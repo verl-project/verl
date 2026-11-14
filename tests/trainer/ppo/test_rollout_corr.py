@@ -140,6 +140,7 @@ def test_basic_rollout_correction():
         ("seq_mean_k3", 2.0),
         ("seq_max_k2", 2.0),
         ("seq_max_k3", 2.0),
+        ("seq_mean_abs_exp", 2.0),
     ],
 )
 def test_each_supported_rollout_rs_option(option: str, threshold):
@@ -498,3 +499,71 @@ if __name__ == "__main__":
 
         traceback.print_exc()
         exit(1)
+
+
+def test_seq_mask_tis_zeroes_out_of_band_sequences_without_changing_mask():
+    """seq_mask_tis: per-token TIS weights (cap 5), whole sequence zeroed when its geomean ratio leaves the band."""
+    device = get_device_name() if is_device_available() else "cpu"
+
+    # Row 0: geomean ratio 1.0 (in band); row 1: geomean exp(0.01) (> 1.002, masked);
+    # row 2: in band but one token has ratio e^3 > 5 (capped) balanced by exp(-3); padding is zero-weighted.
+    log_ratio = torch.tensor(
+        [[0.0, 0.0, 0.0, 0.0], [0.01, 0.01, 0.01, 0.01], [3.0, -3.0, 0.0, 0.0]],
+        device=device,
+    )
+    response_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0]], device=device)
+    old_log_prob = torch.zeros_like(log_ratio)
+    rollout_log_prob = -log_ratio
+
+    weights_proto, modified_response_mask, metrics = compute_rollout_correction_and_rejection_mask(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=rollout_log_prob,
+        response_mask=response_mask,
+        rollout_is="seq_mask_tis",
+        rollout_is_threshold="0.998_1.002",
+        rollout_rs=None,
+    )
+
+    weights = weights_proto.batch["rollout_is_weights"]
+    expected = torch.tensor(
+        [[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0], [5.0, float(torch.exp(torch.tensor(-3.0))), 1.0, 0.0]],
+        device=device,
+    )
+    torch.testing.assert_close(weights, expected, atol=1e-5, rtol=1e-5)
+    assert torch.equal(modified_response_mask, response_mask)
+    assert metrics["rollout_corr/rollout_is_seq_mask_tis_oob_ratio"] == pytest.approx(1.0 / 3.0, abs=1e-6)
+
+
+def test_seq_mask_tis_requires_lower_upper_band():
+    device = get_device_name() if is_device_available() else "cpu"
+    zeros = torch.zeros(1, 3, device=device)
+    with pytest.raises(ValueError, match="seq_mask_tis"):
+        compute_rollout_correction_and_rejection_mask(
+            old_log_prob=zeros,
+            rollout_log_prob=zeros,
+            response_mask=torch.ones_like(zeros),
+            rollout_is="seq_mask_tis",
+            rollout_is_threshold=2.0,
+            rollout_rs=None,
+        )
+
+
+def test_seq_mean_abs_exp_rejects_cancelling_errors():
+    """seq_mean_abs_exp uses |log r|, so +/- errors that cancel in a geometric mean still reject the sequence."""
+    device = get_device_name() if is_device_available() else "cpu"
+    log_ratio = torch.tensor([[1.0, -1.0, 1.0, -1.0], [0.01, -0.01, 0.0, 0.0]], device=device)
+    response_mask = torch.ones_like(log_ratio)
+
+    _, modified_response_mask, metrics = compute_rollout_correction_and_rejection_mask(
+        old_log_prob=torch.zeros_like(log_ratio),
+        rollout_log_prob=-log_ratio,
+        response_mask=response_mask,
+        rollout_is=None,
+        rollout_rs="seq_mean_abs_exp",
+        rollout_rs_threshold=2.0,
+    )
+
+    # Row 0: mean exp(|log r|) = e ~ 2.72 > 2.0 -> rejected; row 1: ~1.005 -> kept.
+    assert torch.all(modified_response_mask[0] == 0)
+    assert torch.all(modified_response_mask[1] == 1)
+    assert metrics["rollout_corr/rollout_rs_seq_mean_abs_exp_seq_masked_fraction"] == pytest.approx(0.5, abs=1e-6)

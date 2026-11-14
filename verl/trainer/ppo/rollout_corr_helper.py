@@ -86,8 +86,62 @@ SUPPORTED_ROLLOUT_RS_OPTIONS: set[str] = {
     "seq_mean_k3",
     "seq_max_k2",
     "seq_max_k3",
+    "seq_mean_abs_exp",
 }
 TOKEN_LEVEL_ROLLOUT_RS_OPTIONS: set[str] = {"token_k1", "token_k2", "token_k3"}
+
+
+# Per-token cap of the seq-mask-tis weights (tunix `truncated_importance_weights` clips the log ratio at log 5).
+SEQ_MASK_TIS_TOKEN_CAP = 5.0
+
+
+def _compute_seq_mask_tis_weights(
+    log_ratio: torch.Tensor,
+    response_mask: torch.Tensor,
+    band_min: Optional[float],
+    band_max: float,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Sequence-masked truncated importance sampling weights (tunix / MLPerf DeepSWE ``seq-mask-tis``).
+
+    Every token is weighted by its own ratio ``pi_train / pi_rollout`` (capped at ``SEQ_MASK_TIS_TOKEN_CAP``, non-finite
+    ratios get weight 0), and every sequence whose geometric-mean ratio ``exp(mean_t log ratio)`` leaves
+    ``[band_min, band_max]`` gets all-zero weights. The response mask is left unchanged, so a rejected sequence stays
+    in the loss denominator and the loss shrinks with the rejection rate (unlike ``rollout_rs``, which drops the
+    sequence from the denominator too).
+
+    Args:
+        log_ratio: ``log pi_train - log pi_rollout`` per token, shape (batch_size, seq_length).
+        response_mask: 1 for scored tokens, shape (batch_size, seq_length).
+        band_min: Lower edge of the keep-band on the geometric-mean ratio (required).
+        band_max: Upper edge of the keep-band.
+
+    Returns:
+        Detached per-token weights (zero on padding), and metrics.
+    """
+    if band_min is None:
+        raise ValueError(
+            "rollout_is='seq_mask_tis' needs a 'lower_upper' rollout_is_threshold band, e.g. '0.999_1.002'."
+        )
+    mask = response_mask.to(dtype=log_ratio.dtype)
+    finite = torch.isfinite(log_ratio)
+    safe_log_ratio = torch.where(finite, log_ratio, torch.zeros_like(log_ratio))
+    token_count = mask.sum(dim=-1)
+    seq_valid = token_count > 0
+    seq_geomean = torch.exp((safe_log_ratio * mask).sum(dim=-1) / (token_count + 1e-8))
+    keep = (seq_geomean >= band_min) & (seq_geomean <= band_max) & seq_valid
+    token_weights = torch.where(
+        finite,
+        torch.exp(torch.clamp(safe_log_ratio, min=-SAFETY_BOUND, max=math.log(SEQ_MASK_TIS_TOKEN_CAP))),
+        torch.zeros_like(log_ratio),
+    )
+    weights = (token_weights * keep.unsqueeze(-1).to(dtype=log_ratio.dtype) * mask).detach()
+    n_valid = seq_valid.sum().clamp_min(1)
+    metrics: dict[str, float] = {
+        "rollout_is_seq_mask_tis_oob_ratio": (1.0 - keep.sum() / n_valid).item() if seq_valid.any() else 0.0,
+        "rollout_is_mean": verl_F.masked_mean(weights, response_mask).item(),
+        "rollout_is_seq_geomean_mean": seq_geomean[seq_valid].mean().item() if seq_valid.any() else 1.0,
+    }
+    return weights, metrics
 
 
 def _parse_rollout_is_threshold(threshold_spec: str | float) -> tuple[float, Optional[float]]:
@@ -339,6 +393,16 @@ def compute_rollout_rejection_mask(
             per_sequence_stat = seq_stat
             token_keep_bool = seq_keep_bool_direct.unsqueeze(-1).expand_as(response_mask_bool)
             per_token_stat = seq_stat.unsqueeze(-1).expand_as(response_mask)
+        elif option_name == "seq_mean_abs_exp":
+            # Multiplicative probability error, mean_t exp(|log pi_train - log pi_rollout|) (tunix
+            # `seq_logprob_error_threshold`, MLPerf DeepSWE 2.0). Absolute values per token, so opposite-sign
+            # disagreements cannot cancel the way they do in a geometric-mean ratio. Uses the unclamped log ratio:
+            # a token the rollout gave zero probability makes the error infinite and drops the sequence.
+            seq_stat = _sequence_mean(torch.exp(log_ratio.abs()))
+            seq_keep_bool_direct = torch.isfinite(seq_stat) & (seq_stat <= upper_value)
+            per_sequence_stat = seq_stat
+            token_keep_bool = seq_keep_bool_direct.unsqueeze(-1).expand_as(response_mask_bool)
+            per_token_stat = seq_stat.unsqueeze(-1).expand_as(response_mask)
         elif option_name.startswith("seq_mean"):
             if option_name.endswith("k1"):
                 if lower_log is None:
@@ -562,10 +626,14 @@ def compute_rollout_correction_weights(
                 - rollout_is_batch_norm_factor: Normalization factor (only if batch_normalize=True)
     """
     # Validate input parameters
-    valid_is_levels = {"token", "sequence"}
+    valid_is_levels = {"token", "sequence", "seq_mask_tis"}
     if rollout_is not in valid_is_levels:
         raise ValueError(f"Invalid rollout_is: {rollout_is}. Must be one of {valid_is_levels}.")
     rollout_is_threshold_upper, rollout_is_threshold_lower = _parse_rollout_is_threshold(rollout_is_threshold)
+    if rollout_is == "seq_mask_tis":
+        return _compute_seq_mask_tis_weights(
+            log_ratio, response_mask, band_min=rollout_is_threshold_lower, band_max=rollout_is_threshold_upper
+        )
     use_icepop = rollout_is_threshold_lower is not None
 
     # Compute IS weights from log ratio (handles different aggregation levels)
