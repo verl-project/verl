@@ -15,15 +15,17 @@
 import pytest
 import torch
 
-from verl.utils.experimental.torch_functional import FusedLinearForPPO
+from verl.utils.experimental import torch_functional as experimental_F
 
 
 @pytest.mark.parametrize("temperature", [0.7, 1.3])
-def test_fused_linear_for_ppo_divides_fp32_logits_by_temperature(temperature):
+def test_fused_linear_for_ppo_divides_fp32_logits_by_temperature(monkeypatch, temperature):
     """Log-probs and gradients must use logits.float() / T, the order the rollout sampler uses.
 
     Dividing the bf16 logits by T before the upcast rounds them a second time.
     """
+    # flash-attn's cross_entropy_loss is a Triton kernel and cannot take these CPU tensors.
+    monkeypatch.setattr(experimental_F, "_FLASH_ATTN_CROSS_ENTROPY_AVAILABLE", False)
     torch.manual_seed(0)
     num_tokens, hidden_size, vocab_size = 64, 256, 1000
     hidden = torch.randn(num_tokens, hidden_size).to(torch.bfloat16).requires_grad_(True)
@@ -31,7 +33,7 @@ def test_fused_linear_for_ppo_divides_fp32_logits_by_temperature(temperature):
     labels = torch.randint(0, vocab_size, (num_tokens,))
     grad = torch.randn(num_tokens)
 
-    log_probs, _ = FusedLinearForPPO(chunk_size=16)(hidden, weight, labels, temperature=temperature)
+    log_probs, _ = experimental_F.FusedLinearForPPO(chunk_size=16)(hidden, weight, labels, temperature=temperature)
     (log_probs * grad).sum().backward()
 
     ref_hidden = hidden.detach().clone().requires_grad_(True)
