@@ -326,7 +326,6 @@ class RLInsightLogger:
             yield
             return
 
-        cls._ensure_rl_insight_init()
         with cls._get_rl_insight().trace_state(state_name, state_lane_id=state_lane_id, **labels):
             yield
 
