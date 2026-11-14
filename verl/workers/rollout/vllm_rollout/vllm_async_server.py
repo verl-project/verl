@@ -1528,6 +1528,17 @@ class vLLMHttpServer:
         lora only update adapter weights, so set sleep level to 1.
         vllm-ascend < 0.30.0 requires sleep level 1 to avoid EP precision issues.
         """
+        # Actor sync skips independent draft weights. N-gram and other
+        # weightless proposers can reuse the target model config as metadata.
+        spec = self.engine.vllm_config.speculative_config
+        if (
+            spec is not None
+            and spec.method not in ("mtp", "extract_hidden_states")
+            and spec.draft_model_config is not None
+            and spec.draft_model_config is not spec.target_model_config
+        ):
+            return 1
+
         mtp_config = getattr(self.config, "mtp", None)
         mtp_rollout_enabled = (
             mtp_config is not None
@@ -1558,7 +1569,7 @@ class vLLMHttpServer:
         return output
 
     async def _sleep_hybrid(self):
-        """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
+        """Release rollout memory at a sleep level compatible with the next weight sync.
 
         Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
         that sleep is properly propagated to all data-parallel worker processes.
