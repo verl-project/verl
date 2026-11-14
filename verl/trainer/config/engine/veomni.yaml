@@ -87,7 +87,13 @@ load_balancing_loss_implementation: eager
 dsa_indexer_implementation: eager
 dsa_attention_implementation: eager
 mhc_implementation: eager
-qat_implementation: none
+
+# QAT is selected per family (VeOmni's `qat` rows). `linear_implementation` rounds the
+# dense projections, `swiglu_mlp_implementation` the shared expert, `moe_implementation`
+# the routed experts, and `kv_round_implementation` the stored KV/indexer activations.
+# Leave a family at its reference row to train it in the model dtype.
+linear_implementation: eager
+kv_round_implementation: none
 
 force_use_huggingface: false
 
