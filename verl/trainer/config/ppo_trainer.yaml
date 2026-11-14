@@ -134,6 +134,10 @@ algorithm:
     # Power used for weight scaling in "pow" method
     weight_pow: 2.0
 
+  # Log the training-inference discrepancy (R3 arXiv:2510.11370, Eq. 3 and 4), split by whether a
+  # trajectory spans a weight sync. Costs one extra forward pass under rollout_correction bypass mode.
+  log_train_infer_discrepancy: False
+
 # config for the trainer
 trainer:
 

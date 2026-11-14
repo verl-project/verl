@@ -85,7 +85,11 @@ from verl.utils.dataset.dataloader import (
 )
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
-from verl.utils.debug.metrics import calculate_debug_metrics
+from verl.utils.debug.metrics import (
+    calculate_debug_metrics,
+    calculate_train_infer_discrepancy,
+    partial_rollout_mask,
+)
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
@@ -1785,6 +1789,8 @@ class PPOTrainer(ABC):
             )
             data["old_log_probs"] = data.pop("rollout_log_probs")
             tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)
+            if self.config.algorithm.get("log_train_infer_discrepancy", False):
+                metrics.update(self._log_train_infer_discrepancy(batch))
             return batch
 
         # 1. compute log probs
@@ -1828,9 +1834,37 @@ class PPOTrainer(ABC):
 
         # 4. calculate rollout vs actor logprobs diff
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:
-            metrics.update(calculate_debug_metrics(data))
+            metrics.update(calculate_debug_metrics(data, partial_rollout_mask(batch.tags)))
 
         return batch
+
+    def _log_train_infer_discrepancy(self, batch: KVBatchMeta) -> dict:
+        """Recompute the rollout tokens' log probs on the training engine, for metrics only.
+
+        Bypass mode sets old_log_probs = rollout_log_probs, so without this pass the gap between
+        the two engines is invisible. The result never reaches the loss.
+        """
+        batch.extra_info.update(
+            {
+                "calculate_entropy": False,
+                "compute_loss": False,
+                "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            }
+        )
+        self.actor_rollout_wg.compute_log_prob(batch)
+        data = tq.kv_batch_get(
+            keys=batch.keys,
+            partition_id=batch.partition_id,
+            select_fields=["log_probs", "rollout_log_probs", "response_mask"],
+        )
+        data["log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
+        data = data.to_padded_tensor()
+        return calculate_train_infer_discrepancy(
+            data["log_probs"],
+            data["rollout_log_probs"],
+            data["response_mask"],
+            partial_rollout_mask(batch.tags),
+        )
 
     def _compute_ref_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the reference log prob of the batch."""

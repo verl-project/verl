@@ -909,6 +909,7 @@ algorithm:
   pf_ppo:
     reweight_method: pow
     weight_pow: 2.0
+  log_train_infer_discrepancy: false
 distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
