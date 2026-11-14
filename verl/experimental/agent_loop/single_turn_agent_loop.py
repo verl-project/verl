@@ -96,11 +96,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
             response_ids=response_ids[: self.response_length],
             response_mask=response_mask[: self.response_length],
             response_logprobs=response_logprobs[: self.response_length] if response_logprobs else None,
-            routed_experts=(
-                output.routed_experts[: len(prompt_ids) + self.response_length]
-                if output.routed_experts is not None
-                else None
-            ),
+            routed_experts=output.routed_experts,
             multi_modal_data=multi_modal_data,
             mm_processor_kwargs=mm_processor_kwargs,
             mm_processor_output=mm_processor_output,

@@ -502,10 +502,18 @@ class MegatronEngine(BaseEngine):
             self.engine_config.use_fused_kernels = False
             return
 
-        from verl.models.mcore.model_forward_fused import patch_fused_forward
+        from verl.models.mcore.model_forward_fused import patch_fused_forward, unpatch_fused_forward
 
+        if all(
+            patch_fused_forward(model, self.model_config, engine_config=self.engine_config) for model in self.module
+        ):
+            return
+
+        # The fused engine forward would pass kwargs the model cannot take. Restore any patched chunks.
         for model in self.module:
-            patch_fused_forward(model, self.model_config, engine_config=self.engine_config)
+            unpatch_fused_forward(model)
+        logger.warning_once("Fused kernels are not supported for this Megatron model; disabling.")
+        self.engine_config.use_fused_kernels = False
 
     def _build_optimizer(self):
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
@@ -1163,7 +1171,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
     def prepare_model_inputs(self, batch: TensorDict):
         input_ids = batch["input_ids"]
         loss_mask = batch["loss_mask"].to(bool)
-        multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
+        multi_modal_inputs = extract_multi_modal_inputs(
+            batch.get("multi_modal_inputs", []), input_ids=input_ids if input_ids.is_nested else None
+        )
 
         routed_experts = batch.get("routed_experts", None)
 
@@ -1228,7 +1238,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
         if distillation_use_topk or score_centering:
-            from verl.models.mcore.util import get_thd_quant_align_size
+            from verl.models.mcore.util import get_thd_min_local_rows, get_thd_quant_align_size
 
             # the top-k tensors are packed like the student inputs: the same padding, CP layout and CP group
             ret.update(
@@ -1237,6 +1247,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     data=batch,
                     data_format=data_format,
                     quant_align_size=get_thd_quant_align_size(self.tf_config),
+                    min_local_rows=get_thd_min_local_rows(self.tf_config, local_cp_size),
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                     local_cp_size=local_cp_size,
@@ -1299,11 +1310,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         unwrapped_model = unwrap_model(model)
         cp_layout = self._get_context_parallel_layout(unwrapped_model)
-        min_local_rows = (
-            self.tf_config.csa_window_size
-            if getattr(self.tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
-            else None
-        )
+        data_format = "thd" if self.engine_config.use_remove_padding else "bshd"
+        forced_max_seqlen = tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None)
         if hasattr(unwrapped_model, "vp_stage"):
             vp_rank = unwrapped_model.vp_stage
         else:
@@ -1325,8 +1333,16 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 )
             replay_mask = None
             if self.engine_config.router_replay.mode == "R3":
-                layers_topk_idx = align_r3_router_replay_data(layers_topk_idx, input_ids)
-                replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
+                layers_topk_idx = align_r3_router_replay_data(
+                    layers_topk_idx,
+                    input_ids,
+                    multi_modal_inputs=multi_modal_inputs,
+                )
+                replay_mask = build_r3_replay_mask(
+                    input_ids,
+                    batch["response_mask"],
+                    multi_modal_inputs=multi_modal_inputs,
+                )
             set_router_replay_data(
                 layers_topk_idx,
                 attention_mask,
@@ -1336,6 +1352,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 local_cp_size=local_cp_size,
                 pad_to_length_bucket=pad_to_length_bucket,
                 model=unwrapped_model,
+                data_format=data_format,
+                forced_max_seqlen=forced_max_seqlen,
+                use_fused_kernels=use_fused_kernels,
             )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
@@ -1348,7 +1367,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         if use_fused_kernels:
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
-            from verl.models.mcore.util import get_thd_quant_align_size
+            from verl.models.mcore.util import get_thd_min_local_rows, get_thd_quant_align_size
 
             fused_forward_fn = get_mcore_forward_fused_model_engine_fn(self.model_config.hf_config)
             topk_labels = None
@@ -1361,7 +1380,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     data=batch,
                     data_format="thd",
                     quant_align_size=get_thd_quant_align_size(self.tf_config),
-                    min_local_rows=min_local_rows,
+                    # the fused forward packs with this same minimum, so the top-k rows must match it
+                    min_local_rows=get_thd_min_local_rows(self.tf_config, local_cp_size, use_fused_kernels=True),
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                     local_cp_size=local_cp_size,
@@ -1393,8 +1413,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
             from verl.models.mcore import get_mcore_engine_forward_fn
 
             forward_fn = get_mcore_engine_forward_fn(self.model_config.hf_config)
-            data_format = "thd" if self.engine_config.use_remove_padding else "bshd"
-
             logits_processor = partial(
                 self._lm_head_logits_processor,
                 calculate_sum_pi_squared=calculate_sum_pi_squared,
@@ -1437,14 +1455,13 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 multi_modal_inputs,
                 logits_processor=logits_processor,
                 logits_processor_args=logits_processor_args,
-                vision_model=hasattr(self.model_config.hf_config, "vision_config"),
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
                 data_format=data_format,
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
                 mtp_loss_normalization_factor=mtp_loss_normalization_factor,
-                forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                forced_max_seqlen=forced_max_seqlen,
                 pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
                 position_ids=batch.get("position_ids", None),
@@ -1461,6 +1478,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 local_cp_size=local_cp_size,
                 pad_to_length_bucket=pad_to_length_bucket,
                 model=unwrapped_model,
+                data_format=data_format,
+                use_fused_kernels=use_fused_kernels,
             )
 
         # Router replay: switch to backward replay mode for next backward pass
@@ -1559,7 +1578,6 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             input_ids,
             multi_modal_inputs,
             value_model=True,
-            vision_model=hasattr(self.model_config.hf_config, "vision_config"),
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),

@@ -15,8 +15,9 @@
 from types import SimpleNamespace  # Or use a mock object library
 
 import pytest
+import torch
 
-from verl.utils.model import update_model_config
+from verl.utils.model import extract_multi_modal_inputs, update_model_config
 
 
 # Parametrize with different override scenarios
@@ -50,3 +51,25 @@ def test_update_model_config(override_kwargs):
         assert mock_config.nested_params.sub_param_x == "original_x", "Nested sub_param_x should be unchanged"
         assert mock_config.nested_params.sub_param_y == 100, "Nested sub_param_y should be unchanged"
         assert not hasattr(mock_config.nested_params, "sub_param_z"), "Nested sub_param_z should not exist"
+
+
+def test_vision_token_types_keep_one_row_per_sample():
+    """A text-only sample without vision_token_types still gets its own all -1 row, in batch order."""
+    batch = [
+        {},
+        {"vision_token_types": torch.tensor([[-1, 0, 1, 3]])},
+        None,
+    ]
+    merged = extract_multi_modal_inputs(batch)
+    assert merged["vision_token_types"].tolist() == [[-1, -1, -1, -1], [-1, 0, 1, 3], [-1, -1, -1, -1]]
+
+
+def test_vision_token_types_use_selected_text_lengths():
+    batch = [{}, {"vision_token_types": torch.tensor([[-1, 0, 1, 3]])}, None]
+    input_ids = torch.nested.as_nested_tensor([torch.arange(n) for n in (9, 4, 6)], layout=torch.jagged)
+    merged = extract_multi_modal_inputs(batch, indices=[1, 2], input_ids=input_ids)
+    assert merged["vision_token_types"].tolist() == [[-1, 0, 1, 3, -1, -1], [-1] * 6]
+
+    batch[1]["vision_token_types"] = torch.tensor([[-1, 0, 1]])
+    with pytest.raises(ValueError, match="3 entries for 4 input tokens"):
+        extract_multi_modal_inputs(batch, input_ids=input_ids)

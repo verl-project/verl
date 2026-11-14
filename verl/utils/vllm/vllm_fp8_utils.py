@@ -314,12 +314,25 @@ def stage_fp8_params_for_loading(model):
 def process_fp8_weights_after_loading(layers):
     """Re-derive the inference layout in place and reinstate the live params."""
     for layer in layers:
-        live = getattr(layer, _FP8_LIVE_ATTR, None) or {}
+        from vllm.model_executor.layers.quantization import fp8 as _vllm_fp8
 
+        live = getattr(layer, _FP8_LIVE_ATTR, None) or {}
         quant_method = getattr(layer, "quant_method", None)
         process = getattr(quant_method, "process_weights_after_loading", None)
+        inner = getattr(quant_method, "old_quant_method", None)
+        if inner is not None and isinstance(inner, _vllm_fp8.Fp8MoEMethod):
+            from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+
+            # Older LoRA wrappers inherit the base no-op. Newer wrappers repack and
+            # restore the LoRA context on the rebuilt kernel through their own hook.
+            if (
+                process is None
+                or getattr(process, "__func__", None) is QuantizeMethodBase.process_weights_after_loading
+            ):
+                process = inner.process_weights_after_loading
         if process is not None:
-            process(layer)
+            with patch.object(_vllm_fp8, "replace_parameter", replace_parameter_preserve_subclass):
+                process(layer)
 
         # Anything routed through the patched ``replace_parameter`` has already
         # been folded and dropped from ``live``; what remains was rewritten by a

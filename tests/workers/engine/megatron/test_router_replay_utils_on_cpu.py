@@ -479,12 +479,12 @@ def test_set_router_replay_data_requires_bshd_attention_mask():
 def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
     router = _FakeRouter()
     tf_config = _config(num_layers=4)
-    routed_experts = torch.ones(1, 3, 2, 1, dtype=torch.int64)
+    routed_experts = torch.ones(1, 3, 4, 1, dtype=torch.int64)
 
     monkeypatch.setattr(rr_utils, "device_name", "cpu")
     monkeypatch.setattr(rr_utils, "preprocess_packed_seqs", lambda tensor, _mask, **_kwargs: (tensor, object()))
     monkeypatch.setattr(rr_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
-    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda model: iter([(4, router)]))
+    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda model: iter([(5, router)]))
 
     with pytest.raises(RuntimeError, match="does not cover every forwarded MoE layer"):
         rr_utils.set_router_replay_data(
@@ -493,3 +493,103 @@ def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
             tf_config,
             model=object(),
         )
+
+
+def test_is_moe_layer_uses_hybrid_expert_symbols():
+    config = _config(num_layers=6)
+    config.hybrid_pattern = "VEVEVE"
+
+    assert [rr_utils.is_moe_layer(config, idx) for idx in range(6)] == [False, True, False, True, False, True]
+
+
+@pytest.mark.parametrize("cp_rank", [0, 1])
+def test_bshd_record_and_replay_restore_static_cp_routes(monkeypatch, cp_rank):
+    # The shorter sample has three padding positions in the full sequence.
+    routes = torch.arange(32, dtype=torch.int16).reshape(8, 2, 2) + 300
+    routes[5:, 1] = 0
+    shards = [routes[[0, 1, 6, 7]], routes[[2, 3, 4, 5]]]
+    # Simulate SP rank 1 in each CP group. SP gathers flattened sequence-major rows first.
+    sp_rows = shards[cp_rank].flatten(0, 1)
+    router = _FakeRouter(recorded_topk_idx=sp_rows.chunk(2)[1])
+    cp_group = object()
+
+    def gather_sp(local, **_kwargs):
+        torch.testing.assert_close(local.view(torch.int16).squeeze(1), router.recorded_topk_idx)
+        return sp_rows.unsqueeze(1).view(torch.uint8)
+
+    def gather(output, local, group):
+        assert group is cp_group
+        assert local.dtype == torch.uint8
+        torch.testing.assert_close(local.view(torch.int16).squeeze(2), shards[cp_rank])
+        for dst, shard in zip(output, shards, strict=True):
+            dst.copy_(shard.unsqueeze(2).view(torch.uint8))
+
+    monkeypatch.setattr(rr_utils.mpu, "get_context_parallel_group", lambda: cp_group)
+    monkeypatch.setattr(rr_utils.mpu, "get_context_parallel_rank", lambda: cp_rank)
+    monkeypatch.setattr(rr_utils.mpu, "get_context_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(rr_utils.mpu, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(torch.distributed, "all_gather", gather)
+    monkeypatch.setattr(rr_utils, "device_name", "cpu")
+    monkeypatch.setattr(rr_utils, "gather_from_sequence_parallel_region", gather_sp)
+    monkeypatch.setattr(rr_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor.chunk(2)[1])
+    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda _model: iter([(1, router)]))
+    input_ids = torch.nested.as_nested_tensor([torch.arange(8), torch.arange(5)], layout=torch.jagged)
+    config = _config(num_layers=1)
+    recorded = []
+    rr_utils.merge_router_topk_indices(None, input_ids, recorded, config, model=object(), data_format="bshd")
+    first, second = recorded[0].unbind()
+    torch.testing.assert_close(first.squeeze(1), routes[:, 0])
+    torch.testing.assert_close(second.squeeze(1), routes[:5, 1])
+    rr_utils.set_router_replay_data(recorded[0], None, config, model=object(), data_format="bshd")
+    torch.testing.assert_close(router.target_topk_idx, router.recorded_topk_idx.long())
+
+
+def test_set_router_replay_data_pads_bshd_in_sequence_major_order(monkeypatch):
+    router = _FakeRouter()
+    routes = torch.nested.as_nested_tensor(
+        [torch.tensor([[[10]], [[11]]], dtype=torch.int16), torch.tensor([[[20]], [[21]], [[22]]], dtype=torch.int16)],
+        layout=torch.jagged,
+    )
+    replay_mask = torch.nested.as_nested_tensor(
+        [torch.tensor([True, True]), torch.tensor([True, False, True])], layout=torch.jagged
+    )
+    monkeypatch.setattr(rr_utils.mpu, "get_context_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(rr_utils.mpu, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(rr_utils, "device_name", "cpu")
+    monkeypatch.setattr(rr_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
+    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda _model: iter([(1, router)]))
+
+    rr_utils.set_router_replay_data(
+        routes,
+        None,
+        _config(num_layers=1),
+        replay_mask=replay_mask,
+        model=object(),
+        data_format="bshd",
+        forced_max_seqlen=4,
+    )
+
+    assert torch.equal(router.target_topk_idx[:, 0], torch.tensor([10, 20, 11, 21, 0, 22, 0, 0]))
+    assert torch.equal(router.target_replay_mask, torch.tensor([True, True, True, False, False, True, False, False]))
+
+
+def test_compact_image_routes_are_consumed_at_each_span_start():
+    """DeepSeek-V4.1: each image span consumes its own compact placeholder route; visual rows stay native."""
+    from verl.utils.model import extract_multi_modal_inputs
+
+    vision_types = [-1, 0, 1, 1, 2, 3, -1, 0, 1, 2, 3, -1, -1]
+    text_input = torch.arange(16)
+    input_ids = torch.nested.as_nested_tensor([torch.arange(len(vision_types)), text_input], layout=torch.jagged)
+    # Text 10, image 11, text 12, image 13, text 14, final text 15.
+    text_routes = text_input.to(torch.int16).reshape(-1, 1, 1)
+    routes = torch.nested.as_nested_tensor(
+        [torch.arange(10, 16, dtype=torch.int16).reshape(-1, 1, 1), text_routes], layout=torch.jagged
+    )
+
+    multimodal = extract_multi_modal_inputs(
+        [{"vision_token_types": torch.tensor([vision_types])}, {}], input_ids=input_ids
+    )
+    aligned = rr_utils.align_r3_router_replay_data(routes, input_ids, multimodal)
+
+    assert aligned.unbind()[0][:, 0, 0].tolist() == [10, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 14, 15]
+    torch.testing.assert_close(aligned.unbind()[1], text_routes)
