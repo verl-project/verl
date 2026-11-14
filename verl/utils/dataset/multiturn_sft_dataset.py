@@ -198,6 +198,8 @@ class MultiTurnSFTDataset(Dataset):
         Args:
             index: turn index in the conversation
             message: A single message dictionary
+            full_message: All messages of the conversation, used to render the turn
+                with its preceding context
             images: List of images to be used
             videos: List of videos to be used
             tools: List of tools to be used
@@ -211,25 +213,92 @@ class MultiTurnSFTDataset(Dataset):
         if enable_thinking is not None:
             apply_chat_template_kwargs["enable_thinking"] = enable_thinking
 
-        inputs = apply_chat_template(
-            processor,
-            messages=[message],
-            tools=tools,
-            add_generation_prompt=False,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            **apply_chat_template_kwargs,
+        # Some chat templates render an assistant message differently depending on the
+        # preceding conversation: e.g. the Qwen3 template builds the `<think>` block from
+        # `reasoning_content` only when the message is rendered with context, so rendering
+        # it in isolation silently drops the reasoning channel and the concatenated sequence
+        # diverges from `apply_chat_template` on the whole conversation
+        # (https://github.com/verl-project/verl/issues/7807).
+        # For conversations that carry a reasoning channel, render assistant turns as part of
+        # the conversation prefix and slice off the rendered prefix to get the per-turn
+        # increment. All other turns keep the per-message rendering, which keeps token
+        # sequences identical to the previous behavior for every template without
+        # position-dependent rendering.
+        use_context_render = (
+            self.processor is None
+            and index != 0
+            and message["role"] == "assistant"
+            and any(isinstance(turn, dict) and turn.get("reasoning_content") for turn in full_message)
         )
 
-        inputs = dict(inputs)
-        input_ids = inputs.pop("input_ids")[0]
-        attention_mask = inputs.pop("attention_mask")[0]
+        if use_context_render:
+            prefix = apply_chat_template(
+                processor,
+                messages=full_message[:index],
+                tools=tools,
+                add_generation_prompt=False,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                **apply_chat_template_kwargs,
+            )
+            prefix_ids = prefix["input_ids"][0]
+            prefix_len = prefix_ids.shape[0]
 
-        # remove system prompt if exists
-        if index != 0 and message["role"] != "system":
-            input_ids = input_ids[len(self.system_prompt) :]
-            attention_mask = attention_mask[len(self.system_prompt) :]
+            inputs = apply_chat_template(
+                processor,
+                messages=full_message[: index + 1],
+                tools=tools,
+                add_generation_prompt=False,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                **apply_chat_template_kwargs,
+            )
+            inputs = dict(inputs)
+            input_ids = inputs.pop("input_ids")[0]
+            attention_mask = inputs.pop("attention_mask")[0]
+
+            # The increment is only well-defined if tokenizing the shorter prefix is a
+            # token-level prefix of tokenizing the longer one (true for chat templates whose
+            # turns are delimited by special tokens). Templates violating this fall back to
+            # the sequence check in `sanity_check`.
+            if input_ids.shape[0] < prefix_len or not torch.equal(input_ids[:prefix_len], prefix_ids):
+                logger.warning(
+                    "MultiTurnSFTDataset: tokenizing messages[:%s] is not a token-level prefix of "
+                    "tokenizing messages[:%s]; slicing the per-turn increment by length anyway. "
+                    "The concatenated sequence may not equal apply_chat_template on the whole "
+                    "conversation, in which case sanity_check will report a mismatch.",
+                    index,
+                    index + 1,
+                )
+            input_ids = input_ids[prefix_len:]
+            attention_mask = attention_mask[prefix_len:]
+        else:
+            # Per-message rendering: used by the multimodal path (processor is not None, so
+            # multi_modal_inputs stay aligned per turn) and by turns whose templates render
+            # them identically with or without context. `tools` are rendered into the system
+            # block, which is either kept (index == 0) or stripped by system prompt length,
+            # so pass them on the first turn only.
+            inputs = apply_chat_template(
+                processor,
+                messages=[message],
+                tools=tools if index == 0 else None,
+                add_generation_prompt=False,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                **apply_chat_template_kwargs,
+            )
+
+            inputs = dict(inputs)
+            input_ids = inputs.pop("input_ids")[0]
+            attention_mask = inputs.pop("attention_mask")[0]
+
+            # remove system prompt if exists
+            if index != 0 and message["role"] != "system":
+                input_ids = input_ids[len(self.system_prompt) :]
+                attention_mask = attention_mask[len(self.system_prompt) :]
 
         if message["role"] == "assistant":
             loss_mask = torch.ones_like(attention_mask)
@@ -305,7 +374,7 @@ class MultiTurnSFTDataset(Dataset):
                 index=i,
                 message=message,
                 full_message=messages,
-                tools=tools if i == 0 else None,
+                tools=tools,
                 enable_thinking=enable_thinking,
             )
             input_ids.append(_input_ids)
