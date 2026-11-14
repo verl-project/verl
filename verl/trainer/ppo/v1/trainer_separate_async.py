@@ -52,6 +52,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     # Default for instances that bypass __init__ (e.g. test stubs): hybrid
     # replicas are enabled unless hybrid_rollout.enable_switch=False.
     _enable_hybrid_replicas = True
+    _refill_after_sample = False
+    _next_batch_submitted = False
 
     def __init__(self, config: DictConfig):
         train_batch_size = config.data.train_batch_size
@@ -98,6 +100,14 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             self.hybrid_rollout_config = replace(self.hybrid_rollout_config, enable_switch=False)
         # Read by PPOTrainer._setup() (triggered by init()).
         self._enable_hybrid_replicas = self.hybrid_rollout_config.enable_switch
+        self._refill_after_sample = bool(self.config.trainer.v1.separate_async.get("refill_after_sample", False))
+        if self._refill_after_sample and self.hybrid_rollout_config.enable_switch:
+            logger.warning(
+                "trainer.v1.separate_async.refill_after_sample is ignored because "
+                "hybrid_rollout.enable_switch=True; the next batch is submitted in prepare_step()"
+            )
+            self._refill_after_sample = False
+        self._next_batch_submitted = False
         if self.hybrid_rollout_config.enable_switch:
             # No support for PD disaggregation for switching
             rollout_cfg = self.config.get("actor_rollout_ref", {}).get("rollout", {})
@@ -287,9 +297,23 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
     def on_sample_end(self):
         self._step_sample_wait_seconds += time.perf_counter() - self._sample_start
+        if (
+            self._refill_after_sample
+            and self.local_trigger_step == self.parameter_sync_step - 1
+            and self.global_steps < self.total_training_steps
+        ):
+            # Submit the next step's batch now, so rollout overlaps with this step's
+            # old_log_prob / update_actor instead of waiting for the next prepare_step().
+            self._add_batch_to_generate()
+            self._next_batch_submitted = True
 
     def prepare_step(self) -> dict:
-        metrics = super().prepare_step()
+        if self._next_batch_submitted:
+            # Already submitted by on_sample_end() of the previous step.
+            self._next_batch_submitted = False
+            metrics = self._wait_for_custom_source_sampleable()
+        else:
+            metrics = super().prepare_step()
         metrics.update(self._wait_for_sampleable_and_switch())
         return metrics
 

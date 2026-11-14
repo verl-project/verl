@@ -1015,6 +1015,7 @@ trainer:
     separate_async:
       num_warmup_batches: 1
       parameter_sync_step: 4
+      refill_after_sample: false
       hybrid_rollout:
         _target_: verl.trainer.config.HybridRolloutSwitchConfig
         enable_switch: false

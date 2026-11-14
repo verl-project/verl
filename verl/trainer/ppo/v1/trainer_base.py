@@ -1658,6 +1658,9 @@ class PPOTrainer(ABC):
 
     def prepare_step(self) -> dict:
         self._add_batch_to_generate()
+        return self._wait_for_custom_source_sampleable()
+
+    def _wait_for_custom_source_sampleable(self) -> dict:
         if self.config.data.get("custom_dataloader") is not None and self.trainer_mode != "sync":
             # Ensure EOF/refill cannot interrupt a parameter-sync cycle after weights have changed.
             _, metrics = self.replay_buffer.wait_for_sampleable(
