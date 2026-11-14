@@ -15,9 +15,12 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
+import torch
 from omegaconf import OmegaConf
 
+import verl.trainer.ppo.v1.trainer_base as trainer_base_module
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
 
@@ -34,6 +37,97 @@ class _StubTrainer(PPOTrainer):
 
     def on_sample_end(self):
         pass
+
+
+def _validation_trainer(monkeypatch, partial_kv, *, fail_restore=False):
+    """Exercise the real validation loop with CPU queue data and a guarded replica."""
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create(
+        {
+            "data": {},
+            "actor_rollout_ref": {"rollout": {"partial_rollout_kv_offload": partial_kv, "val_kwargs": {"n": 1}}},
+            "trainer": {},
+        }
+    )
+    trainer.global_steps = 7
+    trainer.val_dataloader = [{"raw_prompt": ["question"]} for _ in range(2)]
+    trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=None)
+    events = []
+    state = {"admitting": True, "restored": True}
+
+    def generate(batch):
+        assert state["admitting"], "generation admission remained closed after validation"
+        events.append("generate")
+
+    def sleep():
+        state.update(admitting=not partial_kv, restored=False)
+        events.append("sleep")
+
+    def reward(batch):
+        assert not state["restored"]
+        events.append("reward")
+        return batch
+
+    def update(global_steps=None):
+        if partial_kv:
+            assert global_steps == trainer.global_steps, "KV restoration requires the committed policy version"
+        events.append(("update", global_steps))
+        if fail_restore:
+            raise RuntimeError("weight restore failed")
+        state["restored"] = True
+
+    def resume():
+        assert state["restored"], "generation resumed before successful restoration"
+        state["admitting"] = True
+        events.append("resume")
+
+    trainer.agent_loop_manager = SimpleNamespace(generate_sequences=generate)
+    trainer.checkpoint_manager = SimpleNamespace(
+        sleep_replicas=MagicMock(side_effect=sleep),
+        update_weights=MagicMock(side_effect=update),
+        resume_generation_replicas=MagicMock(side_effect=resume),
+    )
+    trainer._compute_reward_colocate = reward
+    trainer.replay_buffer = SimpleNamespace(
+        sample=lambda **kwargs: (SimpleNamespace(keys=["uid_0_0"], partition_id="val"), None)
+    )
+    trainer.tokenizer = SimpleNamespace(pad_token_id=0, decode=lambda ids, **kwargs: "text")
+    trainer._maybe_log_val_generations = MagicMock()
+    trainer._val_metrics_update = MagicMock(return_value={"score": 1.0})
+
+    def batch_get(*, select_fields, **kwargs):
+        if "prompts" in select_fields:
+            return {
+                key: SimpleNamespace(to_padded_tensor=lambda **kwargs: torch.tensor([[1]])) for key in select_fields
+            }
+        return {"uid": np.array(["uid"]), "rm_scores": torch.tensor([[1.0]]), "num_turns": np.array([1])}
+
+    monkeypatch.setattr(trainer_base_module.tq, "kv_batch_put", MagicMock())
+    monkeypatch.setattr(trainer_base_module.tq, "kv_batch_get", batch_get)
+    monkeypatch.setattr(trainer_base_module.tq, "kv_clear", MagicMock())
+    return trainer, events, state
+
+
+@pytest.mark.parametrize("partial_kv", [False, True])
+def test_validation_restores_version_and_admission_between_batches(monkeypatch, partial_kv):
+    trainer, events, state = _validation_trainer(monkeypatch, partial_kv)
+    assert trainer._validate() == {"score": 1.0}
+    expected = ["generate", "sleep", "reward", ("update", trainer.global_steps)]
+    if partial_kv:
+        expected.append("resume")
+    assert events == expected * 2
+    assert state["restored"] and state["admitting"]
+    # Training immediately after initial validation must also be able to submit.
+    trainer.agent_loop_manager.generate_sequences(None)
+    assert events[-1] == "generate"
+
+
+def test_failed_validation_restore_keeps_partial_kv_admission_closed(monkeypatch):
+    trainer, _, state = _validation_trainer(monkeypatch, True, fail_restore=True)
+    with pytest.raises(RuntimeError, match="weight restore failed"):
+        trainer._validate()
+    trainer.checkpoint_manager.resume_generation_replicas.assert_not_called()
+    assert not state["admitting"]
 
 
 class _CustomSampler:

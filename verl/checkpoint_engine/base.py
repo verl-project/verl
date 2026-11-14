@@ -555,6 +555,11 @@ class CheckpointEngineManager:
         await asyncio.gather(*[r.abort_all_requests(reject_request=reject_request) for r in self.replicas])
 
     @auto_await
+    async def prepare_partial_rollout(self, preserve_kv: bool):
+        """Fence hybrid vLLM requests before optional full-pool CPU offload."""
+        await asyncio.gather(*[r.prepare_partial_rollout(preserve_kv=preserve_kv) for r in self.replicas])
+
+    @auto_await
     async def resume_generation_replicas(self):
         """Resume generation on all replicas after abort_all_requests."""
         await asyncio.gather(*[r.resume_generation() for r in self.replicas])

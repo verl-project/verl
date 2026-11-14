@@ -29,6 +29,7 @@ _preprocess_sampling_params before admission, _postprocess_output after release.
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -38,6 +39,7 @@ pytest.importorskip("vllm")
 from vllm.logprobs import Logprob
 
 from verl.workers.config import RolloutConfig
+from verl.workers.config.model import MtpConfig
 from verl.workers.rollout.vllm_rollout import vllm_async_server
 
 
@@ -110,6 +112,104 @@ def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
     server._rejecting = False
     server._disaggregation_role = "null"
     return server
+
+
+@pytest.mark.parametrize("model_mtp", [False, True])
+def test_partial_kv_constructor_accepts_null_rollout_mtp(monkeypatch, model_mtp):
+    """A null rollout MTP block is valid; an enabled model MTP must still be rejected."""
+    import ray
+    from vllm.platforms import current_platform
+
+    from verl.workers.rollout.replica import RolloutMode
+
+    cls = vllm_async_server.vLLMHttpServer
+    for key in ("CUDA_VISIBLE_DEVICES", "VERL_REPLICA_RANK", "VERL_RAY_JOB_ID"):
+        monkeypatch.setenv(key, "")
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(ray, "get_runtime_context", lambda: SimpleNamespace(get_job_id=lambda: "partial-mtp-test"))
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "127.0.0.1")
+    monkeypatch.setattr(cls, "_init_model_config", lambda self, config: config)
+    monkeypatch.setattr(cls, "_validate_configs", lambda self: None)
+    monkeypatch.setattr(cls, "_post_init", lambda self, devices: None)
+    monkeypatch.setattr(vllm_async_server, "build_rollout_dist_profiler", lambda *args, **kwargs: None)
+    config = RolloutConfig(name="vllm", partial_rollout_kv_offload=True, mtp=None)
+    model = SimpleNamespace(lora_rank=0, lora={}, hf_config=SimpleNamespace(), mtp=MtpConfig(enable=model_mtp))
+
+    def construct():
+        return cls(config, model, RolloutMode.HYBRID, [], 0, 1, 1, 2, "")
+
+    if model_mtp:
+        with pytest.raises(ValueError, match="MTP"):
+            construct()
+    else:
+        server = construct()
+        assert server.config.mtp is None
+
+
+def test_partial_kv_server_uses_worker_handoff_and_keeps_scheduling_paused():
+    from verl.workers.rollout.vllm_rollout.partial_kv import PROTOCOL, PartialKVOffload
+
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(name="vllm", partial_rollout_kv_offload=True)
+        server._partial_kv = PartialKVOffload(server)
+        server.engine.engine_core = SimpleNamespace(set_weight_version_async=AsyncMock())
+
+        async def rpc(method, args=()):
+            if method == "offload_partial_kv":
+                return [dict(protocol=PROTOCOL, kv_preserved=True, asleep=True) for _ in range(2)]
+            if method == "restore_partial_kv":
+                return [
+                    dict(protocol=PROTOCOL, kv_preserved=True, tags=args[0], runtime_restored=True) for _ in range(2)
+                ]
+            return []
+
+        server.engine.collective_rpc = AsyncMock(side_effect=rpc)
+        await server.prepare_partial_rollout(preserve_kv=True)
+        await server.wait_for_requests_to_drain()
+        assert server.engine.drain_calls == 0
+        await server.sleep()
+        await server.wake_up(tags=["weights"])
+        await server.clear_kv_cache()
+        assert server.engine.reset_prefix_calls == 0
+        with pytest.raises(RuntimeError, match="refit"):
+            await server.resume_engine_generation()
+        await server.set_global_steps(8)
+        await server.wake_up(tags=["kv_cache"])
+        assert server.engine.resume_calls == 0 and server._submission_paused
+        await server.resume_engine_generation()
+        assert server.engine.resume_calls == 1 and server._submission_paused
+        await server.open_submission_gate()
+        assert not server._submission_paused and server._resume_event.is_set()
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("partial_kv", [False, True])
+def test_single_abort_keeps_other_partial_prefixes_and_reports_success(partial_kv):
+    async def main():
+        server = _make_server()
+        states = server.engine.output_processor.request_states
+        output = object()
+        queue = SimpleNamespace(put=Mock())
+        states["cancel"] = SimpleNamespace(queue=queue, make_request_output=Mock(return_value=output))
+        states["survivor"] = object()
+        server.engine.output_processor.abort_requests = Mock(side_effect=lambda ids: states.pop(ids[0]))
+        server.engine.engine_core = SimpleNamespace(abort_requests_async=AsyncMock())
+        server.engine.reset_mm_cache = AsyncMock()
+        server.engine.reset_encoder_cache = AsyncMock()
+        if partial_kv:
+            server._partial_kv = SimpleNamespace(paused=False, _healthy=Mock())
+
+        result = await server.abort_request("cancel")
+
+        assert result == {"aborted": True, "request_id": "cancel"}
+        queue.put.assert_called_once_with(output)
+        server.engine.engine_core.abort_requests_async.assert_awaited_once_with(["cancel"])
+        assert list(states) == ["survivor"]
+        assert server.engine.reset_prefix_calls == (0 if partial_kv else 1)
+
+    asyncio.run(main())
 
 
 def test_abort_does_not_pause_until_inflight_admissions_land():

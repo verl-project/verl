@@ -96,6 +96,108 @@ def _client() -> FullyAsyncLLMServerClient:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native_segments", [False, True])
+@pytest.mark.parametrize("empty_first", [False, True])
+async def test_empty_attempts_do_not_expand_generated_token_versions(monkeypatch, native_segments, empty_first):
+    """Only the attempt returning tokens contributes to the trajectory version span."""
+
+    def output(ids, version, reason):
+        extra = dict(global_steps=version)
+        if native_segments:
+            extra.update(
+                policy_version_segments=[dict(offset=0, length=len(ids), policy_version=version)] if ids else [],
+                min_global_steps=version if ids else None,
+                max_global_steps=version if ids else None,
+            )
+        return TokenOutput(token_ids=ids, log_probs=[-0.5] * len(ids), stop_reason=reason, extra_fields=extra)
+
+    pieces = (
+        [output([], 1, "aborted"), output([101], 2, "completed")]
+        if empty_first
+        else [output([101], 1, "aborted"), output([], 2, "completed")]
+    )
+    _install_segments(monkeypatch, pieces)
+    result = await _client().generate(request_id="partial", prompt_ids=[1], sampling_params={})
+    assert result.token_ids == [101]
+    assert result.log_probs == [-0.5]
+    version = 2 if empty_first else 1
+    assert result.extra_fields["min_global_steps"] == version
+    assert result.extra_fields["max_global_steps"] == version
+    if native_segments:
+        assert result.extra_fields["policy_version_segments"] == [dict(offset=0, length=1, policy_version=version)]
+
+
+@pytest.mark.asyncio
+async def test_all_empty_attempts_use_the_last_attempt_version(monkeypatch):
+    """An empty final trajectory has an explicit fallback, with no invented token segments."""
+    _install_segments(
+        monkeypatch,
+        [
+            TokenOutput(
+                token_ids=[], stop_reason=reason, extra_fields=dict(global_steps=version, policy_version_segments=[])
+            )
+            for version, reason in [(1, "aborted"), (2, "completed")]
+        ],
+    )
+    result = await _client().generate(request_id="empty", prompt_ids=[1], sampling_params={})
+    assert result.token_ids == []
+    assert result.extra_fields["policy_version_segments"] == []
+    assert result.extra_fields["min_global_steps"] == result.extra_fields["max_global_steps"] == 2
+
+
+@pytest.mark.asyncio
+async def test_native_weight_segments_and_sampler_data_survive_an_abort_retry(monkeypatch):
+    first_segments = [
+        dict(offset=0, length=1, policy_version=0),
+        dict(offset=1, length=1, policy_version=1),
+    ]
+    last_segments = [dict(offset=0, length=1, policy_version=2)]
+    pieces = [
+        TokenOutput(
+            token_ids=[101, 102],
+            log_probs=[-0.25, -0.5],
+            stop_reason="aborted",
+            extra_fields=dict(
+                global_steps=1,
+                min_global_steps=0,
+                max_global_steps=1,
+                policy_version_segments=first_segments,
+                response_topk_ids=np.array([[101, 9], [102, 10]]),
+                response_topk_log_probs=np.array([[-0.25, -2.0], [-0.5, -3.0]]),
+            ),
+        ),
+        TokenOutput(
+            token_ids=[103],
+            log_probs=[-0.75],
+            stop_reason="completed",
+            extra_fields=dict(
+                global_steps=2,
+                min_global_steps=2,
+                max_global_steps=2,
+                policy_version_segments=last_segments,
+                response_topk_ids=np.array([[103, 11]]),
+                response_topk_log_probs=np.array([[-0.75, -4.0]]),
+            ),
+        ),
+    ]
+    _install_segments(monkeypatch, pieces)
+    result = await _client().generate(request_id="partial", prompt_ids=[1, 2], sampling_params={})
+    assert result.token_ids == [101, 102, 103]
+    assert result.log_probs == [-0.25, -0.5, -0.75]
+    assert result.extra_fields["policy_version_segments"] == [
+        *first_segments,
+        dict(offset=2, length=1, policy_version=2),
+    ]
+    assert last_segments[0]["offset"] == 0
+    assert result.extra_fields["min_global_steps"] == 0
+    assert result.extra_fields["max_global_steps"] == 2
+    np.testing.assert_array_equal(result.extra_fields["response_topk_ids"], [[101, 9], [102, 10], [103, 11]])
+    np.testing.assert_array_equal(
+        result.extra_fields["response_topk_log_probs"], [[-0.25, -2.0], [-0.5, -3.0], [-0.75, -4.0]]
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_resume_appends_only_newly_generated_routing(monkeypatch, backend):
     """Two resumes: each attempt re-sends the accumulated prompt and returns routing for
