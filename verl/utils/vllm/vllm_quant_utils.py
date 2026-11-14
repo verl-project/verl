@@ -30,6 +30,7 @@ dispatch below stays unconditional.
 import importlib.metadata
 import logging
 import os
+import re
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -61,24 +62,116 @@ from verl.utils.vllm.vllm_unquant_utils import (
 )
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+
+def _collect_strings(value: Any, values: list[str] | None = None) -> list[str]:
+    """Every string nested anywhere in a quantization config, lower-cased."""
+    if values is None:
+        values = []
+    if isinstance(value, Mapping):
+        for nested in value.values():
+            _collect_strings(nested, values)
+    elif isinstance(value, list | tuple):
+        for nested in value:
+            _collect_strings(nested, values)
+    elif isinstance(value, str):
+        values.append(value.lower())
+    return values
 
 
 def _is_nvfp4_quantization(quantization_config: Mapping[str, Any]) -> bool:
     """Whether a quantization config contains the NVFP4 format."""
-    values = []
+    return any("nvfp4" in value for value in _collect_strings(quantization_config))
 
-    def collect(value: Any) -> None:
-        if isinstance(value, Mapping):
-            for nested in value.values():
-                collect(nested)
-        elif isinstance(value, list | tuple):
-            for nested in value:
-                collect(nested)
-        elif isinstance(value, str):
-            values.append(value.lower())
 
-    collect(quantization_config)
-    return any("nvfp4" in value for value in values)
+def _expert_linear_names(hf_config: Any):
+    """The unfused expert Linear names (``model.layers.<l>.mlp.experts.<e>.<proj>``) compressed-tensors resolves.
+
+    Layer and expert counts come from the model config (``text_config`` for multimodal wrappers); without one, a
+    single probe name is used, which is enough for layer-agnostic targets and ``ignore`` patterns.
+    """
+    config = getattr(hf_config, "text_config", None) or hf_config
+    layers = int(getattr(config, "num_hidden_layers", 0) or 0) or 1
+    experts = 1
+    for key in ("n_routed_experts", "num_experts", "num_local_experts"):
+        value = getattr(config, key, None)
+        if value:
+            experts = int(value)
+            break
+    for layer in range(layers):
+        for expert in range(experts):
+            for proj in ("gate_proj", "up_proj", "down_proj"):
+                yield f"model.layers.{layer}.mlp.experts.{expert}.{proj}"
+
+
+def _matches_target(name: str, targets: Any, *, class_names: bool) -> bool:
+    """Whether a compressed-tensors ``targets`` / ``ignore`` entry reaches ``name`` (``re:`` regex or exact name,
+    plus the ``Linear`` class when ``class_names`` is set)."""
+    if isinstance(targets, str):
+        targets = [targets]
+    for target in targets or ():
+        if not isinstance(target, str):
+            continue
+        if target.startswith("re:"):
+            if re.match(target[3:], name):
+                return True
+        elif target == name or (class_names and target == "Linear"):
+            return True
+    return False
+
+
+def _is_mxfp4_group(group: Mapping[str, Any]) -> bool:
+    weights = group.get("weights") or {}
+    if isinstance(weights, Mapping) and weights.get("num_bits") == 4:
+        if str(weights.get("type", "")).lower() == "float":
+            return True
+    return any("mxfp4" in value for value in _collect_strings(group))
+
+
+def _has_mxfp4_experts(
+    quantization_config: Mapping[str, Any], hf_config: Any = None, checkpoint_quantization: bool = True
+) -> bool:
+    """Whether any routed expert is stored in MXFP4.
+
+    Native DeepSeek-V4 checkpoints keep only the FP8 block config under
+    ``quantization_config`` and declare the expert format as ``expert_dtype``
+    (top-level in V4, inside ``quantization_config`` in V4.1); the ``-Base``
+    checkpoints say ``fp8`` there and keep DeepGEMM on every architecture. That
+    declaration only counts while the rollout keeps the checkpoint's
+    quantization (``checkpoint_quantization``); a rollout override requantizes
+    the experts too. Compressed-tensors configs are resolved per expert module
+    the way compressed-tensors does it: an ``ignore`` entry wins, then a group
+    that targets the module by name or regex, then a plain ``Linear`` group,
+    and one MXFP4 expert anywhere in the model is enough (forcing DeepGEMM
+    would fail to load it on Hopper).
+    """
+    if checkpoint_quantization:
+        expert_dtypes = (
+            getattr(hf_config, "expert_dtype", None),
+            quantization_config.get("expert_dtype"),  # DeepSeek-V4.1 nests it under quantization_config
+        )
+        if any(str(dtype or "").lower() in {"fp4", "mxfp4"} for dtype in expert_dtypes):
+            return True
+    groups = quantization_config.get("config_groups")
+    if not isinstance(groups, Mapping) or not groups:
+        return any("mxfp4" in value for value in _collect_strings(quantization_config))
+    groups = [group for group in groups.values() if isinstance(group, Mapping)]
+    mxfp4 = [_is_mxfp4_group(group) for group in groups]
+    if not any(mxfp4):
+        return False
+    ignore = quantization_config.get("ignore")
+    group_targets = [group.get("targets") or ["Linear"] for group in groups]
+    for name in _expert_linear_names(hf_config):
+        if _matches_target(name, ignore, class_names=False):
+            continue
+        # A name / regex target wins over the ``Linear`` class name (a group without targets means ``Linear``).
+        by_name = [i for i, targets in enumerate(group_targets) if _matches_target(name, targets, class_names=False)]
+        by_class = [i for i, targets in enumerate(group_targets) if _matches_target(name, targets, class_names=True)]
+        governing = (by_name or by_class or [None])[0]
+        if governing is not None and mxfp4[governing]:
+            return True
+    return False
 
 
 def _uses_fp32_block_scales(quantization_config: Mapping[str, Any]) -> bool:
@@ -100,8 +193,23 @@ def _is_hopper() -> bool:
 def set_default_vllm_quantization_backends(
     quantization_config: Mapping[str, Any] | None,
     engine_kwargs: dict[str, Any],
+    hf_config: Any = None,
+    checkpoint_quantization: bool = True,
 ) -> None:
-    """Default non-NVFP4 quantization backends to DeepGEMM."""
+    """Default non-NVFP4 quantization backends to DeepGEMM.
+
+    ``VERL_ROLLOUT_USE_DEEP_GEMM=0`` leaves every backend to vLLM's automatic
+    selection. MXFP4 routed experts keep vLLM's selection on Hopper, where vLLM
+    has no DeepGEMM MXFP4 kernel and picks Marlin, the refittable backend there;
+    forcing ``moe_backend=deep_gemm`` would fail at ``load_model``. ``hf_config``
+    is the model config (layer / expert counts, native ``expert_dtype``);
+    ``checkpoint_quantization`` is False when a rollout quantization override
+    replaced the checkpoint's own, which requantizes the experts as well.
+
+    On Hopper, FP8 block checkpoints with FP32 scales always disable DeepGEMM's
+    E8M0 mode when DeepGEMM may run, whether verl set it, the user set it or
+    vLLM's own selection may pick it.
+    """
     if hasattr(quantization_config, "to_dict"):
         quantization_config = quantization_config.to_dict()
     if not isinstance(quantization_config, Mapping) or _is_nvfp4_quantization(quantization_config):
@@ -109,13 +217,24 @@ def set_default_vllm_quantization_backends(
     # DeepGEMM is NVIDIA-only; on ROCm, vLLM's automatic selection picks the AITER / Triton kernels.
     if torch.version.hip is not None:
         return
-    for option in ("linear_backend", "moe_backend"):
-        engine_kwargs.setdefault(option, "deep_gemm")
-    if (
-        "deep_gemm" in (engine_kwargs["linear_backend"], engine_kwargs["moe_backend"])
-        and _is_hopper()
-        and _uses_fp32_block_scales(quantization_config)
-    ):
+    opt_out = os.getenv("VERL_ROLLOUT_USE_DEEP_GEMM", "1") == "0"
+    if opt_out:
+        logger.info("VERL_ROLLOUT_USE_DEEP_GEMM=0: linear_backend and moe_backend are left to vLLM's selection")
+    else:
+        engine_kwargs.setdefault("linear_backend", "deep_gemm")
+        if "moe_backend" not in engine_kwargs:
+            if _is_hopper() and _has_mxfp4_experts(quantization_config, hf_config, checkpoint_quantization):
+                logger.info(
+                    "MXFP4 routed experts on Hopper: moe_backend is left to vLLM's automatic selection "
+                    "(vLLM's DeepGEMM MXFP4 kernel needs SM100; Marlin is the refittable backend here)"
+                )
+            else:
+                engine_kwargs["moe_backend"] = "deep_gemm"
+    # DeepGEMM may run when verl or the user named it, or when a backend is unset / "auto" and vLLM picks it.
+    deep_gemm_possible = any(
+        engine_kwargs.get(option) in (None, "auto", "deep_gemm") for option in ("linear_backend", "moe_backend")
+    )
+    if deep_gemm_possible and _is_hopper() and _uses_fp32_block_scales(quantization_config):
         os.environ["VLLM_USE_DEEP_GEMM_E8M0"] = "0"
 
 

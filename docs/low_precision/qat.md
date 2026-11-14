@@ -1,6 +1,6 @@
 # Low-Precision Rollout and Quantization-Aware Training
 
-Last updated: 11/2/2026
+Last updated: 11/3/2026
 
 In RL training, rollout usually dominates the step time, and for large MoE models it is bound by memory capacity and bandwidth. Running rollout in low precision:
 
@@ -84,7 +84,7 @@ DeepGEMM implementation.
 | MXFP4 (MoE only) | `MXFP4` | `mxfp4` / `mxfp4_mxfp8` | Blackwell | ❌ (BF16 dense) | MXFP4×FP8<br>`moe_backend=deep_gemm` | ❌ (BF16 dense) | MXFP4×FP8<br>`moe_runner_backend=deep_gemm` | ✅ Blackwell (MoE only) | ✅ Blackwell (MoE only) |
 | NVFP4 (MoE only, per-token activations) | `NVFP4` | `nvfp4` | Blackwell | ❌ | W4A4<br>`(moe_backend=flashinfer_trtllm)` | ❌ | ❌ | ✅ Blackwell (MoE only) | ❌ |
 
-MXFP8, MXFP4 and NVFP4 need Blackwell (SM100) for the validated paths above. On Hopper, vLLM may fall back to Marlin weight-only kernels, whose numerics differ from Blackwell W8A8 / W4A4; those paths are outside this support and validation matrix. The `MXFP4` preset has no such fallback: its MXFP4-weight × FP8-activation experts are served only by vLLM's DeepGEMM FP4 MoE kernel (SM100/SM120), and Marlin and Triton reject the FP8 1x128 activation scheme, so on Hopper the rollout fails at engine start.
+MXFP8, MXFP4 and NVFP4 need Blackwell (SM100) for the validated paths above. On Hopper, vLLM may fall back to Marlin weight-only kernels, whose numerics differ from Blackwell W8A8 / W4A4; those paths are outside this support and validation matrix. The `MXFP4` preset has no such fallback: its MXFP4-weight × FP8 1x128-activation experts are served only by vLLM's DeepGEMM FP4 MoE kernel (SM100/SM120), and Marlin and Triton reject that activation scheme, so on Hopper the rollout fails at engine start. Since verl leaves `moe_backend` to vLLM for MXFP4 experts on Hopper, the failure is vLLM 0.29's `NotImplementedError: No MXFP4 MoE backend supports the deployment configuration` (only the amd-quark `EMULATION` candidate survives the activation filter) rather than the DeepGEMM device error; an explicit `moe_backend=deep_gemm` still fails with `kernel does not support current device`. vLLM 0.32 reads as if it would instead fall back to Marlin with BF16 activations — weight-only, outside this matrix and not matching MXFP4 QAT's MXFP8 input fake-quantization; that path is unvalidated.
 
 ¹ verl passes `linear_backend=deep_gemm`, but vLLM 0.29 has no DeepGEMM
 MXFP8 Linear kernel and deliberately falls back to its MXFP8 auto-selection.
@@ -214,6 +214,13 @@ parallel size 1.
   all other cases retain vLLM's architecture-specific default. On AMD ROCm,
   which has no DeepGEMM, verl sets neither option and vLLM selects its AITER or
   Triton kernels.
+  MXFP4 routed experts (native DeepSeek-V4 `expert_dtype: fp4`, compressed-tensors
+  MXFP4) keep vLLM's own MoE selection on Hopper, where vLLM has no DeepGEMM
+  MXFP4 kernel. For native DeepSeek-V4 experts vLLM 0.29 selects Marlin
+  (W4A16); the compressed-tensors `MXFP4` preset has no Hopper backend in
+  vLLM 0.29 and fails at engine start, as described under MXFP4 support above.
+  `VERL_ROLLOUT_USE_DEEP_GEMM=0` leaves every backend to vLLM's automatic
+  selection.
 - **SGLang**: quantized FP8/MXFP8/MXFP4 rollouts similarly default
   `fp8_gemm_runner_backend` and `moe_runner_backend` to `deep_gemm`. Explicit
   values under `engine_kwargs.sglang` take precedence.
