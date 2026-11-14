@@ -1,6 +1,6 @@
 # Low-Precision Rollout and Quantization-Aware Training
 
-Last updated: 11/2/2026
+Last updated: 11/14/2026
 
 In RL training, rollout usually dominates the step time, and for large MoE models it is bound by memory capacity and bandwidth. Running rollout in low precision:
 
@@ -43,8 +43,9 @@ The trainer always trains in high precision; low-precision checkpoints are dequa
   `quantization_config`, converts each sync bucket into exactly the checkpoint tensors
   expected by the rollout engine. Standard native FP8 is quantized to the `Fp8Config`
   layout; native and overridden compressed-tensors configs use the same
-  compressed-tensors exporter. FP8_BLOCK, MXFP8 and MXFP4 use the same TileLang
-  quantize/pack kernels as QAT, while NVFP4 retains its global-scale-aware
+  compressed-tensors exporter. FP8_BLOCK, MXFP8 and MXFP4 use the same quantize/pack
+  kernels as QAT (TileLang on CUDA, with a PyTorch fallback for FP8_BLOCK and MXFP8
+  when TileLang is unavailable or on ROCm), while NVFP4 retains its global-scale-aware
   compressed-tensors path. DeepSeek-V4 is already quantized by Megatron-Bridge, so its
   exporter only normalizes the packed byte dtype. The rollout worker therefore loads
   pre-quantized tensors and is not responsible for quantization.
