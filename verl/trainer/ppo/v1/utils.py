@@ -29,6 +29,18 @@ class MetricsAggregator:
     Adapted from ``verl.experimental.fully_async_policy.detach_utils.MetricsAggregator`.
     """
 
+    # calculate_debug_metrics emits unavailable NaNs for these keys when no response tokens exist.
+    _ROLLOUT_DEBUG_METRICS = frozenset(
+        {
+            "training/rollout_probs_diff_max",
+            "training/rollout_probs_diff_mean",
+            "training/rollout_probs_diff_std",
+            "training/rollout_actor_probs_pearson_corr",
+            "training/rollout_logprobs_diff_max",
+            "training/rollout_logprobs_diff_mean",
+        }
+    )
+
     def __init__(self):
         self.metric_values: dict[str, list[float]] = defaultdict(list)
         self.metric_weights: dict[str, list[int]] = defaultdict(list)
@@ -37,6 +49,7 @@ class MetricsAggregator:
         self.aggregation_rules = self._init_aggregation_rules()
 
     def _init_aggregation_rules(self) -> dict[str, list[str]]:
+        """Return explicit reduction rules, including availability across local updates."""
         return {
             "sum": [
                 "training/off_policy/evicted_samples",
@@ -51,24 +64,36 @@ class MetricsAggregator:
             ],
             "last": [
                 "training/global_step",
-                "training/rollout_probs_diff_valid",
             ],
+            "max": ["training/rollout_probs_diff_valid"],
         }
 
     def add_step_metrics(self, metrics: dict[str, Any], sample_count: int = 0):
-        """Record one iteration's metrics."""
+        """Record one iteration's values and their sample weights.
+
+        A zero rollout validity flag excludes guarded diagnostics and their weights,
+        while retaining their keys for an all-unavailable window. A missing flag
+        leaves diagnostics available, including any NaN or infinity values.
+        """
         self.step_count += 1
+        rollout_valid = metrics.get("training/rollout_probs_diff_valid", 1)
+        if isinstance(rollout_valid, torch.Tensor) and rollout_valid.numel() == 1:
+            rollout_valid = rollout_valid.item()
+        rollout_unavailable = isinstance(rollout_valid, int | float | np.number) and rollout_valid == 0
         for key, value in metrics.items():
             if isinstance(value, bool):
                 continue
             if key == DAPO_FILTERED_REWARD_COUNTS_KEY and isinstance(value, dict):
                 self.dict_metrics[key].update(value)
                 continue
+            if isinstance(value, torch.Tensor) and value.numel() == 1:
+                value = value.item()
             if isinstance(value, int | float | np.number):
-                self.metric_values[key].append(float(value))
-                self.metric_weights[key].append(self._get_metric_weight(key, metrics, sample_count))
-            elif isinstance(value, torch.Tensor) and value.numel() == 1:
-                self.metric_values[key].append(float(value.item()))
+                values = self.metric_values[key]
+                if key in self._ROLLOUT_DEBUG_METRICS and rollout_unavailable:
+                    # Keep the key for an all-unavailable cycle, but exclude its value and weight.
+                    continue
+                values.append(float(value))
                 self.metric_weights[key].append(self._get_metric_weight(key, metrics, sample_count))
 
     def _get_metric_weight(self, metric_name: str, metrics: dict[str, Any], sample_count: int) -> int:
@@ -103,8 +128,14 @@ class MetricsAggregator:
         return "weighted_avg"
 
     def _aggregate_single_metric(self, metric_name: str, values: list[float]) -> float:
+        """Reduce retained values using the metric's rule and matching weights.
+
+        Empty guarded diagnostics return NaN; other empty metrics return zero.
+        Weighted averages fall back to an arithmetic mean when weights are absent
+        or total zero. Guarded maxima propagate NaN regardless of value order.
+        """
         if not values:
-            return 0.0
+            return float("nan") if metric_name in self._ROLLOUT_DEBUG_METRICS else 0.0
 
         agg_type = self._get_aggregation_type(metric_name)
         if agg_type == "last":
@@ -118,6 +149,9 @@ class MetricsAggregator:
         if agg_type in ("sum", "time_sum"):
             return sum(values)
         if agg_type == "max":
+            # Python max can silently discard a NaN depending on contributor order.
+            if metric_name in self._ROLLOUT_DEBUG_METRICS and any(np.isnan(v) for v in values):
+                return float("nan")
             return max(values)
         if agg_type == "min":
             return min(values)

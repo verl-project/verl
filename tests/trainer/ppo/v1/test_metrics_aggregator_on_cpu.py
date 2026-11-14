@@ -22,11 +22,26 @@ down the per-key aggregation rules (weighted mean/sum/max/min/last/time_sum).
 
 import math
 
+import numpy as np
 import pytest
 import torch
 
+from verl.protocol import DataProto
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
 from verl.trainer.ppo.v1.utils import MetricsAggregator
+from verl.utils.debug.metrics import calculate_debug_metrics
+
+_ROLLOUT_DEBUG_AVERAGES = (
+    "training/rollout_probs_diff_mean",
+    "training/rollout_probs_diff_std",
+    "training/rollout_actor_probs_pearson_corr",
+    "training/rollout_logprobs_diff_mean",
+)
+_ROLLOUT_DEBUG_MAXIMA = (
+    "training/rollout_probs_diff_max",
+    "training/rollout_logprobs_diff_max",
+)
+_ROLLOUT_DEBUG_VALID = "training/rollout_probs_diff_valid"
 
 
 def test_empty_aggregator_returns_empty():
@@ -103,12 +118,234 @@ def test_last_metric_keeps_final_value():
     assert agg.get_aggregated_metrics()["training/global_step"] == 8
 
 
-def test_rollout_probs_diff_valid_keeps_last():
-    # 0/1 validity flag: averaging is meaningless, keep the last iteration's value.
+@pytest.mark.parametrize("flags", [(1, 0), (0, 1), (0, 0)])
+def test_rollout_probs_diff_valid_reports_any_available_step(flags):
+    """Availability remains set if any local update reports available diagnostics."""
     agg = MetricsAggregator()
-    agg.add_step_metrics({"training/rollout_probs_diff_valid": 1})
-    agg.add_step_metrics({"training/rollout_probs_diff_valid": 0})
-    assert agg.get_aggregated_metrics()["training/rollout_probs_diff_valid"] == 0
+    for flag in flags:
+        agg.add_step_metrics({_ROLLOUT_DEBUG_VALID: flag})
+    assert agg.get_aggregated_metrics()[_ROLLOUT_DEBUG_VALID] == max(flags)
+
+
+@pytest.mark.parametrize("metric", _ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA)
+@pytest.mark.parametrize("empty_position", [0, 1, 2])
+@pytest.mark.parametrize("empty_weight", [0, 100])
+def test_rollout_debug_metrics_exclude_unavailable_steps(metric, empty_position, empty_weight):
+    """Exclude placeholders and their weights regardless of their position.
+
+    Available averages retain sample weighting, while maxima use available values.
+    """
+    steps = [(1, 2.0, 1), (1, 6.0, 3)]
+    steps.insert(empty_position, (0, float("nan"), empty_weight))
+    agg = MetricsAggregator()
+    for valid, value, weight in steps:
+        agg.add_step_metrics({metric: value, _ROLLOUT_DEBUG_VALID: valid}, sample_count=weight)
+    out = agg.get_aggregated_metrics()
+    assert out[metric] == pytest.approx(6.0 if metric in _ROLLOUT_DEBUG_MAXIMA else 5.0)
+    assert out[_ROLLOUT_DEBUG_VALID] == 1
+
+
+@pytest.mark.parametrize("metric", _ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA)
+def test_rollout_debug_metrics_exclude_finite_unavailable_values(metric):
+    """Use availability rather than finiteness to decide which updates contribute."""
+    agg = MetricsAggregator()
+    agg.add_step_metrics({metric: 2.0, _ROLLOUT_DEBUG_VALID: 1}, sample_count=1)
+    agg.add_step_metrics({metric: 1000.0, _ROLLOUT_DEBUG_VALID: 0}, sample_count=100)
+    agg.add_step_metrics({metric: 6.0, _ROLLOUT_DEBUG_VALID: 1}, sample_count=3)
+    out = agg.get_aggregated_metrics()
+    assert out[metric] == pytest.approx(6.0 if metric in _ROLLOUT_DEBUG_MAXIMA else 5.0)
+    assert out[_ROLLOUT_DEBUG_VALID] == 1
+
+
+@pytest.mark.parametrize("metric", _ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA)
+@pytest.mark.parametrize("omit_first_guard", [False, True])
+def test_rollout_debug_metrics_keep_sparse_values_and_guards_aligned(metric, omit_first_guard):
+    """Pair each value with its own guard even when either is absent on other steps.
+
+    The missing-guard case gives equally sized value and flag lists from different
+    steps; matching list lengths alone cannot establish the correct pairing.
+    """
+    first = {metric: 6.0}
+    if not omit_first_guard:
+        first[_ROLLOUT_DEBUG_VALID] = 1
+    agg = MetricsAggregator()
+    agg.add_step_metrics(first, sample_count=1)
+    agg.add_step_metrics({_ROLLOUT_DEBUG_VALID: 0}, sample_count=100)
+    agg.add_step_metrics({metric: float("nan"), _ROLLOUT_DEBUG_VALID: 0}, sample_count=100)
+    agg.add_step_metrics({metric: 2.0, _ROLLOUT_DEBUG_VALID: 1}, sample_count=3)
+    out = agg.get_aggregated_metrics()
+    assert out[metric] == pytest.approx(6.0 if metric in _ROLLOUT_DEBUG_MAXIMA else 3.0)
+    assert out[_ROLLOUT_DEBUG_VALID] == 1
+
+
+@pytest.mark.parametrize("flag", [0, 1])
+def test_rollout_debug_guard_alone_does_not_create_diagnostics(flag):
+    """Keep unreported diagnostics absent even when an availability flag is emitted."""
+    agg = MetricsAggregator()
+    agg.add_step_metrics({_ROLLOUT_DEBUG_VALID: flag}, sample_count=10)
+    assert agg.get_aggregated_metrics() == {_ROLLOUT_DEBUG_VALID: flag}
+
+
+def test_rollout_debug_guard_does_not_filter_other_metrics():
+    """Unavailable diagnostics leave unrelated scalar and dictionary reductions intact."""
+    agg = MetricsAggregator()
+    for flag, value, weight in [(0, 2.0, 1), (1, 6.0, 3)]:
+        agg.add_step_metrics(
+            {
+                _ROLLOUT_DEBUG_VALID: flag,
+                "actor/loss/mean": value,
+                "training/rollout_latency_mean": value,
+                "training/global_step": value,
+                "timing_s/update_actor": value,
+                "training/off_policy/evicted_samples": value,
+                DAPO_FILTERED_REWARD_COUNTS_KEY: {1.0: weight},
+            },
+            sample_count=weight,
+        )
+    out = agg.get_aggregated_metrics()
+    assert out["actor/loss/mean"] == pytest.approx(5.0)
+    assert out["training/rollout_latency_mean"] == pytest.approx(5.0)
+    assert out["training/global_step"] == 6.0
+    assert out["timing_s/update_actor"] == 8.0
+    assert out["training/off_policy/evicted_samples"] == 8.0
+    assert out[DAPO_FILTERED_REWARD_COUNTS_KEY] == {1.0: 4}
+
+
+@pytest.mark.parametrize("metric", _ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA)
+@pytest.mark.parametrize("nonfinite", [float("nan"), float("inf")], ids=["nan", "inf"])
+@pytest.mark.parametrize("nonfinite_first", [False, True])
+def test_rollout_debug_metrics_preserve_available_nonfinite_values(metric, nonfinite, nonfinite_first):
+    """Preserve available NaN and infinity in either contributor order.
+
+    A final unavailable update must not hide the nonfinite value or clear validity.
+    """
+    steps = [(1, 2.0), (1, nonfinite)]
+    if nonfinite_first:
+        steps.reverse()
+    # A final empty step must neither hide the failure nor clear aggregate validity.
+    steps.append((0, float("nan")))
+    agg = MetricsAggregator()
+    for valid, value in steps:
+        agg.add_step_metrics({metric: value, _ROLLOUT_DEBUG_VALID: valid}, sample_count=1)
+    out = agg.get_aggregated_metrics()
+    assert out[_ROLLOUT_DEBUG_VALID] == 1
+    if math.isnan(nonfinite):
+        assert math.isnan(out[metric])
+    else:
+        assert out[metric] == nonfinite
+
+
+@pytest.mark.parametrize("sample_count", [0, 2])
+def test_rollout_debug_metrics_all_unavailable(sample_count):
+    """Keep all-unavailable diagnostics as NaN and clear their retained keys on reset."""
+    metrics = dict.fromkeys(_ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA, float("nan"))
+    metrics.update({_ROLLOUT_DEBUG_VALID: 0, "training/rollout_logprobs_mismatch_count": 0})
+    agg = MetricsAggregator()
+    agg.add_step_metrics(metrics, sample_count=sample_count)
+    agg.add_step_metrics(metrics, sample_count=sample_count)
+    out = agg.get_aggregated_metrics()
+    assert out.keys() == metrics.keys()
+    assert out[_ROLLOUT_DEBUG_VALID] == 0
+    assert out["training/rollout_logprobs_mismatch_count"] == 0
+    for key in _ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA:
+        assert math.isnan(out[key])
+    agg.reset()
+    assert agg.get_aggregated_metrics() == {}
+    agg.add_step_metrics({"actor/kl": 2.0})
+    assert agg.get_aggregated_metrics() == {"actor/kl": 2.0}
+
+
+@pytest.mark.parametrize("metric", _ROLLOUT_DEBUG_AVERAGES)
+def test_rollout_debug_metrics_preserve_zero_total_weight_fallback(metric):
+    """Use the arithmetic mean of available values when their total weight is zero."""
+    agg = MetricsAggregator()
+    agg.add_step_metrics({metric: 2.0, _ROLLOUT_DEBUG_VALID: 1}, sample_count=0)
+    agg.add_step_metrics({metric: float("nan"), _ROLLOUT_DEBUG_VALID: 0}, sample_count=10)
+    agg.add_step_metrics({metric: 6.0, _ROLLOUT_DEBUG_VALID: 1}, sample_count=0)
+    assert agg.get_aggregated_metrics()[metric] == pytest.approx(4.0)
+
+
+def test_rollout_debug_metrics_missing_guard_and_missing_metrics():
+    """Treat a missing guard as available and omit absent metrics from the weights."""
+    agg = MetricsAggregator()
+    metric = "training/rollout_probs_diff_mean"
+    agg.add_step_metrics({metric: 2.0}, sample_count=1)
+    agg.add_step_metrics({}, sample_count=100)
+    agg.add_step_metrics({metric: 6.0}, sample_count=3)
+    assert agg.get_aggregated_metrics() == {metric: 5.0}
+
+
+@pytest.mark.parametrize("shape", [(), (1,)])
+def test_rollout_debug_metrics_accept_scalar_tensors(shape):
+    """Filter scalar and single-element tensor guards while retaining unequal weights."""
+    agg = MetricsAggregator()
+    metric = "training/rollout_probs_diff_mean"
+    for flag, value, weight in [(1, 2.0, 1), (0, float("nan"), 100), (1, 6.0, 3)]:
+        agg.add_step_metrics(
+            {metric: torch.tensor(value).reshape(shape), _ROLLOUT_DEBUG_VALID: torch.tensor(flag).reshape(shape)},
+            sample_count=weight,
+        )
+    assert agg.get_aggregated_metrics() == {metric: 5.0, _ROLLOUT_DEBUG_VALID: 1.0}
+
+
+def test_rollout_debug_metrics_accept_numpy_scalars():
+    """Apply availability and sample weighting to NumPy scalar metrics and guards."""
+    agg = MetricsAggregator()
+    metric = "training/rollout_probs_diff_mean"
+    for flag, value, weight in [(1, 2.0, 1), (0, float("nan"), 100), (1, 6.0, 3)]:
+        agg.add_step_metrics({metric: np.float32(value), _ROLLOUT_DEBUG_VALID: np.int64(flag)}, sample_count=weight)
+    assert agg.get_aggregated_metrics() == {metric: 5.0, _ROLLOUT_DEBUG_VALID: 1.0}
+
+
+def test_rollout_debug_metrics_reset_between_available_and_unavailable_windows():
+    """Keep values, weights, and availability isolated across successive reset cycles."""
+    agg = MetricsAggregator()
+    keys = _ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA
+    for flag, value, weight in [(1, 6.0, 1), (0, float("nan"), 100), (1, 2.0, 3)]:
+        agg.add_step_metrics({**dict.fromkeys(keys, value), _ROLLOUT_DEBUG_VALID: flag}, sample_count=weight)
+    first = agg.get_aggregated_metrics()
+    for key in keys:
+        assert first[key] == pytest.approx(6.0 if key in _ROLLOUT_DEBUG_MAXIMA else 3.0)
+    agg.reset()
+    agg.add_step_metrics({**dict.fromkeys(keys, float("nan")), _ROLLOUT_DEBUG_VALID: 0}, sample_count=100)
+    second = agg.get_aggregated_metrics()
+    assert second[_ROLLOUT_DEBUG_VALID] == 0
+    assert all(math.isnan(second[key]) for key in keys)
+    agg.reset()
+    agg.add_step_metrics({**dict.fromkeys(keys, 9.0), _ROLLOUT_DEBUG_VALID: 1}, sample_count=2)
+    assert agg.get_aggregated_metrics() == {**dict.fromkeys(keys, 9.0), _ROLLOUT_DEBUG_VALID: 1.0}
+
+
+@pytest.mark.parametrize("nonfinite", [False, True])
+def test_calculated_rollout_debug_metrics_aggregate_across_empty_responses(nonfinite):
+    """Aggregate real producer outputs across empty responses without hiding available NaNs."""
+    agg = MetricsAggregator()
+    valid_metrics = []
+    for available, weight in [(True, 1), (False, 10), (True, 3), (False, 10)]:
+        actor = torch.tensor([[-1.5, -2.5]])
+        if available and nonfinite:
+            actor[0, 0] = float("nan")
+        data = DataProto.from_dict(
+            {
+                "rollout_log_probs": torch.tensor([[-1.0, -2.0]]),
+                "old_log_probs": actor,
+                "response_mask": torch.full((1, 2), int(available)),
+                "responses": torch.zeros((1, 2)),
+            }
+        )
+        metrics = calculate_debug_metrics(data)
+        if available:
+            valid_metrics.append(metrics)
+        agg.add_step_metrics(metrics, sample_count=weight)
+    out = agg.get_aggregated_metrics()
+    assert out[_ROLLOUT_DEBUG_VALID] == 1
+    assert out["training/rollout_logprobs_mismatch_count"] == 4
+    for key in _ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA:
+        if nonfinite:
+            assert math.isnan(out[key])
+        else:
+            # Identical available batches retain their diagnostics, regardless of empty batches' weights.
+            assert out[key] == pytest.approx(valid_metrics[0][key])
 
 
 def test_rollout_logprobs_mismatch_count_sums():
@@ -141,6 +378,7 @@ def test_minmax_diff_falls_back_when_min_max_absent():
 
 
 def test_tensor_and_non_scalar_handling():
+    """Weight scalar tensor values by sample count and ignore multi-element tensors."""
     agg = MetricsAggregator()
     # 0-d / single-element tensors are recorded; multi-element tensors are ignored.
     agg.add_step_metrics({"actor/loss/mean": torch.tensor(2.0), "actor/vec": torch.tensor([1.0, 2.0])}, sample_count=1)
