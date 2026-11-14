@@ -922,11 +922,31 @@ def contiguous(data: TensorDict) -> TensorDict:
 
 
 def maybe_fix_3d_position_ids(data: TensorDict):
-    # note for tensordict with pickle/unpickle. nested tensor in tensordict after consolidate and pickle/unpickle
-    # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
-    # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
-    if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
-        data["position_ids"]._ragged_idx = 2
+    """Restore nested position IDs to (batch, components, jagged_tokens).
+
+    Repair lost axis metadata or repack component-axis data, preserving sample
+    values. Without nested input_ids, assume token-axis packing as before.
+    """
+    positions = data.get("position_ids")
+    if positions is None or not positions.is_nested or positions.dim() != 3:
+        return
+    if positions._ragged_idx == 2:
+        return
+
+    values, offsets = positions.values(), positions.offsets()
+    input_ids = data.get("input_ids")
+    token_offsets = input_ids.offsets() if input_ids is not None and input_ids.is_nested else None
+    # Token boundaries disambiguate layouts with identical buffer sizes.
+    token_axis_packed = token_offsets is None or (
+        torch.equal(offsets, token_offsets) and values.shape[-1] == int(token_offsets[-1])
+    )
+    if token_axis_packed or int(offsets[-1]) != values.shape[0]:
+        data["position_ids"] = torch.nested.nested_tensor_from_jagged(values, offsets=offsets, jagged_dim=2)
+    else:
+        # Unbind before repacking so each sample retains its position IDs.
+        data["position_ids"] = torch.nested.nested_tensor_from_jagged(
+            torch.cat(list(positions.unbind()), dim=-1), offsets=token_offsets, jagged_dim=2
+        )
 
 
 def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:
