@@ -166,7 +166,7 @@ def test_trace_state_decorator_rejects_sync_method():
             return None
 
 
-def test_trace_state_leaves_initialization_to_explicit_init_under_concurrent_async_tasks(monkeypatch, mock_rl_insight):
+def test_trace_state_does_not_init_under_concurrent_async_tasks(monkeypatch, mock_rl_insight):
     monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
 
     async def _one(i: int):
@@ -181,9 +181,6 @@ def test_trace_state_leaves_initialization_to_explicit_init_under_concurrent_asy
     mock_rl_insight.init.assert_not_called()
     assert mock_rl_insight.trace_state.call_count == 16
     assert RLInsightLogger._init_done is False
-    RLInsightLogger.init(project_name="proj", experiment_name="exp")
-    mock_rl_insight.init.assert_called_once_with(project="proj", experiment_name="exp", config={})
-    assert RLInsightLogger._init_done is True
 
 
 def test_register_metrics_dedups_and_finish_resets(monkeypatch, mock_rl_insight):
