@@ -94,6 +94,7 @@ def get_npu_profiler(
     analysis: bool,
     role: Optional[str] = None,
     profile_step: Optional[str] = None,
+    schedule: Optional[dict] = None,
 ):
     """Generate and return an NPU profiler object.
 
@@ -113,6 +114,10 @@ def get_npu_profiler(
             The role of the current data collection. Defaults to None.
         profile_step(str, optional):
             The current training step. Defaults to None.
+        schedule (dict, optional):
+            Optional kwargs for ``torch_npu.profiler.schedule``
+            (``wait``/``warmup``/``active``/``repeat``/``skip_first``). When provided, the
+            caller must drive ``prof.step()`` once per mini-batch to advance the schedule.
     """
     if profile_level == "level_none":
         level = torch_npu.profiler.ProfilerLevel.Level_none
@@ -149,7 +154,7 @@ def get_npu_profiler(
     if contents is None or "npu" in contents:
         activites.append(torch_npu.profiler.ProfilerActivity.NPU)
 
-    prof = torch_npu.profiler.profile(
+    profile_kwargs = dict(
         with_modules=contents is None or "module" in contents,
         with_stack=contents is None or "stack" in contents,
         record_shapes=contents is None or "shapes" in contents,
@@ -158,7 +163,13 @@ def get_npu_profiler(
         on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(profile_save_path, analyse_flag=analysis),
         experimental_config=experimental_config,
     )
-    return prof
+
+    # torch_npu.profiler.schedule drives the wait/warmup/active/repeat state machine
+    # via prof.step(); without it the profiler collects continuously.
+    if schedule:
+        profile_kwargs["schedule"] = torch_npu.profiler.schedule(**schedule)
+
+    return torch_npu.profiler.profile(**profile_kwargs)
 
 
 class NPUProfiler(DistProfiler):
@@ -167,9 +178,14 @@ class NPUProfiler(DistProfiler):
     """
 
     _define_count = 0
+    # Process-global handle to the currently running NPU profiler. start/stop may
+    # happen on the outer ActorRolloutRefWorker while mini-batch step() is issued by
+    # the inner TrainingWorker; a class-level handle keeps them on the same backend
+    # (same pattern as torch Profiler._active_prof).
+    _active_prof = None
 
     def __init__(self, rank: int, config: ProfilerConfig, tool_config: NPUToolConfig, **kwargs):
-        """Initialize the NsightSystemsProfiler.
+        """Initialize the NPUProfiler.
 
         Args:
             rank (int): The rank of the current process.
@@ -181,11 +197,25 @@ class NPUProfiler(DistProfiler):
         if not tool_config:
             assert not config.enable, "tool_config must be set when profiler is enabled"
         self.discrete: bool = tool_config.discrete
+        self.tool_config = tool_config
         self.profile_npu = None
         self.profile_contents = tool_config.contents
         self.profile_level = tool_config.level
         self.profile_save_path = config.save_path
         self.analysis = tool_config.analysis
+        # Resolved once from config (None => continuous). Not cleared on stop.
+        schedule = tool_config.schedule
+        self._schedule_kwargs = (
+            {
+                "skip_first": schedule.skip_first,
+                "wait": schedule.wait,
+                "warmup": schedule.warmup,
+                "active": schedule.active,
+                "repeat": schedule.repeat,
+            }
+            if schedule and schedule.enabled
+            else None
+        )
 
     def start(self, **kwargs):
         role = kwargs.get("role", None)
@@ -195,29 +225,32 @@ class NPUProfiler(DistProfiler):
                 profile_level=self.profile_level,
                 profile_save_path=self.profile_save_path,
                 analysis=self.analysis,
+                schedule=self._schedule_kwargs,
                 role=role,
             )
             self.profile_npu.start()
+            NPUProfiler._active_prof = self.profile_npu
             NPUProfiler._define_count += 1
 
     def stop(self):
         if not self.discrete and NPUProfiler._define_count == 1:
-            self.profile_npu.step()
             self.profile_npu.stop()
+            self.profile_npu = None
+            NPUProfiler._active_prof = None
             NPUProfiler._define_count -= 1
 
     def step(self):
-        """No-op per-mini-batch hook.
+        """Advance the process-global active profiler by one mini-batch.
 
-        The actor update loop calls this once per mini-batch to drive the torch profiler's
-        schedule, but the NPU profiler is driven by explicit start/stop calls, so it has nothing
-        to advance here. It must still be defined: without it, the dispatcher's
-        ``getattr(self._impl, "step", lambda: None)`` resolves to the inherited
-        ``DistProfiler.step`` (backend impls subclass ``DistProfiler`` but never run its
-        ``__init__``), which then reads dispatcher-only state such as ``_enable`` and raises
-        ``AttributeError``.
+        Uses ``NPUProfiler._active_prof`` so an inner TrainingWorker can advance the
+        profiler started by the outer ActorRolloutRefWorker. No-op when no profiler is
+        active, or when schedule is not configured (continuous collection does not need
+        per-mini-batch stepping). Must still be defined here: without it, the
+        dispatcher's ``getattr(self._impl, "step", lambda: None)`` resolves to the
+        inherited ``DistProfiler.step`` and raises ``AttributeError``.
         """
-        return
+        if self._schedule_kwargs and NPUProfiler._active_prof is not None:
+            NPUProfiler._active_prof.step()
 
     def annotate(self, message: Optional[str] = None, role: Optional[str] = None, **kwargs_outer) -> Callable:
         """Decorate a Worker member function to profile the current rank in the current training step.
@@ -232,6 +265,9 @@ class NPUProfiler(DistProfiler):
                 The role of the current data collection. Defaults to None.
         """
 
+        # Match the torch backend: stages without mini-batch stepping collect in full.
+        scheduled = bool(kwargs_outer.get("scheduled", False))
+
         def decorator(func):
             @functools.wraps(func)
             def wrapper(*args, **kwargs_inner):
@@ -244,14 +280,16 @@ class NPUProfiler(DistProfiler):
                 if not discrete_mode:
                     mark_range = mark_start_range(message=profile_name)
                 else:
-                    profile_npu = get_npu_profiler(
+                    self.profile_npu = get_npu_profiler(
                         contents=self.profile_contents,
                         profile_level=self.profile_level,
                         profile_save_path=self.profile_save_path,
                         analysis=self.analysis,
+                        schedule=self._schedule_kwargs if scheduled else None,
                         role=role,
                     )
-                    profile_npu.start()
+                    self.profile_npu.start()
+                    NPUProfiler._active_prof = self.profile_npu
                     mark_range = mark_start_range(message=profile_name)
 
                 result = func(*args, **kwargs_inner)
@@ -260,8 +298,9 @@ class NPUProfiler(DistProfiler):
                     mark_end_range(mark_range)
                 else:
                     mark_end_range(mark_range)
-                    profile_npu.step()
-                    profile_npu.stop()
+                    self.profile_npu.stop()
+                    self.profile_npu = None
+                    NPUProfiler._active_prof = None
 
                 return result
 

@@ -62,6 +62,27 @@ Use parameters in each role's ``profiler.tool_config.npu`` to control specific c
 
 -  analysis: Whether to enable automatic data parsing.
 -  discrete: Whether to use discrete mode.
+-  schedule: Configures collection windows. verl advances the schedule by calling
+   ``profiler.step()`` once per Actor/Critic update mini-batch. Takes effect only
+   when ``active > 0``:
+
+   -  skip_first: Number of initial mini-batches to ignore before the first cycle begins.
+   -  wait: Mini-batches to idle (no collection) at the start of each cycle.
+   -  warmup: Mini-batches to trace but discard, letting the profiler stabilize, each cycle.
+   -  active: Mini-batches to actively record each cycle. Set ``0`` (default) to disable scheduling. Negative values are not supported.
+   -  repeat: Number of cycles to record. ``0`` (default) repeats until profiling stops.
+
+   With ``discrete=False``, the scheduled profiler starts before log-prob computation
+   and controls collection for all stages it covers, not just update mini-batches.
+   For example, with ``wait=1``, the initial log-prob computation runs in the wait
+   phase and its trace is absent. Initial ``skip_first`` or ``warmup`` phases can
+   likewise prevent earlier stages from being retained. With ``discrete=True``,
+   only Actor update is scheduled; log-prob stages are collected in full.
+
+   For the Critic, scheduling is supported only with ``discrete=False``. With
+   ``discrete=True``, each Critic mini-batch is collected in full and the schedule
+   is ignored, even when ``active > 0``.
+
 -  profile_token_start: Effective only for the rollout role; defines the start response-token index for rollout decoding collection. It is applied only when valid (0-based, ``profile_token_end > profile_token_start``, and the window is within the response length).
 -  profile_token_end: Effective only for the rollout role; defines the stop response-token index (exclusive) for rollout decoding collection. It is applied only when valid (0-based, ``profile_token_end > profile_token_start``, and the window is within the response length).
 
@@ -112,6 +133,13 @@ Separation of Training and Inference Phases
                   npu:
                      discrete: True
                      contents: [npu, cpu]
+                     # Optional: sample mini-batches via schedule; without it, all actor mini-batches are collected
+                     schedule:
+                        skip_first: 0
+                        wait: 0
+                        warmup: 1  # warm up one mini-batch
+                        active: 1  # record the second mini-batch
+                        repeat: 1  # stop after one cycle
          rollout:
             profiler:
                enable: True  # Set to True to collect the inference phase
@@ -168,6 +196,13 @@ Lightweight Collection of Inference Data
       actor_rollout_ref.actor.profiler.tool_config.npu.contents="['npu','cpu']" # Control collection list, default cpu, npu; can configure memory, shapes, module, and so on
       actor_rollout_ref.actor.profiler.tool_config.npu.level=level1
       actor_rollout_ref.actor.profiler.tool_config.npu.analysis=False # Disable automatic data parsing
+
+      # Optional: sample mini-batches via schedule; without it, all actor mini-batches are collected
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.skip_first=0
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.wait=0
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.warmup=1  # warm up one mini-batch
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.active=1  # record the second mini-batch
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.repeat=1  # stop after one cycle
 
       actor_rollout_ref.rollout.profiler.enable=True
       actor_rollout_ref.rollout.profiler.all_ranks=False
