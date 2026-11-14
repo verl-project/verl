@@ -635,6 +635,14 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         """Load model weights through megatron-bridge."""
         self.bridge.load_hf_weights(self.model, hf_model_path)
 
+    def _reload_optimizer_model_params_if_needed(self):
+        if self.use_megatron_fsdp:
+            # The FSDP wrapper loads main-weight DTensors and refreshes compute weights;
+            # DistributedOptimizer.reload_model_params() is unsupported in this mode.
+            return
+        if self.optimizer is not None and not self.should_load_optimizer:
+            self.optimizer.reload_model_params()
+
     @staticmethod
     def _has_checkpoint_files(path: str) -> bool:
         return os.path.isdir(path) and any(os.scandir(path))
@@ -739,6 +747,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         if self.should_load_model:
             self.model[0].load_state_dict(state_dict["model"], strict=True)
             log_with_rank(f"Loaded sharded model checkpoint from {local_path}", rank=self.rank, logger=logger)
+            self._reload_optimizer_model_params_if_needed()
         if self.should_load_optimizer:
             self.optimizer.load_state_dict(state_dict["optimizer"])
             log_with_rank(f"Loaded optimizer checkpoint from {local_path}", rank=self.rank, logger=logger)
@@ -931,6 +940,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             hf_model_path = get_hf_model_checkpoint_path(local_path)
             self._load_model_as_hf_via_bridge(hf_model_path)
             log_with_rank(f"Loaded HF model checkpoint from {hf_model_path} with bridge", rank=self.rank, logger=logger)
+
+        if self.should_load_dist_ckpt_model or self.should_load_hf_model:
+            self._reload_optimizer_model_params_if_needed()
 
         # ── Load optimizer / LR scheduler ───────────────────────────────────
         if self.should_load_optimizer:
