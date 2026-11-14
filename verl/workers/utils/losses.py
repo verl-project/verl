@@ -133,7 +133,9 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
     # Response tokens whose update-forward log-prob is not bitwise equal to old_log_probs. The count is
     # summed across microbatches; it is scaled by dp_size so the worker's DP mean yields the global count.
-    old_logprobs_mismatch = (log_prob.float() != old_log_prob.float())[response_mask].sum()
+    # Masked sum instead of boolean indexing: same count, but a static shape, so backends that compile per
+    # shape (e.g. TPU / XLA) do not recompile for every micro-batch's number of response tokens.
+    old_logprobs_mismatch = ((log_prob.float() != old_log_prob.float()) & response_mask).sum()
     metrics["actor/old_logprobs_mismatch_count"] = Metric(
         value=(old_logprobs_mismatch * config.global_batch_info["dp_size"]).item(), aggregation=AggregationType.SUM
     )

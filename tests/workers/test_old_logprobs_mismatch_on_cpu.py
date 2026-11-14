@@ -26,7 +26,7 @@ from verl.workers.utils.padding import left_right_2_no_padding
 PROMPT_LENGTH = 2
 
 
-def _metrics(old_log_probs, log_probs, dp_size=1, batch_num_tokens=None, global_batch_size=None):
+def _metrics(old_log_probs, log_probs, dp_size=1, batch_num_tokens=None, global_batch_size=None, response_mask=None):
     response_length = old_log_probs.numel()
     sequence_length = PROMPT_LENGTH + response_length
     data = TensorDict(
@@ -36,7 +36,11 @@ def _metrics(old_log_probs, log_probs, dp_size=1, batch_num_tokens=None, global_
             "input_ids": torch.zeros(1, sequence_length, dtype=torch.long),
             "attention_mask": torch.ones(1, sequence_length, dtype=torch.long),
             "position_ids": torch.arange(sequence_length).unsqueeze(0),
-            "response_mask": torch.ones(1, response_length, dtype=torch.long),
+            "response_mask": (
+                torch.ones(1, response_length, dtype=torch.long)
+                if response_mask is None
+                else response_mask.to(torch.long).unsqueeze(0)
+            ),
             "old_log_probs": old_log_probs.unsqueeze(0),
             "advantages": torch.zeros(1, response_length),
         },
@@ -84,3 +88,10 @@ def test_dp_reduction_recovers_the_global_count():
     # This is the same rank reduction used by TrainingWorker.train_mini_batch.
     combined = Metric.aggregate_dp([rank["actor/old_logprobs_mismatch_count"] for rank in ranks])
     assert combined == 2
+
+
+def test_masked_out_tokens_are_not_counted():
+    old = torch.tensor([-1.0, -2.0, -3.0, -4.0])
+    new = old + torch.tensor([1e-3, 1e-3, 0.0, 1e-3])
+    metrics = _metrics(old, new, response_mask=torch.tensor([1, 0, 1, 0]))
+    assert metrics["actor/old_logprobs_mismatch_count"].aggregate() == 1
