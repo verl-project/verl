@@ -1,7 +1,7 @@
 昇腾快速上手说明
 =================
 
-**Last updated:** 2026/07/14.
+**Last updated:** 2026/11/12.
 
 .. contents:: 目录
    :local:
@@ -113,6 +113,17 @@
 脚本内具体参数说明详见 `训练配置参数与指标说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/dev_guide/model_dev/parameter_and_metrics.html>`_。
 
 多节点任务拉起详见 `多机任务拉起操作指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/model_support/examples/multi-machine_task_startup_practice.html>`_。
+
+更多训练示例
+---------------------------------
+
+已支持的模型、算法、训推后端组合及启动脚本详见
+`NPU 模型与算法支持情况 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/model_support/model_and_algorithm_support.html>`_。
+
+完成上述快速验证后，如需体验更多昇腾场景下的模型与算法训练示例，请访问
+`verl-ascend-recipe 仓库 <https://github.com/verl-project/verl-ascend-recipe>`_。
+
+请根据目标模型和算法选择对应示例，并按照示例文档中的版本要求、环境配置和运行步骤执行。
 
 附录
 -------------------------------------------
