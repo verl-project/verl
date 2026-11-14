@@ -552,8 +552,10 @@ def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional
         return
 
     prompt_logprobs_ls, prompt_ids_ls = [], []
-    # NOTE: logprob of first prompt token is None.
-    for logprobs_dict in output.prompt_logprobs[1:]:
+    # NOTE: logprob of first prompt token is None. Index instead of slicing [1:]: FlatLogprobs in vLLM < 0.29 raises
+    # IndexError on an empty slice, i.e. a one-token prompt.
+    for position in range(1, len(output.prompt_logprobs)):
+        logprobs_dict = output.prompt_logprobs[position]
         if num_prompt_logprobs == 0:
             token_id_str = list(logprobs_dict.keys())[0]
             logprob = logprobs_dict[token_id_str].logprob

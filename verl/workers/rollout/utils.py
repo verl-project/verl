@@ -156,6 +156,16 @@ def get_vision_placeholder_token_ids(processor) -> list[int]:
     return token_ids
 
 
+def extract_sampled_logprobs(logprobs) -> list[float]:
+    """Sampled-token log-prob per generated token.
+
+    ``logprobs`` is a vLLM ``FlatLogprobs`` (``SamplingParams(flat_logprobs=True)``), whose row per position starts
+    with the sampled token. Reading that first entry gives ``logprobs[i][token_ids[i]].logprob`` without rebuilding a
+    Logprob dict per position, which indexing ``FlatLogprobs`` would do.
+    """
+    return [logprobs.logprobs[start] for start in logprobs.start_indices]
+
+
 def extract_response_topk_logprobs(logprobs, k: int) -> tuple[list[float], np.ndarray, np.ndarray]:
     """Sampled-token log-probs and the sampler top-k head per generated token.
 
