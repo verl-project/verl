@@ -29,6 +29,7 @@ from omegaconf import DictConfig
 
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import normalize_token_ids
+from verl.utils.device import get_device_name
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.tracking import RLInsightLogger
@@ -504,6 +505,23 @@ class LLMServerManager:
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
         print(f"LLMServerManager: {self.server_addresses}")
 
+        metrics_addresses = list(self.server_addresses)
+        metrics_labels = [{"replica": server.replica_rank} for server in self.rollout_replicas]
+        if self.rollout_config.disaggregation.enabled and get_device_name() == "npu":
+            metrics_addresses = []
+            metrics_labels = []
+            for replica in self.rollout_replicas:
+                for address, endpoint_labels in replica.get_metrics_server_endpoints():
+                    role = endpoint_labels["pd_role"]
+                    index = endpoint_labels["pd_index"]
+                    replica_label = (
+                        f"{replica.replica_rank}-prefill"
+                        if role == "prefill"
+                        else f"{replica.replica_rank}-decode{index}"
+                    )
+                    metrics_addresses.append(address)
+                    metrics_labels.append({"replica": replica_label, **endpoint_labels})
+
         # Update Prometheus / rl-insight metrics with server addresses
         needs_metrics = self.rollout_config.prometheus.enable or RLInsightLogger.enabled()
         if self.rollout_config.disable_log_stats:
@@ -511,14 +529,12 @@ class LLMServerManager:
                 raise ValueError("Metrics monitoring requires disable_log_stats=False, but it is currently True.")
         if not self.rollout_config.disable_log_stats:
             if self.rollout_config.prometheus.enable:
-                update_prometheus_config(
-                    self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name
-                )
+                update_prometheus_config(self.rollout_config.prometheus, metrics_addresses, self.rollout_config.name)
             if RLInsightLogger.enabled():
                 RLInsightLogger.register_rollout_metrics(
-                    self.server_addresses,
+                    metrics_addresses,
                     self.rollout_config.name,
-                    labels=[{"replica": server.replica_rank} for server in self.rollout_replicas],
+                    labels=metrics_labels,
                 )
 
     async def _init_global_load_balancer(self) -> None:
