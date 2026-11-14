@@ -59,6 +59,7 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
     replace_lora_wrapper,
 )
+from verl.utils.hccl_diagnostics import hccl_diagnostic_stage
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.seqlen_balancing import ceildiv
@@ -162,7 +163,13 @@ class FSDPEngine(BaseEngine):
                 "you must enable `use_remove_padding`."
             )
 
-        self._init_device_mesh()
+        with hccl_diagnostic_stage(
+            "fsdp.device_mesh",
+            model_type=getattr(self.model_config, "model_type", None),
+            strategy=self.engine_config.strategy,
+            fsdp_size=self.engine_config.fsdp_size,
+        ):
+            self._init_device_mesh()
 
         if self.engine_config.batch_invariant:
             if self.model_config.use_fused_kernels:
@@ -551,7 +558,8 @@ class FSDPEngine(BaseEngine):
         from verl.utils.model import print_model_size
 
         # Load base model with specified configuration and dtype
-        module = self._build_module()
+        with hccl_diagnostic_stage("fsdp.load_model", model_type=getattr(self.model_config, "model_type", None)):
+            module = self._build_module()
         try:
             self.pass_packed_cu_seqlens = "cu_seqlens" in signature(module.forward).parameters
         except (TypeError, ValueError):
@@ -561,14 +569,23 @@ class FSDPEngine(BaseEngine):
             module = self._build_lora_module(module)
 
         # Synchronize all distributed processes before proceeding
-        torch.distributed.barrier()
+        with hccl_diagnostic_stage("fsdp.model_barrier", model_type=getattr(self.model_config, "model_type", None)):
+            torch.distributed.barrier()
         if self.rank == 0:
             print_model_size(module)
         log_gpu_memory_usage("After init model from HF AutoModel", logger=logger)
 
         # Wrap model with FSDP for distributed training (sharding, mixed precision, etc.)
         log_gpu_memory_usage("Before FSDP", logger=None)
-        module = self._build_fsdp_module(module)
+        with hccl_diagnostic_stage(
+            "fsdp.wrap_model",
+            model_type=getattr(self.model_config, "model_type", None),
+            strategy=self.engine_config.strategy,
+            mesh_ranks=self.device_mesh.mesh.tolist(),
+            mesh_names=self.device_mesh.mesh_dim_names,
+            sync_module_states=self.engine_config.strategy == "fsdp",
+        ):
+            module = self._build_fsdp_module(module)
         log_gpu_memory_usage("After FSDP", logger=None)
 
         if not self.engine_config.forward_only:
