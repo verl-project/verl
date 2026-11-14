@@ -531,6 +531,25 @@ def _any_context_merging_agent_loop(agent_names: set[str]) -> bool:
     return False
 
 
+def _builtin_agent_loop_target(config) -> str | None:
+    """Class path when the registry entry has no constructor fields of its own."""
+    if type(config) is dict and list(config) == ["_target_"] and isinstance(config["_target_"], str):
+        return config["_target_"]
+    return None
+
+
+def _construct_agent_loop(config, runtime_kwargs: dict[str, Any], class_cache: dict[str, type]):
+    """Construct an agent loop. A bare class path skips Hydra's per-sample config merge."""
+    target = _builtin_agent_loop_target(config)
+    if target is None:
+        return hydra.utils.instantiate(config=config, **runtime_kwargs)
+    cls = class_cache.get(target)
+    if cls is None:
+        cls = hydra.utils.get_class(target)
+        class_cache[target] = cls
+    return cls(**runtime_kwargs)
+
+
 class AgentLoopWorker:
     """Agent loop worker takes a batch of messages and run each message in an agent loop.
 
@@ -552,6 +571,7 @@ class AgentLoopWorker:
         self.llm_client = llm_client
         self.teacher_client = teacher_client
         self.reward_loop_worker_handles = reward_loop_worker_handles
+        self._agent_loop_classes: dict[str, type] = {}
 
         rollout_config, model_config = config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
@@ -768,16 +788,19 @@ class AgentLoopWorker:
             )
 
             agent_loop_config = _agent_loop_registry[agent_name]
-            agent_loop = hydra.utils.instantiate(
-                config=agent_loop_config,
-                trainer_config=DictConfigWrap(config=self.config),
-                server_manager=self.llm_client,
-                tokenizer=self.tokenizer,
-                processor=self.processor,
-                hf_model_type=self.hf_model_type,
-                dataset_cls=self.dataset_cls,
-                data_config=DictConfigWrap(self.config.data),
-                tools=ToolListWrap(self.tools),
+            agent_loop = _construct_agent_loop(
+                agent_loop_config,
+                {
+                    "trainer_config": DictConfigWrap(config=self.config),
+                    "server_manager": self.llm_client,
+                    "tokenizer": self.tokenizer,
+                    "processor": self.processor,
+                    "hf_model_type": self.hf_model_type,
+                    "dataset_cls": self.dataset_cls,
+                    "data_config": DictConfigWrap(self.config.data),
+                    "tools": ToolListWrap(self.tools),
+                },
+                self._agent_loop_classes,
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
