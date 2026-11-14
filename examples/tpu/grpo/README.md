@@ -1,6 +1,6 @@
 # GRPO on Cloud TPU with `verl` + `verl-hardware-plugin`
 
-GRPO on GSM8K with Qwen3 on Cloud TPU: a TorchTitan trainer on one slice, a vLLM rollout on the other, and `tpu-sync` weight sync between them. TPU support comes from [`verl-hardware-plugin`](https://github.com/verl-project/verl-hardware-plugin).
+GRPO on GSM8K with Qwen3 on Cloud TPU: a TorchTitan trainer on one slice, a vLLM or SGLang (`ROLLOUT_NAME=sglang`, via [`sglang-torchtpu`](https://github.com/sgl-project/sglang-torchtpu)) rollout on the other, and `tpu-sync` weight sync between them. TPU support comes from [`verl-hardware-plugin`](https://github.com/verl-project/verl-hardware-plugin).
 
 By default, this guide walks through the minimal **2-chip setup** (2 TPU `v6e-1` slices: 1 trainer chip and 1 rollout chip) for the Qwen3-0.6B smoke test. See [Section 6](#6-scale-dense-qwen3-17b-4b-8b-14b-32b) for scaling [`run_qwen3_torchtitan.sh`](run_qwen3_torchtitan.sh) across all dense Qwen3 sizes (`0.6B`, `1.7B`, `4B`, `8B`, `14B`, `32B`) on `v6e-4`, `v6e-8`, `v6e-16` and `v6e-32` slices.
 
@@ -147,6 +147,12 @@ The script selects its dense Qwen3 preset with `MODEL_SIZE=0.6B | 1.7B | 4B | 8B
      env MODEL_SIZE=4B bash examples/tpu/grpo/run_qwen3_torchtitan.sh
    ```
    The `4B` run takes about 10 minutes to start, then about 18-27 s per step (~22 s average over 100 steps).
+
+   To use SGLang for the rollout instead of vLLM (`ROLLOUT_NAME` defaults to `vllm`; the worker image needs `sglang-torchtpu`):
+   ```bash
+   ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+     env MODEL_SIZE=4B ROLLOUT_NAME=sglang bash examples/tpu/grpo/run_qwen3_torchtitan.sh
+   ```
 
    Alternatively, to run the 5-step `0.6B` smoke test across a larger cluster (for example, 2 `v6e-4` slices), override the trainer and rollout topology:
    ```bash
