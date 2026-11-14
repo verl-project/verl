@@ -2,7 +2,7 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 10/03/2026.
+Last updated: 11/07/2026.
 
 ## Background
 
@@ -854,6 +854,7 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `examples/on_policy_distillation_trainer/run_qwen3_8b_megatron.sh` — text, vLLM rollout, Megatron student, single teacher
 - `examples/on_policy_distillation_trainer/run_qwen3_vl_8b_fsdp.sh` — VL student/teacher, vLLM rollout, FSDP student
 - `examples/on_policy_distillation_trainer/run_qwen3_8b_mopd_fsdp.sh` — multi-teacher (gsm8k text + geo3k VL), routed by `data_source`
+- `examples/on_policy_distillation_trainer/run_qwen3_6_35b_mopd_megatron.sh` — multi-teacher (two reasoning_gym tasks), Qwen3.6-35B-A3B, Megatron EP4, fully async with `staleness_threshold=1`, `partial_rollout=False` and `rollout.weight_sync_pause_mode=wait`, MTP rollout; see `qwen3_6_35b_mopd/README.md`
 
 ### **Tests**
 

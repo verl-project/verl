@@ -1,6 +1,6 @@
 # V1 Async Trainer
 
-Last updated: 09/21/2026.
+Last updated: 11/07/2026.
 
 The V1 trainer provides two asynchronous PPO training modes under the standard `verl.trainer.main_ppo` entry point:
 
@@ -58,6 +58,8 @@ Partial rollout is part of the V1 async client behavior rather than a V1 configu
 4. The KV cache is reconstructed for the retained prefix before decoding continues.
 
 This avoids dropping long-running trajectories during rollout/trainer transitions, at the cost of extra prefill work and within-trajectory policy-version changes.
+
+With vLLM rollout, `actor_rollout_ref.rollout.weight_sync_pause_mode=wait` disables partial rollout at weight syncs: the sync waits for in-flight requests to finish under the current weights, so every trajectory comes from a single model version. In `separate_async` with `parameter_sync_step=1`, this is a one-step overlap: batch k+1 generates while batch k trains, and the update to version k+1 waits for batch k+1's longest response. The default `abort` keeps the partial-rollout behavior above; under it, long responses straddle syncs and are retried, so a step's batch is biased toward short responses that finish first.
 
 ### Off-policy control
 
