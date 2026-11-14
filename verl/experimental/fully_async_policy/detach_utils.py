@@ -13,15 +13,16 @@
 # limitations under the License.
 import asyncio
 import time
+import traceback as traceback_lib
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
-from verl import DataProto
-from verl.trainer.ppo.ray_trainer import compute_response_mask
+if TYPE_CHECKING:
+    from verl import DataProto
 
 
 @dataclass
@@ -39,7 +40,56 @@ class RolloutSample:
     rollout_status: dict[str, Any]
 
 
-def prepare_single_generation_data(batch_dict, config) -> DataProto:
+@dataclass(frozen=True)
+class RolloutErrorSignal:
+    """Queue signal used to stop the trainer when rollout generation fails."""
+
+    error_type: str
+    message: str
+    traceback: str
+
+    @classmethod
+    def from_exception(cls, exc: BaseException) -> "RolloutErrorSignal":
+        return cls(
+            error_type=type(exc).__name__,
+            message=str(exc),
+            traceback="".join(traceback_lib.format_exception(type(exc), exc, exc.__traceback__)),
+        )
+
+
+def format_rollout_error_signal(sample: Any) -> str | None:
+    if not isinstance(sample, RolloutErrorSignal):
+        return None
+
+    message = f"Rollout generation failed: {sample.error_type}: {sample.message}"
+    if sample.traceback:
+        message = f"{message}\n{sample.traceback}"
+    return message
+
+
+def first_unexpected_asyncio_exception(results) -> BaseException | None:
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+            return result
+    return None
+
+
+def first_unexpected_task_exception(tasks) -> BaseException | None:
+    for task in tasks:
+        if task.cancelled():
+            continue
+        exception = task.exception()
+        if exception is not None and not isinstance(exception, asyncio.CancelledError):
+            return exception
+    return None
+
+
+async def wait_for_task_failure_or_completion(tasks) -> BaseException | None:
+    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+    return first_unexpected_task_exception(done)
+
+
+def prepare_single_generation_data(batch_dict, config) -> "DataProto":
     """
     Similar to the logic of ray_trainer._prepare_generate_batch, but for a single sample.
     Separate the data used for generation from the original data.
@@ -47,6 +97,8 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
     Returns:
         tuple: (original_batch_dict, gen_data_for_single_sample)
     """
+
+    from verl import DataProto
 
     full_batch = DataProto.from_single_dict(batch_dict)
 
@@ -71,7 +123,7 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
     return full_batch
 
 
-def addition_process(output: DataProto):
+def addition_process(output: "DataProto"):
     """collect metirics"""
     metrics = output.meta_info.pop("metrics")  # List[Dict[str, str]]
     processing_times_list = [item["generate_sequences"] for item in metrics]
@@ -83,7 +135,7 @@ def addition_process(output: DataProto):
 
 def assemble_batch_from_rollout_samples(
     rollout_samples: list[RolloutSample], tokenizer, config, balance_batch=None
-) -> DataProto:
+) -> "DataProto":
     """
     Assemble gen_batch_output from RolloutSample objects
     Assembles batches from RolloutSample objects, similar to the _post_generate_batch logic in ray_trainer.
@@ -100,6 +152,9 @@ def assemble_batch_from_rollout_samples(
     Raises:
         ValueError: If rollout_samples is empty
     """
+    from verl import DataProto
+    from verl.trainer.ppo.ray_trainer import compute_response_mask
+
     start_time = time.time()
 
     if not rollout_samples:
