@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import errno
 import inspect
 import logging
 import os
@@ -18,6 +20,7 @@ import socket
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import numpy as np
 import ray
@@ -389,6 +392,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         num_gpus=1,
         sharing_with=None,
         device_name="cuda",
+        master_endpoint_config=None,
     ) -> Any:
         """Create and return a Ray actor with the configured options.
 
@@ -399,15 +403,22 @@ class RayClassWithInitArgs(ClassWithInitArgs):
             num_gpus: Number of GPUs to allocate
             sharing_with: Actor to share resources with
             device_name: Device for training
+            master_endpoint_config: Endpoint metadata actor and port range for automatic allocation
 
         Returns:
             A Ray actor handle with the configured options
         """
+        actor_cls = self.cls
+        args = self.args
+        if master_endpoint_config is not None:
+            actor_cls = _create_master_store_worker_cls(actor_cls)
+            args = (master_endpoint_config, *args)
+
         if sharing_with is not None:
             target_node_id = ray.get(sharing_with.get_node_id.remote())
             visible_devices = ray.get(sharing_with.get_cuda_visible_devices.remote())
             options = {"scheduling_strategy": NodeAffinitySchedulingStrategy(node_id=target_node_id, soft=False)}
-            return self.cls.options(**options).remote(*self.args, cuda_visible_devices=visible_devices, **self.kwargs)
+            return actor_cls.options(**options).remote(*args, cuda_visible_devices=visible_devices, **self.kwargs)
 
         options = {
             "scheduling_strategy": PlacementGroupSchedulingStrategy(
@@ -427,7 +438,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         # print("cls:", self.cls)
         # print("args: ", self.args)
         # print("kwargs: ", self.kwargs)
-        return self.cls.options(**options).remote(*self.args, **self.kwargs)
+        return actor_cls.options(**options).remote(*args, **self.kwargs)
 
 
 class RayWorkerGroup(WorkerGroup):
@@ -462,11 +473,11 @@ class RayWorkerGroup(WorkerGroup):
             ray_wait_register_center_timeout: Timeout for waiting on register center
             **kwargs: Additional keyword arguments
         """
-        self._master_addr = kwargs.pop("master_addr", None)
-        self._master_port = kwargs.pop("master_port", None)
         self.use_gpu = kwargs.pop("use_gpu", resource_pool.use_gpu if resource_pool is not None else True)
         self._ray_master_port_range = kwargs.pop("master_port_range", None)
         super().__init__(resource_pool=resource_pool, **kwargs)
+        self._master_addr = kwargs.pop("master_addr", None)
+        self._master_port = kwargs.pop("master_port", None)
         self.ray_cls_with_init = ray_cls_with_init
         self.name_prefix = get_random_string(length=6) if name_prefix is None else name_prefix
         self._ray_wait_register_center_timeout = ray_wait_register_center_timeout
@@ -532,24 +543,6 @@ class RayWorkerGroup(WorkerGroup):
         self._workers = workers
         self._world_size = len(workers)
 
-    def _get_master_addr_port(self, pg, bundle_index=0, master_port_range=None):
-        """Get master addr and port for this worker group"""
-        if self._master_addr is None and self._master_port is None:
-            self._master_addr, self._master_port = ray.get(
-                get_master_addr_port.options(
-                    scheduling_strategy=PlacementGroupSchedulingStrategy(
-                        placement_group=pg, placement_group_bundle_index=bundle_index
-                    ),
-                ).remote(master_port_range=master_port_range)
-            )
-        elif self._master_addr is not None and self._master_port is not None:
-            logger.debug(f"{self._master_addr=} {self._master_port=}")
-        else:
-            raise ValueError(
-                "Both 'master_addr' and 'master_port' must be provided if you intend to manually specify them, "
-                "or neither should be provided to use Ray's default assignment."
-            )
-
     def _init_with_resource_pool(
         self,
         resource_pool,
@@ -579,9 +572,6 @@ class RayWorkerGroup(WorkerGroup):
         local_world_size = resource_pool.store[0]
         for pg_idx, pg in enumerate(sort_placement_group_by_node_ip(pgs)):
             assert local_world_size <= pg.bundle_count, f"when generating for {self.name_prefix}, for the "
-            if pg_idx == 0:
-                self._get_master_addr_port(pg, bundle_index=0, master_port_range=self._ray_master_port_range)
-
             for local_rank in range(local_world_size):
                 rank += 1
                 self._create_worker(
@@ -612,11 +602,6 @@ class RayWorkerGroup(WorkerGroup):
 
         rank = -1
         local_world_size = resource_pool.store[0]
-        self._get_master_addr_port(
-            pgs[resource_pool.start_bundle_index // local_world_size],
-            bundle_index=resource_pool.start_bundle_index % local_world_size,
-            master_port_range=self._ray_master_port_range,
-        )
         for curr_rank in range(resource_pool.start_bundle_index, resource_pool.start_bundle_index + world_size):
             pg_idx = curr_rank // local_world_size
             pg = pgs[pg_idx]
@@ -642,6 +627,16 @@ class RayWorkerGroup(WorkerGroup):
             raise ValueError("use_gpu is True but resource_pool.use_gpu is False")
         local_world_size = resource_pool.store[0]
         num_gpus = 1 / resource_pool.max_colocate_count
+        if self._master_addr is None and self._master_port is None:
+            # Placeholder until master store worker publishes the real endpoint.
+            allocate_master_endpoint = True
+            master_addr, master_port = "127.0.0.1", 0
+        elif self._master_addr is not None and self._master_port is not None:
+            # Use the provided or previously published endpoint as-is.
+            allocate_master_endpoint = False
+            master_addr, master_port = self._master_addr, self._master_port
+        else:
+            raise ValueError("Both 'master_addr' and 'master_port' must be provided, or neither.")
 
         # we pass in environment variable at option so that Worker can use environment variable to set
         env_vars = {
@@ -650,8 +645,8 @@ class RayWorkerGroup(WorkerGroup):
             "WG_PREFIX": self.name_prefix,
             "WG_BACKEND": "ray",
             "RAY_LOCAL_WORLD_SIZE": str(local_world_size),
-            "MASTER_ADDR": self._master_addr,
-            "MASTER_PORT": self._master_port,
+            "MASTER_ADDR": master_addr,
+            "MASTER_PORT": str(master_port),
         }
         # TPU workers need slice and mesh environment derived from the placement groups, which
         # Ray does not supply. Kept as an explicit TPU branch rather than a PlatformBase hook,
@@ -701,13 +696,19 @@ class RayWorkerGroup(WorkerGroup):
             ray_cls_with_init.update_options({"lifetime": "detached"})
 
         # create a worker
-        worker = ray_cls_with_init(
-            placement_group=pg,
-            placement_group_bundle_idx=local_rank,
-            use_gpu=self.use_gpu,
-            num_gpus=num_gpus,
-            device_name=self.device_name,
-        )
+        worker_kwargs = {
+            "placement_group": pg,
+            "placement_group_bundle_idx": local_rank,
+            "use_gpu": self.use_gpu,
+            "num_gpus": num_gpus,
+            "device_name": self.device_name,
+        }
+        if allocate_master_endpoint:
+            worker, self._master_addr, self._master_port = _create_master_store_worker(
+                ray_cls_with_init, worker_kwargs, self._ray_master_port_range
+            )
+        else:
+            worker = ray_cls_with_init(**worker_kwargs)
         self._workers.append(worker)
         self._worker_names.append(name)
 
@@ -1154,3 +1155,129 @@ def create_colocated_worker_cls_fused(class_dict: dict[str, RayClassWithInitArgs
     cia.fused_worker_used = True
 
     return cia
+
+
+@ray.remote(num_cpus=0)
+class MasterEndpointMetadata:
+    """Keep the master endpoint available across worker restarts."""
+
+    def __init__(self):
+        """Record the target node and initialize endpoint readiness."""
+        self.master_addr = ray.util.get_node_ip_address().strip("[]")
+        self.master_port = None
+        self.endpoint_ready = asyncio.Event()
+
+    async def get_master_endpoint(self) -> tuple[str, int | None]:
+        """Return the target address and the published port, if one exists."""
+        return self.master_addr, self.master_port
+
+    async def publish_master_port(self, port: int) -> int:
+        """Record the first published port and return the stored port."""
+        if self.master_port is None:
+            self.master_port = port
+        return self.master_port
+
+    async def mark_endpoint_ready(self):
+        """Notify the driver that the master endpoint is ready."""
+        self.endpoint_ready.set()
+
+    async def wait_for_master_endpoint(self) -> tuple[str, str]:
+        """Wait for the master endpoint to become ready."""
+        await self.endpoint_ready.wait()
+        return self.master_addr, str(self.master_port)
+
+
+def _env_rendezvous_uses_libuv() -> bool:
+    """Use the TCPStore backend that this process's later env:// init will use."""
+    from torch.distributed.rendezvous import _get_use_libuv_from_query_dict, _query_to_dict
+
+    init_method = urlparse(os.environ.get("DIST_INIT_METHOD", "env://"))
+    query = _query_to_dict(init_method.query) if init_method.scheme == "env" else {}
+    return _get_use_libuv_from_query_dict(query)
+
+
+def _bind_master_tcp_store(addr: str, port_range: Optional[list[int]], use_libuv: bool):
+    """Bind the master TCPStore, retrying occupied ports within the requested range."""
+    from torch.distributed import DistNetworkError, TCPStore
+
+    os_assigned_port = port_range is None
+    ports = (0,) if os_assigned_port else range(*port_range)
+    for port in ports:
+        try:
+            return TCPStore(
+                host_name=addr,
+                port=port,
+                world_size=None,
+                is_master=True,
+                multi_tenant=True,
+                use_libuv=use_libuv,
+            )
+        except DistNetworkError as error:
+            message = str(error)
+            port_in_use = "EADDRINUSE" in message or f"errno: {errno.EADDRINUSE} -" in message
+            if os_assigned_port or not port_in_use:
+                raise
+    raise RuntimeError(f"Could not bind a TCPStore in range {port_range}")
+
+
+def _create_master_store_worker_cls(cls):
+    """Create a worker class that prebinds the initial TCPStore and restores its endpoint on restart."""
+
+    class MasterStoreWorker(cls.__ray_actor_class__):
+        """Run as global rank 0: retain the initial listener and restore only its endpoint on restart."""
+
+        def __init__(self, *args, **kwargs):
+            """Allocate or restore the endpoint before calling the user constructor.
+
+            The driver starts the other ranks only after it receives this port. The user
+            constructor may wait for those ranks, so report the port first.
+            """
+            (master_endpoint_metadata, master_port_range), *worker_args = args
+            addr, port = ray.get(master_endpoint_metadata.get_master_endpoint.remote())
+            if ray.util.get_node_ip_address().strip("[]") != addr:
+                raise RuntimeError(f"Master store worker must run on the endpoint metadata node: {addr}")
+            if port is None:
+                self.master_tcp_store = _bind_master_tcp_store(addr, master_port_range, _env_rendezvous_uses_libuv())
+                port = ray.get(master_endpoint_metadata.publish_master_port.remote(self.master_tcp_store.port))
+            os.environ["MASTER_ADDR"] = addr
+            os.environ["MASTER_PORT"] = str(port)
+            master_endpoint_metadata.mark_endpoint_ready.remote()
+            super().__init__(*worker_args, **kwargs)
+
+    if cls._default_options:
+        return ray.remote(**cls._default_options)(MasterStoreWorker)
+    return ray.remote(MasterStoreWorker)
+
+
+def _create_master_store_worker(worker_factory, worker_kwargs, master_port_range):
+    """Start the master store worker and return it with its published endpoint."""
+    max_restarts = worker_factory._options.get(
+        "max_restarts", worker_factory.cls._default_options.get("max_restarts", 0)
+    )
+    # Restartable workers retain metadata until Ray removes its placement group and kills the actors in its bundles.
+    master_endpoint_metadata = MasterEndpointMetadata.options(
+        scheduling_strategy=PlacementGroupSchedulingStrategy(
+            placement_group=worker_kwargs["placement_group"],
+            placement_group_bundle_index=worker_kwargs["placement_group_bundle_idx"],
+        ),
+        lifetime="detached" if max_restarts != 0 else None,
+    ).remote()
+    worker = None
+    try:
+        worker = worker_factory(
+            master_endpoint_config=(master_endpoint_metadata, master_port_range),
+            **worker_kwargs,
+        )
+        master_addr_port_ref = master_endpoint_metadata.wait_for_master_endpoint.remote()
+        completed, _ = ray.wait([master_addr_port_ref, worker.__ray_ready__.remote()], num_returns=1)
+        # Watch for constructor failures while waiting for the master endpoint.
+        ray.get(completed[0])
+        master_addr, master_port = ray.get(master_addr_port_ref)
+        if max_restarts == 0:
+            ray.kill(master_endpoint_metadata, no_restart=True)
+        return worker, master_addr, master_port
+    except BaseException:
+        if worker is not None:
+            ray.kill(worker, no_restart=True)
+        ray.kill(master_endpoint_metadata, no_restart=True)
+        raise
