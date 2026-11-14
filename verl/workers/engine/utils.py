@@ -268,6 +268,25 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
 # the veomni backend's own utils.
 
 
+def lockstep_per_tensor_param(per_tensor_param):
+    """Keep the ranks of a collective per-tensor export in step with each other.
+
+    Each tensor of a Megatron HF export is assembled by a chain of PP/EP/TP collectives,
+    and every rank must run those chains in the same order. Consumers are asymmetric:
+    the checkpoint-engine master buckets and broadcasts between pulls while the other
+    ranks discard the tensor and pull the next one at once, so they race ahead until a
+    later collective on another process group never matches, and the sync dies on a
+    timeout with no exception on any rank.
+
+    Barrier once the consumer has finished with each tensor, so no rank starts assembling
+    the next one early. Every rank must iterate the same number of tensors.
+    """
+    for item in per_tensor_param:
+        yield item
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+
 def _prodshape(shape) -> int:
     n = 1
     for x in shape:

@@ -1035,7 +1035,9 @@ class MegatronEngine(BaseEngine):
             per_tensor_param = self.bridge.export_adapter_weights(self.module)
         else:
             conversion_tasks = self._mbridge_export_tasks()
-            per_tensor_param = (
+            from ..utils import lockstep_per_tensor_param
+
+            per_tensor_param = lockstep_per_tensor_param(
                 self.bridge.export_hf_weights(
                     self.module,
                     conversion_tasks=conversion_tasks,
