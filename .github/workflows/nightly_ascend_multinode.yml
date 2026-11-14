@@ -1,6 +1,8 @@
 name: nightly_ci_ascend_multinode
 
 on:
+  # Temporary trigger for validating multinode CI in pull requests; remove after validation.
+  pull_request:
   schedule:
     - cron: "0 17 * * *"
 
