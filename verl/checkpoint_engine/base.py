@@ -141,6 +141,17 @@ class CheckpointEngine(ABC):
     #                       while steady updates carry sparse patches.
     wire_format = "named_tensors"
 
+    # True: ``send_weights`` takes the training engine instead of a ``(name, tensor)`` iterator,
+    # so the backend picks its own export path (local shards, deltas).
+    send_weights_takes_engine: bool = False
+
+    # True: ``CheckpointEngineWorker.fetch_rollout_layout`` passes the rollout worker's
+    # ``RolloutLayout`` to ``set_rollout_layout`` once, before its first receive.
+    needs_rollout_layout: bool = False
+
+    def set_rollout_layout(self, layout) -> None:  # noqa: B027
+        """Receive this worker's :class:`~verl.workers.rollout.base.RolloutLayout` (or ``None``)."""
+
     @abstractmethod
     def prepare(self) -> dict[str, Any]:
         """Prepare checkpoint engine before each step send_weights/receive_weights.
@@ -345,6 +356,7 @@ class CheckpointEngineWorker(Worker):
         self.checkpoint_engine: CheckpointEngine = CheckpointEngineRegistry.new(
             backend, bucket_size=bucket_size, **engine_kwargs
         )
+        self._rollout_layout_sent = False
         self.extra_rollout_args = args
         self.extra_rollout_kwargs = kwargs
         if self.server_adapter is None:
@@ -357,6 +369,16 @@ class CheckpointEngineWorker(Worker):
             )
         # sglang and trt-llm need device_mesh for internal communication
         initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    async def fetch_rollout_layout(self):
+        # Must finish on every worker before any update_weights starts: the leader's
+        # update_weights_from_ipc holds all vLLM workers, so a later get_weight_ownership
+        # RPC would queue behind it and the sync would deadlock.
+        if getattr(self.checkpoint_engine, "needs_rollout_layout", False) and not self._rollout_layout_sent:
+            layout = await self.server_adapter.get_weight_ownership()
+            self.checkpoint_engine.set_rollout_layout(layout)
+            self._rollout_layout_sent = True
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
@@ -458,6 +480,12 @@ class CheckpointEngineManager:
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.actor_wg = actor_wg
         self.replicas = replicas
+        # set while a sync is writing rollout weights; a failed sync leaves it set, so generation stays
+        # blocked until a later sync completes. It lives in this manager, so a replica resumed through
+        # another handle (fully_async rollouter rebalance) bypasses it; move it onto the server actors
+        # if those paths need it
+        self._weights_dirty = False
+        self._applied_global_steps = None
 
         self._update_ticket = None
         self._background_loop = asyncio.new_event_loop()
@@ -557,6 +585,11 @@ class CheckpointEngineManager:
     @auto_await
     async def resume_generation_replicas(self):
         """Resume generation on all replicas after abort_all_requests."""
+        if self._weights_dirty:
+            raise RuntimeError(
+                "rollout weights are mixed after a failed weight sync (last complete sync: global step "
+                f"{self._applied_global_steps}); run update_weights again before resuming generation"
+            )
         await asyncio.gather(*[r.resume_generation() for r in self.replicas])
 
     @auto_await
@@ -618,7 +651,12 @@ class CheckpointEngineManager:
             published = await self._update_ticket.wait_published()
             return self._merge_sync_metrics(published)
         else:
-            return await self._update_ticket.wait_committed()
+            try:
+                return await self._update_ticket.wait_committed()
+            except Exception:
+                # raised to this caller already, so a retry must not raise it again from the wait above
+                self._update_ticket = None
+                raise
 
     async def submit_update(self, global_steps: int | None, rollout_quiesced: bool = False) -> WeightUpdateTicket:
         # 1. create a temporay worker group for all replicas
@@ -636,6 +674,8 @@ class CheckpointEngineManager:
 
         # 2. build process group
         self.build_process_group(rollout)
+
+        rollout.fetch_rollout_layout()
 
         # 3. trainer publish weights
         trainer_published = self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
@@ -666,8 +706,11 @@ class CheckpointEngineManager:
             await self.abort_replicas()
             await self.release_kv_cache_replicas()
 
+        self._weights_dirty = True
         rollout_committed = rollout.update_weights(global_steps=global_steps)
         results = await asyncio.gather(*trainer_published, *rollout_committed)
+        self._weights_dirty = False
+        self._applied_global_steps = global_steps
 
         await asyncio.gather(
             *self.actor_wg.execute_checkpoint_engine(["finalize"] * self.actor_wg.world_size),

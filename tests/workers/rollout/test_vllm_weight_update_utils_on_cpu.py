@@ -299,3 +299,73 @@ def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
     expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
     torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, expected)
+
+
+def test_get_weight_ownership_rejects_eplb():
+    """EPLB maps ``expert_map`` to physical slots and rebalances them at runtime; reject it rather
+    than treating physical slot indices as logical checkpoint expert IDs."""
+    import pytest
+
+    class _FakeMoe(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            # 4 logical + 2 redundant physical slots; EP rank 1 holds physical slots [3, 4, 5]
+            self.expert_map = torch.tensor([-1, -1, -1, 0, 1, 2], dtype=torch.int32)
+            self.ep_size = 2
+            self.ep_rank = 1
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    layer0 = torch.nn.Module()
+    layer0.mlp = _FakeMoe()
+    model.model.layers = torch.nn.ModuleList([layer0])
+
+    fake_dist = types.ModuleType("vllm.distributed")
+    fake_ps = types.ModuleType("vllm.distributed.parallel_state")
+    fake_ps.get_tensor_model_parallel_rank = lambda: 0
+    fake_ps.get_pp_group = lambda: types.SimpleNamespace(rank_in_group=0)
+    fake_dist.parallel_state = fake_ps
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.distributed = fake_dist
+
+    def _make_worker(*, enable_eplb: bool):
+        pc = types.SimpleNamespace(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            enable_expert_parallel=True,
+            enable_eplb=enable_eplb,
+        )
+        worker = object.__new__(vLLMColocateWorkerExtension)
+        worker._rank_local_plan = None
+        worker.model_runner = types.SimpleNamespace(
+            model=model,
+            vllm_config=types.SimpleNamespace(parallel_config=pc),
+        )
+        return worker
+
+    saved = {k: sys.modules.get(k) for k in ("vllm", "vllm.distributed", "vllm.distributed.parallel_state")}
+    try:
+        sys.modules["vllm"] = fake_vllm
+        sys.modules["vllm.distributed"] = fake_dist
+        sys.modules["vllm.distributed.parallel_state"] = fake_ps
+
+        with pytest.raises(NotImplementedError, match="EPLB"):
+            _make_worker(enable_eplb=True).get_weight_ownership()
+
+        ownership = _make_worker(enable_eplb=False).get_weight_ownership()
+        assert ownership["local_experts"] == {0: [3, 4, 5]}
+        assert (ownership["ep_size"], ownership["ep_rank"]) == (2, 1)
+
+        # Newer vLLM with an AITER kernel: the module's expert_map is the 0/1 expert_mask (with a
+        # trailing sentinel), and only the manager holds the canonical -1/local-slot map.
+        canonical = layer0.mlp.expert_map
+        layer0.mlp.expert_map = torch.tensor([0, 0, 0, 1, 1, 1, 0], dtype=torch.int32)
+        layer0.mlp.expert_map_manager = types.SimpleNamespace(expert_map=canonical, ep_size=2, ep_rank=1)
+        ownership = _make_worker(enable_eplb=False).get_weight_ownership()
+        assert ownership["local_experts"] == {0: [3, 4, 5]}
+    finally:
+        for k, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = prev
