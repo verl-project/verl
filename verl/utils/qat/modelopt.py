@@ -16,6 +16,9 @@
 """ModelOpt fake quantization and Megatron QAT workflow helpers."""
 
 import copy
+import logging
+import os
+import re
 
 import modelopt.torch.quantization as mtq
 import torch
@@ -28,6 +31,9 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     is_registered_quant_backend,
     register_quant_backend,
 )
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))  # Ray workers keep root at WARNING
 
 _FP8_BLOCK_BACKEND = "verl_fp8_block"
 _MXFP8_BACKEND = "verl_mxfp8"
@@ -181,7 +187,7 @@ _FP8_BLOCK_QUANTIZER_CFG = {
 }
 
 _QUANTIZER_CFGS = {"fp8": _FP8_BLOCK_QUANTIZER_CFG}
-_SUPPORTED_QAT_MODES = {*_QUANTIZER_CFGS, "mxfp8", "mxfp4", "mxfp4_mxfp8", "nvfp4"}
+_SUPPORTED_QAT_MODES = {*_QUANTIZER_CFGS, "mxfp8", "mxfp4", "mxfp4_mxfp8", "mxfp4_experts", "nvfp4"}
 
 _ROUTED_EXPERT_WEIGHT_QUANTIZER = "*mlp.experts*weight_quantizer"
 _ROUTED_EXPERT_INPUT_QUANTIZER = "*mlp.experts*input_quantizer"
@@ -235,6 +241,32 @@ def _mxfp4_quantize_config(*, dense_mxfp8: bool) -> tuple[list[dict], None]:
     return quant_cfg, None
 
 
+# DeepSeek-V4 "FP4 quantization-aware training for MoE expert weights": routed experts only, weights only,
+# E2M1 values with one E8M0 power-of-two scale per 32 contiguous K elements. This is ModelOpt's native
+# dynamic block quantizer (the grid DeepSeek-V4-Flash's experts ship on and Megatron-Bridge re-exports to on
+# every weight sync). Activations are left to TransformerEngine's real FP8 GEMM, so no input quantizer.
+_MXFP4_EXPERTS_WEIGHT_CFG = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+}
+
+
+def _mxfp4_experts_quantize_config() -> tuple[list[dict], None]:
+    """Weight-only MXFP4 on routed experts; every other quantizer stays disabled.
+
+    The leading ``*`` disable is load-bearing: an unmatched TensorQuantizer defaults to enabled per-tensor
+    INT8. Dynamic block quantization derives its scale per call, so there is no calibration algorithm.
+    """
+    return [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": _ROUTED_EXPERT_WEIGHT_QUANTIZER,
+            "cfg": copy.deepcopy(_MXFP4_EXPERTS_WEIGHT_CFG),
+            "enable": True,
+        },
+    ], None
+
+
 def _nvfp4_quantize_config() -> tuple[list[dict], None]:
     """NVFP4 W4A4 on routed experts, with the rollout's per-token activation scales."""
     quant_cfg = mtq.normalize_quant_cfg_list(copy.deepcopy(mtq.NVFP4_EXPERTS_ONLY_CFG["quant_cfg"]))
@@ -283,6 +315,8 @@ def build_quantize_config(
         quant_cfg, algorithm = _mxfp8_quantize_config()
     elif qat_mode in ("mxfp4", "mxfp4_mxfp8"):
         quant_cfg, algorithm = _mxfp4_quantize_config(dense_mxfp8=qat_mode == "mxfp4_mxfp8")
+    elif qat_mode == "mxfp4_experts":
+        quant_cfg, algorithm = _mxfp4_experts_quantize_config()
     elif qat_mode == "nvfp4":
         quant_cfg, algorithm = _nvfp4_quantize_config()
     else:
@@ -415,7 +449,13 @@ def apply_qat(
     """Apply Quantization-Aware Training to a Megatron model."""
     config = build_quantize_config(qat_mode, ignore_patterns)
     _patch_te_grouped_weight_fake_quant()
-    mtq.quantize(model, config)
+    if qat_mode == "mxfp4_experts":
+        from verl.utils.qat.checkpoint import preserve_native_checkpoint_methods
+
+        with preserve_native_checkpoint_methods(model):
+            mtq.quantize(model, config)
+    else:
+        mtq.quantize(model, config)
     return model
 
 
@@ -424,6 +464,69 @@ def _get_qat_field(qat_config, key, default=None):
     if isinstance(qat_config, dict):
         return qat_config.get(key, default)
     return getattr(qat_config, key, default)
+
+
+_ROUTED_EXPERT_RE = re.compile(r"(^|\.)mlp\.experts\.")
+
+
+def _is_routed_expert(module_name: str) -> bool:
+    """`mlp.experts.*` at any depth (also at the root of a bare MoE block), never `mlp.shared_experts.*`."""
+    return _ROUTED_EXPERT_RE.search(module_name) is not None
+
+
+# A plain linear owns one ``weight_quantizer``; modelopt's TE grouped linear owns a GroupedQuantizer (an
+# nn.ModuleList) whose per-expert quantizers are surfaced as ``weight_quantizer.{i}``.
+_WEIGHT_QUANTIZER_RE = re.compile(r"(^|\.)weight_quantizer(\.\d+)?$")
+
+
+def _is_expert_weight_quantizer(quantizer_name: str) -> bool:
+    return _is_routed_expert(quantizer_name) and _WEIGHT_QUANTIZER_RE.search(quantizer_name) is not None
+
+
+def _check_mxfp4_experts(modules):
+    """Fail fast if the experts-only MXFP4 config did not land where it should.
+
+    (a) at least one routed-expert weight_quantizer enabled, (b) nothing else enabled (a mis-ordered
+    cfg leaves every other linear on modelopt's default INT8 fake-quant), (c) fake-quant is the
+    identity on the freshly loaded expert weights, which are already on the MXFP4 grid.
+    """
+    import torch
+    from modelopt.torch.quantization.nn import TensorQuantizer
+
+    n_expert_w, others, identity = 0, [], None
+    for m in modules:
+        for name, q in m.named_modules():
+            if not isinstance(q, TensorQuantizer) or not getattr(q, "is_enabled", True):
+                continue
+            if _is_expert_weight_quantizer(name):
+                n_expert_w += 1
+            else:
+                others.append(name)
+        if identity is None:
+            for name, sub in m.named_modules():
+                w0, wq = getattr(sub, "weight0", None), getattr(sub, "weight_quantizer", None)
+                if w0 is not None and wq is not None and _is_routed_expert(name):
+                    if isinstance(wq, torch.nn.ModuleList):  # GroupedQuantizer: weight{i} <-> wq[i]
+                        wq = wq[0]
+                    try:
+                        with torch.no_grad():
+                            fq = wq(w0)
+                            identity = (name, bool(torch.equal(fq, w0)), (fq.float() - w0.float()).abs().max().item())
+                    except Exception as e:  # diagnostic only (e.g. weights not materialized yet)
+                        identity = (name, "skipped", repr(e)[:120])
+                    break
+    logger.info(
+        "[QAT mxfp4_experts] enabled expert weight_quantizers=%d, other enabled quantizers=%d, "
+        "identity_check(name, equal, max_abs_diff)=%s",
+        n_expert_w,
+        len(others),
+        identity,
+    )
+    has_experts = any(_is_routed_expert(n) for m in modules for n, _ in m.named_modules())
+    if has_experts and n_expert_w == 0:
+        raise RuntimeError("QAT mxfp4_experts: no routed-expert weight_quantizer enabled -- pattern did not match")
+    if others:
+        raise RuntimeError(f"QAT mxfp4_experts: {len(others)} unexpected quantizers enabled, e.g. {others[:3]}")
 
 
 def apply_qat_to_modules(modules, qat_config):
@@ -441,4 +544,6 @@ def apply_qat_to_modules(modules, qat_config):
 
     for i in range(len(modules)):
         modules[i] = apply_qat(modules[i], qat_mode, ignore_patterns=ignore_patterns)
+    if qat_mode == "mxfp4_experts":
+        _check_mxfp4_experts(modules)
     return modules

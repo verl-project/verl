@@ -83,6 +83,7 @@ DeepGEMM implementation.
 | MXFP8 | `MXFP8` | `mxfp8` | Blackwell | `W8A8Mxfp8`<br>FlashInfer CuteDSL¹ | `W8A8Mxfp8MoE`<br>`moe_backend=deep_gemm` | native `quant_method=mxfp8`<br>`fp8_gemm_runner_backend=deep_gemm` | native `quant_method=mxfp8`<br>`moe_runner_backend=deep_gemm` | ✅ Blackwell | ✅ Blackwell |
 | MXFP4 (MoE only) | `MXFP4` | `mxfp4` / `mxfp4_mxfp8` | Blackwell | ❌ (BF16 dense) | MXFP4×FP8<br>`moe_backend=deep_gemm` | ❌ (BF16 dense) | MXFP4×FP8<br>`moe_runner_backend=deep_gemm` | ✅ Blackwell (MoE only) | ✅ Blackwell (MoE only) |
 | NVFP4 (MoE only, per-token activations) | `NVFP4` | `nvfp4` | Blackwell | ❌ | W4A4<br>`(moe_backend=flashinfer_trtllm)` | ❌ | ❌ | ✅ Blackwell (MoE only) | ❌ |
+| DeepSeek-V4 native (MXFP4 routed experts, FP8 elsewhere) | native `quant_method=fp8` | `mxfp4_experts` | Hopper / Blackwell | native FP8 (bridge export) | native MXFP4 (bridge export) | - | - | ✅ (DeepSeek-V4 only) | - |
 
 MXFP8, MXFP4 and NVFP4 need Blackwell (SM100) for the validated paths above. On Hopper, vLLM may fall back to Marlin weight-only kernels, whose numerics differ from Blackwell W8A8 / W4A4; those paths are outside this support and validation matrix. The `MXFP4` preset has no such fallback: its MXFP4-weight × FP8-activation experts are served only by vLLM's DeepGEMM FP4 MoE kernel (SM100/SM120), and Marlin and Triton reject the FP8 1x128 activation scheme, so on Hopper the rollout fails at engine start.
 
@@ -171,7 +172,7 @@ actor_rollout_ref:
     megatron:
       qat:
         enable: true
-        mode: fp8   # FP8_BLOCK -> fp8, MXFP8 -> mxfp8, MXFP4 -> mxfp4, NVFP4 -> nvfp4
+        mode: fp8   # FP8_BLOCK -> fp8, MXFP8 -> mxfp8, MXFP4 -> mxfp4, NVFP4 -> nvfp4, DeepSeek-V4 native -> mxfp4_experts
 ```
 
 QAT requires a quantized rollout: set `rollout.quantization` or use a checkpoint
@@ -188,6 +189,12 @@ rounding recipe. MXFP4 expert activations use the MXFP8 1x32 kernel
 rather than FP4. Use `mxfp4_mxfp8` for the vLLM combination where dense linear
 layers also use MXFP8.
 Its `ignore_patterns` use Megatron module names and `fnmatch` syntax. Keep them aligned with the rollout ignore list; for Qwen3.5 MXFP8, add `*linear_attn.in_proj_a` and `*linear_attn.in_proj_b`.
+
+`mxfp4_experts` is for checkpoints that already ship MXFP4 routed experts (DeepSeek-V4). It fake-quantizes only
+`*mlp.experts*weight_quantizer` with ModelOpt's dynamic MXFP4 block quantizer (E2M1 values, one E8M0 scale per 32
+elements) and leaves the activations to Transformer Engine's real FP8 GEMM, so it is the one mode that **requires**
+`override_transformer_config.fp8` rather than excluding it. It needs no `rollout.quantization` override: the rollout
+syncs the native quantized layout that Megatron-Bridge exports. See `examples/grpo_trainer/run_deepseek_v4_flash_qat_megatron.sh`.
 
 #### NVFP4 QAT
 
