@@ -120,6 +120,8 @@ jobs:
           }' /proc/meminfo
       - name: Run all NPU unit tests
         env:
+          # This SM90+ CUDA test imports TileLang before its skip marker can apply.
+          PYTEST_ADDOPTS: --ignore=tests/utils/test_qat_fp4_on_gpu.py
           VERL_TEST_N_GPUS_PER_NODE: "16"
         run: |
           # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
