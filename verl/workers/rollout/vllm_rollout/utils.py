@@ -116,15 +116,44 @@ def get_vllm_max_lora_rank(lora_rank: int):
             return rank
 
 
+def _mask_illegal_logits(
+    logits: torch.Tensor,
+    vocab_size: int,
+    banned_index: Optional[torch.Tensor],
+) -> tuple[Any, Optional[torch.Tensor]]:
+    """In-place mask of the OOV tail and banned in-vocab ids (vision placeholders)."""
+    if logits is None:
+        return logits, banned_index
+    logits[..., vocab_size:] = float("-inf")
+    if banned_index is None or banned_index.numel() == 0:
+        return logits, banned_index
+    if banned_index.device != logits.device:
+        banned_index = banned_index.to(logits.device)
+    vocab = logits.shape[-1]
+    valid = banned_index[(banned_index >= 0) & (banned_index < vocab)]
+    if valid.numel():
+        logits.index_fill_(-1, valid, float("-inf"))
+    return logits, banned_index
+
+
 # https://github.com/vllm-project/vllm/issues/13175
-def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
+def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Optional[list[int]] = None) -> bool:
     """Mask the tokens the sampler must never pick.
 
     Beyond the out-of-vocabulary tail, `banned_token_ids` covers tokens that live *inside* the
     vocabulary yet are still illegal to generate: the vision placeholders, which are meaningless
     unless a real image or video sits behind them. See `get_vision_placeholder_token_ids`.
+
+    Returns False when ``model`` has no ``compute_logits`` (graph wrappers / NPU inner
+    modules), so the caller can fall through to the sampler hook.
     """
-    original_compute_logits = model.compute_logits
+    compute_logits_fn = getattr(model, "compute_logits", None)
+    if model is None or not callable(compute_logits_fn):
+        return False
+    if getattr(compute_logits_fn, "_verl_banned_tokens_patched", False):
+        return True
+
+    original_compute_logits = compute_logits_fn
     # Built once and cached on the device: compute_logits runs on every decode step, and
     # rebuilding the index there costs a host-to-device copy per step.
     banned_index = torch.tensor(banned_token_ids, dtype=torch.long) if banned_token_ids else None
@@ -137,14 +166,40 @@ def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Option
         nonlocal banned_index
 
         logits = original_compute_logits(*args, **kwargs)
-        logits[..., vocab_size:] = float("-inf")
-        if banned_index is not None:
-            if banned_index.device != logits.device:
-                banned_index = banned_index.to(logits.device)
-            logits.index_fill_(-1, banned_index, float("-inf"))
+        logits, banned_index = _mask_illegal_logits(logits, vocab_size, banned_index)
         return logits
 
+    compute_logits._verl_banned_tokens_patched = True
     model.compute_logits = MethodType(compute_logits, model)
+    return True
+
+
+def monkey_patch_sampler_banned_tokens(
+    worker: Any, vocab_size: int, banned_token_ids: Optional[list[int]] = None
+) -> bool:
+    """Mask banned ids on the sampler, which NPU still calls after a graph-captured lm_head.
+
+    ``model.compute_logits`` is often snapshotted into an ACL/CUDAGraph wrapper before
+    ``monkey_patch_model`` runs. The Python sampler still sees the raw logits tensor.
+    """
+    runner = getattr(worker, "model_runner", None)
+    sampler = getattr(runner, "sampler", None) if runner is not None else None
+    if sampler is None or not callable(getattr(sampler, "forward", None)):
+        return False
+    if getattr(sampler.forward, "_verl_banned_tokens_patched", False):
+        return True
+
+    original_forward = sampler.forward
+    banned_index = torch.tensor(banned_token_ids, dtype=torch.long) if banned_token_ids else None
+
+    def forward(self, logits, *args, **kwargs):
+        nonlocal banned_index
+        logits, banned_index = _mask_illegal_logits(logits, vocab_size, banned_index)
+        return original_forward(logits, *args, **kwargs)
+
+    forward._verl_banned_tokens_patched = True
+    sampler.forward = MethodType(forward, sampler)
+    return True
 
 
 class vLLMColocateWorkerExtension:
@@ -246,12 +301,52 @@ class vLLMColocateWorkerExtension:
             if draft_cfg is not None:
                 yield self._get_drafter_model(), draft_cfg
 
+    def _iter_models_for_logits(self):
+        """Models whose ``compute_logits`` the sampler may actually call.
+
+        NPU ACLGraph / CUDAGraph wrappers snapshot the inner method, so the wrap
+        has to land on both ``model_runner.model`` and ``get_model()``.
+        """
+        runner = getattr(self, "model_runner", None)
+        if runner is None:
+            return
+        seeds = [getattr(runner, "model", None)]
+        get_model = getattr(runner, "get_model", None)
+        if callable(get_model):
+            try:
+                seeds.append(get_model())
+            except Exception:
+                logger.warning("get_model() failed while installing vision-placeholder ban", exc_info=True)
+        seen: set[int] = set()
+        for seed in seeds:
+            obj = seed
+            for _ in range(4):
+                if obj is None:
+                    break
+                ident = id(obj)
+                if ident in seen:
+                    break
+                seen.add(ident)
+                yield obj
+                obj = (
+                    getattr(obj, "unwrapped_model", None)
+                    or getattr(obj, "language_model", None)
+                    or getattr(obj, "model", None)
+                )
+
     def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
+        patched = False
+        for model in self._iter_models_for_logits():
+            patched = monkey_patch_compute_logits(model, vocab_size, banned_token_ids) or patched
         for model in self._iter_all_models():
-            # patch compute_logits to avoid sampling OOV and other illegal tokens
-            monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
+        patched = monkey_patch_sampler_banned_tokens(self, vocab_size, banned_token_ids) or patched
+        if banned_token_ids and not patched:
+            logger.warning(
+                "vision placeholder ban did not hook compute_logits or sampler; "
+                "Qwen-VL may still sample <|image_pad|>/<|video_pad|>"
+            )
         if self._nvfp4_per_token_config is not None:
             from verl.utils.vllm.vllm_nvfp4_per_token_utils import attest_nvfp4_per_token_runtime, clear_kv_cache
 

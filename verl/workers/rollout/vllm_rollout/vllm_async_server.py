@@ -57,6 +57,7 @@ from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import (
+    apply_vision_placeholder_logit_bias,
     extract_response_topk_logprobs_with_coverage,
     get_max_position_embeddings,
     get_node_visible_devices,
@@ -1545,7 +1546,13 @@ class vLLMHttpServer:
 
         Runs before SamplingParams is built and before the request is admitted, so an
         exception fails the request without touching the admission gate.
+
+        Also reapplies the #7038 vision-placeholder ban via logit_bias. vLLM-Ascend
+        may sample from a graph-captured lm_head that never hits the compute_logits
+        wrap installed in ``monkey_patch_model``.
         """
+        if "logit_bias" in inspect.signature(SamplingParams).parameters:
+            apply_vision_placeholder_logit_bias(sampling_params, self.model_config.processor)
 
     def _postprocess_output(
         self, output: TokenOutput, final_res: RequestOutput, sampling_params: SamplingParams

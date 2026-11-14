@@ -156,6 +156,28 @@ def get_vision_placeholder_token_ids(processor) -> list[int]:
     return token_ids
 
 
+# vLLM SamplingParams clamps logit_bias to [-100, 100]. That is enough to keep
+# the policy off these ids even when the compute_logits wrap is not on the NPU
+# sampling path.
+_VISION_PLACEHOLDER_LOGIT_BIAS = -100.0
+
+
+def apply_vision_placeholder_logit_bias(sampling_params: dict, processor) -> None:
+    """Ban vision placeholders on every vLLM request via logit_bias.
+
+    PR #7038 masks these ids on ``model.compute_logits``. vLLM-Ascend often
+    samples from a graph-captured lm_head / sampler that never calls that
+    Python wrap, so the same ban is applied here at request construction.
+    """
+    banned = get_vision_placeholder_token_ids(processor)
+    if not banned:
+        return
+    bias = dict(sampling_params.get("logit_bias") or {})
+    for token_id in banned:
+        bias[int(token_id)] = _VISION_PLACEHOLDER_LOGIT_BIAS
+    sampling_params["logit_bias"] = bias
+
+
 def extract_response_topk_logprobs(logprobs, k: int) -> tuple[list[float], np.ndarray, np.ndarray]:
     """Sampled-token log-probs and the sampler top-k head per generated token.
 
