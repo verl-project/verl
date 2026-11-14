@@ -8,7 +8,7 @@
 #     The launcher uses dependencies from the current uv.lock.
 #
 # CUDA dependencies from the current uv.lock (Python 3.12):
-#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.5.2.
+#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.6.0.
 #
 # Requirements on Ascend (source install per the MindSpeed-Bridge install guide:
 # https://gitcode.com/Ascend/MindSpeed-Bridge/blob/master/docs/zh/install_guide.md):

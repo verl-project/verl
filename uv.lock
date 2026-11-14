@@ -1147,14 +1147,14 @@ wheels = [
 
 [[package]]
 name = "fla-core"
-version = "0.5.2"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops", marker = "(python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/94/85/20bdc0fbbbaeec27b5b198e0dbbbc51161a267066a4aebd9e4b413637c6c/fla_core-0.5.2.tar.gz", hash = "sha256:9360fc412f784c1c8f05c320ec2902d5d968764178c9b8a92efc919e17a39680", size = 587835, upload-time = "2026-07-27T18:26:19.424Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/49/2d/3181d715d021c12db379ce0bc51ba78c5b6282ff6c3c79cc2f64d183d1b2/fla_core-0.6.0.tar.gz", hash = "sha256:cdd5b7ff6d5c0e5c08fde73f2624d76e0b506f8684af4e316bc7f2d8bfd9a623", size = 775665, upload-time = "2026-10-23T17:48:03.213Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2d/ed/dfe19c4da779957eb6a42a26812f9b4e2280bf757a17a71933ff59ffcb98/fla_core-0.5.2-py3-none-any.whl", hash = "sha256:5e830c85bad3d0d34677f98ac7074d08687a3756f0f0499d95ceb96eb6920761", size = 819225, upload-time = "2026-07-27T18:26:16.147Z" },
+    { url = "https://files.pythonhosted.org/packages/23/08/a1a16725117cddded90bb11afed4b31f23d97f7f554775e66af998818ef9/fla_core-0.6.0-py3-none-any.whl", hash = "sha256:b0708b70e0b119cd58a0a5146ea56cb175cef6ed969d8ac60267e3e077ce3ebd", size = 1085221, upload-time = "2026-10-23T17:48:00.23Z" },
 ]
 
 [[package]]
@@ -1175,15 +1175,15 @@ wheels = [
 
 [[package]]
 name = "flash-linear-attention"
-version = "0.5.2"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fla-core", marker = "(python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "transformers", marker = "(python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d2/76/c180949eae5161b9fcf4c928cab52f0c257ce84c1a59b4462b1d2b6e5883/flash_linear_attention-0.5.2.tar.gz", hash = "sha256:c053d3a75c8f5b725063f719ae6bce0f4d9dac6da32735be8ae7d485a6c9820f", size = 208110, upload-time = "2026-07-27T18:26:20.536Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/86/2f/6e07920d032e97fcc1a09d7578a7aa595b7dece535280bd712bb7077a3fa/flash_linear_attention-0.6.0.tar.gz", hash = "sha256:4110ff0f94ca54b76fc5499f0c169f5cbd44738d875e0199adc3a11ab0e241fa", size = 222155, upload-time = "2026-10-23T17:48:04.341Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/90/d2/2070e3cf2148c5cce99ca4876633c4b7b89ec085323600bd3d47aeacd306/flash_linear_attention-0.5.2-py3-none-any.whl", hash = "sha256:dcf405d81f5426393b59037097aa700d0f4a841465d5028d5aa543f4502f2400", size = 399590, upload-time = "2026-07-27T18:26:17.912Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/c1/ad271e49528b06c7032c35e6dca85592f96ef8390e6ce1b803d6b23eae0a/flash_linear_attention-0.6.0-py3-none-any.whl", hash = "sha256:6dec9735f8454523c13553622e98aff30152dde6586b4ac7d88010fbb7a06b5f", size = 403549, upload-time = "2026-10-23T17:48:01.882Z" },
 ]
 
 [[package]]
@@ -5881,9 +5881,9 @@ requires-dist = [
     { name = "einops", marker = "extra == 'verl-core'" },
     { name = "fastapi", marker = "extra == 'verl-core'" },
     { name = "flash-attn", marker = "extra == 'flash-attn-cu130torch213'", specifier = "==2.8.3", index = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" },
-    { name = "flash-linear-attention", marker = "extra == 'fsdp'", specifier = "==0.5.2" },
-    { name = "flash-linear-attention", marker = "extra == 'megatron'", specifier = "==0.5.2" },
-    { name = "flash-linear-attention", marker = "extra == 'veomni'", specifier = "==0.5.2" },
+    { name = "flash-linear-attention", marker = "extra == 'fsdp'", specifier = "==0.6.0" },
+    { name = "flash-linear-attention", marker = "extra == 'megatron'", specifier = "==0.6.0" },
+    { name = "flash-linear-attention", marker = "extra == 'veomni'", specifier = "==0.6.0" },
     { name = "hf-transfer", marker = "extra == 'ci'" },
     { name = "hydra-core" },
     { name = "hydra-core", marker = "extra == 'verl-core'" },
