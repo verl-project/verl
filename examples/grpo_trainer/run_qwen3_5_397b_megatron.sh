@@ -7,7 +7,7 @@
 #     The launcher uses dependencies from the current uv.lock.
 #
 # CUDA dependencies from the current uv.lock (Python 3.12):
-#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.5.2.
+#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.6.0.
 #
 # Requirements on Ascend (scripts/install_vllm_mcore_npu.sh baseline):
 #   - 8 NPUs (2*64GB each, e.g. 1x8 A3)

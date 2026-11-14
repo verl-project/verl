@@ -8,7 +8,7 @@
 #       source .venv/bin/activate
 #
 # CUDA dependencies from the current uv.lock (Python 3.12):
-#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.5.2.
+#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.6.0.
 #   transformers 5.12.1.
 #
 # Qwen3.5 architecture notes:
