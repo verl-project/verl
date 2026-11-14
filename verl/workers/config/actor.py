@@ -53,15 +53,9 @@ class RouterReplayConfig(BaseConfig):
             - 'disabled': No router replay functionality
             - 'R2': Use Router Replay routing strategy
             - 'R3': Use Rollout Router Replay routing strategy
-        record_file (Optional[str]): File path to save recorded routing decisions.
-            Required when mode is 'record', 'R2', or 'R3'.
-        replay_file (Optional[str]): File path to load recorded routing decisions for replay.
-            Required when mode is 'replay'.
     """
 
     mode: str = "disabled"
-    record_file: Optional[str] = None
-    replay_file: Optional[str] = None
 
     def __post_init__(self):
         """Validate router replay configuration."""
