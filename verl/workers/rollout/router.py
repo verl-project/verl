@@ -15,6 +15,7 @@
 import logging
 import os
 import random
+import zlib
 from typing import Any, Protocol
 
 import ray
@@ -147,8 +148,9 @@ class GlobalRequestLoadBalancer:
     - **Least-loaded Selection**: When no sticky session exists, selects the
       server with the fewest in-flight requests.
     - **Deterministic Routing**: When ``full_determinism=True``, routes every
-      request by ``hash(request_id) % len(servers)`` over the full pool so the
-      same request always routes to the same replica across runs.
+      request by a stable platform-independent hash (``zlib.crc32``) over
+      servers in registration order, which is replica rank order, so the same
+      request always routes to the same replica rank across processes and runs.
     - **Dynamic Server Management**: Supports add/remove servers at runtime
       for hybrid scaling.
     """
@@ -192,9 +194,15 @@ class GlobalRequestLoadBalancer:
 
         if self._full_determinism:
             # Full-hash routing: same request_id always lands on the same replica
-            # across runs. Least-loaded selection depends on async arrival timing,
-            # which varies run-to-run, so it is bypassed entirely here.
-            server_id = list(self._servers)[hash(request_id) % len(self._servers)]
+            # across runs and across processes. Least-loaded selection depends on async
+            # arrival timing, which varies run-to-run, so it is bypassed entirely here.
+            # crc32 ensures platform and process independence without relying on
+            # PYTHONHASHSEED. Index into registration order, which follows
+            # server_addresses in replica rank order. Sorting the address
+            # strings would make the index to rank map depend on the ephemeral
+            # port each replica happened to draw in get_free_port.
+            ordered_servers = list(self._servers)
+            server_id = ordered_servers[zlib.crc32(request_id.encode("utf-8")) % len(ordered_servers)]
         else:
             min_count = min(self._inflight_requests.values())
             candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]

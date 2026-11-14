@@ -377,3 +377,82 @@ class TestGetRouterHandlePrecedence:
 
         status = ray.get(manager.global_load_balancer.get_status.remote())
         assert status["active_servers"] == 2
+
+
+class TestFullDeterminismRouting:
+    """Validate that GlobalRequestLoadBalancer full_determinism routing is
+    cross-process reproducible (independent of PYTHONHASHSEED) and stable in
+    replica rank when ephemeral ports are redrawn between runs."""
+
+    def test_full_determinism_replica_rank_stable_when_ports_redrawn(self):
+        """The request to replica-rank map must not depend on ephemeral ports.
+
+        Servers register in replica rank order, so each list below is indexed
+        by rank. The second run redraws every port, which permutes the
+        lexicographic order of the address strings without changing any rank.
+        """
+        rank_addresses_run1 = ["10.0.0.1:5001", "10.0.0.1:5002", "10.0.0.2:5003", "10.0.0.2:5004"]
+        rank_addresses_run2 = ["10.0.0.1:6004", "10.0.0.1:6003", "10.0.0.2:6002", "10.0.0.2:6001"]
+
+        lb1 = GlobalRequestLoadBalancer(servers={addr: None for addr in rank_addresses_run1}, full_determinism=True)
+        lb2 = GlobalRequestLoadBalancer(servers={addr: None for addr in rank_addresses_run2}, full_determinism=True)
+
+        for i in range(64):
+            req_id = f"det-{i}"
+            s1, _ = lb1.acquire_server(req_id)
+            s2, _ = lb2.acquire_server(req_id)
+            rank1 = rank_addresses_run1.index(s1)
+            rank2 = rank_addresses_run2.index(s2)
+            assert rank1 == rank2, f"Rank mismatch for {req_id}: run1 rank {rank1} ({s1}) vs run2 rank {rank2} ({s2})"
+
+    def test_full_determinism_cross_process_reproducibility(self):
+        """Different Python processes with different PYTHONHASHSEED must compute
+        identical server assignments for the same request IDs."""
+        import json
+        import subprocess
+        import sys
+
+        code = """
+import json
+import sys
+from verl.workers.rollout.router import GlobalRequestLoadBalancer
+
+servers = {"s0": None, "s1": None, "s2": None, "s3": None}
+lb = GlobalRequestLoadBalancer(servers=servers, full_determinism=True)
+results = [lb.acquire_server(f"det-{i}")[0] for i in range(30)]
+print(json.dumps(results))
+"""
+        seeds = ["0", "42", "12345", "random"]
+        all_results = []
+        for seed in seeds:
+            env = {"PYTHONPATH": ".", "PYTHONHASHSEED": seed}
+            res = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env,
+            )
+            all_results.append(json.loads(res.stdout.strip()))
+
+        baseline = all_results[0]
+        for idx, (seed, r) in enumerate(zip(seeds, all_results, strict=True)):
+            assert r == baseline, f"Process with PYTHONHASHSEED={seed} produced divergent routing: {r} != {baseline}"
+
+    def test_full_determinism_sticky_session_and_clear(self):
+        """Sticky session returns the cached server, and clear_sticky_cache re-routes deterministically."""
+        servers = {"s0": "h0", "s1": "h1", "s2": "h2"}
+        lb = GlobalRequestLoadBalancer(servers=servers, full_determinism=True)
+
+        s_first, _ = lb.acquire_server("det-0")
+        s_second, _ = lb.acquire_server("det-0")
+        assert s_first == s_second
+        assert lb.get_inflight_count(s_first) == 2
+
+        lb.release_server(s_first)
+        lb.release_server(s_first)
+        assert lb.get_inflight_count(s_first) == 0
+
+        lb.clear_sticky_cache()
+        s_third, _ = lb.acquire_server("det-0")
+        assert s_third == s_first
