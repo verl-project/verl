@@ -402,9 +402,11 @@ def _compress_weight(
 ) -> dict[str, torch.Tensor]:
     """Quantize one module's weight into its compressed-tensors wire format.
 
-    FP8_BLOCK, MXFP8, and MXFP4 CUDA weights use the shared TileLang export/QAT
-    kernels. NVFP4, unsupported schemes, and CPU tensors retain the
-    compressed-tensors implementation.
+    FP8_BLOCK, MXFP8, and MXFP4 CUDA weights use the shared export/QAT routines
+    (TileLang kernels on CUDA, with a PyTorch fallback for FP8_BLOCK and MXFP8
+    in verl.utils.qat.fp8 when TileLang is unavailable or on ROCm). NVFP4,
+    unsupported schemes, and CPU tensors retain the compressed-tensors
+    implementation.
     """
     preset = _preset_of(scheme)
     if weight.is_cuda and preset == ("FP8_BLOCK", None):

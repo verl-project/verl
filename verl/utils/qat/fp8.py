@@ -18,14 +18,22 @@ from collections.abc import Sequence
 from functools import cache
 from typing import Literal
 
-import tilelang
-import tilelang.language as T
 import torch
 
-tilelang.set_log_level("WARNING")
-pass_configs = {
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-}
+try:
+    import tilelang
+    import tilelang.language as T
+except ModuleNotFoundError:
+    tilelang = None
+    T = None
+
+if tilelang is not None:
+    tilelang.set_log_level("WARNING")
+    pass_configs = {
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    }
+else:
+    pass_configs = {}
 
 __all__ = ["fp8_grouped_fake_quant", "fp8_quant"]
 
@@ -67,6 +75,7 @@ def _row_quant_kernel(
     dequant: bool,
 ):
     """Compile row-wise quantization with several independent rows per CTA."""
+    assert tilelang is not None and T is not None
     rows = T.dynamic("rows")
     scale_cols = cols // block_cols
     cta_rows = 32
@@ -123,6 +132,7 @@ def _block_quant_kernel(
     dequant: bool,
 ):
     """Compile two-dimensional quantization with one independently scaled block per CTA."""
+    assert tilelang is not None and T is not None
     rows = T.dynamic("rows")
     scale_rows = rows // block_rows
     scale_cols = cols // block_cols
@@ -176,6 +186,7 @@ def _grouped_row_fake_quant_kernel(
     scale_fmt: ScaleFormat | None,
 ):
     """Compile row-wise QDQ over independently allocated expert matrices."""
+    assert tilelang is not None and T is not None
     scale_cols = cols // block_cols
     cta_rows = 32
     fp8_max = 448.0
@@ -231,6 +242,7 @@ def _grouped_block_fake_quant_kernel(
     scale_fmt: ScaleFormat | None,
 ):
     """Compile 2D block QDQ over independently allocated expert matrices."""
+    assert tilelang is not None and T is not None
     scale_rows = rows // block_rows
     scale_cols = cols // block_cols
     fp8_max = 448.0
@@ -280,6 +292,46 @@ def _normalize_block_shape(block_shape: Sequence[int]) -> tuple[int, int]:
     return block_rows, block_cols
 
 
+def _use_tilelang() -> bool:
+    return tilelang is not None and torch.version.hip is None
+
+
+def _round_up_to_power_of_two_torch(value: torch.Tensor) -> torch.Tensor:
+    """Round a positive FP32 tensor upward to the nearest power of two."""
+    bits = value.view(torch.int32)
+    exponent = (bits >> 23) & 0xFF
+    mantissa = bits & ((1 << 23) - 1)
+    ceil_exponent = exponent - 127 + (mantissa != 0).to(torch.int32)
+    return ((ceil_exponent + 127) << 23).view(torch.float32)
+
+
+def _fp8_scale_torch(amax: torch.Tensor, scale_fmt: ScaleFormat | None) -> torch.Tensor:
+    scale = amax.clamp_min(1e-4) / 448.0
+    if scale_fmt is not None:
+        scale = _round_up_to_power_of_two_torch(scale)
+    return scale
+
+
+def _fp8_quant_torch(
+    x: torch.Tensor,
+    block_rows: int,
+    block_cols: int,
+    *,
+    scale_dtype: torch.dtype,
+    scale_fmt: ScaleFormat | None,
+    dequant: bool,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    rows, cols = x.shape[-2:]
+    scale_rows = rows // block_rows
+    scale_cols = cols // block_cols
+    blocks = x.float().reshape(*x.shape[:-2], scale_rows, block_rows, scale_cols, block_cols)
+    scales_f32 = _fp8_scale_torch(blocks.abs().amax(dim=(-3, -1)), scale_fmt)
+    quantized = (blocks / scales_f32.unsqueeze(-1).unsqueeze(-3)).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    if dequant:
+        return (quantized.float() * scales_f32.unsqueeze(-1).unsqueeze(-3)).reshape(x.shape).to(x.dtype)
+    return quantized.reshape(x.shape).contiguous(), scales_f32.to(scale_dtype)
+
+
 def fp8_grouped_fake_quant(
     tensors: Sequence[torch.Tensor],
     block_shape: Sequence[int] = (128, 128),
@@ -310,6 +362,19 @@ def fp8_grouped_fake_quant(
     rows, cols = first.shape
     if rows % block_rows or cols % block_cols:
         raise ValueError(f"matrix shape {(rows, cols)} is not divisible by block_shape {(block_rows, block_cols)}")
+
+    if not _use_tilelang():
+        stacked = torch.stack(tuple(tensors), dim=0)
+        result = _fp8_quant_torch(
+            stacked,
+            block_rows,
+            block_cols,
+            scale_dtype=torch.float32,
+            scale_fmt=scale_fmt,
+            dequant=True,
+        )
+        assert isinstance(result, torch.Tensor)
+        return result
 
     pointer_table = torch.tensor(
         [tensor.data_ptr() for tensor in tensors],
@@ -384,6 +449,15 @@ def fp8_quant(
     rows, cols = x.shape[-2:]
     if rows % block_rows or cols % block_cols:
         raise ValueError(f"matrix shape {(rows, cols)} is not divisible by block_shape {(block_rows, block_cols)}")
+    if not _use_tilelang():
+        return _fp8_quant_torch(
+            x,
+            block_rows,
+            block_cols,
+            scale_dtype=scale_dtype,
+            scale_fmt=scale_fmt,
+            dequant=dequant,
+        )
     scale_rows = rows // block_rows
     scale_cols = cols // block_cols
     scale_shape = (*x.shape[:-2], scale_rows, scale_cols)
