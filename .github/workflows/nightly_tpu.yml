@@ -1,0 +1,147 @@
+# Nightly TPU tests (the TPU counterpart of nightly_ascend.yml).
+#
+# - Qwen3-4B GSM8K GRPO of examples/tpu/grpo (torch.compile, splash attention, SimpleFSDP, tpu-sync weight sync with
+#   VERIFY_PARITY=all) on 2 Cloud TPU v6e-4 slices for GRPO_4B_STEPS steps, with validation before training and after
+#   the last step: GSM8K accuracy must go up to at least 0.45.
+# - The Qwen3-0.6B GRPO smoke test of e2e_v1_separate_async_tpu.yml against verl-hardware-plugin `main` instead of the
+#   commit examples/tpu/grpo/README.md checks out: shows when the plugin moved ahead of (or broke against) verl, and
+#   when the README's plugin commit can be updated.
+#
+# Runs on the schedule (GitHub only runs schedules from the default branch), by hand, and on pull requests that change
+# this file. See tpu_unit_tests.yml and tests/special_tpu/README.md for how the TPU jobs run, and where.
+
+name: nightly_tpu
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - ".github/workflows/nightly_tpu.yml"
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: "Number of Qwen3-4B GRPO training steps"
+        required: false
+        default: "20"
+        type: string
+      plugin_repo:
+        description: "verl-hardware-plugin repository of the 4B run, e.g. a fork (empty: the one examples/tpu/grpo/README.md clones)"
+        required: false
+        default: ""
+        type: string
+      plugin_commit:
+        description: "verl-hardware-plugin full commit id, branch or tag of the 4B run (empty: the commit examples/tpu/grpo/README.md checks out)"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+env:
+  # The self-hosted runners run as root.
+  PIP_ROOT_USER_ACTION: ignore
+  # Give up after waiting this long for TPU quota in the Kueue queue, and for the pods of the admitted RayCluster.
+  QUEUE_TIMEOUT_MINS: "180"
+  POD_READY_TIMEOUT_MINS: "60"
+  # The image of examples/tpu/grpo/Dockerfile is only built (privileged, pushes to the registry) for code that is
+  # already in this repository. Pull requests from forks wait for docker-build-tpu.yml instead.
+  TPU_CI_ALLOW_IMAGE_BUILD: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+  IMAGE_WAIT_MINS: "30"
+
+jobs:
+  setup:
+    name: Select the TPU CI runners
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.runner.outputs.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          sparse-checkout: tests/special_tpu/gke/tpu-ci.env
+          sparse-checkout-cone-mode: false
+      - name: Read TPU_CI_RUNNER (repository variable, else tests/special_tpu/gke/tpu-ci.env)
+        id: runner
+        env:
+          TPU_CI_RUNNER: ${{ vars.TPU_CI_RUNNER }}
+        run: |
+          source tests/special_tpu/gke/tpu-ci.env
+          echo "runner=${TPU_CI_RUNNER}" >> "${GITHUB_OUTPUT}"
+          echo "TPU CI runner label: ${TPU_CI_RUNNER:-none, so the TPU jobs are skipped}"
+
+  nightly_grpo_qwen3_4b_tpu:
+    needs: setup
+    if: needs.setup.outputs.runner != ''
+    name: GSM8K GRPO Qwen3-4B on 2 x TPU v6e-4 (TorchTitan + vLLM, tpu-sync)
+    runs-on: ${{ needs.setup.outputs.runner }}
+    timeout-minutes: 420 # Includes waiting for TPU quota (Kueue) and TPU hosts.
+    env:
+      GRPO_4B_STEPS: ${{ inputs.steps || '20' }}
+      # Empty unless set by hand: the plugin repository and commit that examples/tpu/grpo/README.md checks out.
+      VERL_HARDWARE_PLUGIN_REPO: ${{ inputs.plugin_repo }}
+      VERL_HARDWARE_PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Running Qwen3-4B GSM8K GRPO on 8 TPU v6e chips (examples/tpu/grpo/run_qwen3_torchtitan.sh, MODEL_SIZE=4B)
+        run: |
+          bash tests/special_tpu/run_tpu_e2e_ci.sh grpo_4b
+      - name: Clean up the RayCluster
+        if: always()
+        run: |
+          bash tests/special_tpu/run_tpu_e2e_ci.sh teardown grpo_4b
+      - name: Upload the TPU job logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tpu-logs-grpo_4b-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verl-tpu-ci-${{ github.run_id }}/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  nightly_grpo_plugin_main_tpu:
+    needs: setup
+    if: needs.setup.outputs.runner != ''
+    name: GSM8K GRPO Qwen3-0.6B on 2 x TPU v6e-1 with verl-hardware-plugin main
+    runs-on: ${{ needs.setup.outputs.runner }}
+    timeout-minutes: 240 # Includes waiting for TPU quota (Kueue) and TPU hosts.
+    env:
+      VERL_HARDWARE_PLUGIN_COMMIT: main
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Running the GSM8K GRPO smoke test on 2 TPU v6e chips with verl-hardware-plugin main
+        run: |
+          bash tests/special_tpu/run_tpu_e2e_ci.sh grpo
+      - name: Clean up the RayCluster
+        if: always()
+        run: |
+          bash tests/special_tpu/run_tpu_e2e_ci.sh teardown grpo
+      - name: Upload the TPU job logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tpu-logs-grpo_plugin_main-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verl-tpu-ci-${{ github.run_id }}/*.log
+          if-no-files-found: ignore
+          retention-days: 14

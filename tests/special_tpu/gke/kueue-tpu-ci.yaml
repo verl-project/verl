@@ -1,0 +1,186 @@
+# Kueue admission queues of the verl TPU CI.
+#
+# Every CI test provisions its own short-lived RayCluster labelled with
+# `kueue.x-k8s.io/queue-name: verl-tpu-ci-<tier>`. Kueue keeps the RayCluster suspended (no pods
+# are created) until its queue has enough free TPU quota, then admits it as a whole (gang
+# admission). Concurrent CI runs therefore queue instead of fighting over TPU hosts, and a
+# half-scheduled cluster can never deadlock another one.
+#
+# One queue per tier (StrictFIFO: first come, first served within a tier, so a big job is never
+# starved by later small ones):
+#
+#   LocalQueue          ClusterQueue            TPU quota (flavor)                     Cohort
+#   verl-tpu-ci-1chip   verl-tpu-ci-1chip-cq    1 chip  (verl-tpu-ci-v6e-1t, 1x1 pool)  verl-tpu-ci-v6e-1t
+#   verl-tpu-ci-2chip   verl-tpu-ci-2chip-cq    2 chips (verl-tpu-ci-v6e-1t, 1x1 pool)  verl-tpu-ci-v6e-1t
+#   verl-tpu-ci-4chip   verl-tpu-ci-4chip-cq    8 chips (verl-tpu-ci-v6e, 2x4 pools)    verl-tpu-ci-v6e
+#   verl-tpu-ci-8chip   verl-tpu-ci-8chip-cq    8 chips (verl-tpu-ci-v6e, 2x4 pools)    verl-tpu-ci-v6e
+#
+# - The 1-chip tier (unit tests, 1 x v6e-1) and the 2-chip tier (Qwen3-0.6B GRPO, 2 x v6e-1: one
+#   trainer chip and one rollout chip) share the ct6e-standard-1t (1x1) node pool, which
+#   autoscales from 0 to 3 nodes (one chip each): 1 + 2 chips, so one test of each tier runs at a
+#   time and they can borrow each other's idle quota through the cohort. Neither competes with the
+#   4/8-chip tiers.
+# - The 4-chip and 8-chip tiers share the 16 chips of the 2x4 node pools (2 x v6e-8 slices = 4
+#   hosts x 4 chips). Each is guaranteed 8 chips (two trainer jobs / one RL job) and can borrow
+#   the other's unused quota through the cohort, so an idle tier never strands capacity. There
+#   is no preemption: borrowed quota is returned when the (short) CI job finishes.
+# - GKE only allows whole-host TPU requests (4 chips) on `tpu-v6e-slice` 2x4 nodes, so each
+#   4/8-chip worker reserves one host. Kueue picks the flavor whose node labels match the
+#   worker's nodeSelector (topology 2x4 vs 1x1).
+#
+# Applied by a cluster admin (the queues are shared by every run, and CI never changes cluster-wide objects):
+#   kubectl apply -f tests/special_tpu/gke/kueue-tpu-ci.yaml
+# The LocalQueues live in the namespace of the CI RayClusters (TPU_CI_NAMESPACE in tpu-ci.env, `default` here).
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: verl-tpu-ci-v6e
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+    cloud.google.com/gke-tpu-topology: 2x4
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: verl-tpu-ci-v6e-1t
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+    cloud.google.com/gke-tpu-topology: 1x1
+---
+# Label-less flavor for CPU/memory so the Ray head pod (CPU only) is not pinned to TPU
+# nodes and the TPU worker pods do not get an extra node selector.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: verl-tpu-ci-default
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: verl-tpu-ci-1chip-cq
+spec:
+  namespaceSelector: {}
+  cohort: verl-tpu-ci-v6e-1t
+  queueingStrategy: StrictFIFO
+  resourceGroups:
+    - coveredResources: ["google.com/tpu"]
+      flavors:
+        - name: verl-tpu-ci-v6e-1t
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 1
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: verl-tpu-ci-default
+          resources:
+            - name: cpu
+              nominalQuota: 100
+            - name: memory
+              nominalQuota: 400Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: verl-tpu-ci-2chip-cq
+spec:
+  namespaceSelector: {}
+  cohort: verl-tpu-ci-v6e-1t
+  queueingStrategy: StrictFIFO
+  resourceGroups:
+    - coveredResources: ["google.com/tpu"]
+      flavors:
+        - name: verl-tpu-ci-v6e-1t
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 2
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: verl-tpu-ci-default
+          resources:
+            - name: cpu
+              nominalQuota: 200
+            - name: memory
+              nominalQuota: 800Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: verl-tpu-ci-4chip-cq
+spec:
+  namespaceSelector: {}
+  cohort: verl-tpu-ci-v6e
+  queueingStrategy: StrictFIFO
+  resourceGroups:
+    - coveredResources: ["google.com/tpu"]
+      flavors:
+        - name: verl-tpu-ci-v6e
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 8
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: verl-tpu-ci-default
+          resources:
+            - name: cpu
+              nominalQuota: 500
+            - name: memory
+              nominalQuota: 2000Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: verl-tpu-ci-8chip-cq
+spec:
+  namespaceSelector: {}
+  cohort: verl-tpu-ci-v6e
+  queueingStrategy: StrictFIFO
+  resourceGroups:
+    - coveredResources: ["google.com/tpu"]
+      flavors:
+        - name: verl-tpu-ci-v6e
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 8
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: verl-tpu-ci-default
+          resources:
+            - name: cpu
+              nominalQuota: 500
+            - name: memory
+              nominalQuota: 2000Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: verl-tpu-ci-1chip
+  namespace: default
+spec:
+  clusterQueue: verl-tpu-ci-1chip-cq
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: verl-tpu-ci-2chip
+  namespace: default
+spec:
+  clusterQueue: verl-tpu-ci-2chip-cq
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: verl-tpu-ci-4chip
+  namespace: default
+spec:
+  clusterQueue: verl-tpu-ci-4chip-cq
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: verl-tpu-ci-8chip
+  namespace: default
+spec:
+  clusterQueue: verl-tpu-ci-8chip-cq

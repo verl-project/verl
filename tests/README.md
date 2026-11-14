@@ -9,11 +9,12 @@ There are a few folders with `special_` prefix, created for special purposes:
 - `special_distributed`: unit tests that must run with multiple GPUs
 - `special_e2e`: end-to-end tests with training/generation scripts
 - `special_npu`: tests for NPUs
+- `special_tpu`: tests for Cloud TPUs through `verl-hardware-plugin` (see [`special_tpu/README.md`](special_tpu/README.md))
 - `special_sanity`: a suite of quick sanity tests
 - `special_standalone`: a set of test that are designed to run in dedicated environments
 
 Accelerators for tests 
-- By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
+- By default tests are run with GPU available, except for the ones under `special_npu` and `special_tpu`, and any test script whose name ends with `on_cpu.py`.
 - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
 
 # Workflow layout
