@@ -1845,6 +1845,8 @@ class PPOTrainer(ABC):
         batch.extra_info.update(metadata)
         if self.ref_in_actor:
             output = self.actor_rollout_wg.compute_log_prob(batch)
+            # Later stages share this batch; a leftover flag would disable the critic's adapter in `_compute_values`.
+            batch.extra_info.pop("no_lora_adapter")
         else:
             output = self.ref_policy_wg.compute_ref_log_prob(batch)
         assert len(output) == len(batch)
