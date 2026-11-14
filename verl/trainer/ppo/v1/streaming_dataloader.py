@@ -924,6 +924,7 @@ class StreamingDataloaderAsync(StreamingDataloader):
         )
 
     def load_checkpoint(self, local_global_step_folder: str | None, global_steps: int) -> dict:
+        self._train_state_ready = False
         self.global_steps = global_steps
         SkipManager.set_step(global_steps)
         if local_global_step_folder is not None:
@@ -1101,9 +1102,9 @@ class StreamingDataloaderAsync(StreamingDataloader):
         terminal_session_keys = self.finished_session_keys[partition_id] | self.failure_session_keys[partition_id]
         completed_by_uid = Counter(tq_schema.uid_of(key) for key in terminal_session_keys)
 
-        total = len(self.pending_keys[partition_id]) * default_rollout_n
-
-        for uid in self.running_keys[partition_id]:
+        total = 0
+        # Restored pending groups can already contain finished sessions.
+        for uid in self.pending_keys[partition_id] | self.running_keys[partition_id]:
             completed = completed_by_uid[uid]
             if completed > default_rollout_n:
                 raise RuntimeError(
@@ -1154,12 +1155,9 @@ class StreamingDataloaderAsync(StreamingDataloader):
     # ------------------------------------------------------------------ #
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
-        """Restart pending/running prompts from their stored prompt fields; return how many were reissued.
-
-        Partial trajectories and session markers of those prompts are discarded, so every reissued group
-        restarts all of its sessions from scratch.
-        """
+        """Pack finished sessions at the end and use rollout_n to refill the empty prefix."""
         items = (tq.kv_list(partition_id) or {}).get(partition_id, {})
+        n = self.default_rollout_n
         inflight_uids = [
             key
             for key, tag in items.items()
@@ -1168,22 +1166,70 @@ class StreamingDataloaderAsync(StreamingDataloader):
         if not inflight_uids:
             return 0
 
-        batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
-        if "__rollout_n__" in batch:
-            batch.pop("__rollout_n__")
-        inflight_uid_set = set(inflight_uids)
-        stale_keys = [
-            key
-            for key, tag in items.items()
-            if not tq_schema.is_prompt_tag(tag) and tq_schema.uid_of(key) in inflight_uid_set
-        ]
-        if stale_keys:
-            tq.kv_clear(keys=stale_keys, partition_id=partition_id)
-        tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
-        tags = [tq_schema.prompt_tag(tq_schema.PROMPT_PENDING, self.global_steps) for _ in inflight_uids]
+        completed_by_uid = {uid: set() for uid in inflight_uids}
+        children_by_uid = {uid: [] for uid in inflight_uids}
+        for key, tag in items.items():
+            uid = tq_schema.uid_of(key)
+            if uid in children_by_uid and not tq_schema.is_prompt_tag(tag):
+                children_by_uid[uid].append(key)
+                # Finished markers are published after all trajectory writes settle.
+                if tq_schema.is_session_tag(tag) and tag.get("status") == tq_schema.SESSION_FINISHED:
+                    completed_by_uid[uid].add(int(key.rsplit("_", 1)[1]))
+        missing_by_uid = {uid: n - len(completed) for uid, completed in completed_by_uid.items()}
+        reissued_uids = [uid for uid in inflight_uids if missing_by_uid[uid]]
+        for uid in reissued_uids:
+            self._pack_finished_sessions(
+                partition_id, uid, sorted(completed_by_uid[uid]), n, children_by_uid[uid], items
+            )
+
+        tags = []
+        for uid in inflight_uids:
+            tag = dict(items[uid])
+            tag["status"] = tq_schema.PROMPT_PENDING if missing_by_uid[uid] else tq_schema.PROMPT_FINISHED
+            # Retained trajectories keep their original policy metadata and group
+            # age. A group restarted entirely keeps the existing restamping behavior.
+            if not completed_by_uid[uid]:
+                tag["global_steps"] = self.global_steps
+            tags.append(tag)
         tq.kv_batch_put(keys=inflight_uids, partition_id=partition_id, tags=tags)
-        self.agent_loop_manager.generate_sequences(batch)
-        return len(inflight_uids)
+        if reissued_uids:
+            batch = tq.kv_batch_get(keys=reissued_uids, partition_id=partition_id)
+            tu.assign_non_tensor_stack(batch, "__rollout_n__", [missing_by_uid[uid] for uid in reissued_uids])
+            tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+            self.agent_loop_manager.generate_sequences(batch)
+        return len(reissued_uids)
+
+    @staticmethod
+    def _pack_finished_sessions(partition_id, uid, completed_ids, rollout_n, child_keys, items):
+        """Move retained sessions to the tail, freeing IDs [0, missing_count) for normal generation."""
+        missing_count = rollout_n - len(completed_ids)
+        remap = {old: missing_count + i for i, old in enumerate(completed_ids)}
+        retained = []
+        for key in child_keys:
+            parsed = tq_schema.parse_trajectory_key(key)
+            sid = parsed[1] if parsed is not None else int(key.rsplit("_", 1)[1])
+            if sid not in remap:
+                continue
+            new_sid = remap[sid]
+            tag = dict(items[key])
+            if tq_schema.is_session_tag(tag):
+                retained.append((tq_schema.session_key(uid, new_sid), None, dict(tag, session_id=new_sid)))
+            else:
+                # Fetch individually: batched reads can omit fields not shared by every trajectory.
+                fields = tq.kv_batch_get(keys=[key], partition_id=partition_id)
+                if "session_id" in fields:
+                    value = fields["session_id"]
+                    if isinstance(value, torch.Tensor):
+                        fields["session_id"] = torch.full_like(value, new_sid)
+                    else:
+                        tu.assign_non_tensor_stack(fields, "session_id", [new_sid])
+                if "session_id" in tag:
+                    tag["session_id"] = new_sid
+                retained.append((tq_schema.trajectory_key(uid, new_sid, parsed[2]), fields, tag))
+        if child_keys:
+            tq.kv_clear(keys=child_keys, partition_id=partition_id)
+        for key, fields, tag in retained:
+            tq.kv_batch_put(keys=[key], partition_id=partition_id, fields=fields, tags=[tag])
 
 
 def resolve_gen_batch_size(config) -> int:

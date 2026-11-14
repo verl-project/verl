@@ -120,7 +120,7 @@ With `max_off_policy_strategy=wait`, stale groups are not evicted. Instead, samp
 
 With `max_off_policy_threshold=null` (set via `trainer.v1.sampler.max_off_policy_threshold=null`), off-policy version control is disabled entirely: no samples are dropped or awaited for staleness.
 
-When async trainer saves a checkpoint, pending and running groups have already consumed dataloader entries, so they are reissued from their saved prompts during `load_checkpoint` recovery. Finished groups and their completed trajectories are restored as-is and remain available for sampling; they are not regenerated.
+When async trainer saves a checkpoint, pending and running groups have already consumed dataloader entries, so their missing sessions are reissued from saved prompts during `load_checkpoint` recovery. Finished sessions and their trajectories are preserved, even inside a partially completed group. During recovery, finished sessions are renumbered into the tail of each group, including their markers, trajectory keys and session ID fields. Partial writes from unfinished sessions are cleared. The empty prefix is regenerated using the existing per-prompt `__rollout_n__` override; the configured training group size is unchanged. A group becomes sampleable only after all its sessions finish. Normal watermark refill starts after recovery dispatch and counts only unfinished sessions, including those in pending groups.
 
 ### StreamingDataloader actor
 
@@ -150,7 +150,7 @@ Trainer code uses these actor methods:
 - Separate Async only: `count_sampleable` and `wait_sampleable` report or wait for sampleable train groups without consuming them. `separate_async` uses them to decide when lent Hybrid GPUs return to training. Each is served by a regular coordinator pass, so it also applies that pass's evictions; `count_sampleable` leaves accrued eviction metrics for the next `sample` or `wait_sampleable`.
 
 Model and optimizer checkpointing remain in the trainer. The latest-checkpoint marker is updated only after both the model save and the actor's dataloader/TransferQueue save succeed.
-Sync checkpoints contain only `data.pt`. Async checkpoints additionally contain the TransferQueue snapshot and reissue pending/running prompts. Async restore requires `data.pt` to keep the dataloader cursor consistent with restored TransferQueue state.
+Sync checkpoints contain only `data.pt`. Async checkpoints additionally contain the TransferQueue snapshot and reissue only unfinished sessions of pending/running prompts. Async restore requires `data.pt` to keep the dataloader cursor consistent with restored TransferQueue state.
 The actor is hard-affined to the TaskRunner node so local datasets, `data.pt`, and the latest-checkpoint marker share the same filesystem view.
 `skip.rollout_tq` replays cached train batches directly from the actor's `sample` boundary. Sync mode permits arbitrary cache steps; async modes require a fully cached or fully uncached contiguous prefix from the current fresh-training start, because streaming prefetch does not preserve a step-to-prompt correspondence.
 
@@ -349,7 +349,7 @@ Practical tuning order:
 
 ## Checkpoint and Validation Behavior
 
-When the installed TransferQueue supports checkpointing, V1 async checkpoints persist its state alongside model and dataloader state. Finished samples are restored directly. Pending and running prompts are cleared and reissued after resume so prompts already fetched from the dataloader are not lost.
+When the installed TransferQueue supports checkpointing, V1 async checkpoints persist its state alongside model and dataloader state. Finished sessions are restored directly. Only unfinished sessions of pending and running prompts are cleared and reissued after resume, preserving completed siblings after packing them into the tail of each group.
 
 Validation shares the same AgentLoop and rollout server pool with unfinished training trajectories. Existing partial trajectories continue running, but the coordinator pauses train polling and refill from the first validation request until the next train request. `timing_s/testing` therefore still includes contention from pre-existing train trajectories without dispatching additional train prompts.
 

@@ -712,3 +712,57 @@ def test_outstanding_cap_must_allow_full_training_batch():
     actor = _refill_policy_stub(watermark_batches=0.5, max_outstanding_batches=0.5)
     with pytest.raises(ValueError, match="must be >= 1"):
         actor._init_refill_policy()
+
+
+def test_restored_pending_groups_count_only_unfinished_sessions():
+    actor = _async_stub()
+    actor.pending_keys = {"train": {"p"}}
+    actor.running_keys = {"train": {"q"}}
+    actor.finished_session_keys = {"train": {"p_1", "p_4", "p_7", "q_0"}}
+    actor.failure_session_keys = {"train": set()}
+    assert actor.unfinished_session_count("train", 8) == 12
+
+
+def test_recovery_196_partial_groups_dispatches_1022_sessions(monkeypatch):
+    from tensordict import TensorDict
+
+    from verl.trainer.ppo.v1 import tq_schema
+    from verl.utils import tensordict_utils as tu
+
+    actor = _async_stub()
+    actor.default_rollout_n = 8
+    actor.watermark_sessions = 1024
+    actor.global_steps = 2
+    items = {}
+    for index in range(196):
+        uid = f"p{index}"
+        items[uid] = tq_schema.prompt_tag("running", 1)
+        # 154*3 + 42*2 = 546 completed sessions, all in partial groups.
+        for sid in range(3 if index < 154 else 2):
+            items[f"{uid}_{sid}"] = tq_schema.session_tag("finished", sid)
+            items[f"{uid}_{sid}_0"] = {"global_steps": 1}
+    batches = []
+    actor.agent_loop_manager = SimpleNamespace(generate_sequences=batches.append)
+    monkeypatch.setattr(streaming_module.tq, "kv_list", lambda *_a, **_k: {"train": items})
+
+    def get(keys, **kwargs):
+        batch = TensorDict({"index": torch.arange(len(keys))}, batch_size=[len(keys)])
+        tu.assign_non_tensor_stack(batch, "uid", keys)
+        return batch
+
+    def put(keys, tags, **kwargs):
+        items.update(zip(keys, tags, strict=True))
+
+    monkeypatch.setattr(streaming_module.tq, "kv_batch_get", get)
+    monkeypatch.setattr(streaming_module.tq, "kv_batch_put", put)
+    monkeypatch.setattr(streaming_module.tq, "kv_clear", lambda **_k: pytest.fail("no unfinished payload to clear"))
+    packed = []
+    actor._pack_finished_sessions = lambda *args: packed.append(args)
+    assert actor._reissue_inflight_prompts() == 196
+    assert len(packed) == 196
+    assert sum(batches[0]["__rollout_n__"]) == 1022
+    actor.pending_keys = {"train": {f"p{i}" for i in range(196)}}
+    actor.running_keys = {"train": set()}
+    actor.finished_session_keys = {"train": {k for k, v in items.items() if v.get("is_session")}}
+    actor.failure_session_keys = {"train": set()}
+    assert actor.unfinished_session_count("train", 8) == 1022
