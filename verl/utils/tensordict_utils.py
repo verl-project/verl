@@ -22,6 +22,8 @@ from packaging.version import parse as parse_version
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
+_TENSORDICT_SUPPORTS_NESTED_CHUNK = parse_version(tensordict.__version__) >= parse_version("0.10")
+
 
 def assign_non_tensor_data(tensor_dict: TensorDict, key, val):
     """Assign a single non-tensor value to a TensorDict.
@@ -317,8 +319,8 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
     """Split a TensorDict into equal-sized chunks with special nested tensor handling.
 
     Divides a TensorDict into the specified number of chunks along the batch
-    dimension. Handles NestedTensors specially since TensorDict.chunk() doesn't
-    support jagged tensors.
+    dimension. Uses native views for contiguous 2D jagged tensors and rebuilds
+    other jagged tensors.
 
     Args:
         td: The TensorDict to split.
@@ -332,6 +334,8 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
             evenly divisible by chunks.
 
     Note:
+        TensorDict 0.10+ handles contiguous 2D jagged tensors without rebuilding
+        their rows. Tensors with explicit lengths retain the reconstruction path.
         PyTorch ``unbind(dim=0)`` on 3D+ jagged NestedTensors has a bug where
         ``split_with_sizes`` is applied to the wrong dimension of the internal
         ``_values`` tensor.  For example, mRoPE ``position_ids`` with per-sample
@@ -357,6 +361,13 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
     )
     chunk_size = len(td) // chunks
     nested_keys = {key for key, val in td.items() if isinstance(val, torch.Tensor) and val.is_nested}
+    if (
+        nested_keys
+        and _TENSORDICT_SUPPORTS_NESTED_CHUNK
+        and all(td[key].dim() == 2 and td[key].is_contiguous() for key in nested_keys)
+    ):
+        return td.chunk(chunks=chunks)
+
     new_td = TensorDict(
         {k: v for k, v in td.items() if k not in nested_keys}, batch_size=td.batch_size, device=td.device
     )
