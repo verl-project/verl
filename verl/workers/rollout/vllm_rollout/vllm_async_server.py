@@ -62,6 +62,7 @@ from verl.workers.rollout.utils import (
     get_node_visible_devices,
     get_vision_placeholder_token_ids,
     qwen2_5_vl_dedup_image_tokens,
+    qwen2_5_vl_dedup_video_tokens,
     run_uvicorn,
     validate_topk_logprob_request,
     warn_topk_logprob_budget,
@@ -600,6 +601,7 @@ class vLLMHttpServer:
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        video_grid_thw: Optional[Any] = None,
         priority: int = 0,
         kv_transfer_params: Optional[dict] = None,
         session_id: Optional[str] = None,
@@ -619,6 +621,7 @@ class vLLMHttpServer:
                 video_data=video_data,
                 audio_data=audio_data,
                 mm_processor_kwargs=mm_processor_kwargs,
+                video_grid_thw=video_grid_thw,
                 priority=priority,
                 session_id=session_id,
             )
@@ -697,6 +700,13 @@ class vLLMHttpServer:
             multi_modal_data["video"] = video_data
         if audio_data is not None:
             multi_modal_data["audio"] = audio_data
+
+        if video_data is not None:
+            prompt_ids = qwen2_5_vl_dedup_video_tokens(
+                prompt_ids,
+                self.model_config.processor,
+                video_grid_thw=video_grid_thw,
+            )
 
         prompt_kwargs = {"prompt_token_ids": prompt_ids, "multi_modal_data": multi_modal_data}
         if mm_processor_kwargs:
@@ -862,6 +872,7 @@ class vLLMHttpServer:
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        video_grid_thw: Optional[Any] = None,
         priority: int = 0,
         session_id: Optional[str] = None,
     ) -> TokenOutput:
@@ -890,6 +901,7 @@ class vLLMHttpServer:
             video_data=video_data,
             audio_data=audio_data,
             mm_processor_kwargs=mm_processor_kwargs,
+            video_grid_thw=video_grid_thw,
             priority=priority,
             kv_transfer_params=prefill_kv_params,
             session_id=session_id,
@@ -917,6 +929,7 @@ class vLLMHttpServer:
             video_data=video_data,
             audio_data=audio_data,
             mm_processor_kwargs=mm_processor_kwargs,
+            video_grid_thw=video_grid_thw,
             priority=priority,
             kv_transfer_params=decode_kv_params,
             session_id=session_id,
