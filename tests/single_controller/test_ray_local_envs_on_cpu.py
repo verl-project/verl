@@ -171,6 +171,14 @@ def test_customized_worker_env():
             assert "WORLD_SIZE" in str(e)
         else:
             raise ValueError("test failed")
+
+        with pytest.raises(ValueError, match="VERL_MASTER_ENDPOINT_CONFIG"):
+            RayWorkerGroup(
+                resource_pool=resource_pool,
+                ray_cls_with_init=class_with_args,
+                name_prefix="worker_group_endpoint_config_error",
+                worker_env={"VERL_MASTER_ENDPOINT_CONFIG": "user override"},
+            )
     finally:
         ray.shutdown()
 

@@ -667,7 +667,7 @@ class RayWorkerGroup(WorkerGroup):
             )
         if worker_env is not None:
             logging.debug(f"Appending ray class env, origin: {env_vars}, customized env: {worker_env}")
-            conflict_env_vars = set(env_vars.keys()) & set(worker_env.keys())
+            conflict_env_vars = (set(env_vars.keys()) | {"VERL_MASTER_ENDPOINT_CONFIG"}) & set(worker_env.keys())
             if len(conflict_env_vars) > 0:
                 logging.error(
                     f"User customized env vars conflict with system env: {conflict_env_vars} "

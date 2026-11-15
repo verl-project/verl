@@ -225,6 +225,9 @@ class Worker(WorkerHelper):
 
         Subclasses must call this before initializing their process group so rank zero
         can publish its bound master endpoint and let the driver launch the other ranks.
+        Automatic rendezvous retains a multi-tenant TCPStore in rank zero's
+        ``master_tcp_store``. Custom rendezvous code must reuse that store or connect
+        to its endpoint instead of binding an independent server on the same port.
 
         Args:
             cuda_visible_devices (str, optional):
