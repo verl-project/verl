@@ -153,6 +153,10 @@ class DistillationTeacherModelConfig(BaseConfig):
         inference.tensor_model_parallel_size * inference.pipeline_model_parallel_size),
         so the teacher's total GPU footprint is
         `num_replicas * per_replica_world_size`.
+    lora_adapters (dict[str, str]):
+        Optional LoRA teachers sharing this teacher's base model, as {routing_key: local PEFT adapter dir}.
+        Examples whose routing key matches are scored by `model_path` + that adapter on the same
+        inference servers, so N LoRA teachers cost one copy of the base weights. Only vLLM is supported.
     """
 
     _mutable_fields = BaseConfig._mutable_fields | {"num_replicas", "key"}
@@ -161,6 +165,7 @@ class DistillationTeacherModelConfig(BaseConfig):
     model_path: Optional[str] = None
     inference: RolloutConfig = field(default_factory=RolloutConfig)
     num_replicas: Optional[int] = 0
+    lora_adapters: dict[str, str] = field(default_factory=dict)
 
     @property
     def per_replica_world_size(self) -> int:
@@ -331,3 +336,14 @@ class DistillationConfig(BaseConfig):
                 raise ValueError(f"Duplicate teacher key {teacher_config.key} found in teacher models.")
             teacher_models[teacher_config.key] = teacher_config
         return teacher_models
+
+    def get_teacher_routes(self) -> dict[str, tuple[str, Optional[str]]]:
+        """Map each routing key to (teacher key, LoRA adapter path or None for the teacher's base model)."""
+        routes = {}
+        for teacher_key, teacher_config in self.teacher_models.items():
+            entries = [(teacher_key, None), *teacher_config.lora_adapters.items()]
+            for routing_key, adapter_path in entries:
+                if routing_key in routes:
+                    raise ValueError(f"Duplicate teacher routing key {routing_key!r}.")
+                routes[routing_key] = (teacher_key, adapter_path)
+        return routes

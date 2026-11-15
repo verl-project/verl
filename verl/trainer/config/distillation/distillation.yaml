@@ -89,6 +89,7 @@ teacher_models:
     key: null
     model_path: null
     num_replicas: 0
+    lora_adapters: {}
     inference:
       _target_: verl.workers.config.RolloutConfig
       name: ${oc.select:actor_rollout_ref.rollout.name}

@@ -96,22 +96,24 @@ class AsyncTeacherLLMServerManager:
                 f"do not match teacher routing keys {sorted(expected)}."
             )
         self.teacher_client: dict[str, LLMServerClient] = teacher_client
+        # routing key -> (teacher key, LoRA adapter path or None)
+        self.teacher_routes: dict[str, tuple[str, Optional[str]]] = self.distillation_config.get_teacher_routes()
 
-    def _resolve_teacher_key(self, routing_key: Optional[str]) -> str:
-        if len(self.teacher_model_configs) == 1:
+    def _resolve_teacher_route(self, routing_key: Optional[str]) -> tuple[str, Optional[str]]:
+        if len(self.teacher_routes) == 1:
             # Single-teacher path: route everything to the one teacher regardless of the sample's key.
-            return next(iter(self.teacher_model_configs))
+            return next(iter(self.teacher_routes.values()))
         if routing_key is None:
             raise ValueError(
                 f"Routing key is required for multi-teacher distillation "
                 f"(configured via distillation.teacher_key={self.teacher_key!r})."
             )
-        if routing_key not in self.teacher_model_configs:
+        if routing_key not in self.teacher_routes:
             raise ValueError(
                 f"No teacher configured for routing key {routing_key!r}. "
-                f"Configured teachers: {sorted(self.teacher_model_configs)}."
+                f"Configured teachers: {sorted(self.teacher_routes)}."
             )
-        return routing_key
+        return self.teacher_routes[routing_key]
 
     async def compute_teacher_logprobs_single(
         self,
@@ -123,9 +125,10 @@ class AsyncTeacherLLMServerManager:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute teacher log probabilities for a single unpadded sequence."""
         multi_modal_data = multi_modal_data or {}
-        teacher_key = self._resolve_teacher_key(routing_key)
+        teacher_key, lora_path = self._resolve_teacher_route(routing_key)
         teacher_model_config = self.teacher_model_configs[teacher_key]
         client = self.teacher_client[teacher_key]
+        lora_kwargs = {"lora_path": lora_path} if lora_path is not None else {}
         teacher_output = await client.generate(
             request_id=uuid4().hex,
             prompt_ids=sequence_ids,
@@ -135,6 +138,7 @@ class AsyncTeacherLLMServerManager:
             audio_data=multi_modal_data.get("audios"),
             mm_processor_output=mm_processor_output,
             mm_processor_kwargs=mm_processor_kwargs,
+            **lora_kwargs,
         )
         # Shapes: # S, (1 or K), where S is the response length, K is either 1 or topk depending on
         # the distillation loss settings.

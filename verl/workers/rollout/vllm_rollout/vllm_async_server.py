@@ -162,6 +162,8 @@ class vLLMHttpServer:
         self.config = self._init_config(config)
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
+        # Static LoRA adapters requested by path (e.g. LoRA distillation teachers): path -> vLLM lora_int_id.
+        self._lora_path_to_id: dict[str, int] = {}
 
         if self.config.full_determinism:
             from verl.workers.engine.utils import enable_full_determinism
@@ -463,7 +465,7 @@ class vLLMHttpServer:
         if lora_rank > 0:
             lora_args = {
                 "enable_lora": True,
-                "max_loras": 1,
+                "max_loras": self.model_config.lora.get("max_loras", 1),
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
             if self.model_config.lora.get("fully_sharded_loras", False):
@@ -603,13 +605,17 @@ class vLLMHttpServer:
         priority: int = 0,
         kv_transfer_params: Optional[dict] = None,
         session_id: Optional[str] = None,
+        lora_path: Optional[str] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out.
 
         Args:
             kv_transfer_params: vLLM KV-transfer payload for PD requests.
             session_id: Sticky caller id; turns of one session go to the same DP engine.
+            lora_path: Path to a PEFT LoRA adapter to apply to this request (loaded lazily by vLLM).
+                Used by LoRA distillation teachers; requires the server to be launched with enable_lora.
         """
+        assert lora_path is None or self._disaggregation_role == "null", "lora_path is not supported with PD"
         if self._disaggregation_role == "prefill" and self._pd_decode_peers and kv_transfer_params is None:
             return await self._pd_dispatch(
                 prompt_ids,
@@ -708,7 +714,14 @@ class vLLMHttpServer:
 
         # Add lora request
         lora_request = None
-        if self.lora_as_adapter:
+        if lora_path is not None:
+            if lora_path not in self._lora_path_to_id:
+                self._lora_path_to_id[lora_path] = len(self._lora_path_to_id) + 1
+                logger.info(f"Registering LoRA adapter {lora_path} as lora_int_id={self._lora_path_to_id[lora_path]}")
+            lora_request = LoRARequest(
+                lora_name=lora_path, lora_int_id=self._lora_path_to_id[lora_path], lora_path=lora_path
+            )
+        elif self.lora_as_adapter:
             # Make sure we also check that the lora is already loaded in the engine
             lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:

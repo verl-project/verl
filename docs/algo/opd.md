@@ -2,7 +2,7 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 10/03/2026.
+Last updated: 11/15/2026.
 
 ## Background
 
@@ -192,10 +192,11 @@ configured teachers, or `DistillationConfig.__post_init__` raises.
 Field on each sample's data proto used to route the sample to the right
 teacher in multi-teacher setups. Default: `"data_source"`.
 
-- **Single-teacher**: ignored (everything goes to the sole teacher).
+- **Single-teacher** without `lora_adapters`: ignored (everything goes to the
+  sole teacher).
 - **Multi-teacher**: the value of `sample[teacher_key]` must match the `key`
-  of one of the configured teachers, or
-  `AsyncTeacherLLMServerManager._resolve_teacher_key` raises.
+  of one of the configured teachers or one of their `lora_adapters` keys, or
+  `AsyncTeacherLLMServerManager._resolve_teacher_route` raises.
 
 ### `distillation.teacher_models` (dict)
 
@@ -247,6 +248,30 @@ GPUs, so the teacher's total footprint is `num_replicas × per_replica_world_siz
 
 For a **single teacher**, you may leave this at `0`: `_resolve_teacher_models`
 auto-fills it as `pool_size // per_replica_world_size`.
+
+### `distillation.teacher_models.<name>.lora_adapters` (dict[str, str])
+
+LoRA teachers served on top of this teacher's `model_path`, as
+`{routing_key: local PEFT adapter dir}`. Default: `{}`.
+
+The teacher servers load the base model once and apply the adapter per request
+with vLLM multi-LoRA, so K LoRA teachers of one base need the GPUs of one
+teacher instead of K. Samples whose `sample[teacher_key]` equals an adapter key
+are scored by base + that adapter; samples matching the entry's own `key` are
+scored by the plain base model.
+
+```bash
++distillation.teacher_models.teacher_model.key=base
++distillation.teacher_models.teacher_model.model_path=Qwen/Qwen3-8B
++distillation.teacher_models.teacher_model.lora_adapters.math=/ckpt/math_lora
++distillation.teacher_models.teacher_model.lora_adapters.code=/ckpt/code_lora
+```
+
+- vLLM only (`inference.name=vllm`).
+- Each adapter dir must contain `adapter_config.json` and be readable on every
+  teacher node. The servers are started with `max_lora_rank` = the largest `r`
+  and `max_loras` = the number of adapters.
+- Routing keys must be unique across all teachers and adapters.
 
 ### `distillation.teacher_models.<name>.inference.*`
 
@@ -733,15 +758,16 @@ rollouts on other samples.
 
 6. **Teacher selection.**
    `AsyncTeacherLLMServerManager.compute_teacher_logprobs_single` resolves the
-   teacher via `_resolve_teacher_key`:
+   teacher via `_resolve_teacher_route`:
 
-   - **Single-teacher**: routing key is ignored; the sole configured teacher
-     is used.
-   - **Multi-teacher**: `routing_key` must match a configured teacher in
-     `distillation.teacher_models`; otherwise an error is raised.
+   - **Single-teacher** without `lora_adapters`: routing key is ignored; the
+     sole configured teacher is used.
+   - **Multi-teacher**: `routing_key` must match a configured teacher or one of
+     its `lora_adapters` keys; otherwise an error is raised.
 
-   The resolved key indexes into the per-teacher `LLMServerClient` dict to pick
-   the right client.
+   The resolved teacher key indexes into the per-teacher `LLMServerClient` dict
+   to pick the right client; for a LoRA route, the adapter path is passed as
+   `lora_path` to the teacher server.
 
 7. **Sampling params for logprob computation.** The manager builds
    sampling params with `max_tokens=1` plus `prompt_logprobs=topk` (or `0`),

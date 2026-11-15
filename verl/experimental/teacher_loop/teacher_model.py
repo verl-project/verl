@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import json
 import logging
 import os
 
@@ -34,6 +35,25 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 @auto_await
 async def _run_all(tasks: list[asyncio.Task]):
     await asyncio.gather(*tasks)
+
+
+def _get_lora_teacher_config(teacher_model_config: DistillationTeacherModelConfig) -> dict:
+    """vLLM LoRA settings so the teacher servers can serve all `lora_adapters` (empty if there are none)."""
+    lora_adapters = teacher_model_config.lora_adapters
+    if not lora_adapters:
+        return {}
+    if teacher_model_config.inference.name != "vllm":
+        raise NotImplementedError(f"lora_adapters only support vllm, got {teacher_model_config.inference.name}.")
+    max_rank = 0
+    for routing_key, adapter_path in lora_adapters.items():
+        adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
+        if not os.path.isfile(adapter_config_path):
+            raise ValueError(f"LoRA teacher {routing_key!r}: {adapter_config_path} not found.")
+        with open(adapter_config_path) as f:
+            max_rank = max(max_rank, json.load(f)["r"])
+    lora_config = {"rank": max_rank, "max_loras": len(lora_adapters)}
+    logger.warning(f"Teacher {teacher_model_config.key!r}: LoRA adapters {lora_adapters}, vLLM lora {lora_config}")
+    return lora_config
 
 
 class TeacherModelManager:
@@ -85,6 +105,7 @@ class TeacherModelManager:
             {
                 "_target_": "verl.workers.config.HFModelConfig",
                 "path": teacher_model_config.model_path,
+                "lora": _get_lora_teacher_config(teacher_model_config),
             }
         )
         name_suffix = (teacher_model_config.key or "").replace("/", "_")
