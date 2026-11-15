@@ -22,7 +22,7 @@ import verl.utils.tensordict_utils as tu
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import make_nd_compute_dataproto_dispatch_fn, register
-from verl.utils.device import get_device_name, get_nccl_backend
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 
 
 @ray.remote
@@ -106,7 +106,7 @@ def test_dist_global_info_wg():
     from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 
     ray.init()
-    ngpus = torch.cuda.device_count()
+    ngpus = get_torch_device().device_count()
     infer_tp = ngpus // 2
     train_tp = ngpus // 4
 

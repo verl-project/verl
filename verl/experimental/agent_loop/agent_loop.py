@@ -32,7 +32,7 @@ import logging
 import os
 import random
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 from uuid import uuid4
 
 import hydra
@@ -63,6 +63,7 @@ from verl.utils.tokenizer import (
     build_multimodal_processor_inputs,
     get_processor_token_id,
 )
+from verl.utils.tokenizer.continuous_token_check import verify_continuous_token_builder
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 from verl.workers.config import (
     HFModelConfig,
@@ -250,6 +251,11 @@ class AgentLoopBase(ABC):
         data_config (DictConfigWrap): Dataset config.
         hf_model_type: Root Hugging Face ``model_type`` used for Continuous Token builder selection.
     """
+
+    # Set to True in loops that append tool/user turns to the generated tokens (``ct_merge_context_msg``).
+    # AgentLoopWorker checks the Continuous Token builder against the chat template before the first
+    # rollout only when a loop the run can dispatch to sets it.
+    merges_context_messages: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -508,6 +514,23 @@ def register(agent_name: str):
     return decorator
 
 
+def _any_context_merging_agent_loop(agent_names: set[str]) -> bool:
+    """Return whether a registered loop among ``agent_names`` declares ``merges_context_messages``."""
+    for agent_name in agent_names:
+        agent_loop_config = _agent_loop_registry.get(agent_name)
+        if agent_loop_config is None:
+            continue
+        try:
+            agent_loop_cls = hydra.utils.get_class(agent_loop_config["_target_"])
+        except Exception as exc:
+            logger.warning("Could not resolve agent loop %r, assuming it merges context: %s", agent_name, exc)
+            return True
+        # Registered loops need not subclass AgentLoopBase, so the flag may be missing.
+        if getattr(agent_loop_cls, "merges_context_messages", False):
+            return True
+    return False
+
+
 class AgentLoopWorker:
     """Agent loop worker takes a batch of messages and run each message in an agent loop.
 
@@ -562,15 +585,19 @@ class AgentLoopWorker:
 
         # Load custom agent loop implementations from config path
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
+        custom_agent_names = []
         if agent_loop_config_path:
             resolved_path = resolve_config_path(agent_loop_config_path)
             agent_loop_configs = OmegaConf.load(resolved_path)
             for agent_loop_config in agent_loop_configs:
                 _agent_loop_registry[agent_loop_config.name] = agent_loop_config
+                custom_agent_names.append(agent_loop_config.name)
         if self.model_config.get("custom_chat_template", None) is not None:
             if self.model_config.processor is not None:
                 self.model_config.processor.chat_template = self.model_config.custom_chat_template
             self.model_config.tokenizer.chat_template = self.model_config.custom_chat_template
+
+        self._check_continuous_token_builder(custom_agent_names)
 
         trace_config = self.rollout_config.trace
         if trace_config.get("token2text", False):
@@ -583,6 +610,36 @@ class AgentLoopWorker:
             trace_config.get("backend"),
             trace_config.get("token2text", False),
             trace_config.get("max_samples_per_step_per_worker", None),
+        )
+
+    def _check_continuous_token_builder(self, custom_agent_names: list[str]) -> None:
+        """Check the Continuous Token builder against the chat template before the first rollout.
+
+        Only loops that append tool/user turns merge context, so the check runs when a loop the run
+        can dispatch to declares ``merges_context_messages``. Samples dispatch to their dataset
+        ``agent_name`` or the default loop, and datasets route tool rollouts to the built-in tool
+        agent, so it is a candidate whenever multi-turn or tools are configured.
+        """
+        multi_turn = self.rollout_config.multi_turn
+        if multi_turn.tokenization_sanity_check_mode == "disable":
+            return
+        agent_names = {self.rollout_config.agent.default_agent_loop, *custom_agent_names}
+        if multi_turn.enable or self.tools:
+            agent_names.add("tool_agent")
+        if not _any_context_merging_agent_loop(agent_names):
+            return
+        builder = create_continuous_token_builder(
+            self.tokenizer,
+            hf_model_type=self.hf_model_type,
+            chat_template_kwargs=self.config.data.get("apply_chat_template_kwargs", {}),
+            mm_processor_kwargs=self.mm_processor_kwargs,
+            processor=self.processor,
+        )
+        verify_continuous_token_builder(
+            builder,
+            mode=multi_turn.tokenization_sanity_check_mode,
+            hf_model_type=self.hf_model_type,
+            generation_config=self.model_config.generation_config,
         )
 
     def _get_mm_processor_kwargs(self, audio_data: Optional[list[Any]] = None) -> dict[str, Any]:

@@ -31,8 +31,7 @@ LOADER_FQN = REFIT_LOADER_FQN
 FINALIZE_MARKER = "__verl_sglang_quant_refit_finalize__"
 _SYNC_FP8_ATTR = "_verl_sglang_fp8_refit_staged"
 _SYNC_FP4_ATTR = "_verl_sglang_fp4_refit_staged"
-_SYNC_NVFP4_ATTR = "_verl_sglang_nvfp4_refit_staged"
-_SGLangRefitKind = Literal["mxfp8", "mxfp4", "nvfp4"]
+_SGLangRefitKind = Literal["mxfp8", "mxfp4"]
 
 _REGEX_IGNORE_TO_SGLANG = {
     r"re:.*lm_head$": "lm_head",
@@ -104,9 +103,6 @@ class SGLangMxfp8WeightQuantizer:
         translate_mxfp8_to_sglang_fp8_config(ct_config)
         self.compressed_tensors = CompressedTensorsWeightQuantizer(ct_config)
 
-    def refresh_input_global_scales(self, model: torch.nn.Module) -> None:
-        self.compressed_tensors.refresh_input_global_scales(model)
-
     def __call__(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterator[tuple[str, torch.Tensor]]:
         for name, tensor in self.compressed_tensors(weights):
             if name.endswith(".weight_scale"):
@@ -124,8 +120,6 @@ def _sglang_refit_kind(quantization_config: Mapping[str, Any]) -> _SGLangRefitKi
     modes = qat_modes_for_config(quantization_config)
     if "mxfp4_mxfp8" in modes:
         raise ValueError("SGLang does not support MXFP8 dense linear layers with MXFP4 routed experts.")
-    if "nvfp4" in modes:
-        return "nvfp4"
     if any("mxfp4" in mode for mode in modes):
         return "mxfp4"
     return None
@@ -182,9 +176,8 @@ def _prepare_refit_config(
         return native_config
 
     # Compressed-tensors raises when ordinary Linear modules match no group.
-    # MXFP4 selects FusedMoE before ignore checks; NVFP4 retains experts through
-    # its negative-lookahead pattern. Both rules keep dense layers in BF16.
-    ignored = r"re:.*" if refit_kind == "mxfp4" else r"re:^(?!.*mlp\.experts(?:\.|$)).*$"
+    # MXFP4 selects FusedMoE before ignore checks, so this keeps dense layers in BF16.
+    ignored = r"re:.*"
     native_config = deepcopy(quantization_config)
     native_config["ignore"] = list(native_config.get("ignore") or [])
     if ignored not in native_config["ignore"]:
@@ -217,7 +210,7 @@ def finalize_tensors() -> list[tuple[str, torch.Tensor]]:
 
 def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str, torch.Tensor]]) -> None:
     """Load one SGLang quantized-refit bucket and finalize kernel layouts once per sync."""
-    from verl.utils.sglang.sglang_fp4_utils import stage_mxfp4_moe_params, stage_nvfp4_moe_params
+    from verl.utils.sglang.sglang_fp4_utils import stage_mxfp4_moe_params
     from verl.utils.sglang.sglang_fp8_utils import stage_mxfp8_moe_scales
 
     named_tensors = list(named_tensors)
@@ -228,7 +221,6 @@ def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str
             if _SYNC_FP8_ATTR not in model.__dict__:
                 model.__dict__[_SYNC_FP8_ATTR] = stage_mxfp8_moe_scales(model)
                 model.__dict__[_SYNC_FP4_ATTR] = stage_mxfp4_moe_params(model)
-                model.__dict__[_SYNC_NVFP4_ATTR] = stage_nvfp4_moe_params(model)
             model.load_weights(named_tensors)
         if finalize:
             _finish_sync(model)
@@ -239,17 +231,16 @@ def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str
 
 def _abandon_sync(model: torch.nn.Module) -> None:
     """Restore CUDA-graph-captured storage after a failed bucket or finalize request."""
-    from verl.utils.sglang.sglang_fp4_utils import restore_mxfp4_live, restore_nvfp4_live
+    from verl.utils.sglang.sglang_fp4_utils import restore_mxfp4_live
 
     for module, scale_name, live in model.__dict__.pop(_SYNC_FP8_ATTR, ()):
         getattr(module, scale_name).data = live
     restore_mxfp4_live(model.__dict__.pop(_SYNC_FP4_ATTR, ()))
-    restore_nvfp4_live(model.__dict__.pop(_SYNC_NVFP4_ATTR, ()))
 
 
 def _finish_sync(model: torch.nn.Module) -> None:
     """Rebuild FP8/FP4 backend layouts after every bucket has been loaded."""
-    from verl.utils.sglang.sglang_fp4_utils import reprocess_mxfp4_moe_layers, reprocess_nvfp4_moe_layers
+    from verl.utils.sglang.sglang_fp4_utils import reprocess_mxfp4_moe_layers
     from verl.utils.sglang.sglang_fp8_utils import (
         reprocess_mxfp8_layers,
         reprocess_mxfp8_moe_layers,
@@ -259,11 +250,8 @@ def _finish_sync(model: torch.nn.Module) -> None:
         return
     fp8_staged = model.__dict__[_SYNC_FP8_ATTR]
     fp4_staged = model.__dict__.get(_SYNC_FP4_ATTR, ())
-    nvfp4_staged = model.__dict__.get(_SYNC_NVFP4_ATTR, ())
     reprocess_mxfp8_layers(model)
     reprocess_mxfp8_moe_layers(model, fp8_staged)
     reprocess_mxfp4_moe_layers(fp4_staged)
-    reprocess_nvfp4_moe_layers(nvfp4_staged)
     del model.__dict__[_SYNC_FP8_ATTR]
     model.__dict__.pop(_SYNC_FP4_ATTR, None)
-    model.__dict__.pop(_SYNC_NVFP4_ATTR, None)

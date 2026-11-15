@@ -38,6 +38,7 @@ actor_rollout_ref:
       use_orig_params: false
       seed: 42
       full_determinism: false
+      batch_invariant: false
       ulysses_sequence_parallel_size: 1
       entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
       entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
@@ -49,17 +50,6 @@ actor_rollout_ref:
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
-      qat:
-        _target_: verl.workers.config.QATEngineConfig
-        enable: false
-        mode: w4a16
-        group_size: 16
-        ignore_patterns:
-        - lm_head
-        - embed_tokens
-        - re:.*mlp.gate$
-        activation_observer: static_minmax
-        quantization_config_path: null
       turbo_config:
         distributed:
           fully_shard_parallel_size: 16
@@ -164,16 +154,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    qat:
-      enable: false
-      mode: w4a16
-      group_size: 16
-      ignore_patterns:
-      - lm_head
-      - embed_tokens
-      - re:.*mlp.gate$
-      activation_observer: static_minmax
-      quantization_config_path: null
     grad_clip: 1.0
     ulysses_sequence_parallel_size: 1
     entropy_from_logits_with_chunking: false
@@ -246,6 +226,7 @@ actor_rollout_ref:
       use_orig_params: false
       seed: 42
       full_determinism: false
+      batch_invariant: false
       ulysses_sequence_parallel_size: 1
       entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.ref.entropy_from_logits_with_chunking,False}
       entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.ref.entropy_from_logits_chunk_size,2048}
@@ -257,17 +238,6 @@ actor_rollout_ref:
       forward_only: true
       strategy: fsdp
       dtype: bfloat16
-      qat:
-        _target_: verl.workers.config.QATEngineConfig
-        enable: false
-        mode: w4a16
-        group_size: 16
-        ignore_patterns:
-        - lm_head
-        - embed_tokens
-        - re:.*mlp.gate$
-        activation_observer: static_minmax
-        quantization_config_path: null
       turbo_config:
         distributed:
           fully_shard_parallel_size: 16
@@ -426,6 +396,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.RolloutQuantizationConfig
       linear: null
       moe: null
+      moe_activation: null
       ignore: []
       config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
@@ -534,6 +505,7 @@ data:
   custom_cls:
     path: null
     name: null
+  custom_dataloader: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
   mm_processor_kwargs: {}
@@ -571,6 +543,7 @@ critic:
     use_orig_params: false
     seed: 42
     full_determinism: false
+    batch_invariant: false
     ulysses_sequence_parallel_size: 1
     entropy_from_logits_with_chunking: false
     entropy_from_logits_chunk_size: 2048
@@ -582,17 +555,6 @@ critic:
     forward_only: false
     strategy: fsdp
     dtype: bfloat16
-    qat:
-      _target_: verl.workers.config.QATEngineConfig
-      enable: false
-      mode: w4a16
-      group_size: 16
-      ignore_patterns:
-      - lm_head
-      - embed_tokens
-      - re:.*mlp.gate$
-      activation_observer: static_minmax
-      quantization_config_path: null
     turbo_config:
       distributed:
         fully_shard_parallel_size: 16
@@ -783,6 +745,7 @@ sandbox_fusion:
 reward:
   _target_: verl.workers.config.RewardConfig
   num_workers: 8
+  preset: null
   custom_reward_function:
     path: null
     name: compute_score
@@ -840,6 +803,7 @@ reward:
         _target_: verl.workers.config.RolloutQuantizationConfig
         linear: null
         moe: null
+        moe_activation: null
         ignore: []
         config_file: null
       mtp: null

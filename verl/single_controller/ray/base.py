@@ -37,6 +37,9 @@ __all__ = ["Worker"]
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+# OMP_NUM_THREADS for the workers of a RayWorkerGroup. Every other Ray worker keeps Ray's own default.
+TRAINING_WORKER_OMP_NUM_THREADS_ENV = "VERL_TRAINING_WORKER_OMP_NUM_THREADS"
+
 
 def get_random_string(length: int) -> str:
     import random
@@ -676,6 +679,8 @@ class RayWorkerGroup(WorkerGroup):
                 )
                 raise ValueError(f"Cannot override protected system env: {conflict_env_vars}")
             env_vars.update(worker_env)
+        if TRAINING_WORKER_OMP_NUM_THREADS_ENV in os.environ:
+            env_vars.setdefault("OMP_NUM_THREADS", os.environ[TRAINING_WORKER_OMP_NUM_THREADS_ENV])
         import re
 
         cia_name = type(ray_cls_with_init.cls).__name__

@@ -32,7 +32,7 @@ Examples (8 GPUs):
     # MXFP4 expert weights with dynamic MXFP8 expert activations
     .venv-vllm/bin/python scripts/rollout_logprob_diff.py --model-path ~/models/Qwen3.5-35B-A3B --ep 8 \\
         --quant-moe MXFP4 --qat-mode mxfp4 --r3-router-replay
-    # NVFP4 W4A4 experts with FlashInfer CUTLASS
+    # NVFP4 W4A4 experts with per-token activations on FlashInfer TRT-LLM
     .venv-vllm/bin/python scripts/rollout_logprob_diff.py --model-path ~/models/Qwen3.5-35B-A3B --ep 8 \\
         --quant-moe NVFP4 --qat-mode nvfp4
     # same, with Megatron ModelOpt QAT fake-quantizing to the rollout scheme

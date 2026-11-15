@@ -1,4 +1,4 @@
-# The script has been validated on the Ascend Atlas 800T A3.
+# 本脚本已在 Atlas A3训练系列产品上验证。
 set -x
 
 export HCCL_EXEC_TIMEOUT=60000

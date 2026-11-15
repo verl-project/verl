@@ -19,7 +19,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from verl import DataProto
-from verl.utils.reward_score import get_default_compute_score
+from verl.utils.reward_score import get_default_compute_score, validate_reward_preset
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -132,6 +132,14 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
     default_compute_score_ = get_default_compute_score(reward_manager_cfg.name)
 
     if compute_score is None:
+        preset = config.reward.get("preset")
+        if preset is not None:
+            validate_reward_preset(preset)
+
+        default_kwargs: dict[str, Any] = {}
+        if preset is not None:
+            default_kwargs["preset"] = preset
+
         sandbox_config = config.reward.get("sandbox_fusion")
         sandbox_url = sandbox_config.get("url") if sandbox_config else None
         memory_limit_mb = sandbox_config.get("memory_limit_mb", 1024) if sandbox_config else 1024
@@ -139,14 +147,14 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
             sandbox_manager = multiprocessing.Manager()
             # Create a semaphore to control concurrent access to the sandbox
             _concurrent_semaphore = sandbox_manager.Semaphore(sandbox_config.get("max_concurrent", 64))
-            final_compute_score = partial(
-                default_compute_score_,
+            default_kwargs.update(
                 sandbox_fusion_url=sandbox_url,
                 concurrent_semaphore=_concurrent_semaphore,
                 memory_limit_mb=memory_limit_mb,
             )
-        else:
-            final_compute_score = default_compute_score_
+        final_compute_score = (
+            partial(default_compute_score_, **default_kwargs) if default_kwargs else default_compute_score_
+        )
 
     # Instantiate and return the reward manager with the specified parameters
     return reward_manager_cls(
