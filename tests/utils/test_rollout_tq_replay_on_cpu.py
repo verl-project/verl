@@ -98,8 +98,9 @@ def test_replay_preserves_every_trajectory_and_key_suffix(tmp_path, tq_puts):
     # Session 0 produced three outputs, session 1 produced one.
     _write_dump(skip, ["old_0_0", "old_0_1", "old_0_2", "old_1_0"], session_ids=[0, 0, 0, 1])
 
-    skip.load_dump_data(step=1, new_prompt_uids=["new"], global_steps=9, partition_id="replay")
+    covered = skip.load_dump_data(step=1, new_prompt_uids=["new"], global_steps=9, partition_id="replay")
 
+    assert covered == 1, "the single cached group covers the single new prompt"
     assert len(tq_puts) == 2, "expected one trajectory put and one prompt-level put"
     traj_put, prompt_put = tq_puts
     # All four cached rows survive, re-keyed onto the new uid with their own
@@ -108,6 +109,9 @@ def test_replay_preserves_every_trajectory_and_key_suffix(tmp_path, tq_puts):
     # Row content stays aligned with the key: responses 1..4 in saved order.
     assert [row.tolist() for row in traj_put["fields"]["responses"].unbind()] == [[1], [2], [3], [4]]
     assert [int(sid) for sid in traj_put["fields"]["session_id"]] == [0, 0, 0, 1]
+    # The row uid column follows the re-keyed prompt uid: the key prefix and the uid
+    # column are the two GRPO grouping paths and must agree.
+    assert [str(uid) for uid in traj_put["fields"]["uid"]] == ["new"] * 4
     # Staleness tags are overridden for the current step.
     assert all(tag["global_steps"] == 9 for tag in traj_put["tags"])
     assert prompt_put["keys"] == ["new"]
@@ -123,8 +127,30 @@ def test_replay_maps_groups_to_new_prompts_faithfully(tmp_path, tq_puts):
         session_ids=[0, 0, 1, 0],
     )
 
-    skip.load_dump_data(step=1, new_prompt_uids=["new1", "new2"], global_steps=9, partition_id="replay")
+    covered = skip.load_dump_data(step=1, new_prompt_uids=["new1", "new2"], global_steps=9, partition_id="replay")
 
+    assert covered == 2
     traj_put = tq_puts[0]
     assert traj_put["keys"] == ["new1_0_0", "new1_0_1", "new1_1_0", "new2_0_0"]
     assert [row.tolist() for row in traj_put["fields"]["responses"].unbind()] == [[1], [2], [3], [4]]
+    # Row uid columns follow their re-keyed prompt, not the original dump uid.
+    assert [str(uid) for uid in traj_put["fields"]["uid"]] == ["new1", "new1", "new1", "new2"]
+
+
+def test_replay_covers_a_prefix_and_marks_only_covered_prompts_finished(tmp_path, tq_puts):
+    skip = _make_skip(tmp_path)
+    # One cached group but the batch asks for two prompts: the group must not be
+    # duplicated onto the second prompt; the uncovered prompt goes back to the
+    # caller for real rollout.
+    _write_dump(skip, ["old_0_0", "old_1_0"], session_ids=[0, 1])
+
+    covered = skip.load_dump_data(step=1, new_prompt_uids=["new1", "new2"], global_steps=9, partition_id="replay")
+
+    assert covered == 1, "only the first prompt is covered by the single cached group"
+    assert len(tq_puts) == 2, "expected one trajectory put and one prompt-level put"
+    traj_put, prompt_put = tq_puts
+    assert traj_put["keys"] == ["new1_0_0", "new1_1_0"]
+    assert [row.tolist() for row in traj_put["fields"]["responses"].unbind()] == [[1], [2]]
+    assert [str(uid) for uid in traj_put["fields"]["uid"]] == ["new1", "new1"]
+    # Only the replayed prompt is marked finished; "new2" must stay unmarked.
+    assert prompt_put["keys"] == ["new1"]

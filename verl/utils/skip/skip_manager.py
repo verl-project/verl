@@ -159,8 +159,16 @@ class SkipManager:
                 if phase == "submit":
                     # Always prepare batch (keeps dataloader aligned on cache-hit steps)
                     batch = self._next_train_batch()
-                    if skip_instance.maybe_load_and_inject(step, list(batch["uid"])):
+                    new_prompt_uids = list(batch["uid"])
+                    injected = skip_instance.maybe_load_and_inject(step, new_prompt_uids)
+                    if injected >= len(new_prompt_uids):
                         return
+                    if injected:
+                        # The cache covers only a prefix of the batch: submit the
+                        # uncovered trailing prompts for real rollout.
+                        from verl.utils.tensordict_utils import index_select_tensor_dict
+
+                        batch = index_select_tensor_dict(batch, list(range(injected, len(new_prompt_uids))))
                     self._submit_batch_to_rollout(batch)
                     return
 

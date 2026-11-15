@@ -17,6 +17,7 @@ from typing import Callable
 
 import torch
 from omegaconf import OmegaConf
+from tensordict import NonTensorStack
 
 from verl.protocol import DataProto
 from verl.utils.skip.base_skip import BaseSkip, SkipAction, register_skip
@@ -268,12 +269,14 @@ class RolloutTqSkip(RolloutSkip):
         """Phase one: whether the sampled batch should be saved to disk."""
         return partition_id == "train" and not self.has_v1_cache(step)
 
-    def maybe_load_and_inject(self, step: int, new_prompt_uids: list[str], partition_id: str = "train") -> bool:
+    def maybe_load_and_inject(self, step: int, new_prompt_uids: list[str], partition_id: str = "train") -> int:
         """Phase two: load cached data and inject into TransferQueue if cache exists.
 
         Convenience wrapper that combines ``meet_precondition`` + ``load_dump_data``.
-        Returns ``True`` if cached data was injected (caller should skip real rollout),
-        ``False`` otherwise.
+        Returns the number of prompts covered by the injected cache. The cache covers
+        a prefix of ``new_prompt_uids``: callers should skip real rollout only when
+        this equals ``len(new_prompt_uids)`` and submit the remaining trailing
+        prompts for real rollout otherwise.
 
         Args:
             step: Current training step.
@@ -286,14 +289,13 @@ class RolloutTqSkip(RolloutSkip):
                 f"The trainer will generate and dump the data.\033[0m",
                 flush=True,
             )
-            return False
-        self.load_dump_data(
+            return 0
+        return self.load_dump_data(
             step=step,
             new_prompt_uids=new_prompt_uids,
             global_steps=step,
             partition_id=partition_id,
         )
-        return True
 
     def prepare_data(self, step: int, batch, global_steps: int) -> None:
         """Phase one: read batch from TransferQueue and save to disk.
@@ -341,7 +343,7 @@ class RolloutTqSkip(RolloutSkip):
         new_prompt_uids: list[str],
         global_steps: int,
         partition_id: str = "train",
-    ) -> None:
+    ) -> int:
         """Phase two: load cached data from disk and inject into TransferQueue.
 
         Maps saved trajectories to new prompt uids in order, preserving the
@@ -358,6 +360,11 @@ class RolloutTqSkip(RolloutSkip):
             new_prompt_uids: Freshly generated uids for the current batch.
             global_steps: Current ``global_steps``, used to override staleness tags.
             partition_id: TQ partition (``"train"`` or ``"val"``).
+
+        Returns:
+            Number of new prompts covered by the replay. The cache always covers a
+            prefix of ``new_prompt_uids``; when it holds fewer prompt groups than the
+            batch, callers must submit the remaining trailing prompts for real rollout.
         """
         import transfer_queue as tq
 
@@ -405,7 +412,8 @@ class RolloutTqSkip(RolloutSkip):
         if num_cached_groups < num_prompts:
             print(
                 f"{self.print_mark}\033[33mCached {num_cached_groups} prompt groups but need {num_prompts} "
-                f"prompts; will cycle through available groups to fill\033[0m",
+                f"prompts; replaying the first {num_cached_groups} prompts and leaving the remaining "
+                f"{num_prompts - num_cached_groups} for real rollout\033[0m",
                 flush=True,
             )
         elif num_cached_groups > num_prompts:
@@ -415,24 +423,26 @@ class RolloutTqSkip(RolloutSkip):
                 flush=True,
             )
 
-        # Build new keys/tags: map each new uid to a cached group and replay
-        # every trajectory of that group, re-keyed onto the new uid while
-        # keeping the saved ``{session_id}_{index}`` suffix of each row. The
-        # suffix in the cached key is authoritative: it is what the agent loop
-        # emitted for that row, and the row's own ``session_id`` field matches
-        # it. Forcing a fresh ``session_id in range(n)``/``index=0`` here would
-        # drop cached rows whose index is > 0 and relabel intermediate outputs
-        # as final answers.
-        # If cached groups < new prompts, cycle through groups (modulo).
+        # Build new keys/tags: map each new uid to exactly one cached group — a group
+        # is never replayed for several prompts, so a cached group cannot be trained on
+        # multiple times within one step — and replay every trajectory of that group,
+        # re-keyed onto the new uid while keeping the saved ``{session_id}_{index}``
+        # suffix of each row. The suffix in the cached key is authoritative: it is what
+        # the agent loop emitted for that row, and the row's own ``session_id`` field
+        # matches it. Forcing a fresh ``session_id in range(n)``/``index=0`` here would
+        # drop cached rows whose index is > 0 and relabel intermediate outputs as final
+        # answers. Fewer cached groups than prompts cover only a prefix of the batch;
+        # the uncovered prompts stay with the caller for real rollout.
         new_keys = []
         new_tags = []
+        new_uids = []
         traj_indices: list[int] = []
-        for prompt_idx, new_uid in enumerate(new_prompt_uids):
-            group = groups[prompt_idx % num_cached_groups]
+        for new_uid, group in zip(new_prompt_uids, groups, strict=False):
             for traj_idx in group:
                 _, session_id, index = old_keys[traj_idx].rsplit("_", 2)
                 traj_indices.append(traj_idx)
                 new_keys.append(f"{new_uid}_{session_id}_{index}")
+                new_uids.append(new_uid)
                 tag = dict(old_tags[traj_idx])
                 tag["global_steps"] = global_steps
                 tag["min_global_steps"] = global_steps
@@ -445,6 +455,10 @@ class RolloutTqSkip(RolloutSkip):
         from verl.utils.tensordict_utils import index_select_tensor_dict
 
         new_fields = index_select_tensor_dict(data, traj_indices)
+        # The row ``uid`` is the other GRPO grouping path: ``_compute_advantage`` groups
+        # rows by the ``uid`` column while ``compute_advantage_for_multi_trajectories``
+        # parses the key prefix. Rewrite it so both agree on the new uid.
+        new_fields["uid"] = NonTensorStack(*new_uids)
 
         # Write trajectory data to TQ
         tq.kv_batch_put(
@@ -454,20 +468,24 @@ class RolloutTqSkip(RolloutSkip):
             partition_id=partition_id,
         )
 
-        # Mark prompt-level keys as finished so ReplayBuffer can pick them up immediately
-        prompt_tags = [{"is_prompt": True, "status": "finished", "global_steps": global_steps}] * len(new_prompt_uids)
+        # Mark the replayed prompt-level keys as finished so ReplayBuffer can pick them
+        # up immediately. Prompts left uncovered (cache smaller than the batch) are not
+        # marked: their real rollout is submitted by the caller.
+        replayed_uids = new_prompt_uids[: min(num_prompts, num_cached_groups)]
+        prompt_tags = [{"is_prompt": True, "status": "finished", "global_steps": global_steps}] * len(replayed_uids)
         tq.kv_batch_put(
-            keys=new_prompt_uids,
+            keys=replayed_uids,
             partition_id=partition_id,
             tags=prompt_tags,
         )
 
         print(
             f"{self.print_mark}\033[33mInjected {len(new_keys)} cached trajectories "
-            f"from step {load_step} ({len(new_prompt_uids)} prompts, {num_cached_groups} cached groups) "
+            f"from step {load_step} ({len(replayed_uids)}/{num_prompts} prompts, {num_cached_groups} cached groups) "
             f"into TQ partition '{partition_id}' at current step {step}\033[0m",
             flush=True,
         )
+        return len(replayed_uids)
 
 
 def parse_async_rollout_sample_step(sample_id: str) -> int:

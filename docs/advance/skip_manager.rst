@@ -390,9 +390,12 @@ Cache-hit injection: key remapping
    Each group is one prompt GRPO group (``rollout.n`` rows when each session emits a single
    output; sessions can emit several outputs per step, so a group may hold more or fewer rows).
 
-2. **Map new uids to groups**: For each new uid at position prompt_idx, select
-   ``groups[prompt_idx % num_cached_groups]``. If cached groups are fewer than new prompts, groups
-   cycle (modulo). If more, only the first ``num_prompts`` groups are used.
+2. **Map new uids to groups**: Each new uid is mapped to exactly one cached group, in order — a
+   group is never replayed for several prompts, so a cached group cannot be trained on multiple
+   times within one step. If cached groups are fewer than new prompts, only the first
+   ``num_cached_groups`` prompts are replayed and the remaining trailing prompts are submitted for
+   real rollout (``load_dump_data`` returns how many prompts it covered). If more, only the first
+   ``num_prompts`` groups are used.
 
 3. **Replay every trajectory of the mapped group**: iterate over the group's cached rows in
    saved order. The cache is authoritative for both content and per-prompt row count — a
@@ -412,19 +415,24 @@ Cache-hit injection: key remapping
 
 6. **Select tensor rows**: ``index_select_tensor_dict(data, traj_indices)`` picks (and possibly
    duplicates) rows from the cached ``tensordict``. This handles both regular tensors and
-   NestedTensor (unbind -> select -> nested_tensor_from_tensor_list rebuild).
+   NestedTensor (unbind -> select -> nested_tensor_from_tensor_list rebuild). The row ``uid``
+   column is rewritten to the new uid so the two GRPO grouping paths agree: one reads the key
+   prefix (``compute_advantage_for_multi_trajectories``), the other the ``uid`` column
+   (``_compute_advantage``).
 
 7. **Two ``kv_batch_put`` calls**:
 
    - **Trajectory data**: ``keys=new_keys``, ``fields=new_fields``, ``tags=new_tags`` — writes the
      actual trajectory content into TQ storage.
-   - **Prompt-level markers**: ``keys=new_prompt_uids``, ``tags=[{"is_prompt": True, "status":
-     "finished", ...}]`` — marks each new prompt as finished so ``ReplayBuffer.sample``'s
+   - **Prompt-level markers**: ``keys=replayed_uids``, ``tags=[{"is_prompt": True, "status":
+     "finished", ...}]`` — marks only the replayed prompts as finished so ``ReplayBuffer.sample``'s
      ``_has_enough_samples`` passes immediately without polling.
 
 After injection, TQ holds every cached trajectory of the mapped groups re-keyed onto the new
-uids, plus one prompt-level key with ``status="finished"``. ``replay_buffer.sample`` picks
-them up on the next call and returns a KVBatchMeta whose data is the injected cache.
+uids, plus one prompt-level key with ``status="finished"`` per replayed prompt. Prompts left
+uncovered (cache smaller than the batch) are submitted for real rollout by the caller.
+``replay_buffer.sample`` picks them up on the next call and returns a KVBatchMeta whose data is
+the injected cache.
 
 
 5. Fully async quick start (``async_rollout`` role)
