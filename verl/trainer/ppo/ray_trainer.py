@@ -257,8 +257,9 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
-        # GDPO: pass raw data for per-dimension reward extraction
-        if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
+        # GDPO: pass raw data for per-dimension reward extraction.
+        # grpo_segment reads per-row segment_boundaries and combined_rewards.
+        if adv_estimator in (AdvantageEstimator.GDPO, "gdpo", AdvantageEstimator.GRPO_SEGMENT, "grpo_segment"):
             adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
             adv_kwargs["batch"] = data.batch
         # Add sum_pi_squared for Optimal Token Baseline
