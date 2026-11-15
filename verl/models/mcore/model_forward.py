@@ -187,12 +187,7 @@ def gptmodel_forward_model_engine(
                 input_ids_lengths,
                 logits_processor_args.get("response_attention_mask"),
             )
-            projection_mask = preprocess_thd_engine(
-                full_loss_mask,
-                pre_process=True,
-                need_roll=True,
-                **thd_kwargs,
-            )[0].to(torch.bool)
+            projection_mask = preprocess_thd_engine(full_loss_mask, need_roll=True, **thd_kwargs)[0].to(torch.bool)
 
         args = {}
         if mtp_enable_train and post_process:

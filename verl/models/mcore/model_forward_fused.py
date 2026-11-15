@@ -413,9 +413,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             full_loss_mask = _build_full_loss_mask_nested(
                 loss_mask, input_ids.offsets().diff().tolist(), response_attention_mask
             )
-            projection_mask = preprocess_thd_engine(
-                full_loss_mask, pre_process=True, need_roll=True, **thd_kwargs
-            )[0].to(torch.bool)
+            projection_mask = preprocess_thd_engine(full_loss_mask, need_roll=True, **thd_kwargs)[0].to(torch.bool)
         topk_labels_rmpad = None
         if topk_labels is not None:
             topk_labels_rmpad, _, _ = preprocess_thd_engine(

@@ -62,6 +62,8 @@ def response_only_output_projection(model, projection_mask: torch.Tensor) -> Ite
         projection_mask = projection_mask.to(torch.bool)
 
     output_layer = _get_output_layer(model)
+    if getattr(getattr(output_layer, "config", None), "fp8_output_proj", False):
+        raise NotImplementedError("response_only_lm_head does not support a quantized unfused output projection")
     sequence_parallel = bool(getattr(output_layer, "sequence_parallel", False))
     if sequence_parallel and getattr(getattr(output_layer, "config", None), "defer_embedding_wgrad_compute", False):
         raise NotImplementedError(

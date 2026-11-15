@@ -147,52 +147,81 @@ def test_unfused_sequence_parallel_gathers_before_selection(misaligned):
     torch.testing.assert_close(output_layer(hidden)[0], hidden)
 
 
-def test_unfused_sequence_parallel_rejects_deferred_weight_gradients():
-    output_layer = _OutputLayer(sequence_parallel=True)
-    output_layer.config = SimpleNamespace(defer_embedding_wgrad_compute=True)
-    with pytest.raises(NotImplementedError, match="deferred embedding weight gradients"):
+@pytest.mark.parametrize("option", ["defer_embedding_wgrad_compute", "fp8_output_proj"])
+def test_unfused_projection_rejects_unsupported_output_layer_options(option):
+    output_layer = _OutputLayer(sequence_parallel=option == "defer_embedding_wgrad_compute")
+    output_layer.config = SimpleNamespace(**{option: True})
+    with pytest.raises(NotImplementedError, match="response_only_lm_head does not support"):
         with response_only_output_projection(_Model(output_layer), torch.ones(1, 4, dtype=torch.bool)):
-            pytest.fail("Deferred weight gradients must be rejected before installing the hook")
-    assert output_layer.sequence_parallel
+            pytest.fail("Unsupported output-layer options must be rejected before installing the hook")
+    assert output_layer.sequence_parallel == (option == "defer_embedding_wgrad_compute")
     assert not output_layer.disable_grad_reduce
     assert not output_layer._forward_pre_hooks
 
 
-@pytest.mark.parametrize("sequence_parallel", [False, True])
-@pytest.mark.parametrize("empty", [False, True])
-def test_fused_projection_matches_dense_values_and_gradients(sequence_parallel, empty):
+@pytest.mark.parametrize(
+    "impl_backend, sequence_parallel, empty",
+    [
+        ("triton", True, False),
+        ("triton", False, True),
+        ("liger", True, True),
+        ("liger", False, False),
+        ("tilelang", True, False),
+        ("tilelang", False, True),
+    ],
+)
+def test_fused_projection_matches_dense_values_and_gradients(impl_backend, sequence_parallel, empty):
     torch.manual_seed(42)
     mask = torch.tensor([[False, True, False, True, True, False]])
     if empty:
         mask.zero_()
     labels = torch.tensor([[0, 1, 2, 3, 4, 0]])
-    initial_hidden = torch.randn(6, 1, 3)
+    initial_hidden = torch.randn(3 if sequence_parallel else 6, 1, 3)
     initial_weight = torch.randn(5, 3)
     coefficients = torch.randn(1, 6) * mask
+    process_group = object()
 
     def run(projection_mask):
         hidden = initial_hidden.clone().requires_grad_()
         weight = initial_weight.clone().requires_grad_()
         projected_rows = []
 
-        def kernel(h, w, y, temperature, reduction, group):
+        def kernel(h, w, y, temperature, reduction, group, **options):
+            assert temperature == 0.7
+            assert reduction == "none"
+            assert group is process_group
+            assert options == {"impl_backend": impl_backend}
             projected_rows.append(h.shape[0])
             log_probs = (h.reshape(-1, 3) @ w.T / temperature).log_softmax(-1)
             return log_probs.gather(-1, y.reshape(-1, 1)).squeeze(-1), -(log_probs.exp() * log_probs).sum(-1)
 
         with (
             patch.object(mff, "linear_cross_entropy", side_effect=kernel),
-            patch.object(mff.parallel_state, "get_tensor_model_parallel_group", return_value=object()),
-            patch.object(mff, "gather_from_sequence_parallel_region", side_effect=lambda value: value) as gather,
-            patch.object(mff, "copy_to_tensor_model_parallel_region", side_effect=lambda value, group: value) as copy,
+            patch.object(mff.parallel_state, "get_tensor_model_parallel_group", return_value=process_group),
+            patch.object(mff, "has_config_logger_enabled", return_value=False),
+            patch.object(
+                mff,
+                "gather_from_sequence_parallel_region",
+                side_effect=lambda value, **kwargs: torch.cat((value, value + 0.5)),
+            ) as gather,
+            patch.object(mff, "copy_to_tensor_model_parallel_region", side_effect=lambda value: value) as copy,
         ):
-            log_probs, entropy = mff._compute_fused_lm_head(
-                hidden, weight, labels, 0.7, sequence_parallel, projection_mask
+            output = mff.fused_output_processor(
+                hidden_states=hidden,
+                output_layer=SimpleNamespace(weight=weight),
+                output_weight=None,
+                labels=labels,
+                context=mff.FusedOutputProcessorContext(
+                    temperature=0.7, impl_backend=impl_backend, projection_mask=projection_mask
+                ),
+                config=SimpleNamespace(sequence_parallel=sequence_parallel),
             )
 
-        assert gather.called == sequence_parallel
-        assert copy.called != sequence_parallel
-        log_probs, entropy = log_probs.reshape_as(mask), entropy.reshape_as(mask)
+        assert gather.call_count == int(sequence_parallel)
+        assert copy.call_count == int(not sequence_parallel and impl_backend != "liger")
+        if sequence_parallel:
+            assert gather.call_args.kwargs == {"tensor_parallel_output_grad": impl_backend != "liger"}
+        log_probs, entropy = output.log_probs.reshape_as(mask), output.entropy.reshape_as(mask)
         ((log_probs + 0.1 * entropy) * coefficients).sum().backward()
         return log_probs, entropy, hidden.grad, weight.grad, projected_rows
 
