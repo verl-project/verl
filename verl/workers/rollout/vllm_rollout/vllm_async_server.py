@@ -864,35 +864,25 @@ class vLLMHttpServer:
         )
 
     async def start_profile(self, **kwargs):
-        is_nsys = self.profiler_controller._tool == "nsys"
-        profile_engine = self.node_rank == 0 and self._should_profile()
-        if is_nsys:
+        if self.profiler_controller._tool == "nsys":
+            # One controller per Nsight session; its capture includes engine subprocesses.
+            # Forwarding the same CUDA-profiler calls can discard repeated capture ranges.
             self.profiler_controller.start(**kwargs)
-        try:
-            if profile_engine:
-                await self.engine.start_profile(**({} if is_nsys else kwargs))
-        except Exception:
-            if is_nsys:
-                self.profiler_controller.stop(run_command=False)
-            raise
+        elif self.node_rank == 0 and self._should_profile():
+            await self.engine.start_profile(**kwargs)
 
     async def stop_profile(self):
-        is_nsys = self.profiler_controller._tool == "nsys"
-        profile_engine = self.node_rank == 0 and self._should_profile()
-        try:
-            if profile_engine:
-                await self.engine.stop_profile()
-                if not is_nsys:
-                    # Collect engine traces for the training worker's end-of-run upload.
-                    relocate_rollout_traces(
-                        self.profiler_controller.config,
-                        self.replica_rank,
-                        self.replica_world_size,
-                        self.profiler_keep_global_ranks,
-                    )
-        finally:
-            if is_nsys:
-                self.profiler_controller.stop(run_command=False)
+        if self.profiler_controller._tool == "nsys":
+            self.profiler_controller.stop(run_command=False)
+        elif self.node_rank == 0 and self._should_profile():
+            await self.engine.stop_profile()
+            # Collect engine traces for the training worker's end-of-run upload.
+            relocate_rollout_traces(
+                self.profiler_controller.config,
+                self.replica_rank,
+                self.replica_world_size,
+                self.profiler_keep_global_ranks,
+            )
 
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""

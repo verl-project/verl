@@ -374,8 +374,6 @@ class TestVllmProfiler:
                 False,
                 [
                     call.server_start(profile_step=3),
-                    call.engine_start(),
-                    call.engine_stop(),
                     call.server_stop(run_command=False),
                 ],
                 False,
@@ -433,20 +431,6 @@ class TestVllmProfiler:
         relocate.assert_not_called()
         assert server.profiler_controller.start.call_count == server_calls
         assert server.profiler_controller.stop.call_count == server_calls
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("action", ["start", "stop"])
-    async def test_engine_failure_still_stops_server_profiler(self, backend, server, action):
-        error = RuntimeError("engine failed")
-        getattr(server.engine, f"{action}_profile").side_effect = error
-
-        with patch.object(backend, "relocate_rollout_traces") as relocate:
-            with pytest.raises(RuntimeError, match="engine") as exc:
-                await getattr(server, f"{action}_profile")()
-
-        assert exc.value is error
-        server.profiler_controller.stop.assert_called_once_with(run_command=False)
-        relocate.assert_not_called()
 
     def test_init_accepts_nsight_and_sets_report_role(self, backend):
         profiler_config = ProfilerConfig(tool="nsys", tool_config={"nsys": NsightToolConfig()})
