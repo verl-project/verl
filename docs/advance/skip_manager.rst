@@ -307,7 +307,7 @@ Two-phase flow
     |
     +- _add_batch_to_generate()          [submit decorator: skip enabled, cache-miss]
     |    +- _next_train_batch()           -> batch with fresh uids
-    |    +- maybe_load_and_inject()       -> False (no cache)
+    |    +- maybe_load_and_inject()       -> 0 covered prompts (no cache)
     |    +- _submit_batch_to_rollout()    -> real LLM generation dispatched to TQ
     |
     +- replay_buffer.sample()            [sample decorator: skip enabled]
@@ -325,17 +325,21 @@ Two-phase flow
     |
     +- _add_batch_to_generate()          [submit decorator: skip enabled, cache-hit]
     |    +- _next_train_batch()           -> batch with fresh uids
-    |    +- maybe_load_and_inject()       -> True -> load_dump_data()
+    |    +- maybe_load_and_inject()       -> covered prompt count -> load_dump_data()
     |    |    +- torch.load(tq_batch.pt)  -> old keys, tags, tensordict
     |    |    +- group old trajectories by uid prefix
-    |    |    +- map new uids -> cached groups (modulo cycling)
+    |    |    +- map new uids -> one cached group each (one-to-one; the replay
+    |    |    |  covers a prefix of the batch when the cache holds fewer groups)
     |    |    +- index_select_tensor_dict -> select/repeat trajectory rows
     |    |    +- kv_batch_put trajectories with new keys + updated tags
-    |    |    +- kv_batch_put prompt-level keys with status="finished"
-    |    +- return (skip _submit_batch_to_rollout -- no real LLM call)
+    |    |    +- kv_batch_put replayed prompt-level keys with status="finished"
+    |    +- full coverage    -> return (skip _submit_batch_to_rollout -- no real LLM call)
+    |    +- partial coverage -> _submit_batch_to_rollout(uncovered trailing prompts)
     |
     +- replay_buffer.sample()            [sample decorator: skip enabled]
     |    +- (original sample runs)        -> finds finished prompts immediately, returns KVBatchMeta
+    |    |                                (a partial-hit step mixes the injected cache with the
+    |    |                                 real-rollout trajectories of the uncovered prompts)
     |    +- should_save()                 -> False (cache exists)
     |    +- (no prepare_data call)
     |
