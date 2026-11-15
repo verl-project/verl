@@ -40,3 +40,11 @@ def test_duplicate_routing_key_raises():
     config = _config(base=dict(key="base", lora_adapters={"big": "/a/big"}), big=dict(key="big"))
     with pytest.raises(ValueError, match="Duplicate teacher routing key 'big'"):
         config.get_teacher_routes()
+
+
+@pytest.mark.parametrize("key, base_route", [("base", "base"), (None, "default")])
+def test_single_teacher_keeps_configured_key(key, base_route):
+    teacher = DistillationTeacherModelConfig(key=key, model_path="m", lora_adapters={"math": "/a/math"})
+    config = DistillationConfig(n_gpus_per_node=2, nnodes=1, teacher_models={"teacher_model": teacher})
+    config.teacher_models = config._resolve_teacher_models()
+    assert config.get_teacher_routes() == {base_route: (base_route, None), "math": (base_route, "/a/math")}

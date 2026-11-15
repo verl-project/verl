@@ -322,7 +322,8 @@ class DistillationConfig(BaseConfig):
                     f"resource pool size ({self.n_gpus_per_node=} * {self.nnodes=} = {pool_size})."
                 )
             teacher_model.num_replicas = pool_size // per_replica
-            teacher_model.key = "default"
+            if teacher_model.key is None:
+                teacher_model.key = "default"
         else:
             # Multiple teachers: remove default single teacher config
             self.teacher_models.pop("teacher_model")

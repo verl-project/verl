@@ -228,7 +228,7 @@ distillation.teacher_models.teacher_model.model_path=Qwen/Qwen3-4B
 
 Identifier used to route samples to this teacher in multi-teacher mode. Must
 match the value of `sample[distillation.teacher_key]`. Default: `null`
-(required for multi-teacher; auto-set to `"default"` for single-teacher).
+(required for multi-teacher; defaults to `"default"` for single-teacher).
 
 ### `distillation.teacher_models.<name>.model_path` (str)
 

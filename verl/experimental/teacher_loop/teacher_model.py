@@ -50,7 +50,9 @@ def _get_lora_teacher_config(teacher_model_config: DistillationTeacherModelConfi
         if not os.path.isfile(adapter_config_path):
             raise ValueError(f"LoRA teacher {routing_key!r}: {adapter_config_path} not found.")
         with open(adapter_config_path) as f:
-            max_rank = max(max_rank, json.load(f)["r"])
+            adapter_config = json.load(f)
+        # vLLM checks max_lora_rank against r and per-module rank_pattern overrides.
+        max_rank = max(max_rank, adapter_config["r"], *(adapter_config.get("rank_pattern") or {}).values())
     lora_config = {"rank": max_rank, "max_loras": len(lora_adapters)}
     logger.warning(f"Teacher {teacher_model_config.key!r}: LoRA adapters {lora_adapters}, vLLM lora {lora_config}")
     return lora_config
