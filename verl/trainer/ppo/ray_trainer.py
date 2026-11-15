@@ -18,13 +18,14 @@ PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import inspect
 import json
 import os
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pprint import pprint
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -184,6 +185,17 @@ def compute_spec_decode_metrics(
     }
 
 
+def _accepts_kwarg(fn: Callable, name: str) -> bool:
+    """True when ``fn`` declares ``name`` or accepts a ``**kwargs`` catch-all."""
+    try:
+        parameters = inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # builtins / C callables
+        return False
+    if name in parameters:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator,
@@ -257,10 +269,14 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
-        # GDPO: pass raw data for per-dimension reward extraction
-        if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
-            adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
-            adv_kwargs["batch"] = data.batch
+        # Per-sample non-tensor fields are the only place an estimator can see what the
+        # rollout attached to a sample (validity flags, task metadata, ids). GDPO needed
+        # this first and got a special case; pass it to any estimator that can accept it,
+        # so a custom estimator does not have to be named here to be usable.
+        # Estimators with a fixed signature (e.g. grpo_vectorized) are unaffected.
+        for key, value in (("non_tensor_batch", data.non_tensor_batch), ("batch", data.batch)):
+            if _accepts_kwarg(adv_estimator_fn, key):
+                adv_kwargs[key] = value
         # Add sum_pi_squared for Optimal Token Baseline
         if adv_estimator in (AdvantageEstimator.OPTIMAL_TOKEN_BASELINE, AdvantageEstimator.TIR_OPTIMAL_TOKEN_BASELINE):
             # Check if sum_pi_squared is available
