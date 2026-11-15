@@ -118,6 +118,7 @@ def _engine(state, per_token=False):
     engine.module = [ddp]
     engine.tf_config = config
     engine.engine_config = SimpleNamespace(
+        cp_seq_chunks=1,
         context_parallel_size=2,
         dynamic_context_parallel=False,
         use_remove_padding=True,
@@ -192,7 +193,6 @@ def _run(output_path=None):
     from verl.workers.utils.teacher_dump import DUMP_IDS_KEY, DUMP_LOGPROBS_KEY, TeacherTopKDump, dump_consistency_stats
 
     assert int(os.environ.get("WORLD_SIZE", "1")) == 4, "Run with four torchrun ranks"
-    assert os.environ.get("DSV41_SEQ_CHUNKS", "1") == "1", "This check exercises the ordinary K=1 vocab-logits path"
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group("nccl", timeout=timedelta(minutes=4))
     results = []

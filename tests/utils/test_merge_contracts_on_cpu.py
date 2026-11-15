@@ -175,7 +175,7 @@ def test_the_chunk_kwargs_the_forward_builds_are_actually_forwarded():
     Scope: the dict and its spread must sit in the same function, which is how the forward builds
     and forwards them. A dict built in one function and spread in another is not caught here.
 
-    With `DSV41_SEQ_CHUNKS > 1` the tape never reaches the model: each pass packs a full-sequence
+    With `cp_seq_chunks > 1` the tape never reaches the model: each pass packs a full-sequence
     CP shard, the compressed KV is never reused, and the loss is still zeroed per chunk window --
     silently, because the unchunked path is correct.
     """

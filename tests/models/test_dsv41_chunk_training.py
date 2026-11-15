@@ -28,6 +28,7 @@ No checkpoint, tokenizer download or large model is needed.
 import json
 import os
 from copy import deepcopy
+from dataclasses import replace
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -75,6 +76,9 @@ def _tiny_provider(per_token, moe_z_loss_coeff=0.0):
         output_projection_groups=2,
         output_projection_lora_rank=8,
         qk_layernorm=True,
+        # CSA2's validator requires MLA to be on; on the production path this comes from
+        # the HF config, but this tiny provider builds the config from scratch.
+        multi_latent_attention=True,
         layernorm_epsilon=1e-20,
         normalization="RMSNorm",
         rotary_base=10000,
@@ -248,8 +252,11 @@ def _check_training(groups, monkeypatch, per_token, final_chunk_only, length, mo
     initial = deepcopy(model.state_dict())
     reference = None
 
-    for chunks in (1, 2, 3):
-        monkeypatch.setenv("DSV41_SEQ_CHUNKS", str(chunks))
+    # K=8 is the declared upper bound; a chunk plan must tile `cp_size * chunk_count` rows, so
+    # it only applies to lengths that divide evenly (96 of the two under test).
+    chunk_counts = (1, 2, 3, 8) if length % (2 * 8) == 0 else (1, 2, 3)
+    for chunks in chunk_counts:
+        engine.engine_config = replace(engine.engine_config, cp_seq_chunks=chunks)
         model.load_state_dict(initial)
         ddp.zero_grad_buffer()
         result = engine.forward_backward_batch(_batch(final_chunk_only, length), loss_function)
@@ -348,7 +355,7 @@ def test_outer_chunk_infer_batch_preserves_outputs_and_existing_gradients(groups
     from verl.workers.utils.losses import sft_loss
 
     model, ddp, engine = _build_model_and_engine(groups, monkeypatch, per_token=True)
-    monkeypatch.setenv("DSV41_SEQ_CHUNKS", "1")
+    engine.engine_config = replace(engine.engine_config, cp_seq_chunks=1)
     ddp.zero_grad_buffer()
     engine.forward_backward_batch(_batch(False, 98), partial(sft_loss, None))
     parameters = {name: parameter for name, parameter in model.named_parameters() if parameter.requires_grad}
@@ -357,7 +364,7 @@ def test_outer_chunk_infer_batch_preserves_outputs_and_existing_gradients(groups
     model.eval()
     reference = None
     for chunks in (1, 2, 3):
-        monkeypatch.setenv("DSV41_SEQ_CHUNKS", str(chunks))
+        engine.engine_config = replace(engine.engine_config, cp_seq_chunks=chunks)
         result = engine.infer_batch(_batch(False, 98), partial(sft_loss, None))
         log_probs = result["model_output"]["log_probs"].values()
         assert log_probs.numel() == 196

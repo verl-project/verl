@@ -158,6 +158,7 @@ class McoreEngineConfig(EngineConfig):
         virtual_pipeline_model_parallel_size (Optional[int]): Virtual pipeline model parallel size
             for interleaved scheduling.
         context_parallel_size (int): Context parallel size for long sequences.
+        cp_seq_chunks (int): Split each sequence into this many outer chunks; one keeps the single-pass path.
         dynamic_context_parallel (bool): Whether to enable dynamic context parallel scheduling.
         max_seqlen_per_dp_cp_rank (Optional[int]): Maximum sequence length per DPxCP rank.
         sequence_parallel (bool): Whether to enable sequence parallelism.
@@ -187,6 +188,7 @@ class McoreEngineConfig(EngineConfig):
     pipeline_model_parallel_size: int = 1
     virtual_pipeline_model_parallel_size: Optional[int] = None
     context_parallel_size: int = 1
+    cp_seq_chunks: int = 1
     dynamic_context_parallel: bool = False
     entropy_from_logits_with_chunking: bool = False
     entropy_from_logits_chunk_size: int = 2048
@@ -214,6 +216,8 @@ class McoreEngineConfig(EngineConfig):
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        if not isinstance(self.cp_seq_chunks, int) or isinstance(self.cp_seq_chunks, bool) or self.cp_seq_chunks < 1:
+            raise ValueError(f"cp_seq_chunks must be an integer >= 1, got cp_seq_chunks={self.cp_seq_chunks!r}")
         from verl.utils.real_nvfp4 import real_nvfp4_enabled
 
         if real_nvfp4_enabled(self.override_transformer_config):

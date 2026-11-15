@@ -105,6 +105,167 @@ def _resolve_fused_temperature(temperature: float | torch.Tensor) -> float:
     return max(float(values[0].item()), 1e-8)
 
 
+def _resolve_cp_seq_chunks(engine_config) -> int:
+    """Prefer the declarative count, retaining the legacy switch only for older configs."""
+    chunks = getattr(engine_config, "cp_seq_chunks", None)
+    if chunks is None:
+        chunks = int(os.environ.get("DSV41_SEQ_CHUNKS", "1") or 1)
+    if not isinstance(chunks, int) or isinstance(chunks, bool) or chunks < 1:
+        raise ValueError(f"cp_seq_chunks must be an integer >= 1, got cp_seq_chunks={chunks!r}")
+    return chunks
+
+
+def _check_cp_seq_chunk_config(engine_config, tf_config=None) -> None:
+    """Reject unsupported chunking before any step can allocate a full sequence."""
+    if _resolve_cp_seq_chunks(engine_config) == 1:
+        return
+    if engine_config.dynamic_context_parallel:
+        raise NotImplementedError(
+            "Outer-sequence chunking requires static CP: "
+            f"dynamic_context_parallel={engine_config.dynamic_context_parallel!r}"
+        )
+    if engine_config.pipeline_model_parallel_size != 1:
+        raise NotImplementedError(
+            "Outer-sequence chunking requires pipeline_model_parallel_size == 1: "
+            f"pipeline_model_parallel_size={engine_config.pipeline_model_parallel_size!r}"
+        )
+    if not engine_config.use_remove_padding or engine_config.use_fused_kernels:
+        raise NotImplementedError(
+            "Outer-sequence chunking requires the non-fused THD forward: "
+            f"use_remove_padding={engine_config.use_remove_padding!r}, "
+            f"use_fused_kernels={engine_config.use_fused_kernels!r}"
+        )
+    # These are the DDP defaults used by make_megatron_module; forward-only
+    # engines are not wrapped in DDP. An explicit override wins for either wrapper.
+    overlap = not engine_config.forward_only and (engine_config.override_ddp_config or {}).get(
+        "overlap_grad_reduce", engine_config.use_megatron_fsdp
+    )
+    if overlap:
+        raise NotImplementedError(
+            f"Outer-sequence chunking requires overlap_grad_reduce=False: overlap_grad_reduce={overlap!r}"
+        )
+    replay_mode = engine_config.router_replay.mode
+    if replay_mode != "disabled":
+        raise NotImplementedError(
+            f"Outer-sequence chunking does not support router replay: router_replay.mode={replay_mode!r}"
+        )
+    if engine_config.context_parallel_size < 2:
+        raise NotImplementedError(
+            "Outer-sequence chunking requires physical context_parallel_size > 1: "
+            f"context_parallel_size={engine_config.context_parallel_size!r}; "
+            "CSA compression's CP1 path cannot address a later chunk's global token indices"
+        )
+    if tf_config is None:
+        return
+    attention = getattr(tf_config, "experimental_attention_variant", None)
+    if attention != "dsv4_hybrid":
+        raise NotImplementedError(
+            "Outer-sequence chunking requires DSV4 hybrid attention and its chunk tape: "
+            f"experimental_attention_variant={attention!r}"
+        )
+    balancing_types = getattr(tf_config, "moe_router_load_balancing_type", "aux_loss")
+    balancing_coeff = getattr(tf_config, "moe_aux_loss_coeff", 0)
+    balancing_losses = (
+        [(balancing_types, balancing_coeff)]
+        if isinstance(balancing_types, str)
+        else zip(balancing_types, balancing_coeff, strict=True)
+    )
+    if not engine_config.forward_only and any(
+        kind in ("aux_loss", "seq_aux_loss", "global_aux_loss") and coeff is not None and coeff > 0
+        for kind, coeff in balancing_losses
+    ):
+        raise NotImplementedError(
+            "Outer-sequence chunking does not support MoE balancing auxiliary losses: "
+            "their expert-frequency products require the complete logical sequence; "
+            "per-token scaling only supports additive z-loss; "
+            f"moe_router_load_balancing_type={balancing_types!r}, moe_aux_loss_coeff={balancing_coeff!r}"
+        )
+    z_loss = getattr(tf_config, "moe_z_loss_coeff", None)
+    if not tf_config.calculate_per_token_loss and z_loss:
+        raise NotImplementedError(
+            "Outer-sequence chunking with MoE z-loss requires calculate_per_token_loss=True: "
+            f"calculate_per_token_loss={tf_config.calculate_per_token_loss!r}, moe_z_loss_coeff={z_loss!r}"
+        )
+
+
+def _check_cp_seq_chunk_models(models, *, engine_config):
+    """Validate actual routers while Bridge constructs models, before wrapping."""
+    for model in models if isinstance(models, list) else [models]:
+        _check_cp_seq_chunk_config(engine_config, unwrap_model(model).config)
+        from megatron.core.transformer.moe.router import TopKRouter
+
+        # Inspect initialized routers: hash layers bypass balancing algorithms,
+        # and frozen/eval routers do not update QB's per-microbatch quantile.
+        for router in unwrap_model(model).modules():
+            if not isinstance(router, TopKRouter):
+                continue
+            hash_router = getattr(router, "is_hash_layer", False)
+            if (
+                router.training
+                and not hash_router
+                and router.routing_type == "sinkhorn"
+                and router.topk < router.num_experts
+            ):
+                raise NotImplementedError(
+                    "Outer-sequence chunking does not support training-mode Sinkhorn routing: "
+                    "its assignments require the complete token population; "
+                    f"training={router.training!r}, is_hash_layer={hash_router!r}, "
+                    f"routing_type={router.routing_type!r}, topk={router.topk!r}, num_experts={router.num_experts!r}"
+                )
+            if (
+                router.training
+                and not engine_config.forward_only
+                and not hash_router
+                and router.routing_type == "quantile_balancing"
+                and router.config.moe_router_quantile_balancing_ema != 1
+            ):
+                raise NotImplementedError(
+                    "Outer-sequence chunking does not support quantile-balancing updates: "
+                    "averaging chunk quantiles changes the next step's router bias; use frozen EMA=1 or inference; "
+                    f"training={router.training!r}, forward_only={engine_config.forward_only!r}, "
+                    f"is_hash_layer={hash_router!r}, "
+                    f"moe_router_quantile_balancing_ema={router.config.moe_router_quantile_balancing_ema!r}"
+                )
+            capacity_factor = router.config.moe_expert_capacity_factor
+            # ceil(T*topk/E*factor) >= T for every T at this boundary.
+            # Smaller positive factors can select different surviving tokens
+            # in each chunk; a short batch's ceil may only hide the mismatch.
+            if capacity_factor is not None and 0 < capacity_factor * router.topk < router.num_experts:
+                raise NotImplementedError(
+                    "Outer-sequence chunking does not support competitive MoE token dropping: "
+                    "disable capacity or set capacity_factor * router_topk >= num_experts; "
+                    f"capacity_factor={capacity_factor!r}, topk={router.topk!r}, num_experts={router.num_experts!r}"
+                )
+    return models
+
+
+def _check_cp_seq_chunk_batch(batch, model) -> None:
+    """Check the prerequisites that depend on this step's payload."""
+    # Rule 6's batch replay flag and rule 8's video/image presence cannot be
+    # known at construction: even a VLM can receive a text-only microbatch.
+    batch_replay = tu.get_non_tensor_data(batch, key="enable_routing_replay", default=False)
+    if batch_replay:
+        raise NotImplementedError(
+            f"Outer-sequence chunking does not support router replay: enable_routing_replay={batch_replay!r}"
+        )
+    inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
+    videos = {key: value.numel() for key, value in inputs.items() if key in ("pixel_values_videos", "video_grid_thw")}
+    if any(videos.values()):
+        raise NotImplementedError(f"Outer-sequence chunking does not support video inputs: video_numel={videos!r}")
+    images = {
+        key: value.numel()
+        for key, value in inputs.items()
+        if key in ("pixel_values", "image_grid_hws", "image_grid_thw")
+    }
+    image_support = getattr(unwrap_model(model), "supports_cp_chunk_images", False)
+    if any(images.values()) and not image_support:
+        raise NotImplementedError(
+            "Outer-sequence chunking with images requires a paired Megatron Core model "
+            "with supports_cp_chunk_images=True; upgrade Core for chunk-aware image placement: "
+            f"supports_cp_chunk_images={image_support!r}, image_numel={images!r}"
+        )
+
+
 def _validate_dcp_world_size(dpcp_size: int) -> None:
     """Validate the topology accepted by Megatron-Core's dynamic group builder."""
     if dpcp_size < 2 or dpcp_size % 2 != 0:
@@ -200,6 +361,7 @@ class MegatronEngine(BaseEngine):
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
         assert self.engine_config.use_mbridge, "use_mbridge must be True"
+        _check_cp_seq_chunk_config(self.engine_config)
         _check_dcp_unsupported_features(self.engine_config, self.model_config)
         self._init_device_mesh()
 
@@ -253,6 +415,12 @@ class MegatronEngine(BaseEngine):
             from verl.models.mcore.patch import apply_patch_megatron_recomputation_backward
 
             apply_patch_megatron_recomputation_backward()
+
+        if _resolve_cp_seq_chunks(self.engine_config) > 1:
+            # Resolve Bridge defaults and overrides during construction, rather
+            # than discovering an unsupported attention/loss at the first step.
+            self._build_tf_config()
+            _check_cp_seq_chunk_config(self.engine_config, self.provider)
 
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref
@@ -469,6 +637,11 @@ class MegatronEngine(BaseEngine):
         )
         override_ddp_config = self._resolve_override_ddp_config()
 
+        if _resolve_cp_seq_chunks(self.engine_config) > 1:
+            # Hash routing and router.training exist only on constructed modules.
+            # Validate in Bridge's construction hook before DDP and weight loading.
+            self.provider.register_pre_wrap_hook(partial(_check_cp_seq_chunk_models, engine_config=self.engine_config))
+
         module, updated_tf_config = make_megatron_module(
             wrap_config=wrap_config,
             hf_config=self.model_config.hf_config,
@@ -580,7 +753,8 @@ class MegatronEngine(BaseEngine):
 
     def initialize(self):
         self._hf_export_tasks = None
-        self._build_tf_config()
+        if _resolve_cp_seq_chunks(self.engine_config) == 1:
+            self._build_tf_config()
         _check_dcp_unsupported_features(self.engine_config, self.model_config, tf_config=self.tf_config)
 
         # Reserve headroom for allocations the PyTorch caching allocator cannot see or
@@ -1762,97 +1936,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
         # sequence in one pass, exactly the path this engine ran before the feature
         # existed. The door is `_chunk_count > 1`, so the default below is the
         # single pass and nothing downstream changes.
-        _chunk_count = int(os.environ.get("DSV41_SEQ_CHUNKS", "1") or 1)
+        _chunk_count = _resolve_cp_seq_chunks(self.engine_config)
         if _chunk_count > 1 and not getattr(self, "_dsv41_in_chunk", False):
-            if self.engine_config.dynamic_context_parallel or mpu.get_pipeline_model_parallel_world_size() > 1:
-                raise NotImplementedError("Outer-sequence chunking requires static CP and pipeline parallel size 1")
-            if not self.engine_config.use_remove_padding or self.engine_config.use_fused_kernels:
-                raise NotImplementedError("Outer-sequence chunking requires the non-fused THD forward")
-            if getattr(self.tf_config, "experimental_attention_variant", None) != "dsv4_hybrid":
-                raise NotImplementedError("Outer-sequence chunking requires DSV4 hybrid attention and its chunk tape")
-            if getattr(getattr(model, "ddp_config", None), "overlap_grad_reduce", False):
-                raise NotImplementedError("Outer-sequence chunking requires overlap_grad_reduce=False")
-            if self.enable_routing_replay or tu.get_non_tensor_data(batch, key="enable_routing_replay", default=False):
-                raise NotImplementedError("Outer-sequence chunking does not support router replay")
-            if mpu.get_context_parallel_world_size() < 2:
-                raise NotImplementedError(
-                    "Outer-sequence chunking requires physical context_parallel_size > 1: "
-                    "CSA compression's CP1 path cannot address a later chunk's global token indices"
-                )
-            multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
-            if any(
-                value.numel() > 0
-                for key, value in multi_modal_inputs.items()
-                if key in ("pixel_values_videos", "video_grid_thw")
-            ):
-                raise NotImplementedError("Outer-sequence chunking does not support video inputs")
-            if any(
-                value.numel() > 0
-                for key, value in multi_modal_inputs.items()
-                if key in ("pixel_values", "image_grid_hws", "image_grid_thw")
-            ) and not getattr(unwrap_model(model), "supports_cp_chunk_images", False):
-                raise NotImplementedError(
-                    "Outer-sequence chunking with images requires a paired Megatron Core model "
-                    "with supports_cp_chunk_images=True; upgrade Core for chunk-aware image placement"
-                )
-            balancing_types = getattr(self.tf_config, "moe_router_load_balancing_type", "aux_loss")
-            balancing_coeff = getattr(self.tf_config, "moe_aux_loss_coeff", 0)
-            balancing_losses = (
-                [(balancing_types, balancing_coeff)]
-                if isinstance(balancing_types, str)
-                else zip(balancing_types, balancing_coeff, strict=True)
-            )
-            if not postprocess_micro_batch_func.keywords["forward_only"] and any(
-                kind in ("aux_loss", "seq_aux_loss", "global_aux_loss") and coeff is not None and coeff > 0
-                for kind, coeff in balancing_losses
-            ):
-                raise NotImplementedError(
-                    "Outer-sequence chunking does not support MoE balancing auxiliary losses: "
-                    "their expert-frequency products require the complete logical sequence; "
-                    "per-token scaling only supports additive z-loss"
-                )
-            if not self.tf_config.calculate_per_token_loss and getattr(self.tf_config, "moe_z_loss_coeff", None):
-                raise NotImplementedError(
-                    "Outer-sequence chunking with MoE z-loss requires calculate_per_token_loss=True"
-                )
-            from megatron.core.transformer.moe.router import TopKRouter
-
-            # Inspect initialized routers: hash layers bypass balancing algorithms,
-            # and frozen/eval routers do not update QB's per-microbatch quantile.
-            for router in unwrap_model(model).modules():
-                if not isinstance(router, TopKRouter):
-                    continue
-                hash_router = getattr(router, "is_hash_layer", False)
-                if (
-                    router.training
-                    and not hash_router
-                    and router.routing_type == "sinkhorn"
-                    and router.topk < router.num_experts
-                ):
-                    raise NotImplementedError(
-                        "Outer-sequence chunking does not support training-mode Sinkhorn routing: "
-                        "its assignments require the complete token population"
-                    )
-                if (
-                    router.training
-                    and not postprocess_micro_batch_func.keywords["forward_only"]
-                    and not hash_router
-                    and router.routing_type == "quantile_balancing"
-                    and router.config.moe_router_quantile_balancing_ema != 1
-                ):
-                    raise NotImplementedError(
-                        "Outer-sequence chunking does not support quantile-balancing updates: "
-                        "averaging chunk quantiles changes the next step's router bias; use frozen EMA=1 or inference"
-                    )
-                capacity_factor = router.config.moe_expert_capacity_factor
-                # ceil(T*topk/E*factor) >= T for every T at this boundary.
-                # Smaller positive factors can select different surviving tokens
-                # in each chunk; a short batch's ceil may only hide the mismatch.
-                if capacity_factor is not None and 0 < capacity_factor * router.topk < router.num_experts:
-                    raise NotImplementedError(
-                        "Outer-sequence chunking does not support competitive MoE token dropping: "
-                        "disable capacity or set capacity_factor * router_topk >= num_experts"
-                    )
+            _check_cp_seq_chunk_batch(batch, model)
             return self._dsv41_chunked_forward_step(
                 batch,
                 model,

@@ -294,7 +294,7 @@ def test_image_chunk_training_matches_single_pass(groups, monkeypatch, per_token
     parameters = {name: parameter for name, parameter in model.named_parameters() if parameter.requires_grad}
     reference = None
     for chunks in (1, 2, 8):
-        monkeypatch.setenv("DSV41_SEQ_CHUNKS", str(chunks))
+        engine.engine_config = replace(engine.engine_config, cp_seq_chunks=chunks)
         with torch.no_grad():
             for name, parameter in all_parameters.items():
                 parameter.copy_(initial[name])
@@ -374,7 +374,7 @@ def test_image_chunk_inference_preserves_outputs_and_existing_gradients(groups, 
     model.eval()
     reference = None
     for chunks in (1, 2, 8):
-        monkeypatch.setenv("DSV41_SEQ_CHUNKS", str(chunks))
+        engine.engine_config = replace(engine.engine_config, cp_seq_chunks=chunks)
         result = _forward_preserving_inputs(engine, _vision_batch(), partial(sft_loss, None), forward_only=True)
         log_probs = result["model_output"]["log_probs"].values()
         assert log_probs.numel() == 388 and not log_probs.requires_grad

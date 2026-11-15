@@ -22,7 +22,11 @@ import torch
 from megatron.core.pipeline_parallel.schedules import forward_step_calc_loss
 from megatron.core.transformer.transformer_config import TransformerConfig
 
-from verl.workers.engine.megatron.transformer_impl import MegatronEngineWithLMHead
+from verl.workers.engine.megatron.transformer_impl import (
+    MegatronEngineWithLMHead,
+    _check_cp_seq_chunk_config,
+    _check_cp_seq_chunk_models,
+)
 
 
 def _case(monkeypatch, *, per_token, microbatches=1, loss_scale=1):
@@ -102,20 +106,11 @@ def test_chunk_inference_preserves_outputs_and_never_runs_backward(monkeypatch, 
 
 @pytest.mark.parametrize("engine_replay,batch_replay", [(True, False), (False, True)])
 def test_chunk_rejects_unpartitioned_router_replay(monkeypatch, engine_replay, batch_replay):
-    from types import SimpleNamespace
-
-    from megatron.core import parallel_state as mpu
-
-    monkeypatch.setenv("DSV41_SEQ_CHUNKS", "2")
-    monkeypatch.setattr(mpu, "get_pipeline_model_parallel_world_size", lambda: 1)
-    engine = object.__new__(MegatronEngineWithLMHead)
-    engine.engine_config = SimpleNamespace(
-        dynamic_context_parallel=False, use_remove_padding=True, use_fused_kernels=False
-    )
-    engine.tf_config = SimpleNamespace(experimental_attention_variant="dsv4_hybrid")
-    engine.enable_routing_replay = engine_replay
+    engine, model, post = _guard_case(monkeypatch, cp_size=2)
+    engine.engine_config.router_replay.mode = "R2" if engine_replay else "disabled"
     with pytest.raises(NotImplementedError, match="router replay"):
-        engine.forward_step(iter([{"enable_routing_replay": batch_replay}]), torch.nn.Linear(1, 1), None, None)
+        _check_cp_seq_chunk_config(engine.engine_config, engine.tf_config)
+        engine.forward_step(iter([{"enable_routing_replay": batch_replay}]), model, None, post)
 
 
 @pytest.mark.parametrize("chunks", [2, 3])
@@ -202,14 +197,18 @@ def test_chunk_replay_restores_model_rng_and_preserves_loss_rng_consumption(monk
 
 
 def _guard_case(monkeypatch, cp_size):
-    from megatron.core import parallel_state as mpu
-
-    monkeypatch.setenv("DSV41_SEQ_CHUNKS", "2")
-    monkeypatch.setattr(mpu, "get_pipeline_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(mpu, "get_context_parallel_world_size", lambda: cp_size)
     engine = object.__new__(MegatronEngineWithLMHead)
     engine.engine_config = SimpleNamespace(
-        dynamic_context_parallel=False, use_remove_padding=True, use_fused_kernels=False
+        cp_seq_chunks=2,
+        dynamic_context_parallel=False,
+        pipeline_model_parallel_size=1,
+        use_remove_padding=True,
+        use_fused_kernels=False,
+        context_parallel_size=cp_size,
+        forward_only=False,
+        use_megatron_fsdp=False,
+        override_ddp_config={},
+        router_replay=SimpleNamespace(mode="disabled"),
     )
     engine.tf_config = SimpleNamespace(experimental_attention_variant="dsv4_hybrid", calculate_per_token_loss=True)
     engine.enable_routing_replay = False
@@ -217,10 +216,19 @@ def _guard_case(monkeypatch, cp_size):
     return engine, torch.nn.Linear(1, 1), SimpleNamespace(keywords={"forward_only": False})
 
 
+def _constructed_chunk_step(engine, model, post):
+    # These fixtures bypass engine.__init__ and Bridge; exercise their construction
+    # hook explicitly before handing the already-constructed model to a step.
+    engine.engine_config.forward_only = post.keywords["forward_only"]
+    model.config = engine.tf_config
+    _check_cp_seq_chunk_models([model], engine_config=engine.engine_config)
+    return engine.forward_step(iter([{}]), model, None, post)
+
+
 def test_chunk_rejects_cp1_before_native_compression(monkeypatch):
     engine, model, post = _guard_case(monkeypatch, cp_size=1)
     with pytest.raises(NotImplementedError, match="physical context_parallel_size > 1"):
-        engine.forward_step(iter([{}]), model, None, post)
+        _constructed_chunk_step(engine, model, post)
 
 
 @pytest.mark.parametrize("key", ["pixel_values", "image_grid_hws", "image_grid_thw"])
@@ -281,9 +289,9 @@ def test_chunk_rejects_only_enabled_nonadditive_balancing_losses(
         with pytest.raises(
             NotImplementedError, match="expert-frequency products require the complete logical sequence"
         ):
-            engine.forward_step(iter([{}]), model, None, post)
+            _constructed_chunk_step(engine, model, post)
     else:
-        assert engine.forward_step(iter([{}]), model, None, post) == "chunk-driver"
+        assert _constructed_chunk_step(engine, model, post) == "chunk-driver"
 
 
 @pytest.mark.parametrize("per_token", [False, True])
@@ -292,10 +300,10 @@ def test_chunk_z_loss_keeps_its_per_token_requirement(monkeypatch, per_token):
     engine.tf_config.calculate_per_token_loss = per_token
     engine.tf_config.moe_z_loss_coeff = 0.01
     if per_token:
-        assert engine.forward_step(iter([{}]), model, None, post) == "chunk-driver"
+        assert _constructed_chunk_step(engine, model, post) == "chunk-driver"
     else:
         with pytest.raises(NotImplementedError, match="MoE z-loss requires calculate_per_token_loss=True"):
-            engine.forward_step(iter([{}]), model, None, post)
+            _constructed_chunk_step(engine, model, post)
 
 
 @pytest.mark.parametrize("routing_type", ["aux_loss", "seq_aux_loss", "global_aux_loss"])
@@ -304,7 +312,7 @@ def test_chunk_inference_can_use_a_model_configured_with_balancing_aux(monkeypat
     post.keywords["forward_only"] = True
     engine.tf_config.moe_router_load_balancing_type = routing_type
     engine.tf_config.moe_aux_loss_coeff = 0.01
-    assert engine.forward_step(iter([{}]), model, None, post) == "chunk-driver"
+    assert _constructed_chunk_step(engine, model, post) == "chunk-driver"
 
 
 def _routing_guard_case(monkeypatch, *, mode="none", topk=1, capacity=None, training=True, forward_only=False):
@@ -339,14 +347,14 @@ def _routing_guard_case(monkeypatch, *, mode="none", topk=1, capacity=None, trai
 def test_chunk_rejects_sinkhorn_using_the_actual_router_training_mode(monkeypatch, forward_only):
     engine, model, post, _ = _routing_guard_case(monkeypatch, mode="sinkhorn", forward_only=forward_only)
     with pytest.raises(NotImplementedError, match="training-mode Sinkhorn"):
-        engine.forward_step(iter([{}]), model, None, post)
+        _constructed_chunk_step(engine, model, post)
 
 
 @pytest.mark.parametrize("training,topk,hash_router", [(False, 1, False), (True, 2, False), (True, 1, True)])
 def test_chunk_keeps_tokenwise_sinkhorn_paths(monkeypatch, training, topk, hash_router):
     engine, model, post, router = _routing_guard_case(monkeypatch, mode="sinkhorn", training=training, topk=topk)
     router.is_hash_layer = hash_router
-    assert engine.forward_step(iter([{}]), model, None, post) == "chunk-driver"
+    assert _constructed_chunk_step(engine, model, post) == "chunk-driver"
 
 
 @pytest.mark.parametrize("per_token", [False, True])
@@ -354,7 +362,7 @@ def test_chunk_rejects_quantile_updates_independently_of_the_token_loss_regime(m
     engine, model, post, _ = _routing_guard_case(monkeypatch, mode="quantile_balancing")
     engine.tf_config.calculate_per_token_loss = per_token
     with pytest.raises(NotImplementedError, match="averaging chunk quantiles"):
-        engine.forward_step(iter([{}]), model, None, post)
+        _constructed_chunk_step(engine, model, post)
 
 
 @pytest.mark.parametrize(
@@ -367,7 +375,7 @@ def test_chunk_keeps_quantile_routing_without_state_updates(monkeypatch, trainin
     )
     router.config.moe_router_quantile_balancing_ema = ema
     router.is_hash_layer = hash_router
-    assert engine.forward_step(iter([{}]), model, None, post) == "chunk-driver"
+    assert _constructed_chunk_step(engine, model, post) == "chunk-driver"
 
 
 @pytest.mark.parametrize("topk,factor", [(1, 0.01), (1, 1.0), (1, 1.99), (2, 0.99)])
@@ -375,16 +383,16 @@ def test_chunk_keeps_quantile_routing_without_state_updates(monkeypatch, trainin
 def test_chunk_rejects_competitive_capacity_even_in_inference(monkeypatch, topk, factor, forward_only):
     engine, model, post, _ = _routing_guard_case(monkeypatch, topk=topk, capacity=factor, forward_only=forward_only)
     with pytest.raises(NotImplementedError, match="competitive MoE token dropping"):
-        engine.forward_step(iter([{}]), model, None, post)
+        _constructed_chunk_step(engine, model, post)
 
 
 @pytest.mark.parametrize("topk,factor", [(1, None), (1, 0.0), (1, 2.0), (1, 3.0), (2, 1.0)])
 def test_chunk_keeps_disabled_zero_and_nonbinding_capacity(monkeypatch, topk, factor):
     engine, model, post, _ = _routing_guard_case(monkeypatch, topk=topk, capacity=factor)
-    assert engine.forward_step(iter([{}]), model, None, post) == "chunk-driver"
+    assert _constructed_chunk_step(engine, model, post) == "chunk-driver"
 
 
 def test_chunk_does_not_reject_additive_expert_bias_counts(monkeypatch):
     engine, model, post, router = _routing_guard_case(monkeypatch)
     router.enable_expert_bias = True
-    assert engine.forward_step(iter([{}]), model, None, post) == "chunk-driver"
+    assert _constructed_chunk_step(engine, model, post) == "chunk-driver"
