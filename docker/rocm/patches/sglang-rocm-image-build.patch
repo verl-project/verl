@@ -1,0 +1,74 @@
+diff --git a/python/pyproject.toml b/python/pyproject.toml
+index 376db08..b4befe7 100644
+--- a/python/pyproject.toml
++++ b/python/pyproject.toml
+@@ -209,10 +209,12 @@ git_describe_command = ["python3", "python/tools/get_version_tag.py"]
+ # Allow editable installs even when .git metadata is not available.
+ fallback_version = "0.0.0.dev0"
+ 
+-[[tool.setuptools-rust.ext-modules]]
+-target = "sglang.srt.grpc._core"
+-path = "../rust/sglang-grpc/Cargo.toml"
+-binding = "PyO3"
++# Optional grpc rust extension. verl's rollout server does not import it,
++# and building it requires a Rust toolchain this image does not ship.
++# [[tool.setuptools-rust.ext-modules]]
++# target = "sglang.srt.grpc._core"
++# path = "../rust/sglang-grpc/Cargo.toml"
++# binding = "PyO3"
+ 
+ [tool.kernels.dependencies]
+ "kernels-community/sgl-flash-attn3" = 1
+diff --git a/sgl-kernel/include/utils.h b/sgl-kernel/include/utils.h
+index c5a517c..56dd99d 100644
+--- a/sgl-kernel/include/utils.h
++++ b/sgl-kernel/include/utils.h
+@@ -374,19 +374,15 @@ __device__ __forceinline__ dstDtype castFromFloat(float val) {
+ using FP8_TYPE = c10::Float8_e4m3fn;
+ C10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();
+ #else  // USE_ROCM
+-#if HIP_FP8_TYPE_FNUZ
++#if defined(__gfx942__)
+ #include <c10/util/Float8_e4m3fnuz.h>
+ using FP8_TYPE = c10::Float8_e4m3fnuz;
+ constexpr auto FP8_E4M3_MAX = 224.0f;
+ #else
+-#if HIP_FP8_TYPE_E4M3
+ #include <c10/util/Float8_e4m3fn.h>
+ using FP8_TYPE = c10::Float8_e4m3fn;
+ C10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();
+-#else
+-#error "fp8 is not supported in this processor (arch < gfx942)."
+-#endif  // HIP_FP8_TYPE_E4M3
+-#endif  // HIP_FP8_TYPE_FNUZ
++#endif  // __gfx942__
+ #endif  // USE_ROCM
+ 
+ #define FULL_MASK 0xffffffff
+diff --git a/sgl-kernel/setup_rocm.py b/sgl-kernel/setup_rocm.py
+index 9762787..ed4557d 100644
+--- a/sgl-kernel/setup_rocm.py
++++ b/sgl-kernel/setup_rocm.py
+@@ -74,12 +74,6 @@ if torch.cuda.is_available():
+ else:
+     print(f"Warning: torch.cuda not available. Using default target: {amdgpu_target}")
+ 
+-if amdgpu_target not in ["gfx942", "gfx950"]:
+-    print(
+-        f"Warning: Unsupported GPU architecture detected '{amdgpu_target}'. Expected 'gfx942' or 'gfx950'."
+-    )
+-    sys.exit(1)
+-
+ fp8_macro = (
+     "-DHIP_FP8_TYPE_FNUZ" if amdgpu_target == "gfx942" else "-DHIP_FP8_TYPE_E4M3"
+ )
+@@ -97,7 +91,8 @@ hipcc_flags = [
+     "-Xcompiler",
+     "-fPIC",
+     "-std=c++17",
+-    f"--amdgpu-target={amdgpu_target}",
++    "--offload-arch=gfx942",
++    "--offload-arch=gfx950",
+     "-DENABLE_BF16",
+     "-DENABLE_FP8",
+     fp8_macro,
