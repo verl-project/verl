@@ -48,7 +48,7 @@ def _get_lora_teacher_config(teacher_model_config: DistillationTeacherModelConfi
     for routing_key, adapter_path in lora_adapters.items():
         adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
         if not os.path.isfile(adapter_config_path):
-            raise ValueError(f"LoRA teacher {routing_key!r}: {adapter_config_path} not found.")
+            raise ValueError(f"LoRA teacher {routing_key!r}: {adapter_config_path} not found on the trainer driver.")
         with open(adapter_config_path) as f:
             adapter_config = json.load(f)
         # vLLM checks max_lora_rank against r and per-module rank_pattern overrides.

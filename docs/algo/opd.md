@@ -268,9 +268,10 @@ scored by the plain base model.
 ```
 
 - vLLM only (`inference.name=vllm`).
-- Each adapter dir must contain `adapter_config.json` and be readable on every
-  teacher node. The servers are started with `max_lora_rank` = the largest `r`
-  and `max_loras` = the number of adapters.
+- Each adapter dir must contain `adapter_config.json` and be readable both on
+  the trainer driver (which reads the ranks from `adapter_config.json`) and on
+  every teacher node. The servers are started with `max_lora_rank` = the largest
+  rank (`r` or `rank_pattern`) and `max_loras` = the number of adapters.
 - Routing keys must be unique across all teachers and adapters.
 
 ### `distillation.teacher_models.<name>.inference.*`
