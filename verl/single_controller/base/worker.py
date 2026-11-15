@@ -15,10 +15,14 @@
 the class for Worker
 """
 
+import json
+import logging
 import os
 import socket
 import warnings
 from dataclasses import dataclass
+from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 import ray
 
@@ -27,8 +31,46 @@ from verl.utils.device import (
     get_torch_device,
     get_visible_devices_keyword,
 )
+from verl.utils.distributed import create_tcp_store
+from verl.utils.net_utils import is_valid_ipv6_address
 
 from .decorator import Dispatch, Execute, register
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _bind_master_tcp_store(addr: str, port_range: Optional[list[int]]):
+    """Bind a master TCPStore using this worker's env:// rendezvous backend."""
+    init_method = urlparse(os.environ.get("DIST_INIT_METHOD", "env://"))
+    query = parse_qs(init_method.query, keep_blank_values=True) if init_method.scheme == "env" else {}
+    use_libuv = query.get("use_libuv", [os.environ.get("USE_LIBUV", "1")])[-1] == "1"
+
+    family = socket.AF_INET6 if is_valid_ipv6_address(addr) else socket.AF_INET
+    os_assigned_port = port_range is None
+    ports = (0,) if os_assigned_port else range(*port_range)
+    for port in ports:
+        # Without SO_REUSEADDR, other groups cannot bind this port before TCPStore starts listening.
+        with socket.socket(family=family, type=socket.SOCK_STREAM) as listen_socket:
+            try:
+                listen_socket.bind((addr, port))
+            except OSError:
+                if os_assigned_port:
+                    raise
+                logger.info("Could not bind master port %d, trying port %d", port, port + 1)
+                continue
+
+            # create_tcp_store detaches the socket, so leaving this context keeps the port bound.
+            return create_tcp_store(
+                host=addr,
+                port=listen_socket.getsockname()[1],
+                listen_socket=listen_socket,
+                world_size=None,
+                is_master=True,
+                multi_tenant=True,
+                use_libuv=use_libuv,
+            )
+    raise RuntimeError(f"Could not find a free port in range {port_range}")
 
 
 @dataclass
@@ -181,6 +223,9 @@ class Worker(WorkerHelper):
     def __init__(self, cuda_visible_devices=None) -> None:
         """Initialize the worker with environment settings and device configuration.
 
+        Subclasses must call this before initializing their process group so rank zero
+        can publish its bound master endpoint and let the driver launch the other ranks.
+
         Args:
             cuda_visible_devices (str, optional):
                 CUDA visible devices configuration. Defaults to None.
@@ -188,6 +233,17 @@ class Worker(WorkerHelper):
         # construct a meta from environment variable. Note that the import must be inside the class because
         # it is executed remotely
         import os
+
+        # Consume the startup configuration once: nested workers reuse the outer worker's store.
+        master_endpoint_config = os.environ.pop("VERL_MASTER_ENDPOINT_CONFIG", None)
+        if master_endpoint_config is not None:
+            metadata_name, metadata_namespace, master_port_range = json.loads(master_endpoint_config)
+            addr = self._get_node_ip().strip("[]")
+            self.master_tcp_store = _bind_master_tcp_store(addr, master_port_range)
+            os.environ["MASTER_ADDR"] = addr
+            os.environ["MASTER_PORT"] = str(self.master_tcp_store.port)
+            master_endpoint_metadata = ray.get_actor(metadata_name, namespace=metadata_namespace)
+            master_endpoint_metadata.publish_master_endpoint.remote(addr, os.environ["MASTER_PORT"])
 
         self._setup_env_cuda_visible_devices()
 

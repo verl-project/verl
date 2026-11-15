@@ -32,6 +32,7 @@ from verl.single_controller.ray.base import (
     RayClassWithInitArgs,
     RayResourcePool,
     RayWorkerGroup,
+    split_resource_pool,
 )
 
 
@@ -245,6 +246,52 @@ def test_master_port_range(port_count):
                 master_port, worker_ports = ray.get(create_group.remote(), timeout=60)
                 assert master_port == str(port + 1)
                 assert worker_ports == [master_port, master_port]
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.parametrize("use_subresource_pool", [False, True], ids=["resource-pool", "subresource-pool"])
+@pytest.mark.parametrize("world_size", [1, 2], ids=["single-rank", "waiting-peer"])
+def test_constructor_failure_after_endpoint(use_subresource_pool, world_size):
+    """Report rank-zero failure after publication, including while a peer is still constructing."""
+    ray.init(num_cpus=4)
+    try:
+
+        @ray.remote
+        class FailingWorker(Worker):
+            """Fail rank zero after peers confirm that the driver received its endpoint."""
+
+            def __init__(self):
+                """Publish the endpoint before coordinating a deterministic constructor failure."""
+                super().__init__()
+                if self.rank == 0:
+                    if self.world_size > 1:
+                        self.master_tcp_store.wait(["peer-started"], timedelta(seconds=30))
+                    raise RuntimeError("rank zero failed after publishing its endpoint")
+
+                addr, port = self.get_master_addr_port()
+                store = dist.TCPStore(
+                    host_name=addr,
+                    port=int(port),
+                    is_master=False,
+                    timeout=timedelta(seconds=120),
+                )
+                store.set("peer-started", "1")
+                # Group creation must report rank zero's error before this wait times out.
+                store.wait(["never-published"])
+
+        @ray.remote(num_cpus=0)
+        def create_group():
+            """Exercise startup failure through either resource-pool initialization path."""
+            resource_pool = RayResourcePool(
+                [world_size + int(use_subresource_pool)], use_gpu=False, max_colocate_count=1
+            )
+            if use_subresource_pool:
+                resource_pool = split_resource_pool(resource_pool, [1, world_size])[1]
+            RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=RayClassWithInitArgs(FailingWorker))
+
+        with pytest.raises(ray.exceptions.RayTaskError, match="rank zero failed after publishing its endpoint"):
+            ray.get(create_group.remote(), timeout=60)
     finally:
         ray.shutdown()
 
