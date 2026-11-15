@@ -96,3 +96,50 @@ jobs:
     uses: ./.github/workflows/vllm_ascend.yml
     with:
       coverage_mode: true
+  aggregate_coverage:
+    name: Aggregate coverage archives
+    if: ${{ always() && github.repository_owner == 'verl-project' }}
+    needs:
+      - e2e_ascend
+      - e2e_ppo_trainer_megatron_sglang_2_ascend
+      - e2e_ppo_trainer_megatron_sglang_ascend
+      - e2e_ppo_trainer_megatron_vllm_2_ascend
+      - e2e_ppo_trainer_megatron_vllm_ascend
+      - e2e_ppo_trainer_veomni_vllm_ascend
+      - e2e_sft_llm_ascend
+      - e2e_v1_separate_async_ascend
+      - model_ascend
+      - npu_unit_tests
+      - reward_model_sglang_ascend
+      - reward_model_vllm_ascend
+      - sgl_ascend
+      - vllm_ascend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install archive dependencies
+        run: |
+          python -m pip install uv
+          uv pip install --system PyYAML==6.0.2
+      - name: Download job archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ascend-coverage-*.yml-*
+          path: .ci-coverage/downloads
+          merge-multiple: false
+      - name: Build combined coverage archive
+        env:
+          COVERAGE_NEEDS: ${{ toJSON(needs) }}
+        run: python scripts/ci/coverage/aggregate.py .ci-coverage/downloads .ci-coverage/combined/coverage.tar.gz
+      - name: Upload combined coverage archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascend-coverage-combined-${{ github.run_attempt }}
+          path: .ci-coverage/combined/coverage.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14

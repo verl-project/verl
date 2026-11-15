@@ -130,7 +130,6 @@ def run_step(step_id, script):
     entry = next(item for item in manifest["targets"] if item["id"] == step_id)
     directory = output / "coverage" / step_id
     directory.mkdir(parents=True, exist_ok=False)
-    shutil.copyfile(script, directory / "command.sh")
     entry.update(status="running", directory=directory.relative_to(output).as_posix())
     write_json(manifest_path, manifest)
     env = os.environ.copy()
@@ -163,17 +162,23 @@ def package():
     if not manifest_path.exists():
         raise RuntimeError("Coverage initialization did not produce a manifest")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    empty_files = set()
     for entry in manifest["targets"]:
         directory = output / "coverage" / entry["id"]
         files = sorted(directory.glob("coverage.*"))
         entry["coverage_files"] = len(files)
+        entry["empty_coverage_files_removed"] = 0
         entry["has_branch_data"] = False
         errors = []
         for path in files:
             try:
                 data = coverage.CoverageData(basename=str(path))
                 data.read()
-                entry["has_branch_data"] |= data.has_arcs() and any(data.arcs(name) for name in data.measured_files())
+                has_data = any(data.lines(name) or data.arcs(name) for name in data.measured_files())
+                if not has_data:
+                    empty_files.add(path.relative_to(output).as_posix())
+                    entry["empty_coverage_files_removed"] += 1
+                entry["has_branch_data"] |= data.has_arcs() and has_data
             except Exception as error:
                 errors.append(f"{path.name}: {error}")
         processes = []
@@ -188,6 +193,7 @@ def package():
         entry["processes_without_data"] = sum(
             not item.get("data_file") or not Path(item["data_file"]).is_file() for item in processes
         )
+        entry["coverage_files"] -= entry["empty_coverage_files_removed"]
         entry["data_errors"] = errors
         entry["data_complete"] = bool(
             entry["status"] == "passed"
@@ -208,9 +214,20 @@ def package():
     if manifest.get("hook"):
         Path(manifest["hook"]).unlink(missing_ok=True)
     archive = output.parent / "coverage.tar.gz"
+
+    def artifact_filter(member):
+        name = Path(member.name).name
+        if (
+            name == "command.sh"
+            or member.name in empty_files
+            or (name.startswith("process-") and name.endswith(".json"))
+        ):
+            return None
+        return member
+
     with tarfile.open(archive, "w:gz") as stream:
         for child in sorted(output.iterdir()):
-            stream.add(child, arcname=child.name)
+            stream.add(child, arcname=child.name, filter=artifact_filter)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as stream:

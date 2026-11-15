@@ -71,8 +71,8 @@ interpreter with uv. A dedicated opt-in ``.pth`` hook preserves the image's
 existing ``sitecustomize`` and ``PYTHONPATH``. If a workload introduces another
 Python environment, coverage and the hook must be installed there too.
 
-Each coverage-marked Actions ``run`` block is one collection entry. Its exact
-script is retained as ``command.sh``. Multiple commands in a block share coverage,
+Each coverage-marked Actions ``run`` block is one collection entry.
+Multiple commands in a block share coverage,
 preserving heredocs, shell state, checkpoint/resume ordering and validation
 commands. Different steps invoking the same script remain separate entries.
 
@@ -103,13 +103,20 @@ Each executed job retains a GitHub Actions artifact for 14 days, named
     npu_pytest_suites.json
     coveragerc
     covstub/verl/...
-    coverage/step-NN/command.sh
     coverage/step-NN/coverage.<host>.<pid>.<suffix>
-    coverage/step-NN/process-<host>-<pid>.json
 
-The source SHA, run/attempt, original workflow/job, commands, process startup
-evidence and per-step status allow later adapters to associate data correctly.
-Raw SQLite files are kept unchanged; no combine operation consumes them.
+The source SHA, run/attempt, original workflow/job, step identities, aggregate process
+counts and per-step status allow later adapters to associate data correctly.
+Process startup JSON files are used for validation but excluded from the tar.
+Per-step ``command.sh`` copies are not created or included in archives; step
+names and entrypoints remain in the manifest. Aggregation also excludes
+``command.sh`` files from older job artifacts.
+Valid coverage databases with no executed lines or arcs are also excluded;
+``empty_coverage_files_removed`` records their count per step. The retained
+SQLite files are unchanged; no coverage combine operation consumes them.
+Corrupt databases remain available for diagnosis and still fail completeness.
+Removing preprocessing instrumentation does not eliminate empty databases from
+training subprocesses, so this filtering also runs during packaging.
 Different workflows, jobs and run attempts have separate workspace directories.
 
 ``collection_complete`` requires all planned steps to pass, valid branch data
@@ -119,6 +126,33 @@ fail, but the partial tar is still uploaded. ``worker_coverage_verified`` and ``
 false: process counts cannot prove every Ray actor or engine subprocess was
 instrumented. Forked processes do not necessarily produce a separate startup
 record.
+
+Combined archive
+----------------
+
+The final ``aggregate_coverage`` job waits for every workload workflow,
+including failed or skipped calls, and downloads available job artifacts. It
+publishes ``ascend-coverage-combined-<run-attempt>`` containing one
+``coverage.tar.gz`` with this layout::
+
+    index.json
+    workflows/<workflow.yml>/<job-id>/manifest.json
+    workflows/<workflow.yml>/<job-id>/coverage/step-NN/coverage.<host>.<pid>.<suffix>
+    workflows/<workflow.yml>/<job-id>/covstub/verl/...
+
+All other retained job files also live under that workflow/job directory.
+``index.json`` maps every called workflow filename to its caller result and
+available jobs, then each job to its manifest and step directories. Failed or
+skipped workflows with no artifacts remain in the index with
+``artifacts_present: false``. Partial job manifests retain their original
+completeness status; successfully bundling them does not certify coverage.
+
+On a partial rerun, the latest available artifact for each job is used, including
+previous attempts of this same run when a job was not rerun. Each selected
+attempt is recorded. Run IDs and source SHAs must match; duplicate artifacts
+for the same workflow/job/attempt are rejected. No available archives is an
+error. The individual artifacts and combined artifact are retained for 14 days.
+When adding a caller workflow, also add it to the aggregate job's ``needs`` list.
 
 First CI inspection
 -------------------
