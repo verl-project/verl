@@ -290,7 +290,6 @@ class RolloutTqSkip(RolloutSkip):
         self.load_dump_data(
             step=step,
             new_prompt_uids=new_prompt_uids,
-            n=self.n,
             global_steps=step,
             partition_id=partition_id,
         )
@@ -340,7 +339,6 @@ class RolloutTqSkip(RolloutSkip):
         self,
         step: int,
         new_prompt_uids: list[str],
-        n: int,
         global_steps: int,
         partition_id: str = "train",
     ) -> None:
@@ -348,12 +346,16 @@ class RolloutTqSkip(RolloutSkip):
 
         Maps saved trajectories to new prompt uids in order, preserving the
         original key structure (``{uid}_{session_id}_{index}``) and GRPO group
-        composition (each prompt gets *n* trajectories from the same original group).
+        composition: every cached trajectory of a group is replayed for its
+        mapped prompt, keeping the session id and output index it was saved
+        with. A session can emit several trajectories (compaction replay,
+        sub-agent chains), and ``compute_advantage_for_multi_trajectories``
+        anchors each session on its highest-index output, so dropping or
+        relabelling those rows would silently change the cached training data.
 
         Args:
             step: Current training step.
             new_prompt_uids: Freshly generated uids for the current batch.
-            n: Number of trajectories per prompt (``rollout.n``).
             global_steps: Current ``global_steps``, used to override staleness tags.
             partition_id: TQ partition (``"train"`` or ``"val"``).
         """
@@ -413,19 +415,24 @@ class RolloutTqSkip(RolloutSkip):
                 flush=True,
             )
 
-        # Build new keys/tags: map each new uid to a cached group.
-        # If group has fewer than *n* trajectories (some sessions failed),
-        # cycle within the group to fill *n* trajectories.
+        # Build new keys/tags: map each new uid to a cached group and replay
+        # every trajectory of that group, re-keyed onto the new uid while
+        # keeping the saved ``{session_id}_{index}`` suffix of each row. The
+        # suffix in the cached key is authoritative: it is what the agent loop
+        # emitted for that row, and the row's own ``session_id`` field matches
+        # it. Forcing a fresh ``session_id in range(n)``/``index=0`` here would
+        # drop cached rows whose index is > 0 and relabel intermediate outputs
+        # as final answers.
         # If cached groups < new prompts, cycle through groups (modulo).
         new_keys = []
         new_tags = []
         traj_indices: list[int] = []
         for prompt_idx, new_uid in enumerate(new_prompt_uids):
             group = groups[prompt_idx % num_cached_groups]
-            for session_id in range(n):
-                traj_idx = group[session_id % len(group)]
+            for traj_idx in group:
+                _, session_id, index = old_keys[traj_idx].rsplit("_", 2)
                 traj_indices.append(traj_idx)
-                new_keys.append(f"{new_uid}_{session_id}_0")
+                new_keys.append(f"{new_uid}_{session_id}_{index}")
                 tag = dict(old_tags[traj_idx])
                 tag["global_steps"] = global_steps
                 tag["min_global_steps"] = global_steps
@@ -457,7 +464,7 @@ class RolloutTqSkip(RolloutSkip):
 
         print(
             f"{self.print_mark}\033[33mInjected {len(new_keys)} cached trajectories "
-            f"from step {load_step} ({len(new_prompt_uids)} prompts x {n}) "
+            f"from step {load_step} ({len(new_prompt_uids)} prompts, {num_cached_groups} cached groups) "
             f"into TQ partition '{partition_id}' at current step {step}\033[0m",
             flush=True,
         )

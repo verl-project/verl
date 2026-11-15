@@ -1,7 +1,7 @@
 SkipManager: Skip everything in the RL pipeline.
 ===========
 
-Last updated: 2026-07-08
+Last updated: 2026-11-15
 
 .. contents:: :local:
    :depth: 1
@@ -387,18 +387,23 @@ Cache-hit injection: key remapping
 ``_next_train_batch``. It remaps cached trajectories onto new uids:
 
 1. **Group by uid**: Parse ``old_keys`` and group trajectory indices by ``key.split("_")[0]``.
-   Each group is one prompt GRPO group (usually *n* trajectories, but may be fewer if sessions
-   failed).
+   Each group is one prompt GRPO group (``rollout.n`` rows when each session emits a single
+   output; sessions can emit several outputs per step, so a group may hold more or fewer rows).
 
 2. **Map new uids to groups**: For each new uid at position prompt_idx, select
    ``groups[prompt_idx % num_cached_groups]``. If cached groups are fewer than new prompts, groups
    cycle (modulo). If more, only the first ``num_prompts`` groups are used.
 
-3. **Fill *n* trajectories per prompt**: For each session_id in [0, n), pick
-   ``group[session_id % len(group)]``. If a group has fewer than *n* entries (partial failures),
-   trajectories cycle within the group to fill the slot.
+3. **Replay every trajectory of the mapped group**: iterate over the group's cached rows in
+   saved order. The cache is authoritative for both content and per-prompt row count — a
+   session can emit several trajectories (compaction replay, sub-agent chains), so the row
+   count follows the cache, not ``rollout.n``.
 
-4. **Build new keys**: ``{new_uid}_{session_id}_0`` — matching the standard TQ key format.
+4. **Build new keys**: ``{new_uid}_{session_id}_{index}`` — re-key each row onto the new uid
+   while keeping the saved ``{session_id}_{index}`` suffix that the agent loop emitted for it.
+   ``compute_advantage_for_multi_trajectories`` anchors each session on its highest-index
+   output, so dropping or relabelling those rows would silently change the cached training
+   data.
 
 5. **Update tags**: Each trajectory tag's ``global_steps`` / ``min_global_steps`` /
    ``max_global_steps`` are overwritten to the **current** step so ``ReplayBuffer``'s staleness
@@ -417,8 +422,8 @@ Cache-hit injection: key remapping
      "finished", ...}]`` — marks each new prompt as finished so ``ReplayBuffer.sample``'s
      ``_has_enough_samples`` passes immediately without polling.
 
-After injection, TQ holds the same structure as a normal completed rollout: ``n`` trajectory keys
-per prompt plus one prompt-level key with ``status="finished"``. ``replay_buffer.sample`` picks
+After injection, TQ holds every cached trajectory of the mapped groups re-keyed onto the new
+uids, plus one prompt-level key with ``status="finished"``. ``replay_buffer.sample`` picks
 them up on the next call and returns a KVBatchMeta whose data is the injected cache.
 
 
