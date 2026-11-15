@@ -94,6 +94,28 @@ def get_event_loop():
     return loop
 
 
+def run_coroutine_sync(coro):
+    """Drive an awaitable to completion from a synchronous context.
+
+    Outside a running event loop the coroutine runs with ``asyncio.run``;
+    when a loop is already running (e.g. an async Ray actor), the coroutine
+    is driven on a short-lived worker thread so the calling loop is not
+    blocked. Non-awaitable inputs are returned unchanged.
+    """
+    if not inspect.isawaitable(coro):
+        return coro
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop: run it directly on this thread.
+        return asyncio.run(coro)
+
+    # A loop is already running: offload to a worker thread to avoid deadlock.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 def auto_await(func):
     """Auto await a coroutine function.
 
