@@ -18,7 +18,6 @@ e2e test verl.single_controller.ray
 import errno
 import os
 import socket
-import time
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -63,26 +62,12 @@ class TestActor(Worker):
 
     def getenv(self, key):
         """Read an environment variable from the worker process."""
-        return os.getenv(key, f"{key} not set")
-
-    def get_pid(self):
-        """Identify the worker process before and after a Ray actor restart."""
-        return os.getpid()
+        val = os.getenv(key, f"{key} not set")
+        return val
 
     def was_master_port_bound(self):
         """Return the port occupancy observed before process-group initialization."""
         return self.master_port_was_bound
-
-    def release_master_port(self):
-        """Drop the retained TCPStore before a competing listener claims the port."""
-        del self.master_tcp_store
-
-    def assert_master_port_available(self):
-        """Bind and listen after PG teardown to rule out a retained listener."""
-        with socket.socket() as competitor:
-            competitor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            competitor.bind((self.getenv("MASTER_ADDR"), int(self.getenv("MASTER_PORT"))))
-            competitor.listen()
 
     def get_result(self):
         """Return the collective result from the constructor."""
@@ -242,142 +227,28 @@ def test_master_port_range(port_count):
         ray.shutdown()
 
 
-@pytest.mark.parametrize(
-    "decorator_restarts, option_restarts",
-    [(1, None), (0, -1)],
-    ids=["decorator-one-restart", "options-override-unlimited"],
-)
-def test_worker_restart_preserves_endpoint(decorator_restarts, option_restarts):
-    """Restore the endpoint after creator exit and release metadata with its placement group."""
-    ray.init(num_cpus=4)
-    try:
-
-        @ray.remote(num_cpus=0)
-        class GroupCreator:
-            """Create a detached group from a process that the test can terminate."""
-
-            def create_group(self):
-                """Return the worker and its placement group before the creator exits."""
-                pool = RayResourcePool([1], use_gpu=False, max_colocate_count=1, detached=True)
-                restartable_actor = ray.remote(max_restarts=decorator_restarts, max_task_retries=-1)(
-                    TestActor.__ray_actor_class__
-                )
-                factory = RayClassWithInitArgs(restartable_actor, init_process_group=True)
-                if option_restarts is not None:
-                    factory.update_options({"max_restarts": option_restarts})
-                group = RayWorkerGroup(resource_pool=pool, ray_cls_with_init=factory, detached=True)
-                return group.workers[0], pool.pgs[0], (group.master_address, group.master_port)
-
-        creator = GroupCreator.remote()
-        worker, pg, endpoint = ray.get(creator.create_group.remote(), timeout=60)
-        before = ray.get(worker.get_pid.remote(), timeout=30)
-        assert ray.get(worker.get_result.remote(), timeout=30) == 1
-        metadata_ids = [
-            actor_id
-            for actor_id, state in ray._private.state.actors().items()
-            if state["ActorClassName"] == "MasterEndpointMetadata" and state["State"] == "ALIVE"
-        ]
-        assert len(metadata_ids) == 1
-        metadata_id = metadata_ids[0]
-
-        ray.kill(creator, no_restart=True)
-        deadline = time.monotonic() + 15
-        while ray._private.state.actors(creator._actor_id.hex())["State"] != "DEAD":
-            assert time.monotonic() < deadline, "The detached worker's creator did not exit"
-            time.sleep(0.1)
-
-        ray.kill(worker, no_restart=False)
-        after = before
-        deadline = time.monotonic() + 30
-        while after == before and time.monotonic() < deadline:
-            time.sleep(0.1)
-            after = ray.get(worker.get_pid.remote(), timeout=30)
-        assert after != before
-        assert ray.get(worker.getenv.remote("MASTER_ADDR"), timeout=30) == endpoint[0]
-        assert ray.get(worker.getenv.remote("MASTER_PORT"), timeout=30) == endpoint[1]
-        assert ray.get(worker.get_result.remote(), timeout=30) == 1
-        ray.get(worker.assert_master_port_available.remote(), timeout=30)
-
-        ray.util.remove_placement_group(pg)
-        deadline = time.monotonic() + 15
-        while ray._private.state.actors(metadata_id)["State"] != "DEAD":
-            assert time.monotonic() < deadline, "Endpoint metadata outlived its placement group"
-            time.sleep(0.1)
-    finally:
-        ray.shutdown()
-
-
-def test_worker_restart_with_occupied_endpoint():
-    """Fail on the published port during restart even when another candidate is free."""
-    ray.init(num_cpus=4)
-    try:
-
-        @ray.remote(num_cpus=0)
-        def restart_on_occupied_port():
-            """Occupy the published port before the restarted constructor initializes PyTorch."""
-            with socket.socket() as candidate:
-                candidate.bind(("", 0))
-                port = candidate.getsockname()[1]
-                with socket.socket() as successor:
-                    successor.bind(("", port + 1))
-            pool = RayResourcePool([1], use_gpu=False, max_colocate_count=1)
-            restartable_actor = ray.remote(max_restarts=1, max_task_retries=-1)(TestActor.__ray_actor_class__)
-            group = RayWorkerGroup(
-                resource_pool=pool,
-                ray_cls_with_init=RayClassWithInitArgs(restartable_actor, init_process_group=True),
-                master_port_range=[port, port + 2],
-            )
-            worker = group.workers[0]
-            master_addr = group.master_address
-            assert group.master_port == str(port)
-            before = ray.get(worker.get_pid.remote(), timeout=30)
-            assert ray.get(worker.get_result.remote(), timeout=30) == 1
-            ray.get(worker.release_master_port.remote(), timeout=30)
-
-            with socket.socket() as listener:
-                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                listener.bind((master_addr, port))
-                listener.listen()
-                with socket.socket() as successor:
-                    successor.bind(("", port + 1))
-                ray.kill(worker, no_restart=False)
-                with pytest.raises(ray.exceptions.RayActorError, match="init_process_group") as failure:
-                    deadline = time.monotonic() + 30
-                    while time.monotonic() < deadline:
-                        observed = ray.get(worker.get_pid.remote(), timeout=30)
-                        assert observed == before, "The worker restarted on a different master endpoint"
-                        time.sleep(0.1)
-                    raise AssertionError("The worker did not fail on its occupied master port")
-                message = str(failure.value)
-                assert "EADDRINUSE" in message or f"errno: {errno.EADDRINUSE}" in message
-                assert str(port) in message
-
-        ray.get(restart_on_occupied_port.remote(), timeout=90)
-    finally:
-        ray.shutdown()
-
-
 def test_training_worker_omp_num_threads():
+    """Propagate the configured thread count and allow worker-specific overrides."""
     with patch.dict(os.environ, {TRAINING_WORKER_OMP_NUM_THREADS_ENV: "7"}):
         ray.init(num_cpus=100)
+        try:
+            resource_pool = RayResourcePool([2], use_gpu=False)
+            class_with_args = RayClassWithInitArgs(cls=TestActor)
 
-        resource_pool = RayResourcePool([2], use_gpu=False)
-        class_with_args = RayClassWithInitArgs(cls=TestActor)
+            worker_group = RayWorkerGroup(
+                resource_pool=resource_pool, ray_cls_with_init=class_with_args, name_prefix="worker_group_omp"
+            )
+            assert worker_group.execute_all_sync("getenv", key="OMP_NUM_THREADS") == ["7", "7"]
 
-        worker_group = RayWorkerGroup(
-            resource_pool=resource_pool, ray_cls_with_init=class_with_args, name_prefix="worker_group_omp"
-        )
-        assert worker_group.execute_all_sync("getenv", key="OMP_NUM_THREADS") == ["7", "7"]
-
-        worker_group = RayWorkerGroup(
-            resource_pool=resource_pool,
-            ray_cls_with_init=class_with_args,
-            name_prefix="worker_group_omp_customized",
-            worker_env={"OMP_NUM_THREADS": "3"},
-        )
-        assert worker_group.execute_all_sync("getenv", key="OMP_NUM_THREADS") == ["3", "3"]
-
-        ray.shutdown()
+            worker_group = RayWorkerGroup(
+                resource_pool=resource_pool,
+                ray_cls_with_init=class_with_args,
+                name_prefix="worker_group_omp_customized",
+                worker_env={"OMP_NUM_THREADS": "3"},
+            )
+            assert worker_group.execute_all_sync("getenv", key="OMP_NUM_THREADS") == ["3", "3"]
+        finally:
+            ray.shutdown()
 
 
 if __name__ == "__main__":
