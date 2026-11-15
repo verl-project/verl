@@ -38,7 +38,7 @@ from verl.single_controller.ray.base import (
 class TestActor(Worker):
     """Expose worker state and optionally initialize Gloo during construction."""
 
-    def __init__(self, init_process_group=False) -> None:
+    def __init__(self, init_process_group=False, expected_use_libuv=True) -> None:
         """Optionally inspect the master port and initialize a process group."""
         super().__init__()
         if not init_process_group:
@@ -47,6 +47,7 @@ class TestActor(Worker):
         assert not dist.is_initialized()
         self.master_port_was_bound = False
         if self.rank == 0:
+            assert self.master_tcp_store.libuvBackend == expected_use_libuv
             with socket.socket() as competitor:
                 try:
                     competitor.bind((self.getenv("MASTER_ADDR"), int(self.getenv("MASTER_PORT"))))
@@ -54,7 +55,11 @@ class TestActor(Worker):
                     assert error.errno == errno.EADDRINUSE
                     self.master_port_was_bound = True
 
-        dist.init_process_group(backend="gloo", timeout=timedelta(seconds=30))
+        dist.init_process_group(
+            backend="gloo",
+            timeout=timedelta(seconds=30),
+            init_method=os.environ.get("DIST_INIT_METHOD", None),
+        )
         value = torch.tensor(self.rank + 1)
         dist.all_reduce(value)
         self.result = value.item()
@@ -86,9 +91,21 @@ TestActor = ray.remote(TestActor)
 AsyncTestActor = ray.remote(AsyncTestActor)
 
 
-@pytest.mark.parametrize("worker_cls", [TestActor, AsyncTestActor], ids=["sync", "async"])
-def test_basics(worker_cls):
+@pytest.mark.parametrize(
+    "worker_cls, worker_env, expected_use_libuv",
+    [
+        (TestActor, {}, True),
+        (AsyncTestActor, {}, True),
+        (TestActor, {"USE_LIBUV": "0"}, False),
+        (TestActor, {"USE_LIBUV": "1", "DIST_INIT_METHOD": "env://?use_libuv=0"}, False),
+        (TestActor, {"USE_LIBUV": "0", "DIST_INIT_METHOD": "env://?use_libuv=1"}, True),
+    ],
+    ids=["sync-default-libuv", "async-default-libuv", "sync-env-legacy", "sync-query-legacy", "sync-query-libuv"],
+)
+def test_basics(worker_cls, worker_env, expected_use_libuv, monkeypatch):
     """Propagate worker environments and initialize Gloo using the prebound port."""
+    monkeypatch.delenv("USE_LIBUV", raising=False)
+    monkeypatch.delenv("DIST_INIT_METHOD", raising=False)
     ray.init(num_cpus=100)
     try:
 
@@ -96,9 +113,14 @@ def test_basics(worker_cls):
         def run_collective():
             """Bound group startup, including a constructor waiting for other ranks."""
             resource_pool = RayResourcePool([4], use_gpu=False)
-            class_with_args = RayClassWithInitArgs(cls=worker_cls, init_process_group=True)
+            class_with_args = RayClassWithInitArgs(
+                cls=worker_cls, init_process_group=True, expected_use_libuv=expected_use_libuv
+            )
             worker_group = RayWorkerGroup(
-                resource_pool=resource_pool, ray_cls_with_init=class_with_args, name_prefix="worker_group_basic"
+                resource_pool=resource_pool,
+                ray_cls_with_init=class_with_args,
+                name_prefix="worker_group_basic",
+                worker_env=worker_env,
             )
 
             output = worker_group.execute_all_sync("getenv", key="RAY_LOCAL_WORLD_SIZE")

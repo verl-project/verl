@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import errno
 import inspect
 import logging
 import os
@@ -20,7 +19,7 @@ import socket
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import ray
@@ -32,6 +31,8 @@ from verl.plugin.platform import get_platform
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
 from verl.utils.device import get_device_name
+from verl.utils.distributed import create_tcp_store
+from verl.utils.net_utils import is_valid_ipv6_address
 from verl.utils.py_functional import temp_env_var
 
 __all__ = ["Worker"]
@@ -1170,37 +1171,37 @@ class MasterEndpointMetadata:
         return self.master_endpoint
 
 
-def _env_rendezvous_uses_libuv() -> bool:
-    """Use the TCPStore backend that this process's later env:// init will use."""
-    from torch.distributed.rendezvous import _get_use_libuv_from_query_dict, _query_to_dict
-
+def _bind_master_tcp_store(addr: str, port_range: Optional[list[int]]):
+    """Bind a master TCPStore using this worker's env:// rendezvous backend."""
     init_method = urlparse(os.environ.get("DIST_INIT_METHOD", "env://"))
-    query = _query_to_dict(init_method.query) if init_method.scheme == "env" else {}
-    return _get_use_libuv_from_query_dict(query)
+    query = parse_qs(init_method.query, keep_blank_values=True) if init_method.scheme == "env" else {}
+    use_libuv = query.get("use_libuv", [os.environ.get("USE_LIBUV", "1")])[-1] == "1"
 
-
-def _bind_master_tcp_store(addr: str, port_range: Optional[list[int]], use_libuv: bool):
-    """Bind the master TCPStore, retrying occupied ports within the requested range."""
-    from torch.distributed import DistNetworkError, TCPStore
-
+    family = socket.AF_INET6 if is_valid_ipv6_address(addr) else socket.AF_INET
     os_assigned_port = port_range is None
     ports = (0,) if os_assigned_port else range(*port_range)
     for port in ports:
-        try:
-            return TCPStore(
-                host_name=addr,
-                port=port,
+        # Without SO_REUSEADDR, other groups cannot bind this port before TCPStore starts listening.
+        with socket.socket(family=family, type=socket.SOCK_STREAM) as listen_socket:
+            try:
+                listen_socket.bind((addr, port))
+            except OSError:
+                if os_assigned_port:
+                    raise
+                logger.info("Could not bind master port %d, trying port %d", port, port + 1)
+                continue
+
+            # create_tcp_store detaches the socket, so leaving this context keeps the port bound.
+            return create_tcp_store(
+                host=addr,
+                port=listen_socket.getsockname()[1],
+                listen_socket=listen_socket,
                 world_size=None,
                 is_master=True,
                 multi_tenant=True,
                 use_libuv=use_libuv,
             )
-        except DistNetworkError as error:
-            message = str(error)
-            port_in_use = "EADDRINUSE" in message or f"errno: {errno.EADDRINUSE} -" in message
-            if os_assigned_port or not port_in_use:
-                raise
-    raise RuntimeError(f"Could not bind a TCPStore in range {port_range}")
+    raise RuntimeError(f"Could not find a free port in range {port_range}")
 
 
 def _create_master_store_worker_cls(cls):
@@ -1217,7 +1218,7 @@ def _create_master_store_worker_cls(cls):
             """
             (master_endpoint_metadata, master_port_range), *worker_args = args
             addr = ray.util.get_node_ip_address().strip("[]")
-            self.master_tcp_store = _bind_master_tcp_store(addr, master_port_range, _env_rendezvous_uses_libuv())
+            self.master_tcp_store = _bind_master_tcp_store(addr, master_port_range)
             os.environ["MASTER_ADDR"] = addr
             os.environ["MASTER_PORT"] = str(self.master_tcp_store.port)
             master_endpoint_metadata.publish_master_endpoint.remote(addr, os.environ["MASTER_PORT"])
