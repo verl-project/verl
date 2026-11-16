@@ -26,7 +26,7 @@ EP_SIZE=${EP_SIZE:-64}
 TP_SIZE=${TP_SIZE:-1}
 FSDP_SIZE=${FSDP_SIZE:-64}
 
-ep_dispatcher=mc2
+ep_dispatcher=all2all
 max_prompt_length=$((1024 * 2))
 max_response_length=$((1024 * 6))
 max_model_len=$((max_prompt_length + max_response_length))
