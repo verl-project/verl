@@ -24,7 +24,7 @@ from typing import Optional
 import ray
 from ray.actor import ActorHandle
 
-from verl.utils.device import get_device_name, get_resource_name, is_torch_npu_available
+from verl.utils.device import get_device_name, get_resource_name, get_visible_devices_keyword, is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
@@ -270,6 +270,7 @@ class vLLMPDReplica(vLLMReplica):
         per_role_config = _dc_replace(self.config, tensor_model_parallel_size=tp)
 
         env_vars = {
+            get_visible_devices_keyword(): cuda_visible_devices,
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
             "NCCL_CUMEM_ENABLE": "0",
@@ -299,7 +300,6 @@ class vLLMPDReplica(vLLMReplica):
             node_rank=0,
             gpus_per_node=self.gpus_per_replica_node,
             nnodes=1,
-            cuda_visible_devices=cuda_visible_devices,
             disaggregation_role=role,
             disaggregation_kv_transfer_config=kv_transfer_config,
         )
