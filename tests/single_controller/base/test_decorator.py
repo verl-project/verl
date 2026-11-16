@@ -90,3 +90,48 @@ def test_async_callable_instance_preprocess_is_awaited():
         return value
 
     assert asyncio.run(add_one(None, 1)) == 2
+
+
+class _AsyncPostprocess:
+    async def __call__(self, worker, output):
+        return output + 1
+
+
+def test_worker_postprocess_fn_transforms_output():
+    @register(
+        worker_preprocess_fn=lambda self, *args, **kwargs: ((args[0] + 1,), kwargs),
+        worker_postprocess_fn=lambda self, output: output * 10,
+    )
+    def identity(self, value):
+        return value
+
+    assert identity(None, 1) == 20
+
+
+def test_async_callable_instance_postprocess_is_awaited():
+    @register(worker_postprocess_fn=_AsyncPostprocess())
+    def add_one(self, value):
+        return value
+
+    assert asyncio.run(add_one(None, 1)) == 2
+
+
+def _batch_meta():
+    from verl.utils.transferqueue_utils import BatchMeta
+
+    try:
+        return BatchMeta(global_indexes=[0], partition_ids=["p0"])
+    except TypeError:
+        return BatchMeta()
+
+
+def test_worker_hooks_rejected_when_transfer_queue_enabled():
+    @register(
+        worker_preprocess_fn=lambda self, *args, **kwargs: (args, kwargs),
+        worker_postprocess_fn=lambda self, output: output,
+    )
+    def identity(self, data):
+        return data
+
+    with pytest.raises(AssertionError, match="must be None when TransferQueue is enabled"):
+        identity(None, _batch_meta())

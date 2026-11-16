@@ -18,7 +18,7 @@ from typing import Callable
 
 from verl.protocol import DataProtoFuture, _padding_size_key
 from verl.utils.py_functional import DynamicEnum
-from verl.utils.transferqueue_utils import tqbridge
+from verl.utils.transferqueue_utils import _find_meta, tqbridge
 
 # here we add a magic number of avoid user-defined function already have this attribute
 MAGIC_ATTR = "attrs_3141562937"
@@ -423,33 +423,66 @@ def _check_execute_mode(execute_mode):
     assert isinstance(execute_mode, Execute), f"execute_mode must be a Execute. Got {execute_mode}"
 
 
-def _wrap_worker_preprocess_fn(func, worker_preprocess_fn):
-    if worker_preprocess_fn is None:
+def _is_async_worker_hook(hook) -> bool:
+    if hook is None:
+        return False
+    return inspect.iscoroutinefunction(hook) or inspect.iscoroutinefunction(
+        inspect.getattr_static(hook, "__call__", None)
+    )
+
+
+def _wrap_worker_hooks(func, worker_preprocess_fn, worker_postprocess_fn):
+    if worker_preprocess_fn is None and worker_postprocess_fn is None:
         return func
 
     if (
         inspect.iscoroutinefunction(func)
-        or inspect.iscoroutinefunction(worker_preprocess_fn)
-        or inspect.iscoroutinefunction(inspect.getattr_static(worker_preprocess_fn, "__call__", None))
+        or _is_async_worker_hook(worker_preprocess_fn)
+        or _is_async_worker_hook(worker_postprocess_fn)
     ):
 
         @wraps(func)
         async def async_inner(self, *args, **kwargs):
-            preprocessed = worker_preprocess_fn(self, *args, **kwargs)
-            if inspect.isawaitable(preprocessed):
-                preprocessed = await preprocessed
-            args, kwargs = preprocessed
+            if worker_preprocess_fn is not None:
+                preprocessed = worker_preprocess_fn(self, *args, **kwargs)
+                if inspect.isawaitable(preprocessed):
+                    preprocessed = await preprocessed
+                args, kwargs = preprocessed
             output = func(self, *args, **kwargs)
-            return await output if inspect.isawaitable(output) else output
+            if inspect.isawaitable(output):
+                output = await output
+            if worker_postprocess_fn is not None:
+                output = worker_postprocess_fn(self, output)
+                if inspect.isawaitable(output):
+                    output = await output
+            return output
 
         return async_inner
 
     @wraps(func)
     def inner(self, *args, **kwargs):
-        args, kwargs = worker_preprocess_fn(self, *args, **kwargs)
-        return func(self, *args, **kwargs)
+        if worker_preprocess_fn is not None:
+            args, kwargs = worker_preprocess_fn(self, *args, **kwargs)
+        output = func(self, *args, **kwargs)
+        if worker_postprocess_fn is not None:
+            output = worker_postprocess_fn(self, output)
+        return output
 
     return inner
+
+
+def _assert_no_worker_hooks_when_transfer_queue_enabled(worker_preprocess_fn, worker_postprocess_fn, *args, **kwargs):
+    """Reject worker hooks when this call carries TransferQueue metadata.
+
+    ``tqbridge`` reads metadata before worker hooks run. Hooks that redistribute data
+    across ranks, such as a model-parallel broadcast, drop that metadata on ranks that
+    were not the dispatch target.
+    """
+    if _find_meta(*args, **kwargs) is None:
+        return
+    assert worker_preprocess_fn is None and worker_postprocess_fn is None, (
+        "worker_preprocess_fn and worker_postprocess_fn must be None when TransferQueue is enabled"
+    )
 
 
 def _materialize_futures(*args, **kwargs):
@@ -473,6 +506,7 @@ def register(
     blocking=True,
     materialize_futures=True,
     worker_preprocess_fn: Callable | None = None,
+    worker_postprocess_fn: Callable | None = None,
 ):
     """Register a function with distributed execution configuration.
 
@@ -493,6 +527,10 @@ def register(
             Optional function executed inside each worker before the registered method.
             It receives ``(self, *args, **kwargs)`` and returns ``(args, kwargs)``.
             Defaults to None.
+        worker_postprocess_fn:
+            Optional function executed inside each worker after the registered method.
+            It receives ``(self, output)`` and returns the output to send back.
+            Defaults to None. Must be None when the call carries TransferQueue metadata.
 
 
     Returns:
@@ -505,21 +543,30 @@ def register(
     assert worker_preprocess_fn is None or callable(worker_preprocess_fn), (
         f"worker_preprocess_fn must be callable or None. Got {worker_preprocess_fn}"
     )
+    assert worker_postprocess_fn is None or callable(worker_postprocess_fn), (
+        f"worker_postprocess_fn must be callable or None. Got {worker_postprocess_fn}"
+    )
 
     def decorator(func):
-        func = _wrap_worker_preprocess_fn(func, worker_preprocess_fn)
+        func = _wrap_worker_hooks(func, worker_preprocess_fn, worker_postprocess_fn)
         func = tqbridge(dispatch_mode=dispatch_mode)(func)
+
+        def _prepare_call(args, kwargs):
+            if materialize_futures:
+                args, kwargs = _materialize_futures(*args, **kwargs)
+            _assert_no_worker_hooks_when_transfer_queue_enabled(
+                worker_preprocess_fn, worker_postprocess_fn, *args, **kwargs
+            )
+            return args, kwargs
 
         @wraps(func)
         def inner(*args, **kwargs):
-            if materialize_futures:
-                args, kwargs = _materialize_futures(*args, **kwargs)
+            args, kwargs = _prepare_call(args, kwargs)
             return func(*args, **kwargs)
 
         @wraps(func)
         async def async_inner(*args, **kwargs):
-            if materialize_futures:
-                args, kwargs = _materialize_futures(*args, **kwargs)
+            args, kwargs = _prepare_call(args, kwargs)
             return await func(*args, **kwargs)
 
         wrapper = async_inner if inspect.iscoroutinefunction(func) else inner

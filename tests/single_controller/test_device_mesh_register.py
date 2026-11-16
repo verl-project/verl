@@ -42,6 +42,21 @@ def _broadcast_preprocess(mesh_name: str):
     return preprocess
 
 
+def _double_postprocess(mesh_name: str):
+    """Double the method output so the collected value shows the hook ran after compute."""
+
+    def postprocess(worker, output):
+        worker._query_dispatch_info(mesh_name)
+        if isinstance(output, DataProto):
+            output.batch["a"] *= 2
+            return output
+        key = "a" if "a" in output else "input_ids"
+        output[key] *= 2
+        return output
+
+    return postprocess
+
+
 @ray.remote
 class TestActor(Worker):
     def __init__(self):
@@ -172,6 +187,46 @@ class TestActor(Worker):
     def generate_nested_tensor_mp_src(self, data: TensorDict):
         return self.generate_nested_tensor(data)
 
+    @register(
+        dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="infer", dispatch_mp_src_only=True),
+        worker_preprocess_fn=_broadcast_preprocess("infer"),
+        worker_postprocess_fn=_double_postprocess("infer"),
+    )
+    def generate_data_proto_mp_src_postprocess(self, data: DataProto):
+        return self.generate_data_proto(data)
+
+    @register(
+        dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="infer", dispatch_mp_src_only=True),
+        worker_preprocess_fn=_broadcast_preprocess("infer"),
+        worker_postprocess_fn=_double_postprocess("infer"),
+    )
+    def generate_tensordict_mp_src_postprocess(self, data: TensorDict):
+        return self.generate_tensordict(data)
+
+    @register(
+        dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train", dispatch_mp_src_only=True),
+        worker_preprocess_fn=_broadcast_preprocess("train"),
+        worker_postprocess_fn=_double_postprocess("train"),
+    )
+    def train_data_proto_mp_src_postprocess(self, data: DataProto):
+        return self.train_data_proto(data)
+
+    @register(
+        dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train", dispatch_mp_src_only=True),
+        worker_preprocess_fn=_broadcast_preprocess("train"),
+        worker_postprocess_fn=_double_postprocess("train"),
+    )
+    def train_tensordict_mp_src_postprocess(self, data: TensorDict):
+        return self.train_tensordict(data)
+
+    @register(
+        dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="infer", dispatch_mp_src_only=True),
+        worker_preprocess_fn=_broadcast_preprocess("infer"),
+        worker_postprocess_fn=_double_postprocess("infer"),
+    )
+    def generate_nested_tensor_mp_src_postprocess(self, data: TensorDict):
+        return self.generate_nested_tensor(data)
+
 
 def test_dist_global_info_wg():
     # create a worker group with size 8
@@ -198,12 +253,17 @@ def test_dist_global_info_wg():
     assert torch.all(torch.eq(infer_output_data_proto.batch["a"], torch.tensor([1, 3])))
     infer_output_data_proto_mp_src = wg.generate_data_proto_mp_src(infer_input_data_proto)
     assert torch.all(torch.eq(infer_output_data_proto_mp_src.batch["a"], torch.tensor([1, 3])))
+    # Doubling after compute yields [2, 6]. Doubling first would yield [2, 5].
+    infer_output_data_proto_post = wg.generate_data_proto_mp_src_postprocess(infer_input_data_proto)
+    assert torch.all(torch.eq(infer_output_data_proto_post.batch["a"], torch.tensor([2, 6])))
 
     infer_input_tensordict = infer_input_data_proto.to_tensordict()
     infer_output_tensordict = wg.generate_tensordict(infer_input_tensordict)
     assert torch.all(torch.eq(infer_output_tensordict["a"], torch.tensor([1, 3])))
     infer_output_tensordict_mp_src = wg.generate_tensordict_mp_src(infer_input_tensordict)
     assert torch.all(torch.eq(infer_output_tensordict_mp_src["a"], torch.tensor([1, 3])))
+    infer_output_tensordict_post = wg.generate_tensordict_mp_src_postprocess(infer_input_tensordict)
+    assert torch.all(torch.eq(infer_output_tensordict_post["a"], torch.tensor([2, 6])))
 
     train_input_data_proto = DataProto.from_single_dict(data={"a": torch.tensor([3, 4])})
     train_output_data_proto = wg.train_data_proto(train_input_data_proto)
@@ -214,12 +274,17 @@ def test_dist_global_info_wg():
     assert torch.all(torch.eq(train_output_data_proto.batch["a"], torch.tensor([11, 16])))
     train_output_data_proto_mp_src = wg.train_data_proto_mp_src(train_input_data_proto)
     assert torch.all(torch.eq(train_output_data_proto_mp_src.batch["a"], torch.tensor([11, 16])))
+    # Train collection uses pp rank 1, while the source is pp rank 0.
+    train_output_data_proto_post = wg.train_data_proto_mp_src_postprocess(train_input_data_proto)
+    assert torch.all(torch.eq(train_output_data_proto_post.batch["a"], torch.tensor([22, 32])))
 
     train_input_tensordict = train_input_data_proto.to_tensordict()
     train_output_tensordict = wg.train_tensordict(train_input_tensordict)
     assert torch.all(torch.eq(train_output_tensordict["a"], torch.tensor([11, 16])))
     train_output_tensordict_mp_src = wg.train_tensordict_mp_src(train_input_tensordict)
     assert torch.all(torch.eq(train_output_tensordict_mp_src["a"], torch.tensor([11, 16])))
+    train_output_tensordict_post = wg.train_tensordict_mp_src_postprocess(train_input_tensordict)
+    assert torch.all(torch.eq(train_output_tensordict_post["a"], torch.tensor([22, 32])))
 
     # create a batch size of input_ids
     input_ids = [
@@ -241,6 +306,8 @@ def test_dist_global_info_wg():
 
     assert torch.all(torch.eq(output["input_ids"].values(), expected.values()))
     assert torch.all(torch.eq(output_mp_src["input_ids"].values(), expected.values()))
+    output_post = wg.generate_nested_tensor_mp_src_postprocess(data)
+    assert torch.all(torch.eq(output_post["input_ids"].values(), expected.values() * 2))
 
     ray.shutdown()
 
