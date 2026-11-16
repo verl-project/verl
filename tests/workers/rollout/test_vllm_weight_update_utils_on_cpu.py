@@ -301,3 +301,53 @@ def test_vllm_update_weights_syncs_buffers_to_mtp_drafter(owner_attr):
     expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
     torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, expected)
+
+
+@pytest.mark.parametrize("helper_available,fail_receive", [(True, False), (True, True), (False, False)])
+def test_bucketed_mtp_check_is_scoped_to_transfer(monkeypatch, helper_available, fail_receive):
+    events = []
+    validation = types.ModuleType("vllm.model_executor.model_loader.mtp_validation")
+
+    @contextlib.contextmanager
+    def disable_check():
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("exit")
+
+    if helper_available:
+        validation.disable_mtp_completeness_check = disable_check
+    monkeypatch.setitem(sys.modules, validation.__name__, validation)
+    loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
+    loader_utils.process_weights_after_loading = lambda *args: events.append("postprocess")
+    monkeypatch.setitem(sys.modules, loader_utils.__name__, loader_utils)
+
+    class Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([], False)
+            if fail_receive:
+                raise RuntimeError("transfer failed")
+            on_bucket_received([], True)
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", Receiver)
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.device = torch.device("cpu")
+    worker.model_runner = _FakeModelRunner(_ToyModel())
+    monkeypatch.setattr(worker, "_iter_all_models", lambda: [])
+    monkeypatch.setattr(worker, "_iter_all_models_with_config", lambda: [(None, None)])
+    monkeypatch.setattr(worker, "_get_zmq_handle", lambda: "unused")
+    monkeypatch.setattr(worker, "_use_mtp_drafter_weight_sync", lambda: True)
+    monkeypatch.setattr(worker, "_update_weights", lambda *args, **kwargs: events.append("bucket"))
+
+    if fail_receive:
+        with pytest.raises(RuntimeError, match="transfer failed"):
+            worker.update_weights_from_ipc()
+        assert events == ["enter", "bucket", "exit"]
+    else:
+        worker.update_weights_from_ipc()
+        expected = ["enter", "bucket", "bucket", "exit"] if helper_available else ["bucket", "bucket"]
+        assert events == expected + ["postprocess"]
