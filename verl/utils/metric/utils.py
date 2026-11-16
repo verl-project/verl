@@ -21,6 +21,8 @@ from typing import Any, Optional, Union
 import numpy as np
 import torch
 
+from verl.utils.metric.deferred import DeferredScalar, host_scalar
+
 
 def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, Any]:
     """
@@ -107,8 +109,9 @@ class Metric:
         if isinstance(value, torch.Tensor):
             if value.numel() != 1:
                 raise ValueError("Only scalar tensors can be converted to float")
-            value = value.detach().item()
-        if not isinstance(value, NumericType):
+            # value.detach().item(); a DeferredScalar inside verl.utils.metric.deferred.defer_host_scalars()
+            value = host_scalar(value.detach())
+        if not isinstance(value, NumericType + (DeferredScalar,)):
             raise ValueError(f"Unsupported value type: {type(value)}")
         self.values.append(value)
 

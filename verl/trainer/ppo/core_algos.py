@@ -32,6 +32,7 @@ import verl.utils.torch_functional as verl_F
 from verl.trainer.config import AlgoConfig
 from verl.utils import as_torch_index, group_mean_std
 from verl.utils.import_utils import deprecated
+from verl.utils.metric.deferred import host_scalar
 from verl.workers.config import ActorConfig
 
 PolicyLossFn = Callable[
@@ -1368,10 +1369,11 @@ def compute_policy_loss_vanilla(
         loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )
 
+    # .detach().item() each; DeferredScalars inside verl.utils.metric.deferred.defer_host_scalars()
     pg_metrics = {
-        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-        "actor/ppo_kl": ppo_kl.detach().item(),
-        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        "actor/pg_clipfrac": host_scalar(pg_clipfrac.detach()),
+        "actor/ppo_kl": host_scalar(ppo_kl.detach()),
+        "actor/pg_clipfrac_lower": host_scalar(pg_clipfrac_lower.detach()),
     }
     return pg_loss, pg_metrics
 
