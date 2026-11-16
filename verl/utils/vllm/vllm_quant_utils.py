@@ -324,10 +324,15 @@ def _build_compressed_tensors_kv_cache_scale_patcher():
 
 def load_quanted_weights(weights, model_runner, is_drafter=False):
     if is_drafter:
-        drafter = getattr(model_runner, "drafter", None)
-        model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
+        model = None
+        for attr in ("drafter", "speculator"):
+            owner = getattr(model_runner, attr, None)
+            model = getattr(owner, "model", None)
+            if model is not None:
+                break
         assert model is not None, (
-            "load_quanted_weights(is_drafter=True) requires model_runner.drafter.model "
+            "load_quanted_weights(is_drafter=True) requires model_runner.drafter.model or "
+            "model_runner.speculator.model "
             "to be present and non-None for FP8 weight loading."
         )
     else:
