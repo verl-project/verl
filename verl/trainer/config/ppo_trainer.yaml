@@ -495,5 +495,8 @@ ray_kwargs:
       # Inherited by the TaskRunner and every worker actor. null -> Ray's default.
       py_executable: null
 
+  # Pin the TaskRunner to the driver's node (trainer checkpoint files on node-local disks)
+  task_runner_on_driver_node: False
+
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null

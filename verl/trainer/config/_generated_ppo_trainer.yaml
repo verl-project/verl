@@ -1027,4 +1027,5 @@ ray_kwargs:
     num_cpus: null
     runtime_env:
       py_executable: null
+  task_runner_on_driver_node: false
   timeline_json_file: null
