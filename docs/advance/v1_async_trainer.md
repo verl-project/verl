@@ -25,7 +25,7 @@ Set the mode with `trainer.v1.trainer_mode`.
 `colocate_async` and `separate_async` both enable partial-rollout through `FullyAsyncLLMServerClient`. If generation is aborted during a mode transition, completed tokens are retained and the remaining generation is retried. A resumed trajectory can therefore span multiple model versions.
 
 ![v1_trainer_timeline](
-https://github.com/Begunner/verl-link/blob/main/v1_trainer.svg?raw=true)
+images/v1_trainer/v1_trainer.svg)
 
 ## The V1 Training Loop
 
@@ -124,7 +124,7 @@ trainer.v1.separate_async.hybrid_rollout.enable_switch=True
 The switch addresses a specific idle window: after a PPO step finishes, the trainer may have to wait for standalone rollout to produce enough sampleable groups for the next step. During that window, the trainer's hybrid replicas can join the standalone load balancer and help generate samples.
 
 ![separate_async_switch_timeline](
-https://github.com/Begunner/verl-link/blob/main/sepa_switch.svg?raw=true)
+images/v1_trainer/sepa_switch.svg)
 
 The upper timeline shows `separate_async` without switching; the lower timeline shows hybrid GPUs joining rollout during idle windows when switching is enabled.
 
@@ -292,16 +292,16 @@ The three modes were compared over their first 150 steps with the same four-node
 
 
 ![v1_modes_quality_step](
-https://github.com/Begunner/verl-link/blob/main/v1_trainer/v1_modes_quality_step.png?raw=true)
+images/v1_trainer/v1_modes_quality_step.png)
 
 ![v1_modes_timing_components](
-https://github.com/Begunner/verl-link/blob/main/v1_trainer/v1_modes_timing_components.png?raw=true)
+images/v1_trainer/v1_modes_timing_components.png)
 
 ![v1_modes_offpolicy](
-https://github.com/Begunner/verl-link/blob/main/v1_trainer/v1_modes_offpolicy.png?raw=true)
+images/v1_trainer/v1_modes_offpolicy.png)
 
 ![v1_modes_policy_alignment](
-https://github.com/Begunner/verl-link/blob/main/v1_trainer/v1_modes_policy_alignment.png?raw=true)
+images/v1_trainer/v1_modes_policy_alignment.png)
 
 
 ### Separate_async switching
@@ -321,10 +321,10 @@ The step switch was evaluated for the first 100 steps of two otherwise identical
 | `switch`    | 2 hybrid + 1 standalone | 11.79 h (-10.3%)       | 16,445 (+12.6%)    | 13,478               | 0.7762      |
 
 ![switch_quality_step](
-https://github.com/Begunner/verl-link/blob/main/v1_trainer/switch_quality_step.png?raw=true)
+images/v1_trainer/switch_quality_step.png)
 
 ![switch_timing_components](
-https://github.com/Begunner/verl-link/blob/main/v1_trainer/switch_timing_components.png?raw=true)
+images/v1_trainer/switch_timing_components.png)
 
 ![switch_offpolicy](
-https://github.com/Begunner/verl-link/blob/main/v1_trainer/switch_offpolicy.png?raw=true)
+images/v1_trainer/switch_offpolicy.png)

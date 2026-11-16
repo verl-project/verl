@@ -22,7 +22,7 @@ IMPORTANT: after downloading MiMo-7B-RL, set `max_position_embeddings: 32768` in
 
 The `*_multinode.sh` variant uses the fully-async one-step-off trainer
 (`recipe.fully_async_policy.fully_async_main`), pinned to verl v0.9.1.
-Follow the [recipe setup](https://github.com/Begunner/verl-recipe/tree/776a0f47dd5321cdac75b676e183b921064f40fe/fully_async_policy/README.md#required-verl-version)
+Follow the [recipe setup](https://github.com/verl-project/verl-recipe/tree/main/fully_async_policy/README.md#required-verl-version)
 and run from the pinned verl checkout with the recipe repository at `recipe/`.
 Scale it via:
 
