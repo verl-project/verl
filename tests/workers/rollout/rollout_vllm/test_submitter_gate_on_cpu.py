@@ -97,8 +97,9 @@ class _FakeEngine:
         self.reset_prefix_calls += 1
 
 
-def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
+def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer, weight_sync_pause_mode: str = "abort"):
     server = object.__new__(cls)
+    server.config = RolloutConfig(name="vllm", weight_sync_pause_mode=weight_sync_pause_mode)
     server.node_rank = node_rank
     server.global_steps = 7
     server.engine = _FakeEngine()
@@ -148,6 +149,43 @@ def test_abort_uses_compatible_vllm_pause_api(monkeypatch, vllm_version, expecte
         await server.abort_all_requests(reset_prefix_cache=False)
 
         assert server.engine.pause_kwargs == [expected_kwargs]
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    ("vllm_version", "expected_kwargs"),
+    [
+        ("0.29.0", {"wait_for_inflight_requests": True, "clear_cache": True}),
+        ("0.32.0", {"mode": "wait", "clear_cache": True}),
+    ],
+)
+def test_wait_pause_mode_lets_inflight_requests_finish(monkeypatch, vllm_version, expected_kwargs):
+    # One-step off-policy async training needs every response from a single policy version,
+    # so a weight sync must wait for in-flight requests instead of aborting them.
+    async def main():
+        server = _make_server(weight_sync_pause_mode="wait")
+        server.engine.output_processor.request_states = {"r1": None, "r2": None}
+        monkeypatch.setattr(vllm_async_server, "_VLLM_VERSION", vllm_async_server.version.parse(vllm_version))
+
+        result = await server.abort_all_requests()
+
+        assert server.engine.pause_kwargs == [expected_kwargs]
+        assert result == {"aborted_count": 0, "request_ids": []}
+        assert server._submission_paused is True
+
+    asyncio.run(main())
+
+
+def test_wait_pause_mode_still_aborts_a_replica_leaving_for_training():
+    async def main():
+        server = _make_server(weight_sync_pause_mode="wait")
+        server.engine.output_processor.request_states = {"r1": None}
+
+        result = await server.abort_all_requests(reject_request=True)
+
+        assert server.engine.pause_kwargs[0]["mode"] == "abort"
+        assert result["aborted_count"] == 1
 
     asyncio.run(main())
 

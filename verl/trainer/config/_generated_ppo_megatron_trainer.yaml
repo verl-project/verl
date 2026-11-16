@@ -328,6 +328,7 @@ actor_rollout_ref:
     do_sample: true
     'n': 1
     over_sample_rate: 0
+    weight_sync_pause_mode: abort
     multi_stage_wake_up: false
     engine_kwargs:
       vllm: {}

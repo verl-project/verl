@@ -138,6 +138,11 @@ n: 1
 # where the system will abort remaining requests when (1 - over_sample_rate) * total_requests completions are reached.
 over_sample_rate: 0
 
+# How in-flight requests are handled when generation pauses for a weight update (vLLM only).
+# abort: abort them; the agent loop resubmits them under the new weights (partial rollout).
+# wait: let them finish under the current weights first, so every response comes from one policy version.
+weight_sync_pause_mode: abort
+
 # Whether to wake up inference engine in multi-stage for SGLang
 # to reduce peak memory during training-rollout transition.
 # This is only effective for SGLang rollout.

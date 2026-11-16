@@ -2,7 +2,7 @@
 
 **Author:** `https://github.com/meituan-search`
 
-Last updated: 05/25/2026.
+Last updated: 11/07/2026.
 
 This document introduces a fully asynchronous PPO training system that completely decouples the Trainer and Rollouter,
 supporting asynchronous sample generation and training.
@@ -148,6 +148,11 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 * `async_training.partial_rollout`
 
   partial_rollout only actually takes effect when staleness_threshold>0.
+
+  A weight sync aborts in-flight requests either way; with `partial_rollout=False` the aborted requests are not
+  resumed and are returned with the tokens generated so far. With vLLM rollout, set
+  `actor_rollout_ref.rollout.weight_sync_pause_mode=wait` as well to let in-flight requests finish under the current
+  weights instead, so no response is cut at a sync and each response comes from a single model version.
 
 * `async_training.require_batches`
 
