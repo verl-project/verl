@@ -3,25 +3,16 @@
 # with FSDPTurbo: https://gitcode.com/Ascend/FSDPTurbo
 
 set -xeuo pipefail
-# ===================================================================
-# Detached docker exec does not inherit the interactive CANN environment.
-# Pin this launch to the installed toolkit used by torch_npu in this container.
-CANN_DIR=/usr/local/Ascend
-source $CANN_DIR/ascend-toolkit/set_env.sh
-set +u
-source $CANN_DIR/nnal/atb/set_env.sh --cxx_abi=1
-set -u
-#=======================================================================
 
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 PROJECT_NAME=${PROJECT_NAME:-GRPO-DeepSeekV4}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-GRPO-DeepSeekV4-Flash}
 
-RAY_DATA_HOME="/efs_rl/z00886395"
-MODEL_PATH="/efs_rl/z00886395/models/DeepSeek-V4-Flash-BF16"
+RAY_DATA_HOME="/verl"
+MODEL_PATH="/models/DeepSeek-V4-Flash-BF16"
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${PROJECT_NAME}/${EXPERIMENT_NAME}"}
-TRAIN_FILE="/efs_rl/c00833002/datasets/dapo-math-17k.parquet"
-TEST_FILE="/efs_rl/c00833002/datasets/dapo-math-17k.parquet"
+TRAIN_FILE="/datasets/dapo-math-17k.parquet"
+TEST_FILE="/datasets/dapo-math-17k.parquet"
 
 ########################### derived defaults ###########################
 NNODES=${NNODES:-4}
@@ -102,7 +93,6 @@ MODEL=(
     +actor_rollout_ref.model.override_config.attn_implementation=eager
     +actor_rollout_ref.model.override_config.use_sparse_flash_attn=True
     +actor_rollout_ref.model.override_config._experts_implementation=eager
-    actor_rollout_ref.model.external_lib=examples.deepseekv4.register_dcp_loader
 )
 
 ACTOR=(
