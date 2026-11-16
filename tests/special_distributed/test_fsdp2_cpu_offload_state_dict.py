@@ -106,8 +106,8 @@ def _probe_pre_fix_crash(device_mesh, rank):
         msg = str(e).lower()
         # Issue #5995 error string is:
         #   "Attempted to set the storage of a tensor on device 'cpu' to a
-        #    storage on different device 'cuda:0'."
-        crashed_with_device_mismatch = "cpu" in msg and "cuda" in msg and "storage" in msg
+        #    storage on different device 'cuda:0'." (the device is the platform's on other accelerators)
+        crashed_with_device_mismatch = "cpu" in msg and get_device_name() in msg and "storage" in msg
         if rank == 0:
             print(f"pre-fix path crashed (as expected for #5995): {str(e)[:200]}")
 

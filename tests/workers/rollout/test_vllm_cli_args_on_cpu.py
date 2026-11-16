@@ -238,6 +238,36 @@ class TestCliArgsVllmParserRoundTrip:
         assert engine_args.enable_flashinfer_autotune is enabled
 
 
+class TestEngineKwargsManagedArgs:
+    """engine_kwargs may not set vLLM args that verl derives from its own config."""
+
+    @staticmethod
+    def _preprocess(engine_kwargs):
+        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+
+        server = SimpleNamespace(config=SimpleNamespace(checkpoint_engine=None))
+        vLLMHttpServer._preprocess_engine_kwargs(server, engine_kwargs)
+
+    @pytest.mark.parametrize(
+        "key,points_to",
+        [
+            ("enable_expert_parallel", "rollout.expert_parallel_size"),
+            ("enable-expert-parallel", "rollout.expert_parallel_size"),
+            ("tensor_parallel_size", "rollout.tensor_model_parallel_size"),
+            ("enable_return_routed_experts", "rollout.enable_rollout_routing_replay"),
+        ],
+        ids=["ep", "ep-hyphen", "tp", "r3"],
+    )
+    def test_rejects_managed_arg(self, key, points_to):
+        with pytest.raises(ValueError, match=points_to):
+            self._preprocess({key: True})
+
+    def test_passes_through_other_args(self):
+        engine_kwargs = {"max_num_seqs": 8}
+        self._preprocess(engine_kwargs)
+        assert engine_kwargs["max_num_seqs"] == 8
+
+
 class TestVllmColocateZmqHandle:
     def test_dp_local_rank_offsets_tensor_parallel_rank(self):
         """DP workers on the same node must not reuse the same TP-local socket."""

@@ -37,6 +37,9 @@ __all__ = ["Worker"]
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+# OMP_NUM_THREADS for the workers of a RayWorkerGroup. Every other Ray worker keeps Ray's own default.
+TRAINING_WORKER_OMP_NUM_THREADS_ENV = "VERL_TRAINING_WORKER_OMP_NUM_THREADS"
+
 
 def get_random_string(length: int) -> str:
     import random
@@ -150,6 +153,10 @@ class RayResourcePool(ResourcePool):
         bundle = {"CPU": self.max_colocate_count}
         if self.use_gpu:
             bundle[device_name] = 1
+            if self.accelerator_type is None and current_platform.device_name == "tpu":
+                # Ray places each per-node placement group independently, so a multi-host pool can
+                # straddle two TPU slices, which the TPU mesh cannot span. Pin the pool to one slice.
+                self.accelerator_type = current_platform.auto_assign_accelerator_type(self.name_prefix, None)
             if self.accelerator_type is not None:
                 bundle[self.accelerator_type] = 1e-4
         pg_scheme = [[bundle.copy() for _ in range(process_count)] for process_count in self._store]
@@ -672,6 +679,8 @@ class RayWorkerGroup(WorkerGroup):
                 )
                 raise ValueError(f"Cannot override protected system env: {conflict_env_vars}")
             env_vars.update(worker_env)
+        if TRAINING_WORKER_OMP_NUM_THREADS_ENV in os.environ:
+            env_vars.setdefault("OMP_NUM_THREADS", os.environ[TRAINING_WORKER_OMP_NUM_THREADS_ENV])
         import re
 
         cia_name = type(ray_cls_with_init.cls).__name__

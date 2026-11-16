@@ -1,0 +1,99 @@
+# KubeRay RayCluster for the GRPO examples (see README.md): 1 CPU head pod and 2 single-host TPU v6e-1 slices (2 chips).
+# The comments give the values for 2 v6e-4, v6e-8, v6e-16 or v6e-32 slices.
+# Replace <IMAGE>, <BUCKET> and <GSA_EMAIL> before applying (see README.md, step 4).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ray-ksa
+  annotations:
+    iam.gke.io/gcp-service-account: "<GSA_EMAIL>"
+---
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: ray-tpu-v6e-cluster
+spec:
+  headGroupSpec:
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+      spec:
+        serviceAccountName: ray-ksa
+        containers:
+          - name: ray-head
+            image: "<IMAGE>"
+            imagePullPolicy: Always
+            ports:
+              - containerPort: 8265  # Dashboard and job submission
+              - containerPort: 10001  # Ray client
+            resources:
+              limits:
+                cpu: "12"
+                memory: 48Gi
+              requests:
+                cpu: "12"
+                memory: 48Gi
+            volumeMounts:
+              - name: gcs-volume
+                mountPath: /data
+              - name: host-tmp
+                mountPath: /tmp
+        volumes:
+          - name: gcs-volume
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: "<BUCKET>"
+                mountOptions: implicit-dirs
+          - name: host-tmp
+            hostPath:
+              path: /tmp
+  workerGroupSpecs:
+    - groupName: tpu-group
+      replicas: 2  # 2 slices: trainer and rollout
+      numOfHosts: 1  # v6e-1: 1 host x 1 chip; v6e-4: 1 host x 4 chips; v6e-8: 2; v6e-16: 4; v6e-32: 8 (4 chips/host)
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+        spec:
+          serviceAccountName: ray-ksa
+          containers:
+            - name: ray-worker
+              image: "<IMAGE>"
+              imagePullPolicy: Always
+              env:
+                - name: RAY_memory_monitor_refresh_ms
+                  value: "0"
+                - name: RAY_memory_usage_threshold
+                  value: "0.99"
+              resources:
+                limits:
+                  memory: 128Gi  # v6e-4 / v6e-8 / v6e-16: 400Gi, v6e-32 (Qwen3-32B): 600Gi
+                  google.com/tpu: "1"  # v6e-4 / v6e-8 / v6e-16 / v6e-32: "4"
+                requests:
+                  cpu: "32"  # v6e-4 / v6e-8 / v6e-16: "48", v6e-32: "160"
+                  memory: 128Gi  # v6e-4 / v6e-8 / v6e-16: 400Gi, v6e-32 (Qwen3-32B): 600Gi
+                  google.com/tpu: "1"  # v6e-4 / v6e-8 / v6e-16 / v6e-32: "4"
+              volumeMounts:
+                - name: gcs-volume
+                  mountPath: /data
+                - name: host-tmp
+                  mountPath: /tmp
+          volumes:
+            - name: gcs-volume
+              csi:
+                driver: gcsfuse.csi.storage.gke.io
+                volumeAttributes:
+                  bucketName: "<BUCKET>"
+                  mountOptions: implicit-dirs
+            - name: host-tmp
+              hostPath:
+                path: /tmp
+          nodeSelector:
+            cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+            cloud.google.com/gke-tpu-topology: 1x1  # v6e-4: 2x2, v6e-8: 2x4, v6e-16: 4x4, v6e-32: 4x8

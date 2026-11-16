@@ -3,8 +3,8 @@
 This directory contains examples and scripts for running **Multi-Turn / Instruction SFT (Supervised Fine-Tuning)** on Google Cloud TPU v6e clusters using `verl`, `verl-hardware-plugin`, and the **TorchTitan** engine (`engine=torchtitan`).
 
 Both `verl` SFT entrypoints are supported on TPU:
-- **Single-Controller (Ray)**: `python3 -m verl.trainer.sft_trainer_ray` (`SFT_TRAINER_MODE=ray`, default for KubeRay `ray job submit`)
-- **Multi-Controller (`torchrun` SPMD)**: `torchrun ... -m verl.trainer.sft_trainer` (`SFT_TRAINER_MODE=torchrun`, for single-host TPU VMs or GKE JobSet)
+- **Multi-Controller (`torchrun` SPMD, default)**: `torchrun ... -m verl.trainer.sft_trainer` (`SFT_TRAINER_MODE=torchrun`, for single-host TPU VMs or GKE JobSet)
+- **Single-Controller (Ray)**: `python3 -m verl.trainer.sft_trainer_ray` (`SFT_TRAINER_MODE=ray`, for KubeRay `ray job submit`)
 
 The training setup uses:
 - **Training Engine**: TorchTitan (`engine=torchtitan`, PyTorch FSDP2 on `torch_tpu`)
@@ -45,19 +45,21 @@ kubectl port-forward svc/ray-tpu-v6e-cluster-head-svc 23333:8265 > /dev/null 2>&
 
 ### 3. Submit an SFT Training Job
 
-#### Option A: Ray Single-Controller (`verl.trainer.sft_trainer_ray`, Default)
+#### Option A: Ray Single-Controller (`verl.trainer.sft_trainer_ray`, `SFT_TRAINER_MODE=ray`)
 
-Submit the SFT job from the root of the `verl` repository using `ray job submit`:
+Submit the SFT job from the root of the `verl` repository using `ray job submit` (with `verl-hardware-plugin` checked out at `../verl-hardware-plugin`, see [`examples/tpu/grpo/README.md`](../grpo/README.md#1-get-the-code)):
 
 ```bash
 export RAY_ADDRESS="http://localhost:23333"
+RUNTIME_ENV='{"py_modules": ["../verl-hardware-plugin/verl_hardware_plugin"], "excludes": [".git", ".venv", "logs", "*.log", "*.pt", "*.bin"],
+  "env_vars": {"PYTHONPATH": ".", "PYTHONUNBUFFERED": "1", "VERL_PLATFORM": "tpu",
+    "VERL_USE_EXTERNAL_MODULES": "verl_hardware_plugin",
+    "RAY_OVERRIDE_JOB_RUNTIME_ENV": "1"}}'
 
 ray job submit --address "${RAY_ADDRESS}" \
   --working-dir . \
-  --runtime-env-json '{
-    "excludes": [".git", "logs", "*.log", "*.pt", "*.bin"]
-  }' \
-  -- bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
+  --runtime-env-json "${RUNTIME_ENV}" \
+  -- env SFT_TRAINER_MODE=ray bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
 ```
 
 For a quick 8-step smoke test with validation at Step 4 and Step 8, pass `SMOKE_TEST=1`:
@@ -65,19 +67,20 @@ For a quick 8-step smoke test with validation at Step 4 and Step 8, pass `SMOKE_
 ```bash
 ray job submit --address "${RAY_ADDRESS}" \
   --working-dir . \
-  --runtime-env-json '{
-    "excludes": [".git", "logs", "*.log", "*.pt", "*.bin"]
-  }' \
-  -- bash -c 'SMOKE_TEST=1 bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh'
+  --runtime-env-json "${RUNTIME_ENV}" \
+  -- env SFT_TRAINER_MODE=ray SMOKE_TEST=1 bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
 ```
 
-#### Option B: Multi-Controller SPMD via `torchrun` (`verl.trainer.sft_trainer`)
+#### Option B: Multi-Controller SPMD via `torchrun` (`verl.trainer.sft_trainer`, Default)
 
-To run directly with `torchrun` (for example on a single-host TPU v6e-4 VM or inside a multi-host JobSet container), set `SFT_TRAINER_MODE=torchrun`:
+To run directly with `torchrun` (the script's default `SFT_TRAINER_MODE=torchrun`, for example on a single-host TPU v6e-4 VM or inside a multi-host JobSet container):
+
+The `torchrun` path needs the TorchTPU slice environment: `TORCH_TPU_SLICEBUILDER_ADDRESSES` and `TORCH_TPU_TOPOLOGY`. GKE TPU pods (including the KubeRay pods above) get them from the TPU webhook. On a plain TPU VM, export them yourself; the script exits early if either is unset. For example, on a single-host TPU v6e-4 (1 host x 4 TPU chips, `2x2` topology):
 
 ```bash
-# Single-host TPU v6e-4 (1 host x 4 TPU chips)
-SFT_TRAINER_MODE=torchrun NNODES_TRAINER=1 N_CHIPS_TRAINER=4 DATA_PARALLEL_SHARD_SIZE=4 \
+export TORCH_TPU_SLICEBUILDER_ADDRESSES=localhost:8471,localhost:8472,localhost:8473,localhost:8474
+export TORCH_TPU_TOPOLOGY=2,2,1
+NNODES_TRAINER=1 N_CHIPS_TRAINER=4 \
   bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
 ```
 
@@ -86,13 +89,13 @@ SFT_TRAINER_MODE=torchrun NNODES_TRAINER=1 N_CHIPS_TRAINER=4 DATA_PARALLEL_SHARD
 ## ⚙️ Key Configuration & Tuning Notes
 
 1. **TPU Slice Topology (`NNODES_TRAINER` & `N_CHIPS_TRAINER`)**:
-   - On a **TPU v6e-8** slice (`2x4` topology = 2 VM hosts $\times$ 4 TPU chips/host), `NNODES_TRAINER` **must** match the full slice host count (`NNODES_TRAINER=2`, `N_CHIPS_TRAINER=4`, `DATA_PARALLEL_SHARD_SIZE=8`) so `libtpu`'s multi-host slice builder initializes all 8 chips in the slice together.
+   - On a **TPU v6e-8** slice (`2x4` topology = 2 VM hosts $\times$ 4 TPU chips/host), `NNODES_TRAINER` **must** match the full slice host count (`NNODES_TRAINER=2`, `N_CHIPS_TRAINER=4`) so `libtpu`'s multi-host slice builder initializes all 8 chips in the slice together.
    - On a single-host **TPU v6e-4** slice (`2x2` topology = 1 VM host $\times$ 4 TPU chips), override via:
      ```bash
-     NNODES_TRAINER=1 N_CHIPS_TRAINER=4 DATA_PARALLEL_SHARD_SIZE=4 bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
+     NNODES_TRAINER=1 N_CHIPS_TRAINER=4 bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
      ```
-2. **Pure FSDP2 (`engine.tensor_parallel_size=1`)**:
-   - Keep `engine.tensor_parallel_size=1` and shard across all TPU chips using `engine.data_parallel_shard_size=<total_chips>`. Tensor parallelism (`tensor_parallel_size > 1`) on `torch_tpu` routes logits through `DTensor.full_tensor()`, whose backward pass produces non-finite (`NaN`/`Inf`) gradients.
+2. **Pure FSDP by Default (`engine.tensor_parallel_size=1`)**:
+   - Pure FSDP (`engine.tensor_parallel_size=1`, `engine.data_parallel_shard_size=<total_chips>`) is the default for best training throughput. Tensor parallelism (`TENSOR_PARALLEL_SIZE > 1`, where `DATA_PARALLEL_SHARD_SIZE` defaults to `TOTAL_TRAINER_CHIPS / TENSOR_PARALLEL_SIZE`) is also supported when needed to reduce per-chip HBM usage. If you set `DATA_PARALLEL_SHARD_SIZE` explicitly, keep `DATA_PARALLEL_SHARD_SIZE * TENSOR_PARALLEL_SIZE` equal to the number of trainer chips.
 3. **Sequence Bucketing (`engine.pad_to_length=True`, `engine.pad_to_length_bucket=256`)**:
    - Packed 1D sequences are padded to multiples of `engine.pad_to_length_bucket` (default `256`, with `VERL_TPU_SEQ_BUCKET_SIZE` fallback) and aligned across data-parallel ranks so XLA compiles a bounded set of static bucket shapes (`256, 512, ..., 2048`) and reuses them with 100% cache hit rate.
 4. **Qwen3 Chat Template (`data.ignore_input_ids_mismatch=True`)**:

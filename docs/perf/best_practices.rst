@@ -129,7 +129,7 @@ Parameter Reference
   - ``actor_rollout_ref.rollout.val_kwargs.temperature`` / ``top_p`` / ``top_k`` / ``do_sample`` / ``n``:
     Sampling options for validation. Set ``temperature > 0`` to prevent repetitive thinking chains. For small test sets (e.g., AIME24) raise ``n`` (64 is a common choice) to reduce variance. A practical starting point is ``temperature=1.0``, ``top_p=0.7``, ``top_k=-1``, ``do_sample=True``, ``n=1`` and then increase ``n`` as needed.
   - ``+actor_rollout_ref.rollout.engine_kwargs.vllm.*`` / ``+actor_rollout_ref.rollout.engine_kwargs.sglang.*``:
-    Extra backend options injected via the ``+`` syntax. Consult backend docs for exact semantics. Some switches (for example ``pipeline_parallel_size``) may not be supported yet; when TP=32, ``enable_expert_parallel=True`` can even slow down DeepSeek-V3 rollout, so benchmark carefully.
+    Extra backend options injected via the ``+`` syntax. Consult backend docs for exact semantics. Some switches (for example ``pipeline_parallel_size``) may not be supported yet; when TP=32, expert parallelism (``actor_rollout_ref.rollout.expert_parallel_size``) can even slow down DeepSeek-V3 rollout, so benchmark carefully.
 
 :math:`\pi_\theta`
   - ``data.train_batch_size``:

@@ -6,15 +6,14 @@
 #   Can also be overridden for 1 Slice of TPU v6e-4 via `NNODES_TRAINER=1 N_CHIPS_TRAINER=4`.
 #
 # Launch Modes (`SFT_TRAINER_MODE`):
-#   - `ray` (default): Launches single-controller Ray SFT trainer (`verl.trainer.sft_trainer_ray`),
-#     suitable for KubeRay `ray job submit`.
-#   - `torchrun`: Launches SPMD multi-controller SFT trainer (`verl.trainer.sft_trainer`) via `torchrun`,
+#   - `torchrun` (default): Launches SPMD multi-controller SFT trainer (`verl.trainer.sft_trainer`) via `torchrun`,
 #     suitable for single-host v6e-4 or multi-host GKE JobSet workloads.
+#   - `ray`: Launches single-controller Ray SFT trainer (`verl.trainer.sft_trainer_ray`),
+#     suitable for KubeRay `ray job submit`.
 #
 # Parallelism Config:
-#   Pure FSDP2 (TP=1, DP_SHARD=8, PP=1) is used by default on TPU.
-#   Do NOT enable tensor_parallel_size > 1 on TPU without re-testing: TorchTitan's
-#   DTensor full_tensor() backward path produces non-finite gradients at TP > 1.
+#   Pure FSDP (TP=1, DP_SHARD=8, PP=1) is used by default on TPU for best throughput.
+#   Can also be combined with Tensor Parallelism (e.g. TENSOR_PARALLEL_SIZE=2).
 
 set -xeuo pipefail
 
@@ -36,9 +35,13 @@ export NNODES_TRAINER="${NNODES_TRAINER:-2}"
 export N_CHIPS_TRAINER="${N_CHIPS_TRAINER:-4}"
 TOTAL_TRAINER_CHIPS=$((NNODES_TRAINER * N_CHIPS_TRAINER))
 
-# Parallelism: Pure FSDP across all trainer chips
+# Parallelism: Pure FSDP across all trainer chips by default
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
-DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-${TOTAL_TRAINER_CHIPS}}"
+if (( TENSOR_PARALLEL_SIZE < 1 || TOTAL_TRAINER_CHIPS % TENSOR_PARALLEL_SIZE != 0 )); then
+    echo "ERROR: TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE} must be a positive divisor of the ${TOTAL_TRAINER_CHIPS} trainer chips." >&2
+    exit 1
+fi
+DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((TOTAL_TRAINER_CHIPS / TENSOR_PARALLEL_SIZE))}"
 
 # Sequence length bucket padding (`verl#8150`) to prevent XLA HLO recompilation on variable-length batches
 PAD_TO_LENGTH="${PAD_TO_LENGTH:-True}"
@@ -53,7 +56,7 @@ else
     TEST_FREQ="${TEST_FREQ:-5}"
 fi
 
-SFT_TRAINER_MODE="${SFT_TRAINER_MODE:-ray}"
+SFT_TRAINER_MODE="${SFT_TRAINER_MODE:-torchrun}"
 
 # Note on `data.ignore_input_ids_mismatch=True`:
 # Qwen3's chat template injects `<think>\n\n</think>\n\n` only on the last assistant turn and strips
@@ -106,8 +109,20 @@ COMMON_ARGS=(
 )
 
 if [[ "${SFT_TRAINER_MODE}" == "torchrun" ]]; then
-    NODE_RANK="${NODE_RANK:-0}"
-    MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+    if [[ -z "${TORCH_TPU_SLICEBUILDER_ADDRESSES:-}" || -z "${TORCH_TPU_TOPOLOGY:-}" ]]; then
+        echo "ERROR: TORCH_TPU_SLICEBUILDER_ADDRESSES and TORCH_TPU_TOPOLOGY must be set for SFT_TRAINER_MODE=torchrun." >&2
+        echo "In GKE KubeRay TPU pods these are set automatically by the webhook; on plain TPU VMs export them before running." >&2
+        exit 1
+    fi
+    NODE_RANK="${NODE_RANK:-${TPU_WORKER_ID:-0}}"
+    # Loopback is only reachable on a single host; multi-host runs need a routable master address.
+    if [[ -z "${MASTER_ADDR:-}" && -z "${TPU_WORKER_HOSTNAMES:-}" && "${NNODES_TRAINER}" -gt 1 ]]; then
+        echo "ERROR: set MASTER_ADDR (or TPU_WORKER_HOSTNAMES) for multi-host SFT_TRAINER_MODE=torchrun." >&2
+        exit 1
+    fi
+    DEFAULT_MASTER_ADDR="${TPU_WORKER_HOSTNAMES:-127.0.0.1}"
+    DEFAULT_MASTER_ADDR="${DEFAULT_MASTER_ADDR%%,*}"
+    MASTER_ADDR="${MASTER_ADDR:-${DEFAULT_MASTER_ADDR}}"
     MASTER_PORT="${MASTER_PORT:-29500}"
     torchrun \
         --nnodes="${NNODES_TRAINER}" \
@@ -117,6 +132,7 @@ if [[ "${SFT_TRAINER_MODE}" == "torchrun" ]]; then
         --master_port="${MASTER_PORT}" \
         -m verl.trainer.sft_trainer \
         "${COMMON_ARGS[@]}" \
+        data.num_workers=0 \
         "$@"
 else
     python3 -m verl.trainer.sft_trainer_ray \

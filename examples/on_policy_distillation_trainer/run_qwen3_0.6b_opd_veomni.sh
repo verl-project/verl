@@ -3,16 +3,13 @@
 #
 # VeOmni engine variant of the FSDP OPD script. Key differences:
 #   - model_engine=veomni for FSDP2-based training
-#   - use_fused_kernels=True enables veomni's fused-linear kernels:
+#   - use_fused_kernels=True with impl_backend=tilelang enables verl's fused-linear kernel:
 #     * For RL/SFT batches: fused log-prob + entropy (no logits materialization)
 #     * For top-K distillation batches (loss_mode=forward_kl_topk):
-#       veomni's chunk_topk_distill kernel computes the top-K forward-KL
-#       distillation loss without materializing [B, L, V] logits — saving
-#       significant GPU memory for large-vocabulary models.
+#       TileLang returns the teacher-token log-probabilities without
+#       materializing [B, L, V] logits.
 #   Without use_fused_kernels, the vanilla FSDP actor materializes full
-#   [B, L, V] logits and computes distillation loss eagerly. The VeOmni fused
-#   chunk_topk_distill path avoids this by streaming the lm_head
-#   projection chunk-by-chunk.
+#   [B, L, V] logits and computes distillation loss eagerly.
 
 set -xeuo pipefail
 
@@ -72,6 +69,7 @@ MODEL=(
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
     actor_rollout_ref.model.use_fused_kernels=True
+    actor_rollout_ref.model.fused_kernel_options.impl_backend=tilelang
 )
 
 ACTOR=(
@@ -127,11 +125,24 @@ EXTRA=(
 )
 
 ########################### launch ###########################
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): the driver and every Ray worker
+# (runtime_env.py_executable) run through `uv run` on the vllm × veomni extras of
+# the committed uv.lock — veomni is the third cu130 training backend alongside
+# fsdp / megatron. Some VeOmni-generated models additionally need
+# `--with transformers==5.16.1`; the Qwen3 models here run on the locked 5.12.1.
+# Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    LAUNCH=(uv run --frozen --all-packages --extra vllm --extra veomni python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra vllm --extra veomni")
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \
     "${ROLLOUT[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

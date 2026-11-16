@@ -1,6 +1,6 @@
 # Qwen3.5 Megatron NPU 使用指南
 
-Last updated: 09/29/2026.
+Last updated: 11/03/2026.
 
 本文用于指导在 Ascend NPU 上使用 verl + Megatron + vLLM 跑通 Qwen3.5-35B-A3B 和 Qwen3.5-122B-A10B GRPO 示例。
 
@@ -12,10 +12,13 @@ Last updated: 09/29/2026.
 | --- | --- |
 | Python | 3.12 |
 | CANN | 9.1.0 |
-| torch / torch_npu | 2.10.0 / 2.10.0.post4 |
-| vLLM / vLLM-Ascend | 0.23.0 / 0.23.0 |
-| transformers | 5.10.4 |
-| Megatron-LM / MindSpeed / MegatronAdaptor | `core_r0.18.0` |
+| torch / torch_npu | 2.10.0 / 2.10.0.post7 |
+| vLLM / vLLM-Ascend | 0.30.0 / 0.30.0 |
+| triton-ascend | 3.6.0.post2 |
+| transformers | 5.14.1 |
+| xgrammar | `>=0.2.1,<1.0.0` |
+| Megatron-LM | `core_v0.18.0` |
+| MindSpeed / MegatronAdaptor | `core_r0.18.0` |
 | Megatron-Bridge | `v0.5.0` |
 | MindSpeed-Bridge | 仓库默认分支（未固定 tag/commit） |
 

@@ -39,6 +39,11 @@ distillation_loss:
   # Optional min clamp value for log probabilities for stability, e.g., log q - log p where p or q are very close to zero.
   log_prob_min_clamp: null
 
+  # Minimum student probability mass for the aggregate tail bucket in
+  # forward_kl_topk_tail. This avoids log(0) when the student top-k mass
+  # rounds to one in finite precision.
+  tail_mass_eps: 1.0e-6
+
   # Whether to incorporate distillation loss as a reward.
   use_policy_gradient: false
 

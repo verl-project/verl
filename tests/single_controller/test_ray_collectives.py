@@ -20,6 +20,7 @@ Rollout rank 2, 3 - Rollout rank 1
 Then, we initiate 4 p2p comms from actor to rollout
 """
 
+import pytest
 import ray
 import ray.util.collective as collective
 import torch
@@ -27,6 +28,7 @@ import torch
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device, is_device_available
 
 
 @ray.remote
@@ -35,11 +37,11 @@ class Actor(Worker):
     def init(self):
         remote_rank = self.rank // 2
         self.group_name = f"A{self.rank}_R{remote_rank}"
-        collective.init_collective_group(world_size=2, rank=0, backend="nccl", group_name=self.group_name)
+        collective.init_collective_group(world_size=2, rank=0, backend=get_nccl_backend(), group_name=self.group_name)
 
     @register(Dispatch.ONE_TO_ALL, blocking=False)
     def send_tensors(self):
-        tensor = torch.ones(size=(4,), dtype=torch.float32, device="cuda") * self.rank
+        tensor = torch.ones(size=(4,), dtype=torch.float32, device=get_device_name()) * self.rank
         collective.send(tensor=tensor, dst_rank=1, group_name=self.group_name)
 
 
@@ -52,13 +54,17 @@ class Rollout(Worker):
         self.first_group_name = f"A{self.remote_first_rank}_R{self.rank}"
         self.second_group_name = f"A{self.remote_second_rank}_R{self.rank}"
 
-        collective.init_collective_group(world_size=2, rank=1, backend="nccl", group_name=self.first_group_name)
-        collective.init_collective_group(world_size=2, rank=1, backend="nccl", group_name=self.second_group_name)
+        collective.init_collective_group(
+            world_size=2, rank=1, backend=get_nccl_backend(), group_name=self.first_group_name
+        )
+        collective.init_collective_group(
+            world_size=2, rank=1, backend=get_nccl_backend(), group_name=self.second_group_name
+        )
 
     @register(Dispatch.ONE_TO_ALL, blocking=False)
     def receive_tensors(self):
-        self.tensor1 = torch.randn(size=(4,), dtype=torch.float32, device="cuda")
-        self.tensor2 = torch.randn(size=(4,), dtype=torch.float32, device="cuda")
+        self.tensor1 = torch.randn(size=(4,), dtype=torch.float32, device=get_device_name())
+        self.tensor2 = torch.randn(size=(4,), dtype=torch.float32, device=get_device_name())
 
         collective.recv(self.tensor1, src_rank=0, group_name=self.first_group_name)
         collective.recv(self.tensor2, src_rank=0, group_name=self.second_group_name)
@@ -68,9 +74,29 @@ class Rollout(Worker):
         return {f"src_{self.remote_first_rank}": self.tensor1, f"src_{self.remote_second_rank}": self.tensor2}
 
 
+def _ray_backend_available(backend: str) -> bool:
+    # Newer Ray lets platforms register their own collective backend; older Ray only knows NCCL.
+    check = getattr(collective, "is_backend_available", None)
+    if check is not None:
+        return check(backend)
+    return backend.lower() == "nccl" and collective.nccl_available()
+
+
 def test_ray_collective_group():
+    # get_device_name() falls back to "cuda" when no accelerator is detected at all (e.g. a CPU-only
+    # box), so is_device_available() is needed too or that case would slip past the skips below.
+    if not is_device_available():
+        pytest.skip("no accelerator available")
+    ngpus = get_torch_device().device_count()
+    # 2 actors + 1 rollout must be placed at once; with fewer devices the rollout pool is never satisfied.
+    if ngpus < 3:
+        pytest.skip(f"needs at least 3 devices, found {ngpus}")
+    # Init Ray before probing backends: nccl_available() calls ray.get_gpu_ids(), which auto-starts Ray.
     ray.init()
-    ngpus = torch.cuda.device_count()
+    backend = get_nccl_backend()
+    if not _ray_backend_available(backend):
+        ray.shutdown()
+        pytest.skip(f"ray.util.collective has no {backend!r} backend registered")
     n_rollout = max(1, ngpus // 3)  # keep 2:1 actor:rollout ratio
     n_actor = n_rollout * 2
 

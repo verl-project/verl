@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 09/29/2026
+Last updated: 11/02/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -20,19 +20,15 @@ FP8 rollout-only mode keeps training in BF16 and quantizes rollout inference to 
 
 ### Implementation
 
-We monkey patch several vLLM functions to enable FP8 rollout for reinforcement learning:
-
-1. **Quantize weights**: Quantize model weights on-the-fly from higher-precision formats to FP8.
-2. **Process weights after loading**: For vLLM, we replace the `vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading` function to handle weight processing after quantization. For SGLang, this patch is not needed as it natively supports loading quantized weights.
+The rollout engine starts from a compressed-tensors `quantization_config` with dummy weights, and the trainer quantizes every weight sync to that config with the compressed-tensors compressors (`verl/utils/qat/compressed_tensors.py`). On the vLLM side we monkey patch `process_weights_after_loading` of the compressed-tensors FP8 linear/MoE methods so refits are written back into the live parameters (`verl/utils/vllm/vllm_fp8_utils.py`).
 
 ### Support Matrix
 
-- FP8 blockwise quantization for rollout
+- FP8 blockwise quantization for rollout (compressed-tensors preset `FP8_BLOCK`)
   - Used in Deepseek, which is 1x128 quantization for activations and 128x128 quantization for model weights
 - Dense models and MoE models
 - Async rollout interfaces
-- vLLM 0.10.x & vLLM 0.11 & vLLM 0.12 & SGLang 0.5.5
-- FSDP and Megatron training backends
+- vLLM or SGLang rollout (SGLang validated on Hopper only) with the Megatron training backend; TRT-LLM and FSDP are not supported
 
 ### Usage
 
@@ -40,52 +36,20 @@ Enable in config file:
 
 ```yaml
 rollout:
-  quantization: "fp8"
+  quantization:
+    linear: FP8_BLOCK  # dense linear layers (attention, dense MLP, shared experts)
+    moe: FP8_BLOCK     # routed experts
+    ignore: []         # extra "re:" patterns kept in BF16
 ```
 
 Or via command line:
 
 ```bash
-actor_rollout_ref.rollout.quantization=fp8
+actor_rollout_ref.rollout.quantization.linear=FP8_BLOCK \
+actor_rollout_ref.rollout.quantization.moe=FP8_BLOCK
 ```
 
-#### Skipping layers in SGLang FP8 rollout
-
-When using SGLang FP8 rollout, you can skip FP8 weight quantization for
-selected modules. Skipped modules stay in the rollout model dtype instead
-of being converted to FP8. This is useful for layers that are not
-compatible with block-wise FP8 weight quantization, or for modules that
-you prefer to keep in higher precision.
-
-Set `SGLANG_FP8_IGNORED_LAYERS` before starting training:
-
-```bash
-SGLANG_FP8_IGNORED_LAYERS=linear_attn \
-python3 -m verl.trainer.main_ppo \
-  actor_rollout_ref.rollout.name=sglang \
-  actor_rollout_ref.rollout.quantization=fp8 \
-  ...
-```
-
-Multiple entries can be separated by commas:
-
-```bash
-SGLANG_FP8_IGNORED_LAYERS=linear_attn,visual
-```
-
-You can also use the model `quantization_config`:
-
-```json
-{
-  "quantization_config": {
-    "ignored_layers": ["re:.*linear_attn.*"]
-  }
-}
-```
-
-Plain module names, full module paths, and `re:` regex patterns are
-supported. verl applies the same ignored-layer rules when launching
-SGLang and when syncing updated actor weights into the rollout engine.
+Routers, `lm_head`, embeddings, vision towers and MTP layers stay in BF16 by default, as do layers whose weight shape is not a multiple of the 128x128 block. To provide a complete compressed-tensors `quantization_config` instead, set `actor_rollout_ref.rollout.quantization.config_file=/path/to/quantization_config.json` (exclusive with `linear` / `moe` / `ignore`).
 
 ### Experiments and Outcomes
 
@@ -183,15 +147,30 @@ actor_rollout_ref.actor.optim.override_optimizer_config:
   fp8_recipe: "blockwise"
 
 # FP8 rollout inference (vLLM)
-actor_rollout_ref.rollout:
-  quantization: fp8
+actor_rollout_ref.rollout.quantization:
+  linear: FP8_BLOCK
+  moe: FP8_BLOCK
 ```
+
+### FP8 KV Cache (Optional)
+
+The rollout KV cache can also be stored in FP8 by passing vLLM's `kv_cache_dtype` through `engine_kwargs`:
+
+```bash
++actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8_e4m3
+```
+
+- Only the rollout side changes. Training-side core attention stays in BF16, so the extra train/rollout mismatch is corrected by TIS like the rest of the FP8 rollout error.
+- The q/k/v scales are uncalibrated (1.0): verl does not export KV cache scales, so the values are cast to FP8 directly. On Hopper, vLLM's FlashAttention-3 backend then runs attention in FP8 and quantizes Q as well.
+- Combined with `quantization.linear/moe=FP8_BLOCK`, this needs [#8483](https://github.com/verl-project/verl/pull/8483). Without it, the attention scales keep the random values from the dummy load and the rollout generates garbage.
+- Validated with vLLM only.
 
 ### Support Matrix
 
 - Megatron training backend (via Megatron-Bridge)
-- Verified on Qwen3-30B-A3B and Qwen3-8B
+- Verified on Qwen3-30B-A3B and Qwen3-8B (H100); Qwen3-30B-A3B also on H20
 - Block-wise FP8 scaling (`fp8_recipe: "blockwise"`)
+- Optional FP8 KV cache in vLLM rollout
 
 ### Experiments and Results
 
@@ -212,6 +191,35 @@ actor_rollout_ref.rollout:
 Results and observations:
 - FP8 E2E achieves comparable accuracy to the BF16 baseline, with the two curves closely aligned throughout training.
 - The training/inference precision mismatch (measured by KL divergence) follows the ordering: FP8 rollout-only > FP8 E2E > BF16 E2E. This is expected, as FP8 E2E maintains consistent precision across both training and inference, resulting in lower distribution mismatch than the FP8 rollout-only setting where training remains in BF16.
+
+#### Qwen3-30B-A3B MoE Model on H20, with FP8 KV Cache
+
+**Configuration**
+- Same recipe as above (DAPO-Math-17k, prompt batch size 128, n=16, max prompt / response length 2K / 20K, token-level TIS with C=2, dynamic sampling), 100 steps
+- AIME24 online validation every 10 steps (32 samples per problem, temperature 0.6)
+- Megatron + Megatron-Bridge, vLLM 0.29 rollout, Transformer Engine 2.16
+- 1\*8*H20 per run, CUDA 13.0
+- Three runs: BF16 training + BF16 rollout; FP8 E2E; FP8 E2E + FP8 KV cache (`kv_cache_dtype=fp8_e4m3`, scales 1.0)
+
+| | BF16 | FP8 E2E | FP8 E2E + FP8 KV cache |
+|---|---|---|---|
+| AIME24 at step 0 / 50 / 100 | 5.4 / 20.1 / 23.9 | 4.4 / 19.4 / 22.5 | 4.6 / 19.0 / 22.0 |
+| `rollout_corr/k3_kl`, steps 1–10 / last 20 steps | 0.00127 / 0.00065 | 0.00264 / 0.00131 | 0.00534 / 0.00290 |
+| Step time (s) | 396 | 376 | 357 |
+| Rollout generation (s) | 182 | 164 | 143 |
+| Actor update (s) | 151 | 146 | 147 |
+| Peak training memory reserved (GB) | 110 | 127 | 127 |
+
+Times are steady-state means over steps without validation or checkpointing. Generation time includes dynamic-sampling refills.
+
+![Qwen3-30B-A3B on H20, training curves](https://github.com/user-attachments/assets/202130be-49db-47b9-bcc1-ac3a1c5a2745)
+
+![Qwen3-30B-A3B on H20, step time](https://github.com/user-attachments/assets/b97a8ecd-8cb6-47ec-8c00-620493c7e635)
+
+Results and observations:
+- All three runs train stably for 100 steps. Accuracy, reward, entropy, response length and grad norm overlap; the AIME24 gap at step 100 is within the evaluation noise of about ±2–3 points.
+- FP8 E2E roughly doubles the train/rollout mismatch of BF16, and the FP8 KV cache doubles it again (about 4.5× BF16). It does not grow over training. In a single-step probe, BF16 rollout with an FP8 KV cache alone gives a larger mismatch (0.0050) than FP8 E2E without it (0.0029), so the uncalibrated KV scales are the larger error source.
+- The FP8 KV cache cuts rollout generation by another 13% over FP8 E2E and the whole step by 5% (10% versus BF16). Training time and memory do not change. Responses here average about 1K tokens; longer responses spend more time reading the KV cache, so the gain should be larger.
 
 ---
 

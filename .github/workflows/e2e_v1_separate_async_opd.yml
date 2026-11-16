@@ -67,7 +67,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev5"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -117,7 +117,9 @@ jobs:
       - name: Run V1 separate_async with Multi-Teacher OPD
         run: |
           $UV_RUN ray stop --force
-          bash tests/special_e2e/run_v1_separate_async_opd.sh
+          bash tests/special_e2e/run_v1_separate_async_opd.sh \
+            actor_rollout_ref.model.use_fused_kernels=True \
+            actor_rollout_ref.model.fused_kernel_options.impl_backend=tilelang
 
   cleanup:
     runs-on: ubuntu-latest

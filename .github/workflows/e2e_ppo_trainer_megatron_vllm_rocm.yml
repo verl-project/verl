@@ -90,6 +90,11 @@ env:
   # This image is not the uv.cu130 one: it ships its own ROCm torch stack, so the
   # shared e2e scripts must launch with ambient python instead of `uv run`.
   VERL_USE_UV: 0
+  # With a rocprofiler client registered, idle GPU processes busy-poll in the ROCm
+  # runtime. vLLM >= 0.32 registers one in every worker, which saturates the 32
+  # cores these jobs are pinned to and roughly doubles the Megatron job. This keeps
+  # the runtime from registering, at the cost of GPU records in profiler traces.
+  HSA_TOOLS_DISABLE_REGISTER: "1"
 
 jobs:
   e2e_ppo_trainer_fsdp_vllm_rocm:
@@ -97,8 +102,8 @@ jobs:
     runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      # built from https://github.com/mingjielu/Training-dockerfile/blob/main/ubuntu/rocm7.14_verl_0810_py312/Dockerfile
-      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
+      # built from docker/rocm/Dockerfile.rocm
+      image: "verlai/verl:rocm7.14_torch2.12_release_1112"
       options: >-
         --device /dev/kfd
         --device /dev/dri
@@ -191,7 +196,7 @@ jobs:
     runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
+      image: "verlai/verl:rocm7.14_torch2.12_release_1112"
       options: >-
         --device /dev/kfd
         --device /dev/dri
@@ -253,7 +258,7 @@ jobs:
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 \
           MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True \
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=2 \
-          USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 ROLLOUT_QUANTIZATION=fp8 \
+          USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 ROLLOUT_QUANTIZATION=FP8_BLOCK \
           bash tests/special_e2e/run_ppo_trainer_megatron.sh \
           global_profiler.tool=null actor_rollout_ref.actor.profiler.tool=null actor_rollout_ref.ref.profiler.tool=null actor_rollout_ref.rollout.profiler.tool=null critic.profiler.tool=null "${VLLM_ROCM_OVERRIDE}"
       - name: clean up
@@ -267,7 +272,7 @@ jobs:
     if: ${{ always() && github.repository_owner == 'verl-project' }}
     runs-on: [rocm-mi300]
     container:
-      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
+      image: "verlai/verl:rocm7.14_torch2.12_release_1112"
     steps:
       - name: Clean up leftover checkpoints
         run: |

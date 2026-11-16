@@ -577,7 +577,7 @@ def efficient_entropy_forward(
     """
     forward host function
     """
-    assert hidden.is_cuda and weight.is_cuda and labels.is_cuda
+    assert hidden.device.type != "cpu" and weight.device.type != "cpu" and labels.device.type != "cpu"
     assert weight.device == hidden.device and labels.device == hidden.device
     assert hidden.dim() == 2 and weight.dim() == 2 and labels.dim() == 1
     assert hidden.is_contiguous() and weight.is_contiguous() and labels.is_contiguous()
@@ -634,7 +634,7 @@ def efficient_entropy_forward(
         _logprobs = torch.empty((num_tokens,), device=hidden.device, dtype=torch.float32)
 
     assert _accu.is_contiguous() and _entropy_b.is_contiguous() and _max.is_contiguous()
-    assert _accu.is_cuda and _entropy_b.is_cuda and _max.is_cuda
+    assert _accu.device.type != "cpu" and _entropy_b.device.type != "cpu" and _max.device.type != "cpu"
 
     if _config._use_triton:
         # 1D kernel launch, then split the tile
@@ -1532,7 +1532,7 @@ def efficient_entropy_backward(
     """
     backward host function
     """
-    assert hidden.is_cuda and weight.is_cuda and labels.is_cuda
+    assert hidden.device.type != "cpu" and weight.device.type != "cpu" and labels.device.type != "cpu"
     assert weight.device == hidden.device and labels.device == hidden.device
     assert hidden.dim() == 2 and weight.dim() == 2 and labels.dim() == 1
     assert hidden.is_contiguous() and weight.is_contiguous() and labels.is_contiguous()
@@ -1554,7 +1554,7 @@ def efficient_entropy_backward(
         assert dlogprobs.dim() == 0
 
     assert dlogprobs.is_contiguous() and dentropy.is_contiguous()
-    assert dlogprobs.is_cuda and dentropy.is_cuda
+    assert dlogprobs.device.type != "cpu" and dentropy.device.type != "cpu"
     assert dlogprobs.device == hidden.device and dlogprobs.device == dentropy.device
     assert dentropy.shape == (num_tokens,)
 
@@ -1570,13 +1570,13 @@ def efficient_entropy_backward(
     assert maximum.is_contiguous() and acc.is_contiguous()
     assert maximum.device == hidden.device and acc.device == hidden.device
     assert maximum.shape == labels.shape == acc.shape
-    assert maximum.is_cuda and acc.is_cuda
+    assert maximum.device.type != "cpu" and acc.device.type != "cpu"
 
     vocab_per_split = 1024
     assert vocab_per_split % 128 == 0
     num_splits = (vocab_size + vocab_per_split - 1) // vocab_per_split
 
-    assert entropy_b.is_contiguous() and entropy_b.is_cuda
+    assert entropy_b.is_contiguous() and entropy_b.device.type != "cpu"
     assert entropy_b.shape == (num_tokens,)
 
     if _config._backward == BackwardEnum._Total_Fuse_MN:

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import os
 import random
 
@@ -61,6 +62,45 @@ def enable_full_determinism(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.enabled = False
+
+
+def enable_batch_invariance():
+    """Install vLLM's batch-invariant kernel overrides in this process.
+
+    ``init_batch_invariance()`` replaces softmax, log_softmax, mean, bmm (and matmul on SM80) with the
+    batch-invariant kernels a rollout under ``VLLM_BATCH_INVARIANT=1`` uses and pins TF32 and cuBLASLt
+    the same way. It also writes vLLM's NCCL profile into ``os.environ``; the training communicators are
+    created after this call and that profile would throttle them, so every env change is reverted and
+    ``BATCH_INVARIANT_ENV`` (which main_ppo already exports) is written back. vLLM 0.29-0.31 also assign
+    ``torch.bmm`` to a kernel launch without autograd; the ``aten::bmm`` override keeps the invariant
+    kernel, so the original ``torch.bmm`` is restored.
+    """
+    try:
+        batch_invariant = importlib.import_module("vllm.model_executor.determinism.batch_invariant")
+    except ImportError as e:
+        raise ImportError(
+            "batch_invariant needs a vLLM that provides vllm.model_executor.determinism.batch_invariant"
+        ) from e
+
+    from verl.trainer.constants_ppo import BATCH_INVARIANT_ENV
+
+    os.environ["VLLM_BATCH_INVARIANT"] = "1"
+    before = dict(os.environ)
+    bmm = torch.bmm
+    batch_invariant.init_batch_invariance()
+    torch.bmm = bmm
+    if not batch_invariant._batch_invariant_MODE:
+        raise RuntimeError(
+            "vLLM did not install its batch-invariant kernels: its cached envs read VLLM_BATCH_INVARIANT as unset; "
+            "export it before vLLM is first imported in this process"
+        )
+    for key in set(before) | set(os.environ):
+        if os.environ.get(key) != before.get(key):
+            if key in before:
+                os.environ[key] = before[key]
+            else:
+                del os.environ[key]
+    os.environ.update(BATCH_INVARIANT_ENV)
 
 
 def pad_packed_inputs(

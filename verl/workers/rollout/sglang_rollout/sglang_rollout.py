@@ -37,6 +37,12 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from verl.utils.device import get_device_id
 from verl.utils.net_utils import is_valid_ipv6_address
+from verl.utils.sglang.sglang_quant_utils import (
+    LOADER_FQN,
+    finalize_tensors,
+    resolve_sglang_quantization_config,
+    uses_sglang_refit_loader,
+)
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
@@ -50,6 +56,11 @@ from verl.workers.rollout.sglang_rollout.utils import (
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _uses_quantized_refit(config: RolloutConfig, model_config: HFModelConfig) -> bool:
+    quantization_config = resolve_sglang_quantization_config(config, model_config)
+    return quantization_config is not None and uses_sglang_refit_loader(quantization_config)
 
 
 def _strip_lora_base_layer(name: str) -> str:
@@ -130,17 +141,6 @@ class ServerAdapter(BaseRollout):
         replica_rank: int = -1,
     ):
         super().__init__(config, model_config, device_mesh)
-        if self.config.get("quantization", None) == "fp8":
-            import sglang
-            from packaging import version
-
-            from verl.utils.sglang.sglang_fp8_utils import build_sglang_fp8_quant_config
-
-            assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
-                "sglang>=0.5.5 is required for FP8 quantization"
-            )
-            fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
-            self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
         self._engine: AsyncHttpServerAdapter = None
 
         rank = int(os.environ["RANK"])
@@ -322,12 +322,18 @@ class ServerAdapter(BaseRollout):
             - runtime envs: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L39
         """
         await self._init_server_adapter()
+        use_quantized_refit = _uses_quantized_refit(self.config, self.model_config)
 
         # Delta checkpoint-engine wire (standalone replicas): the generator yields
         # per-flush sparse payloads, applied in place through the verl custom
         # weight loader. Hybrid replicas pass full (name, tensor) pairs with no
         # wire_format kwarg and take the bucketed path below.
         if wire_format == "delta_flush":
+            if use_quantized_refit:
+                raise ValueError(
+                    "SGLang MXFP8/MXFP4 custom refit is not supported with wire_format='delta_flush'; "
+                    "use the regular bucketed weight sync"
+                )
             await self._update_weights_delta(weights, global_steps=global_steps)
             return
 
@@ -357,18 +363,6 @@ class ServerAdapter(BaseRollout):
                 await self._engine.load_lora_adapter_from_tensor(req)
         else:
             update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
-            if self.config.get("quantization", None) == "fp8":
-                from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
-
-                logger.info("Convert bf16 weights to fp8 format before loading")
-                fp8_quantizer_helper = SGLangFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
-                weights = fp8_quantizer_helper.quant_weights_by_name(
-                    weights,
-                    dtype=self.model_config.hf_config.dtype,
-                )
-            else:
-                weights = weights
-
             fusion_groups = (
                 DEEPSEEK_V4_FUSION_GROUPS
                 if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4"
@@ -377,11 +371,23 @@ class ServerAdapter(BaseRollout):
             async for params_batch in get_named_tensor_buckets(
                 weights, update_weights_bucket_bytes, fusion_groups=fusion_groups
             ):
+                load_format = None
+                if use_quantized_refit:
+                    load_format = LOADER_FQN
                 await sgl_update_weights(
                     engine=self._engine,
                     params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
                     device_mesh_key="infer_tp",
                     device_mesh=self.device_mesh,
+                    load_format=load_format,
+                )
+            if use_quantized_refit:
+                await sgl_update_weights(
+                    engine=self._engine,
+                    params_batch=[(name, _to_ipc_device(t)) for name, t in finalize_tensors()],
+                    device_mesh_key="infer_tp",
+                    device_mesh=self.device_mesh,
+                    load_format=LOADER_FQN,
                 )
 
         if self._engine is not None and self._is_server_tp_leader():

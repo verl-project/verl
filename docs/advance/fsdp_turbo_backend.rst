@@ -1,7 +1,7 @@
 FSDP-Turbo backend
 ==================
 
-Last updated: 08/31/2026.
+Last updated: 11/02/2026.
 
 FSDP-Turbo (``fsdp_turbo``) is a high-performance FSDP training backend built
 on top of the `fsdp-turbo <https://gitcode.com/Ascend/FSDPTurbo.git>`_ library.
@@ -23,7 +23,7 @@ Select the backend by setting ``strategy=fsdp_turbo``:
    actor_rollout_ref.actor.strategy=fsdp_turbo
    actor_rollout_ref.ref.strategy=fsdp_turbo
 
-The turbo-specific parallelism and memory options live under
+The turbo-specific parallelism, memory, and model options live under
 ``fsdp_config.turbo_config``.  The full schema is defined in
 ``verl/trainer/config/engine/fsdp.yaml``.
 
@@ -67,15 +67,22 @@ are sharded, hooked, or re-computed.  Patterns use ``{*}`` for integer indices:
    +actor_rollout_ref.actor.fsdp_config.turbo_config.distributed.fsdp_plan.apply_modules='{model.language_model.layers.{*}:{},lm_head:{}}'
    +actor_rollout_ref.actor.fsdp_config.turbo_config.distributed.fsdp_plan.hook_modules="['model.language_model.layers.{*}']"
    +actor_rollout_ref.actor.fsdp_config.turbo_config.distributed.ep_plan.apply_modules="['model.language_model.layers.{*}.mlp.experts']"
-   +actor_rollout_ref.actor.fsdp_config.turbo_config.distributed.ep_plan.dispatcher=fused
+   +actor_rollout_ref.actor.fsdp_config.turbo_config.distributed.ep_plan.apply_efsdp_modules="['model.language_model.layers.{*}.mlp.experts']"
+   +actor_rollout_ref.actor.fsdp_config.turbo_config.distributed.ep_plan.dispatcher=all2all
+   +actor_rollout_ref.actor.fsdp_config.turbo_config.distributed.ep_plan.use_fused_ops=True
 
 * ``fsdp_plan.apply_modules`` — modules to wrap with FSDP.
 * ``fsdp_plan.hook_modules`` — modules whose forward hooks are managed by
   Turbo (needed for recompute overlap).
 * ``ep_plan.apply_modules`` — modules whose parameters are split across the EP
   group (typically the MoE expert container).
-* ``ep_plan.dispatcher`` — ``eager`` (default) or ``fused``.  Use ``fused``
-  on NPU for better all-to-all overlap.
+* ``ep_plan.apply_efsdp_modules`` — expert modules additionally sharded with
+  expert-wise FSDP (EFSDP) inside the expert-parallel group, together with
+  ``expert_fully_shard_parallel_size``.
+* ``ep_plan.dispatcher`` — ``all2all(default)``.  The bundled
+  MoE example uses ``all2all``.
+* ``ep_plan.use_fused_ops`` — enable Turbo's fused EP ops on top of the
+  dispatcher.  The bundled MoE example enables it on NPU.
 
 Memory plan
 ~~~~~~~~~~~
@@ -87,6 +94,30 @@ Memory plan
 
 When ``recompute=True``, activation checkpointing is applied to every module
 listed in ``recompute_plan``.
+
+Model overrides and fused kernels
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``turbo_config.model`` selects Turbo's optimized model implementation and
+fused kernels:
+
+.. code-block:: bash
+
+   +actor_rollout_ref.actor.fsdp_config.turbo_config.model.model_name_or_path=qwen3_5
+   +actor_rollout_ref.actor.fsdp_config.turbo_config.model.use_fused_causal_conv1d=True
+   +actor_rollout_ref.actor.fsdp_config.turbo_config.model.use_fused_gdn=True
+
+* ``model_name_or_path`` — name of the model in Turbo's model registry
+  (``qwen3_5`` for the dense Qwen3.5 scripts, ``qwen3_5_moe`` for the MoE
+  script).  When the name resolves to a Turbo model class, the engine
+  temporarily overrides ``verl.utils.model.get_hf_auto_model_class`` during
+  module construction so that Turbo's optimized implementation is loaded
+  instead of the plain Hugging Face auto class.  The override is restored as
+  soon as the module has been built.
+* ``use_fused_causal_conv1d`` / ``use_fused_gdn`` — enable Turbo's fused
+  causal-conv1d and gated-delta-net kernels.  Both are applied to the model's
+  ``hf_config`` through ``fsdp_turbo.utils.model.set_fused_overrides`` before
+  the module is built.
 
 Module patches and CP function patches
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -108,7 +139,7 @@ Three patch lists are involved (all under ``turbo_config``):
    +actor_rollout_ref.actor.fsdp_config.turbo_config.distributed.cp_plan.loss_function_patches="[{target_functions:['transformers.loss.loss_utils.ForCausalLMLoss'],type:causal_lm_loss}]"
 
    # module_patches — replace a HF forward with a Turbo-compatible one
-   +actor_rollout_ref.actor.fsdp_config.turbo_config.module_patches="[{target:transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeModel.forward,replacement:fsdp_turbo.models.qwen.qwen3_5_moe.qwen3_5_moe_model_forward}]"
+   +actor_rollout_ref.actor.fsdp_config.turbo_config.module_patches="[{target:transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeModel.forward,replacement:fsdp_turbo.models.qwen.qwen3_5_moe.qwen3_5_moe_cp.qwen3_5_moe_model_forward}]"
 
 Patch entry fields:
 
@@ -122,9 +153,10 @@ Patch entry fields:
   package).  The replacement is applied at engine initialization time.
 
 The dense Qwen3.5 scripts point at ``transformers.models.qwen3_5.modeling_qwen3_5``
-instead of the ``qwen3_5_moe`` module, and use
-``fsdp_turbo.models.qwen.qwen3_5.qwen3_5_model_forward`` as the replacement.
-The patch structure is otherwise identical.
+instead of the ``qwen3_5_moe`` module, use
+``fsdp_turbo.models.qwen.qwen3_5_moe.qwen3_5.qwen3_5_model_forward`` as the
+replacement, and additionally patch ``Qwen3_5GatedDeltaNet.forward`` with
+``type:gated_delta_net``.
 
 Offload policy
 ~~~~~~~~~~~~~~
@@ -137,9 +169,18 @@ FSDP-Turbo reuses verl's existing offload flags:
    actor_rollout_ref.actor.fsdp_config.param_offload=True
    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
 
-When ``offload_policy`` is ``True``, Turbo applies ``CPUOffloadPolicy``
-internally and disables verl's separate param/optimizer offload paths to avoid
-double offloading.
+When ``offload_policy`` **or** ``forward_only`` is ``True`` — the latter is
+typical for log-prob-only workers such as the reference model — Turbo applies
+``CPUOffloadPolicy`` internally and disables verl's separate param/optimizer
+offload paths to avoid double offloading.
+
+NPU-specific behavior
+~~~~~~~~~~~~~~~~~~~~~
+
+When ``strategy=fsdp_turbo`` is selected, ``FSDPEngine`` skips verl's generic
+NPU FSDP patches (``apply_npu_fsdp_patches`` in
+``verl/workers/engine/fsdp/utils.py``); FSDP-Turbo applies its own
+device-specific patches internally.
 
 Context parallelism constraints
 -------------------------------
@@ -193,10 +234,17 @@ Two GRPO example scripts are provided:
 
 Both scripts auto-detect NPU vs. GPU, configure HCCL environment variables on
 NPU, and pass the full Turbo plan via Hydra command-line overrides.  On NPU
-they default to ``fully_shard_parallel_size=16`` and (for the MoE script)
-``ep_plan.dispatcher=fused``; on GPU they default to ``8`` and ``eager``
-respectively.  The CP patches described above are appended only when
-``SP_SIZE > 1``.
+they default to ``fully_shard_parallel_size=16``; on GPU they default to ``8``.
+The MoE script uses ``ep_plan.dispatcher=all2all`` everywhere and enables
+``ep_plan.use_fused_ops`` together with ``expert_parallel_size=16`` on NPU
+(``False`` and ``8`` on GPU); on NPU it additionally exports
+``CPU_AFFINITY_CONF=1``, ``VLLM_ASCEND_TASK_QUEUE_ENABLE=1``,
+``TASK_QUEUE_ENABLE=2``, ``MULTI_STREAM_MEMORY_REUSE=1`` and
+``HCCL_OP_EXPANSION_MODE=AIV`` for better performance.  Both scripts enable
+the model overrides and fused kernels described above
+(``model_name_or_path``, ``use_fused_causal_conv1d``, ``use_fused_gdn``) for
+the actor and the reference model.  The CP patches described above are
+appended only when ``SP_SIZE > 1``.
 
 For CI, the following smoke-test scripts are available:
 
@@ -208,10 +256,13 @@ For CI, the following smoke-test scripts are available:
    # NPU nightly CI smoke test for Qwen3.5-2B (dense)
    bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp_turbo_npu.sh
 
-Both scripts target Qwen3.5-2B (``FSDP_SIZE=4``, ``SP_SIZE=2``) on a single
-8-NPU node with context parallelism enabled by default.  The CI smoke test
-runs for 1 training step; the nightly script runs for 5.  Both hardcode the
-Turbo plan rather than auto-detecting the device.
+Both scripts target Qwen3.5-2B on a single NPU node and hardcode the Turbo
+plan rather than auto-detecting the device.  Context parallelism is disabled
+by default (``SP_SIZE=1``); export ``SP_SIZE=2`` to exercise the CP path.
+Both enable the dense-model fused kernels (``model_name_or_path=qwen3_5``,
+``use_fused_causal_conv1d``, ``use_fused_gdn``).  The CI smoke test runs for
+1 training step (``FSDP_SIZE=8``); the nightly script runs for 5
+(``FSDP_SIZE=4``).
 
 Source of truth
 ---------------
@@ -219,8 +270,8 @@ Source of truth
 * ``verl/workers/config/engine.py``: ``FSDPEngineConfig`` with the
   ``turbo_config`` field and ``strategy`` validation.
 * ``verl/workers/engine/fsdp/fsdp_turbo_impl.py``:
-  ``FSDPTurboEngineWithLMHead`` — mesh initialization, module building, and
-  CP validation.
+  ``FSDPTurboEngineWithLMHead`` — Turbo config initialization, module
+  building with model overrides and fused kernels, and CP validation.
 * ``verl/workers/engine/fsdp/utils.py``:
   ``apply_clip_grad_norm_patch`` — mixed-mesh gradient clipping.
 * ``verl/trainer/config/engine/fsdp.yaml``: default Turbo config schema.

@@ -1,7 +1,7 @@
 Multi-Chip Support
 ==================
 
-Last updated: 06/03/2026.
+Last updated: 10/14/2026.
 
 Overview
 --------
@@ -32,7 +32,8 @@ package, which provides reference implementations for vendors to adapt:
 - Intel XPU (Data Center GPU Max / Arc)
 - Cambricon MLU (MLU370 / MLU590)
 - MetaX (CUDA-compatible)
-- Google TPU — **experimental, under development**
+- Google TPU v6e (TorchTitan training + vLLM rollout; GRPO examples in
+  `examples/tpu/grpo <https://github.com/verl-project/verl/tree/main/examples/tpu/grpo>`_)
 
 .. note::
 

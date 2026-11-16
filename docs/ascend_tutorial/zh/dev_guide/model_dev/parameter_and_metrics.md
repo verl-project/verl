@@ -1,6 +1,6 @@
 # 训练配置参数与指标说明
 
-Last updated: 07/02/2026.
+Last updated: 11/02/2026.
 
 如需查看 NPU 相关特性，请访问：[NPU 高级特性指南](../../feature_support/npu_advance_features.md) 。
 
@@ -120,8 +120,8 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `actor_rollout_ref.rollout.calculate_log_probs` | `false` | 是否在 rollout 阶段计算 log probs |
 | `actor_rollout_ref.rollout.skip_tokenizer_init` | `true` | 是否跳过分词器初始化 |
 | `actor_rollout_ref.rollout.enable_rollout_routing_replay` | `false` | 是否启用 rollout 路由重放 |
-| `actor_rollout_ref.rollout.quantization` | `null` | 量化方式 |
-| `actor_rollout_ref.rollout.quantization_config_file` | `null` | 量化配置文件路径 |
+| `actor_rollout_ref.rollout.quantization.linear` / `.moe` | `null` | compressed-tensors 量化 preset（如 `FP8_BLOCK`） |
+| `actor_rollout_ref.rollout.quantization.config_file` | `null` | compressed-tensors 量化配置文件路径 |
 | `actor_rollout_ref.rollout.layered_summon` | `false` | 是否启用分层召唤（仅 FSDP 方案） |
 
 #### 1.1.5 Rollout 验证采样配置
@@ -608,18 +608,7 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `checkpoint.load_contents` | 引用自 `checkpoint.save_contents` | Checkpoint 加载内容 |
 | `checkpoint.async_save` | `false` | 是否异步保存 Checkpoint |
 
-#### 1.4.5 QAT 配置
-
-| 参数名 | 默认值 | 说明 |
-|--------|--------|------|
-| `qat.enable` | `false` | 是否启用量化感知训练（QAT） |
-| `qat.mode` | `w4a16` | 量化模式 |
-| `qat.group_size` | `16` | 量化分组大小 |
-| `qat.ignore_patterns` | `[lm_head, embed_tokens, re:.*mlp.gate$]` | 量化忽略的模式列表 |
-| `qat.activation_observer` | `static_minmax` | 激活值观察器类型 |
-| `qat.quantization_config_path` | `null` | 量化配置文件路径 |
-
-#### 1.4.6 MTP 配置
+#### 1.4.5 MTP 配置
 
 | 参数名 | 默认值 | 说明 |
 |--------|--------|------|
