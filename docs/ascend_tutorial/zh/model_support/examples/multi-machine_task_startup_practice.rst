@@ -22,7 +22,7 @@ Last updated: 07/28/2026.
 
 多机训练前, 请确保所有节点满足以下条件：
 
-- 各节点已按照 :doc:`昇腾安装指南 <../../get_start/install_guidance>` 完成环境构建, 且 verl、Ray、PyTorch、torch-npu、CANN 等关键组件版本一致
+- 各节点已按照 `昇腾安装指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/install_guidance.html>`_ 完成环境构建, 且 verl、Ray、PyTorch、torch-npu、CANN 等关键组件版本一致
 - 各节点间训练网段网络互通, 可访问 Ray 端口、Dashboard 端口以及后续配置的 HCCL 端口范围。``ping`` 只能验证基础连通性, 若集群开启防火墙, 还需确认 TCP 端口未被拦截
 - 各节点的训练脚本路径及模型/数据/checkpoint 路径保持一致(推荐使用共享文件系统如 NFS)
 - 各节点均已完成 NPU 驱动与 CANN 软件栈安装, 且 ``npu-smi info`` 可正常识别设备
@@ -178,7 +178,7 @@ Last updated: 07/28/2026.
    * - ``NNODES``
      - 参与训练的节点数量
    * - ``NPUS_PER_NODE``
-     - 每个节点的 NPU 数量, 如 Atlas 800T A3 通常为16
+     - 每个节点的 NPU 数量, 如 Atlas A3训练系列产品 通常为16
    * - ``MASTER_ADDR``
      - 主节点 IP, 所有节点的该参数必须相同
    * - ``SOCKET_IFNAME``

@@ -16,11 +16,17 @@ e2e test verl.single_controller.ray
 """
 
 import os
+from unittest.mock import patch
 
 import ray
 
 from verl.single_controller.base.worker import Worker
-from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+from verl.single_controller.ray.base import (
+    TRAINING_WORKER_OMP_NUM_THREADS_ENV,
+    RayClassWithInitArgs,
+    RayResourcePool,
+    RayWorkerGroup,
+)
 
 
 @ray.remote
@@ -86,6 +92,30 @@ def test_customized_worker_env():
     ray.shutdown()
 
 
+def test_training_worker_omp_num_threads():
+    with patch.dict(os.environ, {TRAINING_WORKER_OMP_NUM_THREADS_ENV: "7"}):
+        ray.init(num_cpus=100)
+
+        resource_pool = RayResourcePool([2], use_gpu=False)
+        class_with_args = RayClassWithInitArgs(cls=TestActor)
+
+        worker_group = RayWorkerGroup(
+            resource_pool=resource_pool, ray_cls_with_init=class_with_args, name_prefix="worker_group_omp"
+        )
+        assert worker_group.execute_all_sync("getenv", key="OMP_NUM_THREADS") == ["7", "7"]
+
+        worker_group = RayWorkerGroup(
+            resource_pool=resource_pool,
+            ray_cls_with_init=class_with_args,
+            name_prefix="worker_group_omp_customized",
+            worker_env={"OMP_NUM_THREADS": "3"},
+        )
+        assert worker_group.execute_all_sync("getenv", key="OMP_NUM_THREADS") == ["3", "3"]
+
+        ray.shutdown()
+
+
 if __name__ == "__main__":
     test_basics()
     test_customized_worker_env()
+    test_training_worker_omp_num_threads()

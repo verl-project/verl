@@ -18,6 +18,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -270,8 +271,9 @@ def test_vllm_update_weights_loads_params_and_buffers():
     )
 
 
-def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
-    """When an MTP drafter is synced, its registered buffers must be updated too."""
+@pytest.mark.parametrize("owner_attr", ["drafter", "speculator"])
+def test_vllm_update_weights_syncs_buffers_to_mtp_drafter(owner_attr):
+    """MTP buffers must stay in sync with either the V1 or V2 draft-model owner."""
     main_model = _ToyModel()
     drafter_model = _ToyModel()
     main_model.load_weights = lambda weights: None
@@ -287,7 +289,7 @@ def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
 
     worker = object.__new__(vLLMColocateWorkerExtension)
     worker.model_runner = _FakeModelRunner(main_model, speculative_config=_SpecConfig())
-    worker.model_runner.drafter = _Drafter(drafter_model)
+    setattr(worker.model_runner, owner_attr, _Drafter(drafter_model))
 
     weights = [
         ("model.layers.0.linear.weight", torch.ones(4, 4, dtype=torch.float32)),
