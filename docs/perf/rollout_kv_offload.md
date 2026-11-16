@@ -77,13 +77,14 @@ never matches entries written under earlier weights (or by an earlier run),
 whether or not it can be reset. Those entries are never read again, so
 LRU-style eviction reclaims them ahead of entries still in use. GPU-local caches
 are still cleared on every weight update, as with `reset`; only the external
-store is kept. The exception is vLLM's own sleep (`free_cache_engine`), which
-always resets the connector. Usually that happens at a weight update, when the
-stored entries are already unreachable, but `separate_async` switching also
-sleeps hybrid replicas without one, which wipes a store that standalone replicas
-share. The salt keeps both cases correct; keeping the store across sleep needs a
-vLLM option to skip the connector reset
-([vllm#57810](https://github.com/vllm-project/vllm/pull/57810)).
+store is kept. vLLM's own sleep (`free_cache_engine`) resets the connector by
+default; under `salt` verl passes `reset_connector=False`, so the store also
+survives sleep, including `separate_async` switching, which sleeps hybrid
+replicas while standalone replicas keep using the same store at the same weight
+version. This needs a vLLM with
+[vllm#57810](https://github.com/vllm-project/vllm/pull/57810) (after 0.33.0).
+On older vLLM, sleep still resets the store and verl logs a warning; results
+stay correct, only the cached entries are lost.
 
 Things to know before enabling it:
 

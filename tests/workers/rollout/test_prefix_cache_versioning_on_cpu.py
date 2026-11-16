@@ -160,15 +160,19 @@ def test_salt_weight_update_requires_global_steps(mode, raises):
     class _Reached(Exception):
         pass
 
-    async def abort_replicas():
-        raise _Reached
+    class _Replica:
+        config = _server_config("vllm", mode=mode)
+
+        @property
+        def workers(self):  # first thing submit_update() touches after the guard
+            raise _Reached
 
     manager = object.__new__(CheckpointEngineManager)
     manager.backend = "nccl"
-    manager.replicas = [SimpleNamespace(config=_server_config("vllm", mode=mode))]
-    manager.abort_replicas = abort_replicas
+    manager.replicas = [_Replica()]
+    manager._update_ticket = None
 
-    # The guard must fire before any replica is aborted; otherwise the update proceeds.
+    # The guard must fire before the update touches any replica; otherwise the update proceeds.
     with pytest.raises(ValueError if raises else _Reached):
         manager.update_weights(global_steps=None)
 

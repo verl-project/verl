@@ -956,9 +956,23 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            await self._engine_sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
+
+    async def _engine_sleep(self, level: int):
+        # Sleep discards the KV cache and, by default, resets the KV connector, which for a shared store
+        # (e.g. MooncakeStoreConnector) deletes entries other replicas still use. Under "salt" that is never
+        # needed: unchanged weights keep the current salt, and new weights get a new one.
+        if self.config.external_kv_cache_invalidation == "salt":
+            if "reset_connector" in inspect.signature(self.engine.sleep).parameters:
+                await self.engine.sleep(level=level, reset_connector=False)
+                return
+            logger.warning(
+                "external_kv_cache_invalidation='salt': this vLLM's sleep() cannot keep the KV connector's cache "
+                "(needs vllm-project/vllm#57810), so the external KV store is reset on sleep."
+            )
+        await self.engine.sleep(level=level)
 
     async def _reset_prefix_cache(self):
         # Under "reset", reset_connector=True also drops any attached external KV store
@@ -988,7 +1002,7 @@ class vLLMHttpServer:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self._engine_sleep(level=self._resolve_sleep_level())
         await self.engine.wake_up(tags=["weights"])
 
     @RLInsightLogger.trace_state_decorator(
@@ -1582,7 +1596,7 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self._engine_sleep(level=self._resolve_sleep_level())
         await self.engine.reset_encoder_cache()
 
 

@@ -629,3 +629,49 @@ def test_salt_barrier_timeout_fails_closed(monkeypatch):
         assert server.engine.pause_calls == 0
 
     asyncio.run(main())
+
+
+class _SleepEngine:
+    def __init__(self):
+        self.sleep_calls = []
+
+    async def sleep(self, level=1, mode="abort"):
+        self.sleep_calls.append({"level": level})
+
+    async def wake_up(self, tags=None):
+        pass
+
+    async def reset_encoder_cache(self):
+        pass
+
+
+class _SleepEngineKeepsConnector(_SleepEngine):
+    async def sleep(self, level=1, mode="abort", reset_connector=True):
+        self.sleep_calls.append({"level": level, "reset_connector": reset_connector})
+
+
+@pytest.mark.parametrize(
+    "rollout_mode,method", [("COLOCATED", "sleep"), ("HYBRID", "sleep"), ("STANDALONE", "release")]
+)
+@pytest.mark.parametrize(
+    "mode,engine_cls,expected_reset",
+    [
+        ("salt", _SleepEngineKeepsConnector, False),  # vLLM with reset_connector: keep the store
+        ("reset", _SleepEngineKeepsConnector, True),  # reset mode keeps vLLM's default
+        ("salt", _SleepEngine, "unsupported"),  # older vLLM: plain sleep, warned
+    ],
+)
+def test_sleep_keeps_external_kv_store_only_when_salted(rollout_mode, method, mode, engine_cls, expected_reset):
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(name="vllm", free_cache_engine=True, external_kv_cache_invalidation=mode)
+        server.rollout_mode = vllm_async_server.RolloutMode[rollout_mode]
+        server.model_config = SimpleNamespace(lora_rank=0, lora={})
+        server.engine = engine_cls()
+
+        await (server.release_kv_cache() if method == "release" else server.sleep())
+
+        (call,) = server.engine.sleep_calls
+        assert call.get("reset_connector", "unsupported") == expected_reset
+
+    asyncio.run(main())
