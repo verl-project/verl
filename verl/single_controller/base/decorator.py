@@ -14,6 +14,7 @@
 import inspect
 from functools import partial, wraps
 from types import FunctionType
+from typing import Callable
 
 from verl.protocol import DataProtoFuture, _padding_size_key
 from verl.utils.py_functional import DynamicEnum
@@ -199,7 +200,14 @@ def collect_dp_compute_data_proto(worker_group, output):
     return _concat_data_proto_or_future(output)
 
 
-def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs):
+def dispatch_nd_compute(
+    dispatch_infos: list,
+    dp_size,
+    worker_group,
+    *args,
+    dispatch_mp_src_only: bool = False,
+    **kwargs,
+):
     import os
 
     from verl.single_controller.base.worker_group import WorkerGroup
@@ -207,7 +215,7 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
 
     assert isinstance(worker_group, WorkerGroup)
 
-    max_workers = max(1, min(len(args[0]), os.cpu_count()))
+    max_workers = max(1, min(dp_size, os.cpu_count() or 1))
 
     args = [parallel_put(arg, max_workers=max_workers) for arg in args]
     kwargs = {k: parallel_put(v, max_workers=max_workers) for k, v in kwargs.items()}
@@ -217,8 +225,10 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
         assert isinstance(arg, tuple | list) and len(arg) == dp_size
         transformed_args = []
         for i in range(worker_group.world_size):
-            local_dp_rank = dp_rank_mapping[i]
-            transformed_args.append(arg[local_dp_rank])
+            dispatch_info = dispatch_infos[i]
+            transformed_args.append(
+                arg[dispatch_info.dp_rank] if not dispatch_mp_src_only or dispatch_info.is_mp_src else None
+            )
         all_args.append(transformed_args)
     all_args = tuple(all_args)
 
@@ -227,13 +237,15 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
         assert isinstance(v, tuple | list) and len(v) == dp_size
         transformed_v = []
         for i in range(worker_group.world_size):
-            local_dp_rank = dp_rank_mapping[i]
-            transformed_v.append(v[local_dp_rank])
+            dispatch_info = dispatch_infos[i]
+            transformed_v.append(
+                v[dispatch_info.dp_rank] if not dispatch_mp_src_only or dispatch_info.is_mp_src else None
+            )
         all_kwargs[k] = transformed_v
     return all_args, all_kwargs
 
 
-def collect_nd_compute(collect_mask: list[bool], worker_group, output):
+def collect_nd_compute(collect_infos: list, worker_group, output):
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
@@ -241,19 +253,32 @@ def collect_nd_compute(collect_mask: list[bool], worker_group, output):
 
     output_in_dp = []
     for global_rank in range(worker_group.world_size):
-        collect_dp_rank = collect_mask[global_rank]
-        if collect_dp_rank:
+        if collect_infos[global_rank].is_collect:
             output_in_dp.append(output[global_rank])
     return output_in_dp
 
 
-def dispatch_nd_compute_dataproto(dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs):
+def dispatch_nd_compute_dataproto(
+    dispatch_infos: list,
+    dp_size,
+    worker_group,
+    *args,
+    dispatch_mp_src_only: bool = False,
+    **kwargs,
+):
     splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(dp_size, *args, **kwargs)
-    return dispatch_nd_compute(dp_rank_mapping, dp_size, worker_group, *splitted_args, **splitted_kwargs)
+    return dispatch_nd_compute(
+        dispatch_infos,
+        dp_size,
+        worker_group,
+        *splitted_args,
+        dispatch_mp_src_only=dispatch_mp_src_only,
+        **splitted_kwargs,
+    )
 
 
-def collect_nd_compute_dataproto(collect_mask: list[bool], worker_group, output):
-    output = collect_nd_compute(collect_mask, worker_group, output)
+def collect_nd_compute_dataproto(collect_infos: list, worker_group, output):
+    output = collect_nd_compute(collect_infos, worker_group, output)
 
     from verl.protocol import BatchData
 
@@ -263,7 +288,15 @@ def collect_nd_compute_dataproto(collect_mask: list[bool], worker_group, output)
     return _concat_data_proto_or_future(output)
 
 
-def dispatch_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
+def _check_one_mp_src_per_dp_rank(mesh_name, dispatch_infos, dp_size):
+    for dp_rank in range(dp_size):
+        num_src_ranks = sum(info.dp_rank == dp_rank and info.is_mp_src for info in dispatch_infos)
+        assert num_src_ranks == 1, (
+            f"mesh {mesh_name} dp_rank {dp_rank} must have exactly one MP source rank, but got {num_src_ranks}"
+        )
+
+
+def dispatch_lazy_compute_data_proto(mesh_name, worker_group, *args, dispatch_mp_src_only: bool = False, **kwargs):
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
@@ -273,10 +306,18 @@ def dispatch_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
         worker_group._dispatch_info[mesh_name] = worker_group._query_dispatch_info(mesh_name)
         assert len(worker_group._dispatch_info[mesh_name]) == worker_group.world_size
 
-    dp_rank_mapping = worker_group._dispatch_info[mesh_name]
-    # perform dispatch
-    dp_size = max(dp_rank_mapping) + 1
-    return dispatch_nd_compute_dataproto(dp_rank_mapping, dp_size, worker_group, *args, **kwargs)
+    dispatch_infos = worker_group._dispatch_info[mesh_name]
+    dp_size = max(info.dp_rank for info in dispatch_infos) + 1
+    if dispatch_mp_src_only:
+        _check_one_mp_src_per_dp_rank(mesh_name, dispatch_infos, dp_size)
+    return dispatch_nd_compute_dataproto(
+        dispatch_infos,
+        dp_size,
+        worker_group,
+        *args,
+        dispatch_mp_src_only=dispatch_mp_src_only,
+        **kwargs,
+    )
 
 
 def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
@@ -291,15 +332,17 @@ def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
         worker_group._collect_info[mesh_name] = worker_group._query_collect_info(mesh_name)
         assert len(worker_group._collect_info[mesh_name]) == worker_group.world_size
 
-    # a boolean of whether the dp_rank is used for collect
-    collect_mask = worker_group._collect_info[mesh_name]
-    # perform dispatch
-    return collect_nd_compute_dataproto(collect_mask, worker_group, *args, **kwargs)
+    collect_infos = worker_group._collect_info[mesh_name]
+    return collect_nd_compute_dataproto(collect_infos, worker_group, *args, **kwargs)
 
 
-def make_nd_compute_dataproto_dispatch_fn(mesh_name):
+def make_nd_compute_dataproto_dispatch_fn(mesh_name, dispatch_mp_src_only: bool = False):
     return {
-        "dispatch_fn": partial(dispatch_lazy_compute_data_proto, mesh_name),
+        "dispatch_fn": partial(
+            dispatch_lazy_compute_data_proto,
+            mesh_name,
+            dispatch_mp_src_only=dispatch_mp_src_only,
+        ),
         "collect_fn": partial(collect_lazy_compute_data_proto, mesh_name),
     }
 
@@ -380,6 +423,31 @@ def _check_execute_mode(execute_mode):
     assert isinstance(execute_mode, Execute), f"execute_mode must be a Execute. Got {execute_mode}"
 
 
+def _wrap_worker_preprocess_fn(func, worker_preprocess_fn):
+    if worker_preprocess_fn is None:
+        return func
+
+    if inspect.iscoroutinefunction(func) or inspect.iscoroutinefunction(worker_preprocess_fn):
+
+        @wraps(func)
+        async def async_inner(self, *args, **kwargs):
+            preprocessed = worker_preprocess_fn(self, *args, **kwargs)
+            if inspect.isawaitable(preprocessed):
+                preprocessed = await preprocessed
+            args, kwargs = preprocessed
+            output = func(self, *args, **kwargs)
+            return await output if inspect.isawaitable(output) else output
+
+        return async_inner
+
+    @wraps(func)
+    def inner(self, *args, **kwargs):
+        args, kwargs = worker_preprocess_fn(self, *args, **kwargs)
+        return func(self, *args, **kwargs)
+
+    return inner
+
+
 def _materialize_futures(*args, **kwargs):
     new_args = []
     for arg in args:
@@ -395,7 +463,13 @@ def _materialize_futures(*args, **kwargs):
     return new_args, kwargs
 
 
-def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocking=True, materialize_futures=True):
+def register(
+    dispatch_mode=Dispatch.ALL_TO_ALL,
+    execute_mode=Execute.ALL,
+    blocking=True,
+    materialize_futures=True,
+    worker_preprocess_fn: Callable | None = None,
+):
     """Register a function with distributed execution configuration.
 
     This decorator registers a function with specific dispatch and execution modes
@@ -411,6 +485,10 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
             Whether the execution should be blocking. Defaults to True.
         materialize_futures:
             Whether to materialize the data before dispatching. Defaults to True.
+        worker_preprocess_fn:
+            Optional function executed inside each worker before the registered method.
+            It receives ``(self, *args, **kwargs)`` and returns ``(args, kwargs)``.
+            Defaults to None.
 
 
     Returns:
@@ -420,8 +498,12 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
 
     _check_dispatch_mode(dispatch_mode=dispatch_mode)
     _check_execute_mode(execute_mode=execute_mode)
+    assert worker_preprocess_fn is None or callable(worker_preprocess_fn), (
+        f"worker_preprocess_fn must be callable or None. Got {worker_preprocess_fn}"
+    )
 
     def decorator(func):
+        func = _wrap_worker_preprocess_fn(func, worker_preprocess_fn)
         func = tqbridge(dispatch_mode=dispatch_mode)(func)
 
         @wraps(func)

@@ -1750,11 +1750,11 @@ class PPOTrainer(ABC):
         # get actor dp size
         role, worker_group = "actor", self.actor_rollout_wg
         if role not in worker_group._dispatch_info:
-            dp_rank_mapping = worker_group._query_dispatch_info(role)
-            worker_group._dispatch_info[role] = dp_rank_mapping
+            dispatch_infos = worker_group._query_dispatch_info(role)
+            worker_group._dispatch_info[role] = dispatch_infos
         else:
-            dp_rank_mapping = worker_group._dispatch_info[role]
-        dp_size = max(dp_rank_mapping) + 1
+            dispatch_infos = worker_group._dispatch_info[role]
+        dp_size = max(info.dp_rank for info in dispatch_infos) + 1
 
         # Upsampling the batch with padding sequences
         batch_multiple = self._get_required_batch_multiple(dp_size)
