@@ -67,8 +67,11 @@ class TestActorConfig(unittest.TestCase):
         """Test creating ActorConfig from YAML file."""
         from hydra import compose, initialize_config_dir
 
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
-            cfg = compose(config_name="actor", overrides=["strategy=fsdp", "ppo_micro_batch_size_per_gpu=128"])
+        # Compose from the config root so that absolute defaults (e.g. /optim) resolve.
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
+            cfg = compose(
+                config_name="actor/actor", overrides=["actor.strategy=fsdp", "actor.ppo_micro_batch_size_per_gpu=128"]
+            ).actor
 
         config = omega_conf_to_dataclass(cfg)
 
@@ -79,8 +82,12 @@ class TestActorConfig(unittest.TestCase):
         """Test creating FSDPActorConfig from YAML file."""
         from hydra import compose, initialize_config_dir
 
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
-            cfg = compose(config_name="dp_actor", overrides=["strategy=fsdp2", "ppo_micro_batch_size_per_gpu=128"])
+        # Compose from the config root so that absolute defaults (e.g. /optim) resolve.
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
+            cfg = compose(
+                config_name="actor/dp_actor",
+                overrides=["actor.strategy=fsdp2", "actor.ppo_micro_batch_size_per_gpu=128"],
+            ).actor
 
         config = omega_conf_to_dataclass(cfg)
 
@@ -91,8 +98,11 @@ class TestActorConfig(unittest.TestCase):
         """Test creating McoreActorConfig from YAML file."""
         from hydra import compose, initialize_config_dir
 
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
-            cfg = compose(config_name="megatron_actor", overrides=["ppo_micro_batch_size_per_gpu=128"])
+        # Compose from the config root so that absolute defaults (e.g. /optim) resolve.
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
+            cfg = compose(
+                config_name="actor/megatron_actor", overrides=["actor.ppo_micro_batch_size_per_gpu=128"]
+            ).actor
 
         config = omega_conf_to_dataclass(cfg)
 
