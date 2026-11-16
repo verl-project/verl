@@ -112,6 +112,36 @@ def _slice_topk_labels_for_ulysses(topk_labels: torch.Tensor, pad_size: int) -> 
     return slice_input_tensor(topk_labels, dim=1, padding=False)
 
 
+def _topk_kl_side_outputs(
+    logits_rmpad: torch.Tensor,
+    micro_batch: TensorDict,
+    pad_size: int,
+    use_ulysses_sp: bool,
+) -> dict[str, torch.Tensor]:
+    """Per-token outputs of ``kl_loss_type: topk_rb`` from the (local, packed) logits.
+
+    ``ref_topk=k`` (reference pass): this model's top-k as ``ref_topk_*``. ``kl_topk_rb`` (actor update): the
+    coarse KL against the batch's ``ref_topk_*`` and the policy's log tail mass, ``(N,)`` each.
+    """
+    from verl.trainer.ppo.topk_rb_kl import compute_coarse_reverse_kl, compute_topk_log_probs
+
+    out = {}
+    ref_topk = tu.get_non_tensor_data(data=micro_batch, key="ref_topk", default=0)
+    if ref_topk:
+        log_probs, ids = compute_topk_log_probs(logits_rmpad, int(ref_topk))
+        out["ref_topk_log_probs"], out["ref_topk_ids"] = log_probs, ids.to(torch.int32)
+    if tu.get_non_tensor_data(data=micro_batch, key="kl_topk_rb", default=False):
+        ref_ids = micro_batch["ref_topk_ids"].values().unsqueeze(0)
+        ref_log_probs = micro_batch["ref_topk_log_probs"].values().unsqueeze(0)
+        if use_ulysses_sp:  # slice like the token stream
+            ref_ids = _slice_topk_labels_for_ulysses(ref_ids, pad_size)
+            ref_log_probs = _slice_topk_labels_for_ulysses(ref_log_probs, pad_size)
+        ref_ids, ref_log_probs = ref_ids.squeeze(0).long(), ref_log_probs.squeeze(0)
+        coarse, log_q_tail = compute_coarse_reverse_kl(logits_rmpad, ref_ids, ref_log_probs)
+        out["kl_topk_coarse"], out["kl_topk_log_q_tail"] = coarse, log_q_tail
+    return out
+
+
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -1095,6 +1125,14 @@ class FSDPEngineWithLMHead(FSDPEngine):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+        topk_kl = tu.get_non_tensor_data(data=micro_batch, key="ref_topk", default=0) or tu.get_non_tensor_data(
+            data=micro_batch, key="kl_topk_rb", default=False
+        )
+        if topk_kl and (use_fused_kernels or self.pad_to_length):
+            # needs the full logits; the ref top-k is sliced with the Ulysses rule, unaware of the static pad
+            raise NotImplementedError(
+                "kl_loss_type=topk_rb is not supported with use_fused_kernels=True or pad_to_length."
+            )
         use_fused_topk = use_fused_kernels and (distillation_use_topk or score_centering)
         topk_labels = None
         if use_fused_topk:
@@ -1297,6 +1335,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(data=micro_batch, key="distillation_only", default=False)
         score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
+        kl_topk_rb = tu.get_non_tensor_data(data=micro_batch, key="kl_topk_rb", default=False)
         use_fused_topk = use_fused_kernels and (distillation_use_topk or score_centering)
 
         if calculate_sum_pi_squared and use_fused_kernels:
@@ -1385,10 +1424,22 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         v = self._gather_and_unpad_packed(v, output_args["pad_size"])
                         model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
 
+                topk_kl_outputs = _topk_kl_side_outputs(
+                    logits_rmpad,
+                    micro_batch,
+                    pad_size=output_args["pad_size"],
+                    use_ulysses_sp=self.use_ulysses_sp,
+                )
+                if topk_kl_outputs:
+                    cu_seqlens = input_ids.offsets()
+                    for k, v in topk_kl_outputs.items():
+                        v = self._gather_and_unpad_packed(v, output_args["pad_size"])
+                        model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
+
                 if not distillation_only:
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
-                    # entropy and the score centering hook reuse the logits in their backward
-                    inplace_backward = not (calculate_entropy or score_centering)
+                    # entropy, the score centering hook and the topk_rb KL reuse the logits in their backward
+                    inplace_backward = not (calculate_entropy or score_centering or kl_topk_rb)
                     log_probs = logprobs_from_logits(
                         logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
                         labels=input_ids_rmpad_rolled,
@@ -1508,12 +1559,16 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             )
                             model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
 
+                    topk_kl_outputs = _topk_kl_side_outputs(logits_rmpad, micro_batch, pad_size=0, use_ulysses_sp=False)
+                    for k, v in topk_kl_outputs.items():
+                        model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
+
                     log_probs = None
                     if not distillation_only:
                         log_probs = logprobs_from_logits(
                             logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
                             labels=input_ids_rmpad_rolled,
-                            inplace_backward=not score_centering,
+                            inplace_backward=not (score_centering or kl_topk_rb),
                             batch_invariant=batch_invariant,
                             temperature=None
                             if temperature_is_one

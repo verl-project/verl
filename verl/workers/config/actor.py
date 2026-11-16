@@ -127,6 +127,8 @@ class ActorConfig(BaseConfig):
         use_torch_compile (bool): Whether to use torch.compile for optimization.
         kl_loss_coef (float): KL divergence loss coefficient.
         kl_loss_type (str): Type of KL loss to use.
+        kl_topk (int): Reference top-k size for ``kl_loss_type="topk_rb"``; trades payload and compute for
+            lower variance (the estimator is unbiased for every k).
         ppo_epochs (int): Number of PPO epochs per training step.
         shuffle (bool): Whether to shuffle data during training.
         checkpoint (CheckpointConfig): Configuration for checkpointing.
@@ -171,6 +173,7 @@ class ActorConfig(BaseConfig):
     use_torch_compile: bool = True
     kl_loss_coef: float = 0.001
     kl_loss_type: str = "low_var_kl"
+    kl_topk: int = 16
     ppo_epochs: int = 1
     shuffle: bool = False
     data_loader_seed: int = 42
@@ -204,6 +207,9 @@ class ActorConfig(BaseConfig):
                     "[actor] Please set at least one of 'actor.ppo_micro_batch_size' or "
                     "'actor.ppo_micro_batch_size_per_gpu' if use_dynamic_bsz is not enabled."
                 )
+
+        if self.use_kl_loss and self.kl_loss_type == "topk_rb" and self.kl_topk < 1:
+            raise ValueError(f"[actor] kl_topk must be >= 1 for kl_loss_type='topk_rb', got {self.kl_topk}.")
 
         valid_loss_agg_modes = [
             "token-mean",
