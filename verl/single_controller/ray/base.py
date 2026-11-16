@@ -1187,22 +1187,14 @@ def _create_master_store_worker(worker_factory, worker_kwargs, master_port_range
             placement_group_bundle_index=worker_kwargs["placement_group_bundle_idx"],
         ),
     ).remote()
-    worker = None
-    try:
-        # This is the same env_vars object installed in the rank-zero actor's runtime_env.
-        env_vars["WG_MASTER_ENDPOINT_CONFIG"] = json.dumps(
-            (metadata_name, ray.get_runtime_context().namespace, master_port_range)
-        )
-        worker = worker_factory(**worker_kwargs)
-        master_addr_port_ref = master_endpoint_metadata.get_master_endpoint.remote()
-        completed, _ = ray.wait([master_addr_port_ref, worker.get_master_addr_port.remote()], num_returns=1)
-        # Watch for constructor failures while waiting for the master endpoint.
-        ray.get(completed[0])
-        master_addr, master_port = ray.get(master_addr_port_ref)
-        return worker, master_addr, master_port
-    except BaseException:
-        if worker is not None:
-            ray.kill(worker, no_restart=True)
-        raise
-    finally:
-        ray.kill(master_endpoint_metadata, no_restart=True)
+    # This is the same env_vars object installed in the rank-zero actor's runtime_env.
+    env_vars["WG_MASTER_ENDPOINT_CONFIG"] = json.dumps(
+        (metadata_name, ray.get_runtime_context().namespace, master_port_range)
+    )
+    worker = worker_factory(**worker_kwargs)
+    master_addr_port_ref = master_endpoint_metadata.get_master_endpoint.remote()
+    completed, _ = ray.wait([master_addr_port_ref, worker.get_master_addr_port.remote()], num_returns=1)
+    # Watch for constructor failures while waiting for the master endpoint.
+    ray.get(completed[0])
+    master_addr, master_port = ray.get(master_addr_port_ref)
+    return worker, master_addr, master_port
