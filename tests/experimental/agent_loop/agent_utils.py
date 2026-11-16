@@ -18,9 +18,9 @@ from omegaconf import DictConfig
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
+from verl.trainer.ppo.utils import Role
 from verl.utils import omega_conf_to_dataclass
 from verl.utils.device import get_device_name
 from verl.workers.engine_workers import ActorRolloutRefWorker

@@ -105,8 +105,6 @@ def _validate_score_centering_config(config: DictConfig) -> None:
                 f"score centering requires actor_rollout_ref.actor.policy_loss.rollout_correction.{key} to match "
                 f"algorithm.rollout_correction.{key}."
             )
-    if not config.trainer.get("use_v1", True):
-        raise ValueError("score centering requires the v1 trainer (trainer.use_v1=True).")
     if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2", "megatron"):
         raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2 or megatron.")
     if config.actor_rollout_ref.rollout.get("name") != "vllm":
@@ -132,18 +130,13 @@ def validate_config(
         use_critic (bool): is critic needed
     """
     if config.actor_rollout_ref.rollout.get("partial_rollout_kv_offload", False):
-        if not config.trainer.get("use_v1", True) or config.trainer.v1.trainer_mode != "colocate_async":
-            raise ValueError(
-                "Partial KV offload requires trainer.use_v1=True and trainer.v1.trainer_mode=colocate_async"
-            )
+        if config.trainer.v1.trainer_mode != "colocate_async":
+            raise ValueError("Partial KV offload requires trainer.v1.trainer_mode=colocate_async")
         if not config.actor_rollout_ref.get("hybrid_engine", True):
             raise ValueError("Partial KV offload requires actor_rollout_ref.hybrid_engine=True")
         agent = config.actor_rollout_ref.rollout.get("agent", {})
         if agent.get("default_agent_loop", "single_turn_agent") != "single_turn_agent":
             raise ValueError("Partial KV offload initially supports single_turn_agent")
-    if config.data.get("custom_dataloader") is not None:
-        if not config.trainer.get("use_v1", True):
-            raise ValueError("data.custom_dataloader requires the V1 PPO trainer.")
 
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes

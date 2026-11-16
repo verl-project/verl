@@ -12,11 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
+
 import pytest
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.config import omega_conf_to_dataclass, validate_config
 from verl.workers.config.rollout import CheckpointEngineConfig, RolloutConfig
+
+
+@pytest.mark.parametrize("compatibility_flag", [None, True, False])
+@pytest.mark.parametrize("mode", ["colocate_async", "sync", "separate_async"])
+def test_partial_kv_trainer_validation_follows_mode_not_deprecated_flag(compatibility_flag, mode):
+    """Compose the real Hydra defaults; the compatibility flag no longer selects a legacy trainer."""
+    overrides = [
+        f"trainer.v1.trainer_mode={mode}",
+        "actor_rollout_ref.actor.use_dynamic_bsz=true",
+        "actor_rollout_ref.rollout.name=vllm",
+        "actor_rollout_ref.rollout.partial_rollout_kv_offload=true",
+    ]
+    if compatibility_flag is not None:
+        overrides.append(f"trainer.use_v1={str(compatibility_flag).lower()}")
+    config_dir = Path(__file__).resolve().parents[3] / "verl/trainer/config"
+    with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
+        config = compose(config_name="ppo_trainer", overrides=overrides)
+    if mode == "colocate_async":
+        validate_config(config, use_reference_policy=False, use_critic=False)
+    else:
+        with pytest.raises(ValueError, match="trainer.v1.trainer_mode=colocate_async"):
+            validate_config(config, use_reference_policy=False, use_critic=False)
 
 
 def test_max_num_batched_tokens_raised_when_chunked_prefill_disabled():

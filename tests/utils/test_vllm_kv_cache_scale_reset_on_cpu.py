@@ -146,3 +146,27 @@ def test_refit_post_processing_resets_the_scales(quant_utils):
     quant_utils.process_quanted_weights_after_loading(model, reload_state={})
 
     assert _scales(model["attn"]) == [1.0] * 8
+
+
+def test_initial_post_load_resets_scales_before_warmup(quant_utils):
+    layer = _attention_layer()
+
+    def process_weights_after_loading(quant_method, loaded_layer):
+        assert quant_method is layer.quant_method
+        assert loaded_layer is layer
+        return "loaded"
+
+    wrapped = quant_utils._reset_uncalibrated_kv_cache_scales_after_loading(process_weights_after_loading)
+
+    assert wrapped(layer.quant_method, layer) == "loaded"
+    assert _scales(layer) == [1.0] * 8
+
+
+def test_initial_post_load_keeps_scales_of_a_kv_cache_scheme(quant_utils):
+    scheme = {"type": "float", "num_bits": 8, "strategy": "tensor", "symmetric": True}
+    layer = _attention_layer(kv_cache_scheme=scheme)
+    wrapped = quant_utils._reset_uncalibrated_kv_cache_scales_after_loading(lambda quant_method, loaded_layer: None)
+
+    wrapped(layer.quant_method, layer)
+
+    assert _scales(layer) == pytest.approx([_DUMMY_SCALE] * 8)

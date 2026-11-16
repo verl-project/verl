@@ -26,7 +26,10 @@ from megatron.core.config_logger import has_config_logger_enabled, log_config_to
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
+from megatron.core.tensor_parallel.mappings import (
+    copy_to_tensor_model_parallel_region,
+    gather_from_sequence_parallel_region,
+)
 from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
@@ -83,6 +86,11 @@ def get_fused_impl_backend(model: torch.nn.Module) -> str:
 
 def _gather_fused_hidden_states(hidden_states: Tensor, sequence_parallel: bool, impl_backend: str) -> Tensor:
     if not sequence_parallel:
+        # Triton and TileLang return the contribution from the local vocabulary
+        # shard. Match ColumnParallelLinear's replicated-input contract by
+        # reducing dHidden across TP ranks in backward.
+        if impl_backend.lower() != "liger":
+            return copy_to_tensor_model_parallel_region(hidden_states)
         return hidden_states
 
     # Liger TP-FLSCE already reduces dHidden across vocabulary shards. Its
@@ -100,6 +108,7 @@ class FusedOutputProcessorContext:
 
     temperature: float
     impl_backend: str = "triton"
+    topk_labels: Tensor | None = None
 
 
 def fused_output_processor(
@@ -127,15 +136,38 @@ def fused_output_processor(
 
     temperature = context.temperature
     hidden_states = _gather_fused_hidden_states(hidden_states, config.sequence_parallel, context.impl_backend)
-    logprobs, entropy = linear_cross_entropy(
+    transpose_output = (
+        context.topk_labels is not None
+        and hidden_states.ndim == 3
+        and labels.ndim == 2
+        and hidden_states.shape[:2] == tuple(reversed(labels.shape))
+        and hidden_states.shape[:2] != labels.shape
+    )
+    kernel_policy_labels = labels.transpose(0, 1) if transpose_output else labels
+    kernel_topk_labels = (
+        context.topk_labels.transpose(0, 1)
+        if transpose_output and context.topk_labels is not None
+        else context.topk_labels
+    )
+    kernel_labels = kernel_policy_labels
+    if kernel_topk_labels is not None:
+        if kernel_topk_labels.shape[:-1] != kernel_policy_labels.shape:
+            raise ValueError("topk_labels must have labels.shape as its leading dimensions")
+        kernel_labels = torch.cat((kernel_policy_labels.unsqueeze(-1), kernel_topk_labels), dim=-1)
+    all_logprobs, entropy = linear_cross_entropy(
         hidden_states,
         weight,
-        labels,
+        kernel_labels,
         temperature,
         "none",
         parallel_state.get_tensor_model_parallel_group(),
         impl_backend=context.impl_backend,
     )
+    if transpose_output:
+        all_logprobs = all_logprobs.transpose(0, 1)
+        entropy = entropy.transpose(0, 1)
+    logprobs = all_logprobs[..., 0] if context.topk_labels is not None else all_logprobs
+    topk_logprobs = all_logprobs[..., 1:] if context.topk_labels is not None else None
 
     if has_config_logger_enabled(config):
         payload = OrderedDict(
@@ -152,6 +184,7 @@ def fused_output_processor(
 
     output.entropy = entropy
     output.log_probs = logprobs
+    output.topk_log_probs = topk_logprobs
     return output
 
 
@@ -240,7 +273,10 @@ def patch_fused_forward(
     if model is None:
         return
     if model_config is not None:
-        impl_backend = "liger" if model_config.use_liger else "triton"
+        configured_backend = (model_config.fused_kernel_options or {}).get("impl_backend")
+        impl_backend = (
+            "liger" if model_config.use_liger else ("tilelang" if configured_backend == "tilelang" else "triton")
+        )
     if impl_backend == "liger" and engine_config is not None and model.config.params_dtype == torch.bfloat16:
         _configure_liger_runtime(model, engine_config)
     setattr(model, _FUSED_IMPL_BACKEND_ATTR, impl_backend)
@@ -284,6 +320,9 @@ def fused_forward_model_engine(vision_model: bool = False):
         router_padding_mask: Tensor | None = None,
         pad_to_length_bucket: int | None = None,
         position_ids: Tensor | None = None,
+        topk_labels: Tensor | None = None,
+        auxiliary_logits_processor=None,
+        distillation_only: bool = False,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -335,6 +374,19 @@ def fused_forward_model_engine(vision_model: bool = False):
             local_cp_size=local_cp_size,
         )
         labels_rmpad = labels_rmpad.contiguous()
+        topk_labels_rmpad = None
+        if topk_labels is not None:
+            topk_labels_rmpad, _, _ = preprocess_thd_engine(
+                topk_labels,
+                pre_process=True,
+                need_roll=False,
+                quant_align_size=quant_align_size,
+                min_local_rows=min_local_rows,
+                pad_to_length_bucket=pad_to_length_bucket,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
+            )
+            topk_labels_rmpad = topk_labels_rmpad.contiguous()
         forward_kwargs = dict(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
@@ -351,6 +403,7 @@ def fused_forward_model_engine(vision_model: bool = False):
                 output_processor_context=FusedOutputProcessorContext(
                     temperature=temperature,
                     impl_backend=impl_backend,
+                    topk_labels=topk_labels_rmpad,
                 ),
             )
         else:
@@ -358,33 +411,28 @@ def fused_forward_model_engine(vision_model: bool = False):
             output_orig: CausalLMOutputForPPO = model(
                 temperature=temperature,
                 impl_backend=impl_backend,
+                topk_labels=topk_labels_rmpad,
                 **forward_kwargs,
             )
 
         if not post_process:
             return output_orig
 
-        log_probs = output_orig.log_probs
-        if log_probs.dim() == 1:
-            log_probs = log_probs.unsqueeze(0)
-        log_probs = postprocess_thd_engine(
-            log_probs,
-            packed_seq_params,
-            input_ids,
-            input_ids.shape[0],
-            post_process=post_process,
-            cp_layout=cp_layout,
-            local_cp_size=local_cp_size,
-        )
-
-        output = {"log_probs": log_probs}
-
+        local_output = {}
+        if not distillation_only:
+            local_output["log_probs"] = output_orig.log_probs
         if calculate_entropy:
-            entropy = output_orig.entropy
-            if entropy.dim() == 1:
-                entropy = entropy.unsqueeze(0)
-            entropy = postprocess_thd_engine(
-                entropy,
+            local_output["entropy"] = output_orig.entropy
+        if topk_labels_rmpad is not None:
+            if output_orig.topk_log_probs is None:
+                raise RuntimeError("TileLang fused forward did not return topk_log_probs")
+            if auxiliary_logits_processor is None:
+                raise RuntimeError("An auxiliary logits processor is required with fused top-k labels")
+            local_output.update(auxiliary_logits_processor(student_topk_log_probs=output_orig.topk_log_probs))
+
+        return {
+            key: postprocess_thd_engine(
+                value.unsqueeze(0) if value.dim() == 1 else value,
                 packed_seq_params,
                 input_ids,
                 input_ids.shape[0],
@@ -392,9 +440,8 @@ def fused_forward_model_engine(vision_model: bool = False):
                 cp_layout=cp_layout,
                 local_cp_size=local_cp_size,
             )
-            output["entropy"] = entropy
-
-        return output
+            for key, value in local_output.items()
+        }
 
     return fused_forward_model_engine_inner
 
@@ -415,6 +462,7 @@ def _fused_GPTModel_forward(
     loss_mask: Optional[Tensor] = None,
     temperature: float = 1.0,
     impl_backend: str = "triton",
+    topk_labels: Tensor | None = None,
     padding_mask: Tensor | None = None,
     **kwargs,
 ) -> CausalLMOutputForPPO:
@@ -486,15 +534,34 @@ def _fused_GPTModel_forward(
         # When embeddings are tied, use the embedding weight
         output_weight = model.embedding.word_embeddings.weight
 
-    logprobs, entropy = linear_cross_entropy(
+    transpose_output = (
+        topk_labels is not None
+        and hidden_states.ndim == 3
+        and labels.ndim == 2
+        and hidden_states.shape[:2] == tuple(reversed(labels.shape))
+        and hidden_states.shape[:2] != labels.shape
+    )
+    kernel_policy_labels = labels.transpose(0, 1) if transpose_output else labels
+    kernel_topk_labels = topk_labels.transpose(0, 1) if transpose_output and topk_labels is not None else topk_labels
+    kernel_labels = kernel_policy_labels
+    if kernel_topk_labels is not None:
+        if kernel_topk_labels.shape[:-1] != kernel_policy_labels.shape:
+            raise ValueError("topk_labels must have labels.shape as its leading dimensions")
+        kernel_labels = torch.cat((kernel_policy_labels.unsqueeze(-1), kernel_topk_labels), dim=-1)
+    all_logprobs, entropy = linear_cross_entropy(
         hidden_states,
         output_weight,
-        labels,
+        kernel_labels,
         temperature,
         "none",
         parallel_state.get_tensor_model_parallel_group(),
         impl_backend=impl_backend,
     )
+    if transpose_output:
+        all_logprobs = all_logprobs.transpose(0, 1)
+        entropy = entropy.transpose(0, 1)
+    logprobs = all_logprobs[..., 0] if topk_labels is not None else all_logprobs
+    topk_logprobs = all_logprobs[..., 1:] if topk_labels is not None else None
 
     if has_config_logger_enabled(model.config):
         payload = OrderedDict(
@@ -511,5 +578,6 @@ def _fused_GPTModel_forward(
 
     output.entropy = entropy
     output.log_probs = logprobs
+    output.topk_log_probs = topk_logprobs
 
     return output

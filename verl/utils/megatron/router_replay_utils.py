@@ -242,6 +242,7 @@ def merge_router_topk_indices(
     vp_rank=None,
     local_cp_size=None,
     model=None,
+    pad_to_length_bucket=None,
 ):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
@@ -257,8 +258,10 @@ def merge_router_topk_indices(
             the current micro-batch.
         vp_rank (Optional[int]): Virtual pipeline stage rank override. If None, the current VP rank from
             Megatron parallel state will be used.
+        local_cp_size: Dynamic context-parallel group size for the current micro-batch.
         model: The forwarded model chunk. When given, routes are collected from its own routers instead
             of inferring their location in the process-global router registry.
+        pad_to_length_bucket: Static THD bucket alignment used by the model forward.
 
     Returns:
         None: The function has side effects only; it appends a tensor of shape
@@ -350,6 +353,7 @@ def merge_router_topk_indices(
                 quant_align_size=quant_align_size,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
             )
             layers_topk_idx = postprocess_thd_engine(
@@ -440,6 +444,7 @@ def set_router_replay_data(
     replay_mask=None,
     local_cp_size=None,
     model=None,
+    pad_to_length_bucket=None,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -457,8 +462,10 @@ def set_router_replay_data(
             Megatron parallel state will be used.
         replay_mask (Optional[torch.Tensor]): Optional per-token mask. Masked tokens use replayed routes;
             unmasked tokens keep native Megatron routes.
+        local_cp_size: Dynamic context-parallel group size for the current micro-batch.
         model: The forwarded model (or list of VPP chunks). When given, targets are written to its own
             routers instead of a positional slice of the global RouterReplay.router_instances list.
+        pad_to_length_bucket: Static THD bucket alignment used by the model forward.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -485,6 +492,7 @@ def set_router_replay_data(
                 quant_align_size=quant_align_size,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
             )
             if replay_mask is not None:
@@ -494,6 +502,7 @@ def set_router_replay_data(
                     quant_align_size=quant_align_size,
                     min_local_rows=min_local_rows,
                     local_cp_size=local_cp_size,
+                    pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                 )
         else:

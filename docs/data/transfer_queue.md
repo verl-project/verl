@@ -147,7 +147,7 @@ Developers can leverage `TransferQueueClient` directly to implement advanced fea
 ### Collocated Example
 
 #### verl
-The primary motivation for integrating TransferQueue into verl is to **alleviate the data transfer bottleneck of the single controller `RayPPOTrainer`**. Currently, all `DataProto` objects must be routed through `RayPPOTrainer`, resulting in a single-point bottleneck for the entire post-training system.
+V1 uses TransferQueue to exchange training data without routing every `DataProto` through the controller. The legacy `RayPPOTrainer`, available in [verl v0.9.1](https://github.com/verl-project/verl/tree/v0.9.1), routed all batches through a single controller.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/wuxibin89/verl/refs/heads/wuxibin/doc_images/docs/_static/transfer_queue.png" width="100%">

@@ -150,8 +150,6 @@ As we can see, in the control process, multiple processes are wrapped
 into a ``RayWorkerGroup``. Inside this ``WorkerGroup``, there is a
 ``self._workers`` member, where each worker is a RayActor
 (https://docs.ray.io/en/latest/ray-core/actors.html) of SampleGenerator.
-ray_trainer.md also provide an implementation of
-``MegatronRayWorkerGroup``.
 
 Assuming the model is distributed using FSDP, and there is a batch of
 data on the control process, for data parallelism, the underlying
@@ -270,4 +268,4 @@ flow. It is recommended that ``main_task`` is also a ray remote process.
 
 Here, different ``WorkerGroups`` can be placed in the same resource pool or
 in different resource pools using ``create_colocated_worker_cls``
-similar as in `ray_trainer.py <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py>`_.
+similar as in `trainer_base.py <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/v1/trainer_base.py>`_.
