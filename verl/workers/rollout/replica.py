@@ -258,6 +258,15 @@ class RolloutReplica(ABC):
         """Get rollout server handle for Token-in-token-out generation."""
         return self._server_handle
 
+    def get_metrics_server_endpoints(self) -> list[tuple[str, dict[str, Any]]]:
+        """Return scrape addresses and RL-Insight labels after servers launch.
+
+        Ordinary replicas keep their existing single metrics entry. Backends
+        with independent engines can expose additional scrape targets without
+        adding those engines to the generation router.
+        """
+        return [(self._server_address, {"replica": self.replica_rank})]
+
     def rollout_worker_use_gpu(self) -> bool:
         return True
 

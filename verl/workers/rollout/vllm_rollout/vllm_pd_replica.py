@@ -228,21 +228,15 @@ class vLLMPDReplica(vLLMReplica):
 
         self.servers = list(self._prefill_servers) + list(self._decode_servers)
         self._server_handle = self._prefill_servers[0]
-        if use_ascend_mooncake_v1:
-            prefill_addresses = await asyncio.gather(
-                *[server.get_server_address.remote() for server in self._prefill_servers]
-            )
-            decode_addresses = await asyncio.gather(
-                *[server.get_server_address.remote() for server in self._decode_servers]
-            )
-            self._prefill_server_addresses = [
-                self._format_server_address(host, port) for host, port in prefill_addresses
-            ]
-            self._decode_server_addresses = [self._format_server_address(host, port) for host, port in decode_addresses]
-            self._server_address = self._prefill_server_addresses[0]
-        else:
-            prefill_address, prefill_port = await self._prefill_servers[0].get_server_address.remote()
-            self._server_address = self._format_server_address(prefill_address, prefill_port)
+        # Every independent engine exposes metrics on both GPU and Ascend.
+        addresses = await asyncio.gather(*[server.get_server_address.remote() for server in self.servers])
+        self._prefill_server_addresses = [
+            self._format_server_address(host, port) for host, port in addresses[: len(self._prefill_servers)]
+        ]
+        self._decode_server_addresses = [
+            self._format_server_address(host, port) for host, port in addresses[len(self._prefill_servers) :]
+        ]
+        self._server_address = self._prefill_server_addresses[0]
 
         logger.info(
             "vLLMPDReplica rank=%s launched: prefill=%s (engine_id=%s, side_channel=%s:%d), decodes=%d",
@@ -255,18 +249,17 @@ class vLLMPDReplica(vLLMReplica):
         )
 
     def get_metrics_server_endpoints(self) -> list[tuple[str, dict[str, Any]]]:
-        """Return all Ascend P/D metrics endpoints with role labels."""
         if len(self._prefill_server_addresses) != len(self._prefill_servers):
             raise RuntimeError("PD prefill metrics endpoints are not ready")
         if len(self._decode_server_addresses) != len(self._decode_servers):
             raise RuntimeError("PD decode metrics endpoints are not ready")
         return [
             *[
-                (address, {"pd_role": "prefill", "pd_index": index})
+                (address, {"replica": f"{self.replica_rank}-prefill", "pd_role": "prefill", "pd_index": index})
                 for index, address in enumerate(self._prefill_server_addresses)
             ],
             *[
-                (address, {"pd_role": "decode", "pd_index": index})
+                (address, {"replica": f"{self.replica_rank}-decode{index}", "pd_role": "decode", "pd_index": index})
                 for index, address in enumerate(self._decode_server_addresses)
             ],
         ]

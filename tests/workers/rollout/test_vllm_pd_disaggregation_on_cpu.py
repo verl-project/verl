@@ -444,11 +444,11 @@ class _DispatchStub:
 
         return vLLMHttpServer._select_decode_peer(self)
 
-    async def _select_decode_peer_for_dispatch(self, routing_key, prompt_ids, reservation_id=None):
+    async def _select_decode_peer_for_dispatch(self, routing_key, prompt_ids, reservation_id=None, **generation_kwargs):
         from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
         return await vLLMHttpServer._select_decode_peer_for_dispatch(
-            self, routing_key, prompt_ids, reservation_id=reservation_id
+            self, routing_key, prompt_ids, reservation_id=reservation_id, **generation_kwargs
         )
 
     def _build_pd_decode_kv_params(self, prefill_out, connector, transfer_id, request_id):

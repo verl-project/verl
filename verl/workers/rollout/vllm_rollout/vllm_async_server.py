@@ -943,6 +943,7 @@ class vLLMHttpServer:
         routing_key: str,
         prompt_ids: Sequence[int],
         reservation_id: Optional[str] = None,
+        **generation_kwargs: Any,
     ) -> tuple[ActorHandle, Optional[str]]:
         """Use the configured router, or the upstream round-robin selector."""
         if self._pd_router is None:
@@ -953,6 +954,7 @@ class vLLMHttpServer:
                 **{
                     name: value
                     for name, value in {
+                        **generation_kwargs,
                         "prompt_ids": list(prompt_ids) if prompt_ids is not None else None,
                         "reservation_id": reservation_id,
                     }.items()
@@ -1035,11 +1037,42 @@ class vLLMHttpServer:
         # Session affinity and per-call accounting are separate. A retry or
         # concurrent turn in the same session must not release another call.
         reservation_id = uuid.uuid4().hex
-        decode_peer, decode_peer_id = await self._select_decode_peer_for_dispatch(
-            effective_routing_key,
-            prompt_ids,
-            reservation_id=reservation_id,
+        acquire_task = asyncio.create_task(
+            self._select_decode_peer_for_dispatch(
+                effective_routing_key,
+                prompt_ids,
+                reservation_id=reservation_id,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+                priority=priority,
+                session_id=session_id,
+            )
         )
+        try:
+            decode_peer, decode_peer_id = await asyncio.shield(acquire_task)
+        except asyncio.CancelledError:
+            # Cancelling an ObjectRef waiter does not cancel the remote acquire.
+            # Keep its result so an already-recorded reservation can be released.
+            async def release_after_acquire():
+                _, server_id = await acquire_task
+                await self._release_pd_decode_peer(server_id, effective_routing_key, reservation_id=reservation_id)
+
+            cleanup_task = asyncio.create_task(release_after_acquire())
+            # Repeated caller cancellation must not interrupt this cleanup.
+            while True:
+                try:
+                    await asyncio.shield(cleanup_task)
+                    break
+                except asyncio.CancelledError:
+                    if cleanup_task.cancelled():
+                        break
+                except Exception as exc:  # noqa: BLE001 - preserve the caller's cancellation
+                    logger.warning("PD decode router cancellation cleanup failed: %s", exc)
+                    break
+            raise
         try:
             connector = (self._disaggregation_kv_transfer_config or {}).get("kv_connector", "")
 

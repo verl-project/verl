@@ -25,6 +25,7 @@ import logging
 import socket
 import types
 import uuid
+from ipaddress import ip_address
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -33,6 +34,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 SERVER = "verl/workers/rollout/vllm_rollout/vllm_async_server.py"
 REPLICA = "verl/workers/rollout/vllm_rollout/vllm_pd_replica.py"
+BASE_REPLICA = "verl/workers/rollout/replica.py"
+MANAGER = "verl/workers/rollout/llm_server.py"
 
 
 def _load_functions(path, names, owner=None, **namespace):
@@ -56,7 +59,178 @@ def _remote(function):
     return types.SimpleNamespace(remote=invoke)
 
 
-@pytest.mark.parametrize("fields", [[], ["prompt_ids"], ["prompt_ids", "reservation_id"]])
+def _metrics_pd_replica(rank, device, backend):
+    methods = _load_functions(
+        REPLICA,
+        ["launch_servers", "get_metrics_server_endpoints", "_build_kv_transfer_config", "_format_server_address"],
+        "vLLMPDReplica",
+        get_device_name=lambda: device,
+        is_valid_ipv6_address=lambda host: ip_address(host).version == 6,
+    )
+    spawned = []
+
+    def spawn(**kwargs):
+        port = 8000 + rank * 10 + len(spawned)
+        server = types.SimpleNamespace(
+            launch_server=types.SimpleNamespace(remote=AsyncMock()),
+            set_pd_peer=types.SimpleNamespace(remote=AsyncMock()),
+            get_server_address=_remote(lambda: ("::1", port)),
+        )
+        spawned.append((kwargs, server))
+        return server
+
+    replica = types.SimpleNamespace(
+        replica_rank=rank,
+        world_size=8,
+        _prefill_tp=4,
+        _decode_tp=2,
+        _n_decode=2,
+        name_suffix="",
+        workers=[
+            types.SimpleNamespace(__ray_call__=_remote(lambda fn, i=i: ("node", str(i), "::1"))) for i in range(8)
+        ],
+        config=types.SimpleNamespace(
+            disaggregation=types.SimpleNamespace(transfer_backend=backend, mooncake_protocol="tcp")
+        ),
+        _decode_servers=[],
+        _prefill_server_addresses=[],
+        _decode_server_addresses=[],
+        _is_ascend_platform=lambda: device == "npu",
+        _collect_cuda_devices=lambda infos: ",".join(info[1] for info in infos),
+        _reserve_pd_ports=Mock(return_value=(39000, 39010, [39020, 39030], [], False)),
+        _build_kv_transfer_config=methods._build_kv_transfer_config,
+        _format_server_address=methods._format_server_address,
+        _spawn_pd_server=spawn,
+    )
+    replica.launch_servers = types.MethodType(methods.launch_servers, replica)
+    replica.get_metrics_server_endpoints = types.MethodType(methods.get_metrics_server_endpoints, replica)
+    return replica, spawned
+
+
+@pytest.mark.parametrize(
+    "device,backend,connector",
+    [
+        ("cuda", "nixl", "NixlConnector"),
+        ("cuda", "mooncake", "MooncakeConnector"),
+        ("npu", "mooncake", "MooncakeConnectorV1"),
+    ],
+)
+def test_launch_discovers_every_pd_metrics_endpoint_without_changing_request_entry(device, backend, connector):
+    replica, spawned = _metrics_pd_replica(3, device, backend)
+    asyncio.run(replica.launch_servers())
+
+    assert [address for address, _ in replica.get_metrics_server_endpoints()] == [
+        "[::1]:8030",
+        "[::1]:8031",
+        "[::1]:8032",
+    ]
+    assert replica._server_address == "[::1]:8030"
+    assert replica._server_handle is spawned[0][1]
+    assert [options["kv_transfer_config"]["kv_connector"] for options, _ in spawned] == [connector] * 3
+    spawned[0][1].set_pd_peer.remote.assert_awaited_once()
+    assert spawned[0][1].set_pd_peer.remote.await_args.kwargs["decode_peers"] == [server for _, server in spawned[1:]]
+
+
+@pytest.mark.parametrize(
+    "name,device,backend",
+    [
+        ("vllm", "cuda", "nixl"),
+        ("vllm", "cuda", "mooncake"),
+        ("vllm", "npu", "mooncake"),
+        ("vllm", "cuda", None),
+        ("sglang", "cuda", None),
+        ("trtllm", "cuda", None),
+    ],
+)
+@pytest.mark.parametrize("prometheus,insight", [(False, False), (True, False), (False, True), (True, True)])
+def test_manager_registers_metrics_separately_from_request_routing(name, device, backend, prometheus, insight):
+    register = Mock()
+    update_prometheus = Mock()
+    initialize = _load_functions(
+        MANAGER,
+        ["_initialize_llm_servers"],
+        "LLMServerManager",
+        get_device_name=lambda: device,
+        RLInsightLogger=types.SimpleNamespace(enabled=lambda: insight, register_rollout_metrics=register),
+        update_prometheus_config=update_prometheus,
+    )._initialize_llm_servers
+    default_metrics = _load_functions(
+        BASE_REPLICA, ["get_metrics_server_endpoints"], "RolloutReplica"
+    ).get_metrics_server_endpoints
+
+    def make_replica(replica_rank, **kwargs):
+        if backend:
+            replica, _ = _metrics_pd_replica(replica_rank, device, backend)
+
+            async def init(*args):
+                await replica.launch_servers()
+
+        else:
+            replica = types.SimpleNamespace(
+                replica_rank=replica_rank,
+                _server_address=f"[::1]:{8000 + replica_rank * 10}",
+                _server_handle=object(),
+            )
+            replica.get_metrics_server_endpoints = types.MethodType(default_metrics, replica)
+            init = AsyncMock()
+        replica.init_hybrid = init
+        replica.init_hybrid_colocated = init
+        return replica
+
+    config = types.SimpleNamespace(
+        name=name,
+        tensor_model_parallel_size=4,
+        data_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        n_gpus_per_node=8,
+        disaggregation=types.SimpleNamespace(
+            enabled=bool(backend), decode_tensor_model_parallel_size=2, prefill_replicas=1, decode_replicas=2
+        ),
+        prometheus=types.SimpleNamespace(enable=prometheus),
+        disable_log_stats=False,
+    )
+    manager = types.SimpleNamespace(
+        start_rank=3,
+        rollout_config=config,
+        model_config=None,
+        worker_group=types.SimpleNamespace(world_size=16 if backend else 8),
+        rollout_resource_pool=object(),
+        rollout_replica_class=make_replica,
+    )
+    asyncio.run(initialize(manager))
+
+    assert manager.server_addresses == ["[::1]:8030", "[::1]:8040"]
+    assert manager.server_handles == [replica._server_handle for replica in manager.rollout_replicas]
+    if backend:
+        expected_addresses = [f"[::1]:{8000 + rank * 10 + index}" for rank in (3, 4) for index in range(3)]
+        expected_labels = [
+            {"replica": f"{rank}-{suffix}", "pd_role": role, "pd_index": index}
+            for rank in (3, 4)
+            for suffix, role, index in (("prefill", "prefill", 0), ("decode0", "decode", 0), ("decode1", "decode", 1))
+        ]
+    else:
+        expected_addresses = ["[::1]:8030", "[::1]:8040"]
+        expected_labels = [{"replica": 3}, {"replica": 4}]
+    if insight:
+        register.assert_called_once_with(expected_addresses, name, labels=expected_labels)
+    else:
+        register.assert_not_called()
+    if prometheus:
+        update_prometheus.assert_called_once_with(config.prometheus, expected_addresses, name)
+    else:
+        update_prometheus.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        [],
+        ["prompt_ids"],
+        ["prompt_ids", "reservation_id"],
+        ["sampling_params", "priority", "session_id"],
+        ["image_data", "video_data", "audio_data", "mm_processor_kwargs"],
+    ],
+)
 def test_decode_router_only_receives_declared_fields(fields):
     functions = _load_functions(SERVER, ["_select_decode_peer_for_dispatch"], "vLLMHttpServer")
     calls = []
@@ -74,12 +248,27 @@ def test_decode_router_only_receives_declared_fields(fields):
         _pd_decode_peers=[peer],
         _select_decode_peer=Mock(side_effect=AssertionError("unexpected fallback")),
     )
-    result = asyncio.run(functions._select_decode_peer_for_dispatch(stub, "session", [1, 2], reservation_id="turn"))
+    generation = {
+        "sampling_params": {"max_tokens": 20},
+        "priority": 7,
+        "session_id": "session",
+        "image_data": ["image"],
+        "video_data": ["video"],
+        "audio_data": ["audio"],
+        "mm_processor_kwargs": {"fps": 1},
+    }
+    result = asyncio.run(
+        functions._select_decode_peer_for_dispatch(stub, "session", [1, 2], reservation_id="turn", **generation)
+    )
     assert result == (peer, "d")
     assert calls == [
         (
             "session",
-            {key: value for key, value in {"prompt_ids": [1, 2], "reservation_id": "turn"}.items() if key in fields},
+            {
+                key: value
+                for key, value in {**generation, "prompt_ids": [1, 2], "reservation_id": "turn"}.items()
+                if key in fields
+            },
         )
     ]
     stub._select_decode_peer.assert_not_called()
@@ -135,12 +324,85 @@ def test_dispatch_releases_reservation_on_every_exit(outcome, release_fields):
             asyncio.run(run())
     assert select.await_count == 1
     assert select.await_args.args == ("session", [1, 2])
+    assert select.await_args.kwargs["sampling_params"] == {"max_tokens": 20}
+    assert generate.await_args.args[1]["max_tokens"] == 1
     reservation_id = select.await_args.kwargs["reservation_id"]
     assert len(reservation_id) == 32
     identity_fields = {"request_id": "session", "reservation_id": reservation_id}
     release.assert_awaited_once_with(
         server_id="d", **{key: value for key, value in identity_fields.items() if key in release_fields}
     )
+
+
+@pytest.mark.parametrize("repeat_cancel", [None, "acquire", "release"])
+def test_pending_acquire_cancellation_releases_after_reply(repeat_cancel):
+    methods = _load_functions(
+        SERVER, ["_pd_dispatch", "_select_decode_peer_for_dispatch", "_release_pd_decode_peer"], "vLLMHttpServer"
+    )
+
+    async def run():
+        recorded, reply, releasing, release_reply = [asyncio.Event() for _ in range(4)]
+        reservations = {}
+        remote_tasks = []
+        peer = object()
+
+        async def acquire(request_id, prompt_ids, reservation_id):
+            assert prompt_ids == [1]
+            reservations[reservation_id] = "d"
+            recorded.set()
+            await reply.wait()
+            return "d", peer
+
+        def remote_acquire(**kwargs):
+            task = asyncio.create_task(acquire(**kwargs))
+            remote_tasks.append(task)
+            # Like a Ray ObjectRef: cancelling the waiter does not stop remote work.
+            return asyncio.shield(task)
+
+        async def release(server_id, request_id, reservation_id):
+            releasing.set()
+            await release_reply.wait()
+            assert request_id == "session"
+            assert reservations.pop(reservation_id) == server_id
+
+        release_call = AsyncMock(side_effect=release)
+        stub = types.SimpleNamespace(
+            _pd_router=types.SimpleNamespace(
+                acquire_server=types.SimpleNamespace(remote=remote_acquire),
+                release_server=types.SimpleNamespace(remote=release_call),
+            ),
+            _pd_router_acquire_fields=["prompt_ids", "reservation_id"],
+            _pd_router_release_fields=["request_id", "reservation_id"],
+            _pd_decode_peer_ids=["d"],
+            _select_decode_peer=Mock(side_effect=AssertionError("unexpected fallback")),
+            generate=AsyncMock(side_effect=AssertionError("cancelled request must not run prefill")),
+        )
+        for name in ("_select_decode_peer_for_dispatch", "_release_pd_decode_peer"):
+            setattr(stub, name, types.MethodType(getattr(methods, name), stub))
+        dispatch = asyncio.create_task(
+            methods._pd_dispatch(stub, [1], {"max_tokens": 20}, "turn", session_id="session")
+        )
+        await asyncio.wait_for(recorded.wait(), 1)
+        dispatch.cancel("request cancelled")
+        # Let the first cancellation enter cleanup before issuing another.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        if repeat_cancel == "acquire":
+            dispatch.cancel()
+        assert not remote_tasks[0].cancelled()
+        reply.set()
+        await asyncio.wait_for(releasing.wait(), 1)
+        if repeat_cancel == "release":
+            dispatch.cancel()
+        release_reply.set()
+        with pytest.raises(asyncio.CancelledError, match="request cancelled"):
+            await asyncio.wait_for(dispatch, 1)
+        await asyncio.gather(*remote_tasks)
+        assert reservations == {}
+        assert release_call.await_count == 1
+        stub.generate.assert_not_awaited()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("blocks", [None, [], (), [[]], [[], []], ([], [])])
@@ -328,15 +590,16 @@ def test_partial_port_reservation_failure_closes_acquired_sockets(contiguous):
 def test_metrics_endpoints_cover_both_roles():
     metrics = _load_functions(REPLICA, ["get_metrics_server_endpoints"], "vLLMPDReplica").get_metrics_server_endpoints
     stub = types.SimpleNamespace(
+        replica_rank=0,
         _prefill_servers=[object()],
         _decode_servers=[object(), object()],
         _prefill_server_addresses=["p:1"],
         _decode_server_addresses=["d0:1", "d1:1"],
     )
     assert metrics(stub) == [
-        ("p:1", {"pd_role": "prefill", "pd_index": 0}),
-        ("d0:1", {"pd_role": "decode", "pd_index": 0}),
-        ("d1:1", {"pd_role": "decode", "pd_index": 1}),
+        ("p:1", {"replica": "0-prefill", "pd_role": "prefill", "pd_index": 0}),
+        ("d0:1", {"replica": "0-decode0", "pd_role": "decode", "pd_index": 0}),
+        ("d1:1", {"replica": "0-decode1", "pd_role": "decode", "pd_index": 1}),
     ]
 
 

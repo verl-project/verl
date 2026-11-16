@@ -29,7 +29,6 @@ from omegaconf import DictConfig
 
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import normalize_token_ids
-from verl.utils.device import get_device_name
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.tracking import RLInsightLogger
@@ -505,22 +504,13 @@ class LLMServerManager:
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
         print(f"LLMServerManager: {self.server_addresses}")
 
-        metrics_addresses = list(self.server_addresses)
-        metrics_labels = [{"replica": server.replica_rank} for server in self.rollout_replicas]
-        if self.rollout_config.disaggregation.enabled and get_device_name() == "npu":
-            metrics_addresses = []
-            metrics_labels = []
-            for replica in self.rollout_replicas:
-                for address, endpoint_labels in replica.get_metrics_server_endpoints():
-                    role = endpoint_labels["pd_role"]
-                    index = endpoint_labels["pd_index"]
-                    replica_label = (
-                        f"{replica.replica_rank}-prefill"
-                        if role == "prefill"
-                        else f"{replica.replica_rank}-decode{index}"
-                    )
-                    metrics_addresses.append(address)
-                    metrics_labels.append({"replica": replica_label, **endpoint_labels})
+        # Scrape targets may include engines that are not generation entries (PD decode).
+        metrics_addresses = []
+        metrics_labels = []
+        for replica in self.rollout_replicas:
+            for address, endpoint_labels in replica.get_metrics_server_endpoints():
+                metrics_addresses.append(address)
+                metrics_labels.append(endpoint_labels)
 
         # Update Prometheus / rl-insight metrics with server addresses
         needs_metrics = self.rollout_config.prometheus.enable or RLInsightLogger.enabled()
