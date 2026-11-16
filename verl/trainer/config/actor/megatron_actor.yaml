@@ -1,10 +1,10 @@
 # megatron actor config, inheriting from trainer/config/actor/actor.yaml
 defaults:
   # megatron optimizer config
-  - ../optim@optim: megatron
+  - /optim@optim: megatron
 
   # megatron engine config
-  - ../engine@megatron: megatron
+  - /engine@megatron: megatron
 
   - actor
 

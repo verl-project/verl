@@ -1,10 +1,10 @@
 # torchtitan ref config, inheriting from trainer/config/ref/ref.yaml
 defaults:
   # torchtitan optimizer config
-  - ../optim@optim: torchtitan
+  - /optim@optim: torchtitan
 
   # torchtitan engine config
-  - ../engine@torchtitan: torchtitan
+  - /engine@torchtitan: torchtitan
 
   - ref
 

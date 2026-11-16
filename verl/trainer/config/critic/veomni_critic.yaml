@@ -2,10 +2,10 @@
 defaults:
 
   # veomni optimizer config
-  - ../optim@optim: veomni
+  - /optim@optim: veomni
 
   # veomni engine config
-  - ../engine@veomni: veomni
+  - /engine@veomni: veomni
 
   # critic config, inheriting from trainer/config/critic/critic.yaml
   - critic
