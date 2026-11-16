@@ -23,10 +23,13 @@ import torch
 
 from verl.trainer.ppo.metric_utils import (
     bootstrap_metric,
+    build_metric_batch_fields,
     calc_maj_val,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    compute_variance_proxy_metrics,
+    metric_length_caps,
     process_validation_metrics,
 )
 from verl.utils.metric import (
@@ -605,6 +608,180 @@ class TestProcessValidationMetrics(unittest.TestCase):
         self.assertAlmostEqual(result["acc_source"]["acc_success_only"]["mean@1"], 1.0)
         self.assertNotIn("acc", result["reward_source"])
         self.assertNotIn("acc_success_only", result["reward_source"])
+
+
+class TestComputeDataMetricsLengthCaps(unittest.TestCase):
+    """Regression tests: truncation rates must use the configured length caps.
+
+    V1 stores jagged sequences and pads them to the longest sample in the batch,
+    so ``prompts``/``responses`` tensor widths are not the configured caps.
+    """
+
+    def _make_v1_batch(self, meta_info=None):
+        batch = MagicMock()
+        batch.meta_info = dict(meta_info or {})
+        batch.non_tensor_batch = {}
+        batch.batch = {
+            "token_level_scores": torch.zeros((4, 512)),
+            "token_level_rewards": torch.zeros((4, 512)),
+            "advantages": torch.zeros((4, 512)),
+            "returns": torch.zeros((4, 512)),
+            "values": torch.zeros((4, 512)),
+            "prompts": torch.zeros((4, 70)),
+            "responses": torch.zeros((4, 512)),
+            "response_mask": torch.ones((4, 512)),
+            # V1 carries the true per-sample lengths as separate columns.
+            "prompt_length": torch.tensor([50.0, 60.0, 70.0, 70.0]),
+            "response_length": torch.tensor([100.0, 200.0, 512.0, 512.0]),
+        }
+        return batch
+
+    def test_meta_info_caps_report_no_truncation(self):
+        # Batch max width is 512/70 but the configured caps are 4096/1024 and
+        # nothing was truncated, so both clip ratios must be 0.0 (they were 0.5
+        # when the width was used as the cap).
+        batch = self._make_v1_batch(meta_info={"max_prompt_length": 1024, "max_response_length": 4096})
+
+        metrics = compute_data_metrics(batch, use_critic=True)
+
+        self.assertAlmostEqual(metrics["response_length/clip_ratio"], 0.0)
+        self.assertAlmostEqual(metrics["prompt_length/clip_ratio"], 0.0)
+        self.assertAlmostEqual(metrics["response_length_non_aborted/clip_ratio"], 0.0)
+
+    def test_meta_info_caps_detect_real_truncation(self):
+        # Two of the four responses hit the configured 512-token cap.
+        batch = self._make_v1_batch(meta_info={"max_prompt_length": 70, "max_response_length": 512})
+
+        metrics = compute_data_metrics(batch, use_critic=True)
+
+        self.assertAlmostEqual(metrics["response_length/clip_ratio"], 0.5)
+        self.assertAlmostEqual(metrics["prompt_length/clip_ratio"], 0.5)
+
+    def test_explicit_caps_take_precedence_over_meta_info(self):
+        batch = self._make_v1_batch(meta_info={"max_prompt_length": 1, "max_response_length": 1})
+
+        metrics = compute_data_metrics(
+            batch,
+            use_critic=True,
+            max_prompt_length=1024,
+            max_response_length=4096,
+        )
+
+        self.assertAlmostEqual(metrics["response_length/clip_ratio"], 0.0)
+        self.assertAlmostEqual(metrics["prompt_length/clip_ratio"], 0.0)
+
+    def test_width_fallback_preserves_legacy_behaviour(self):
+        # No caps supplied: keep the historical width-based comparison used by
+        # V0-style callers and existing external users.
+        batch = self._make_v1_batch()
+
+        metrics = compute_data_metrics(batch, use_critic=True)
+
+        self.assertAlmostEqual(metrics["response_length/clip_ratio"], 0.5)
+        self.assertAlmostEqual(metrics["prompt_length/clip_ratio"], 0.5)
+
+    def test_invalid_caps_fall_back_to_width(self):
+        # 0 / bool / non-integer caps must not crash torch.eq; they are ignored.
+        batch = self._make_v1_batch(meta_info={"max_prompt_length": 0, "max_response_length": True})
+
+        metrics = compute_data_metrics(batch, use_critic=True)
+
+        self.assertAlmostEqual(metrics["response_length/clip_ratio"], 0.5)
+        self.assertAlmostEqual(metrics["prompt_length/clip_ratio"], 0.5)
+
+
+class TestComputeVarianceProxyMetrics(unittest.TestCase):
+    """The V1 metrics projection must keep the variance-proxy inputs together."""
+
+    def _make_batch(self, with_variance_inputs: bool = True):
+        tensors = {
+            "response_mask": torch.ones((1, 1)),
+            "advantages": torch.tensor([[2.0]]),
+        }
+        if with_variance_inputs:
+            # Uniform policy over two tokens: pi(y) = 0.5, sum_pi_squared = 0.5,
+            # so W = 1 - 2*0.5 + 0.5 = 0.5 and proxy2 = A^2 * W = 2.0.
+            tensors["old_log_probs"] = torch.tensor([[0.5]]).log()
+            tensors["sum_pi_squared"] = torch.tensor([[0.5]])
+        batch = MagicMock()
+        batch.batch = tensors
+        return batch
+
+    def test_emits_variance_proxy_metrics(self):
+        metrics = compute_variance_proxy_metrics(self._make_batch())
+
+        self.assertAlmostEqual(metrics["variance_proxy/proxy2_total_power"], 2.0)
+        self.assertAlmostEqual(metrics["variance_proxy/expected_a_squared"], 4.0)
+
+    def test_returns_empty_when_inputs_are_not_projected(self):
+        # This is the V1 regression: without old_log_probs/sum_pi_squared the
+        # function silently returns {} instead of emitting the proxy metrics.
+        self.assertEqual(compute_variance_proxy_metrics(self._make_batch(with_variance_inputs=False)), {})
+
+
+class TestBuildMetricBatchFields(unittest.TestCase):
+    """The V1 metrics projection must fetch every field the metric functions read."""
+
+    def test_always_requests_data_metric_inputs(self):
+        fields = build_metric_batch_fields(use_critic=False, calculate_sum_pi_squared=False)
+
+        self.assertEqual(
+            fields,
+            [
+                "prompts",
+                "responses",
+                "response_mask",
+                "advantages",
+                "returns",
+                "rm_scores",
+                "token_level_rewards",
+                "num_turns",
+            ],
+        )
+
+    def test_adds_values_for_critic(self):
+        fields = build_metric_batch_fields(use_critic=True, calculate_sum_pi_squared=False)
+
+        self.assertIn("values", fields)
+        self.assertNotIn("old_log_probs", fields)
+        self.assertNotIn("sum_pi_squared", fields)
+
+    def test_requests_variance_proxy_inputs(self):
+        # compute_variance_proxy_metrics needs both fields, so the projection must
+        # fetch them whenever the actor emits sum_pi_squared.
+        fields = build_metric_batch_fields(use_critic=True, calculate_sum_pi_squared=True)
+
+        self.assertIn("old_log_probs", fields)
+        self.assertIn("sum_pi_squared", fields)
+
+
+class TestMetricLengthCaps(unittest.TestCase):
+    """The V1 trainer passes the configured caps through ``batch.meta_info``."""
+
+    def test_uses_rollout_lengths(self):
+        from omegaconf import OmegaConf
+
+        config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"prompt_length": 1024, "response_length": 4096}}})
+
+        self.assertEqual(metric_length_caps(config), {"max_prompt_length": 1024, "max_response_length": 4096})
+
+    def test_ignores_missing_and_invalid_values(self):
+        from omegaconf import OmegaConf
+
+        for prompt_length, response_length, expected in (
+            (None, 4096, {"max_response_length": 4096}),
+            (0, -1, {}),
+            (True, "512", {}),
+        ):
+            with self.subTest(prompt_length=prompt_length, response_length=response_length):
+                config = OmegaConf.create(
+                    {
+                        "actor_rollout_ref": {
+                            "rollout": {"prompt_length": prompt_length, "response_length": response_length}
+                        }
+                    }
+                )
+                self.assertEqual(metric_length_caps(config), expected)
 
 
 if __name__ == "__main__":
