@@ -17,10 +17,20 @@ FSDP engine order: `_chunked_topk_log_probs` runs before the log-prob call. For
 fp32 logits its `.float()` does not copy, so its logsumexp keeps the logits
 buffer for backward, and flash-attn's in-place backward overwrites it first.
 bf16 logits are copied by `.float()` and are not affected.
+
+The corruption needs ALL of these (FSDP engine only; Megatron has its own
+vocab-parallel KL and never shares the buffer):
+  1. the non-fused FSDP path (`use_fused_kernels=False`), so logits are materialized;
+  2. fp32 logits, e.g. `mixed_precision.param_dtype=fp32` (autocast off);
+  3. top-k distillation with `distillation_loss.use_chunked_topk=True` (default False);
+  4. flash-attn cross entropy with in-place backward (the default `inplace_backward=True`).
+With bf16 logits, or the default non-chunked top-k (`F.log_softmax` saves its output,
+not the logits), nothing is aliased and in-place backward is safe.
 """
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.distillation.fsdp.losses import _chunked_topk_log_probs
@@ -34,7 +44,7 @@ pytestmark = pytest.mark.skipif(
 N, V, K = 256, 151936, 8
 
 
-def _student_grad(dtype, logprob_fn):
+def _student_grad(dtype, logprob_fn, chunked_topk=True):
     gen = torch.Generator().manual_seed(0)
     base = (torch.randn(N, V, generator=gen) * 3).to("cuda", dtype)
     labels = torch.randint(0, V, (N,), generator=gen).to("cuda")
@@ -44,7 +54,11 @@ def _student_grad(dtype, logprob_fn):
 
     leaf = base.clone().requires_grad_(True)
     logits = leaf * 1.0  # non-leaf, like an lm_head output
-    distill = _chunked_topk_log_probs(logits.unsqueeze(0), topk_ids).squeeze(0).float().sum(-1)
+    if chunked_topk:
+        distill = _chunked_topk_log_probs(logits.unsqueeze(0), topk_ids).squeeze(0).float().sum(-1)
+    else:  # default `use_chunked_topk=False` path of the distillation loss
+        log_softmax = F.log_softmax(logits.unsqueeze(0), dim=-1)
+        distill = torch.gather(log_softmax, -1, topk_ids).squeeze(0).float().sum(-1)
     log_probs = logprob_fn(logits, labels).float()
     (-(log_probs * w_logprob).sum() - (distill * w_distill).sum()).backward()
     return leaf.grad.float()
@@ -72,3 +86,14 @@ def test_flash_ce_inplace_safe_with_bf16_topk_distillation(monkeypatch):
     keep = _rel_err(torch.bfloat16, inplace_backward=False, monkeypatch=monkeypatch)
     inplace = _rel_err(torch.bfloat16, inplace_backward=True, monkeypatch=monkeypatch)
     assert inplace == pytest.approx(keep, rel=1e-3)
+
+
+def test_flash_ce_inplace_safe_with_default_nonchunked_topk(monkeypatch):
+    # pins why the trigger needs `use_chunked_topk=True`: the default log_softmax path
+    # does not save the logits, so even fp32 + in-place backward gives the right gradient
+    monkeypatch.setenv("VERL_DISABLE_FLASH_ATTN_CE", "0")
+    grad = _student_grad(
+        torch.float32, lambda x, y: verl_F.logprobs_from_logits(x, y, inplace_backward=True), chunked_topk=False
+    )
+    ref = _student_grad(torch.float32, verl_F.logprobs_from_logits_naive, chunked_topk=False)
+    assert ((grad - ref).norm() / ref.norm()).item() < 1e-5

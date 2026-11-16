@@ -16,6 +16,11 @@
 logits that the top-k distillation processor keeps for its own backward. This drives the real
 method (both padding branches) with the real log-prob dispatch and compares the student gradient
 against a plain-PyTorch reference, so reverting the engine's ``inplace_backward`` guard fails here.
+
+The bug the guard prevents needs: the non-fused FSDP path, fp32 logits (``param_dtype=fp32``),
+top-k distillation with ``use_chunked_topk=True`` (default off) and flash-attn CE with in-place
+backward. The guard keys on fp32 + top-k only, so it also covers the (safe) non-chunked default.
+Megatron is not affected: it uses its own vocab-parallel KL.
 """
 
 import pytest
