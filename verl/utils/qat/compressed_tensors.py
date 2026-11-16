@@ -770,7 +770,11 @@ def dispatch_rollout_weight_quantizer(
     else:
         quantization_config = _as_quantization_config(native)
 
-    qat_mode = qat_config.mode if qat_config is not None and qat_config.enable else None
+    # An engine config may carry QAT as a config object or as a plain mapping (e.g. Megatron-LM mLite).
+    if isinstance(qat_config, Mapping):
+        qat_mode = qat_config.get("mode") if qat_config.get("enable", False) else None
+    else:
+        qat_mode = qat_config.mode if qat_config is not None and qat_config.enable else None
     real_nvfp4 = real_nvfp4_bf16_layers is not None
     if quantization_config is None:
         if real_nvfp4:
