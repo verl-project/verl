@@ -105,8 +105,6 @@ def _validate_score_centering_config(config: DictConfig) -> None:
                 f"score centering requires actor_rollout_ref.actor.policy_loss.rollout_correction.{key} to match "
                 f"algorithm.rollout_correction.{key}."
             )
-    if not config.trainer.get("use_v1", True):
-        raise ValueError("score centering requires the v1 trainer (trainer.use_v1=True).")
     if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2", "megatron"):
         raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2 or megatron.")
     if config.actor_rollout_ref.rollout.get("name") != "vllm":
@@ -131,10 +129,6 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
-    if config.data.get("custom_dataloader") is not None:
-        if not config.trainer.get("use_v1", True):
-            raise ValueError("data.custom_dataloader requires the V1 PPO trainer.")
-
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 

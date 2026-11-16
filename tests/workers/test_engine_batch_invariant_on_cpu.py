@@ -154,8 +154,10 @@ def test_veomni_engine_config_rejects_batch_invariant():
         VeOmniEngineConfig(batch_invariant=True)
 
 
-def test_prepare_model_outputs_runs_with_a_veomni_engine_config():
+def test_prepare_model_outputs_runs_with_a_veomni_engine_config(monkeypatch):
     # VeOmniEngineWithLMHead reuses this method with its own engine config.
+    # CPU tensors must use the torch path even when flash-attn is installed.
+    monkeypatch.setenv("VERL_DISABLE_FLASH_ATTN_CE", "1")
     torch.manual_seed(0)
     total_nnz, vocab_size = 5, 16
     cu_seqlens = torch.tensor([0, 3, 5])
