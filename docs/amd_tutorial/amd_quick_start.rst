@@ -1,9 +1,9 @@
 Getting started with AMD ROCm
 =========================================
 
-Last updated: 07/24/2026.
+Last updated: 11/13/2026.
 
-Author: `Mingjie Lu <https://github.com/mingjielu>`_, `Xiaohong Kou <https://github.com/xiaohong42>`_, `Fuwei Yang <https://github.com/amd-fuweiy>`_, `Zhaodong Bing <https://github.com/aaab8b>`_
+Author: `Mingjie Lu <https://github.com/mingjielu>`_, `Xiaohong Kou <https://github.com/xiaohong42>`_, `Fuwei Yang <https://github.com/amd-fuweiy>`_, `Zhaodong Bing <https://github.com/aaab8b>`_, `Yuhan Yang <https://github.com/PeterYang12>`_
 
 Overview
 --------
@@ -27,7 +27,7 @@ Software Baseline
 
 Use the following prebuilt image for tutorial and validation:
 
-- ``amdagi/verl-dev:rocm7.14_torch2.12_release_0724``
+- ``verlai/verl:rocm7.14_torch2.12_release_1112``
 
 Or build from source:
 
@@ -48,7 +48,7 @@ Launch Container
 .. code-block:: bash
 
     NAME=verl_release
-    DOCKER=amdagi/verl-dev:rocm7.14_torch2.12_release_0724
+    DOCKER=verlai/verl:rocm7.14_torch2.12_release_1112
 
     docker pull $DOCKER
 
@@ -148,5 +148,5 @@ Known Issues
 1. For qwen2.5-math-7b, update max_position_embeddings to 32768 in config.json after model download.
 2. ``PYTORCH_ALLOC_CONF=expandable_segments:True`` is set by default in ``Dockerfile.rocm`` to prevent out-of-memory (OOM). However, this setting may conflict with ``vllm_custom_all_reduce``, so we set ``vllm.disable_custom_all_reduce=True`` in ``config.yaml`` by default which will be removed in the future once ROCm resolves the conflict.
 3. ``attention_backend`` must be set to ``triton`` for SGLang.
-4. Several ROCm-specific pull requests for vLLM and SGLang are still pending upstream integration, so we currently incorporate the required patches directly within the Dockerfile. In the future, we intend to transition to stable, officially released versions.
+4. vLLM is built from the v0.32.0 release plus one ROCm fix merged upstream after that release (`vllm-project/vllm#61872 <https://github.com/vllm-project/vllm/pull/61872>`_). SGLang is still built from a pinned commit with ROCm patches applied in the Dockerfile. In the future, we intend to transition to stable, officially released versions.
 
