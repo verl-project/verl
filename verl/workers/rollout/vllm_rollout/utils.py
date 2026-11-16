@@ -21,6 +21,7 @@ import platform
 import signal
 import threading
 from collections.abc import Mapping
+from contextlib import nullcontext
 from types import MethodType
 from typing import Any, Literal, Optional, get_args
 
@@ -314,6 +315,23 @@ class vLLMColocateWorkerExtension:
 
             pin_memory = is_pin_memory_available()
 
+        # A bucket can contain only base-model weights, so skip the drafter's
+        # per-load completeness check during this bucketed transfer, including
+        # the initial base-weight sync for LoRA.
+        skip_mtp_completeness_check = (
+            not (peft_config and base_sync_done)
+            and not is_quantized_model(self.model_runner.vllm_config)
+            and self._use_mtp_drafter_weight_sync()
+        )
+        mtp_load_context = nullcontext
+        if skip_mtp_completeness_check:
+            try:
+                from vllm.model_executor.model_loader.mtp_validation import disable_mtp_completeness_check
+            except ImportError:
+                pass  # Older vLLM versions do not provide the scoped helper.
+            else:
+                mtp_load_context = disable_mtp_completeness_check
+
         def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
             if lora_weights is not None:
                 # Copy: add_lora keeps these past the callback (reused IPC buffer, #6454). One CPU block per
@@ -344,7 +362,8 @@ class vLLMColocateWorkerExtension:
                 base_sync_done=base_sync_done,
             )
 
-        receiver.receive_weights(on_bucket_received=on_bucket_received)
+        with mtp_load_context():
+            receiver.receive_weights(on_bucket_received=on_bucket_received)
 
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
