@@ -39,7 +39,6 @@ def _reset_rl_insight_logger():
 @pytest.fixture
 def mock_rl_insight(monkeypatch):
     module = MagicMock()
-    module.__version__ = "0.3.0"
     module.metric_gauge = MagicMock()
     # Released 0.3.0 has no metric_log. MagicMock would otherwise invent one.
     module.metric_log = None
