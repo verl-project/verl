@@ -412,6 +412,10 @@ actor_rollout_ref:
       prefill_replicas: 1
       decode_replicas: 1
       decode_tensor_model_parallel_size: null
+      prefill_gpu_memory_utilization: null
+      decode_gpu_memory_utilization: null
+      prefill_engine_kwargs: {}
+      decode_engine_kwargs: {}
       transfer_backend: nixl
       bootstrap_port: null
       ib_device: null

@@ -1081,6 +1081,7 @@ class vLLMHttpServer:
             prefill_sp.pop("max_tokens", None)
             prefill_sp.pop("max_new_tokens", None)
             prefill_sp["max_tokens"] = 1
+            prefill_sp["ignore_eos"] = True
             transfer_id = uuid.uuid4().hex
             prefill_kv_params = {
                 "do_remote_decode": True,
@@ -1100,6 +1101,10 @@ class vLLMHttpServer:
                 kv_transfer_params=prefill_kv_params,
                 session_id=session_id,
             )
+            # An aborted prefill has no completed handoff; let the caller retry
+            # after resume instead of sending incomplete KV metadata to D.
+            if getattr(prefill_out, "stop_reason", None) in ("aborted", "abort"):
+                return prefill_out
             decode_kv_params = self._build_pd_decode_kv_params(
                 prefill_out,
                 connector,

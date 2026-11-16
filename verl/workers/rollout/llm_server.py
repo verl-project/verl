@@ -500,8 +500,11 @@ class LLMServerManager:
         else:
             await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
 
-        self.server_handles = [server._server_handle for server in self.rollout_replicas]
-        self.server_addresses = [server._server_address for server in self.rollout_replicas]
+        request_endpoints = [
+            endpoint for replica in self.rollout_replicas for endpoint in replica.get_request_server_endpoints()
+        ]
+        self.server_addresses = [address for address, _ in request_endpoints]
+        self.server_handles = [handle for _, handle in request_endpoints]
         print(f"LLMServerManager: {self.server_addresses}")
 
         # Scrape targets may include engines that are not generation entries (PD decode).

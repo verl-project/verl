@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""vLLM PD-disaggregated replica with one prefill and N decode servers.
+"""vLLM PD-disaggregated replica with N prefill and M decode servers.
 
 Asymmetric TP is supported, and the complete PD replica must fit on one node.
 GPU keeps vLLM's native NIXL/Mooncake connectors; Ascend uses
@@ -19,6 +19,7 @@ vLLM-Ascend's MooncakeConnectorV1.
 """
 
 import asyncio
+import copy
 import logging
 import os
 import socket
@@ -70,8 +71,6 @@ class vLLMPDReplica(vLLMReplica):
                 f"revision; got {disagg.transfer_backend!r}. mori/ascend/fake are reserved "
                 f"in DisaggregationConfig and will land in follow-ups."
             )
-        if disagg.prefill_replicas != 1:
-            raise NotImplementedError(f"prefill_replicas=1 only (got {disagg.prefill_replicas})")
         self._n_prefill = disagg.prefill_replicas
         self._n_decode = disagg.decode_replicas
 
@@ -83,7 +82,7 @@ class vLLMPDReplica(vLLMReplica):
             else self._prefill_tp
         )
 
-        pd_world_size = self._prefill_tp + self._n_decode * self._decode_tp
+        pd_world_size = self._n_prefill * self._prefill_tp + self._n_decode * self._decode_tp
         if pd_world_size > gpus_per_node:
             raise NotImplementedError(
                 f"PD replica needs {pd_world_size} GPUs but gpus_per_node={gpus_per_node}; "
@@ -130,16 +129,12 @@ class vLLMPDReplica(vLLMReplica):
                 for worker in self.workers
             ]
         )
+        if len({info[0] for info in worker_infos}) != 1:
+            raise ValueError("All workers of a PD replica must be placed on the same node")
 
         prefill_host_ip = worker_infos[0][2]
-        prefill_engine_id = uuid.uuid4().hex
-        prefill_end = self._prefill_tp
-        prefill_workers = self.workers[:prefill_end]
-        prefill_node_id = worker_infos[0][0]
-        prefill_devs = self._collect_cuda_devices(worker_infos[:prefill_end])
-
         (
-            prefill_side_channel_port,
+            prefill_side_channel_ports,
             bootstrap_port,
             decode_side_channel_ports,
             reserved_socks,
@@ -149,35 +144,48 @@ class vLLMPDReplica(vLLMReplica):
             for sock in reserved_socks:
                 sock.close()
             reserved_socks.clear()
+        prefill_peers = []
         try:
-            prefill_kv_cfg = self._build_kv_transfer_config(
-                role="prefill",
-                engine_id=prefill_engine_id,
-                transfer_backend=transfer_backend,
-                mooncake_protocol=self.config.disaggregation.mooncake_protocol,
-                use_ascend_mooncake_v1=use_ascend_mooncake_v1,
-                kv_port=prefill_side_channel_port,
-                prefill_tp=self._prefill_tp,
-                decode_tp=self._decode_tp,
-            )
-            self._prefill_servers = [
-                self._spawn_pd_server(
+            for i in range(self._n_prefill):
+                start = i * self._prefill_tp
+                end = start + self._prefill_tp
+                prefill_engine_id = uuid.uuid4().hex
+                prefill_side_channel_port = prefill_side_channel_ports[i]
+                prefill_kv_cfg = self._build_kv_transfer_config(
                     role="prefill",
-                    workers=prefill_workers,
-                    node_id=prefill_node_id,
-                    cuda_visible_devices=prefill_devs,
+                    engine_id=prefill_engine_id,
+                    transfer_backend=transfer_backend,
+                    mooncake_protocol=self.config.disaggregation.mooncake_protocol,
+                    use_ascend_mooncake_v1=use_ascend_mooncake_v1,
+                    kv_port=prefill_side_channel_port,
+                    prefill_tp=self._prefill_tp,
+                    decode_tp=self._decode_tp,
+                )
+                # Keep the existing actor name for 1P callers and weight adapters.
+                actor_name = (
+                    f"vllm_server_{self.replica_rank}_0{self.name_suffix}"
+                    if self._n_prefill == 1
+                    else f"vllm_server_prefill_{self.replica_rank}_{i}_0{self.name_suffix}"
+                )
+                server = self._spawn_pd_server(
+                    role="prefill",
+                    workers=self.workers[start:end],
+                    node_id=worker_infos[start][0],
+                    cuda_visible_devices=self._collect_cuda_devices(worker_infos[start:end]),
                     tp=self._prefill_tp,
                     kv_transfer_config=prefill_kv_cfg,
                     side_channel_host=prefill_host_ip,
                     side_channel_port=prefill_side_channel_port,
-                    mooncake_bootstrap_port=bootstrap_port,
-                    actor_name=f"vllm_server_{self.replica_rank}_0{self.name_suffix}",
-                    zmq_base_trainer_rank=0,
+                    # Native GPU Mooncake starts one bootstrap server per P.
+                    mooncake_bootstrap_port=(bootstrap_port if use_ascend_mooncake_v1 else prefill_side_channel_port),
+                    actor_name=actor_name,
+                    zmq_base_trainer_rank=start,
                 )
-            ]
+                self._prefill_servers.append(server)
+                prefill_peers.append((server, prefill_side_channel_port, prefill_engine_id))
 
             for i in range(self._n_decode):
-                start = self._prefill_tp + i * self._decode_tp
+                start = self._n_prefill * self._prefill_tp + i * self._decode_tp
                 end = start + self._decode_tp
                 workers_i = self.workers[start:end]
                 node_id_i = worker_infos[start][0]
@@ -220,10 +228,15 @@ class vLLMPDReplica(vLLMReplica):
             for sock in reserved_socks:
                 sock.close()
 
-        await self._prefill_servers[0].set_pd_peer.remote(
-            decode_peers=self._decode_servers,
-            prefill_side_channel_port=prefill_side_channel_port,
-            prefill_engine_id=prefill_engine_id,
+        await asyncio.gather(
+            *[
+                server.set_pd_peer.remote(
+                    decode_peers=self._decode_servers,
+                    prefill_side_channel_port=port,
+                    prefill_engine_id=engine_id,
+                )
+                for server, port, engine_id in prefill_peers
+            ]
         )
 
         self.servers = list(self._prefill_servers) + list(self._decode_servers)
@@ -239,14 +252,15 @@ class vLLMPDReplica(vLLMReplica):
         self._server_address = self._prefill_server_addresses[0]
 
         logger.info(
-            "vLLMPDReplica rank=%s launched: prefill=%s (engine_id=%s, side_channel=%s:%d), decodes=%d",
+            "vLLMPDReplica rank=%s launched: prefills=%s, decodes=%s",
             self.replica_rank,
-            self._server_address,
-            prefill_engine_id,
-            prefill_host_ip,
-            prefill_side_channel_port,
-            len(self._decode_servers),
+            self._prefill_server_addresses,
+            self._decode_server_addresses,
         )
+
+    def get_request_server_endpoints(self) -> list[tuple[str, ActorHandle]]:
+        """Expose every prefill engine, using addresses collected at startup."""
+        return list(zip(self._prefill_server_addresses, self._prefill_servers, strict=True))
 
     def get_metrics_server_endpoints(self) -> list[tuple[str, dict[str, Any]]]:
         if len(self._prefill_server_addresses) != len(self._prefill_servers):
@@ -255,7 +269,18 @@ class vLLMPDReplica(vLLMReplica):
             raise RuntimeError("PD decode metrics endpoints are not ready")
         return [
             *[
-                (address, {"replica": f"{self.replica_rank}-prefill", "pd_role": "prefill", "pd_index": index})
+                (
+                    address,
+                    {
+                        "replica": (
+                            f"{self.replica_rank}-prefill"
+                            if len(self._prefill_servers) == 1
+                            else f"{self.replica_rank}-prefill{index}"
+                        ),
+                        "pd_role": "prefill",
+                        "pd_index": index,
+                    },
+                )
                 for index, address in enumerate(self._prefill_server_addresses)
             ],
             *[
@@ -268,6 +293,20 @@ class vLLMPDReplica(vLLMReplica):
         """Resume every independent P/D engine before opening any admission gate."""
         await asyncio.gather(*[server.resume_engine_generation.remote() for server in self.servers])
         await asyncio.gather(*[server.open_submission_gate.remote() for server in self.servers])
+
+    async def sleep(self):
+        """Drain all prefills, then sleep Mooncake consumers before producers.
+
+        The trainer must quiesce generation before calling this method. Worker
+        sleep owns transport unregistration; no connector disconnect RPC is used.
+        """
+        await asyncio.gather(*[server.wait_for_requests_to_drain.remote() for server in self._prefill_servers])
+        # Ascend also uses Mooncake when the configured NIXL backend falls back.
+        if self._is_ascend_platform() or self.config.disaggregation.transfer_backend == "mooncake":
+            await asyncio.gather(*[server.sleep.remote() for server in self._decode_servers])
+            await asyncio.gather(*[server.sleep.remote() for server in self._prefill_servers])
+        else:
+            await asyncio.gather(*[server.sleep.remote() for server in self.servers])
 
     @staticmethod
     def _is_ascend_platform() -> bool:
@@ -282,29 +321,34 @@ class vLLMPDReplica(vLLMReplica):
         self,
         address: str,
         contiguous: bool,
-    ) -> tuple[int, int, list[int], list[socket.socket], bool]:
+    ) -> tuple[list[int], int, list[int], list[socket.socket], bool]:
         """Reserve P/D ports using either upstream or Ascend allocation semantics."""
         reserved_socks: list[socket.socket] = []
+        prefill_ports: list[int] = []
         decode_ports: list[int] = []
         try:
             if contiguous:
-                prefill_port, prefill_socks = self._reserve_port_range(address, self._prefill_tp)
-                reserved_socks.extend(prefill_socks)
+                for _ in range(self._n_prefill):
+                    prefill_port, prefill_socks = self._reserve_port_range(address, self._prefill_tp)
+                    prefill_ports.append(prefill_port)
+                    reserved_socks.extend(prefill_socks)
                 bootstrap_port, bootstrap_socks = self._reserve_port_range(address, self.world_size)
                 reserved_socks.extend(bootstrap_socks)
                 for _ in range(self._n_decode):
                     decode_port, decode_socks = self._reserve_port_range(address, self._decode_tp)
                     decode_ports.append(decode_port)
                     reserved_socks.extend(decode_socks)
-                return prefill_port, bootstrap_port, decode_ports, reserved_socks, True
+                return prefill_ports, bootstrap_port, decode_ports, reserved_socks, True
 
-            prefill_port, prefill_sock = get_free_port(address, with_alive_sock=True)
-            reserved_socks.append(prefill_sock)
+            for _ in range(self._n_prefill):
+                prefill_port, prefill_sock = get_free_port(address, with_alive_sock=True)
+                prefill_ports.append(prefill_port)
+                reserved_socks.append(prefill_sock)
             for _ in range(self._n_decode):
                 decode_port, decode_sock = get_free_port(address, with_alive_sock=True)
                 decode_ports.append(decode_port)
                 reserved_socks.append(decode_sock)
-            return prefill_port, prefill_port, decode_ports, reserved_socks, False
+            return prefill_ports, prefill_ports[0], decode_ports, reserved_socks, False
         except Exception:
             # Reservation may fail before launch_servers enters its try/finally.
             for sock in reserved_socks:
@@ -405,7 +449,23 @@ class vLLMPDReplica(vLLMReplica):
         zmq_base_trainer_rank: int = 0,
     ) -> ActorHandle:
         """Construct one PD ``vLLMHttpServer`` actor."""
-        per_role_config = _dc_replace(self.config, tensor_model_parallel_size=tp)
+        disagg = self.config.disaggregation
+        memory_utilization = (
+            disagg.prefill_gpu_memory_utilization if role == "prefill" else disagg.decode_gpu_memory_utilization
+        )
+        role_overrides = disagg.prefill_engine_kwargs if role == "prefill" else disagg.decode_engine_kwargs
+        engine_kwargs = copy.deepcopy(self.config.engine_kwargs)
+        engine_kwargs.setdefault("vllm", {}).update(
+            {key: value for key, value in role_overrides.items() if value is not None}
+        )
+        per_role_config = _dc_replace(
+            self.config,
+            tensor_model_parallel_size=tp,
+            gpu_memory_utilization=(
+                self.config.gpu_memory_utilization if memory_utilization is None else memory_utilization
+            ),
+            engine_kwargs=engine_kwargs,
+        )
 
         env_vars = {
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",

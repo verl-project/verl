@@ -59,10 +59,16 @@ def _remote(function):
     return types.SimpleNamespace(remote=invoke)
 
 
-def _metrics_pd_replica(rank, device, backend):
+def _metrics_pd_replica(rank, device, backend, n_prefill=1, n_decode=2, prefill_tp=4, decode_tp=2):
     methods = _load_functions(
         REPLICA,
-        ["launch_servers", "get_metrics_server_endpoints", "_build_kv_transfer_config", "_format_server_address"],
+        [
+            "launch_servers",
+            "get_metrics_server_endpoints",
+            "get_request_server_endpoints",
+            "_build_kv_transfer_config",
+            "_format_server_address",
+        ],
         "vLLMPDReplica",
         get_device_name=lambda: device,
         is_valid_ipv6_address=lambda host: ip_address(host).version == 6,
@@ -81,29 +87,41 @@ def _metrics_pd_replica(rank, device, backend):
 
     replica = types.SimpleNamespace(
         replica_rank=rank,
-        world_size=8,
-        _prefill_tp=4,
-        _decode_tp=2,
-        _n_decode=2,
+        world_size=n_prefill * prefill_tp + n_decode * decode_tp,
+        _prefill_tp=prefill_tp,
+        _decode_tp=decode_tp,
+        _n_prefill=n_prefill,
+        _n_decode=n_decode,
         name_suffix="",
         workers=[
-            types.SimpleNamespace(__ray_call__=_remote(lambda fn, i=i: ("node", str(i), "::1"))) for i in range(8)
+            types.SimpleNamespace(__ray_call__=_remote(lambda fn, i=i: ("node", str(i), "::1")))
+            for i in range(n_prefill * prefill_tp + n_decode * decode_tp)
         ],
         config=types.SimpleNamespace(
             disaggregation=types.SimpleNamespace(transfer_backend=backend, mooncake_protocol="tcp")
         ),
+        _prefill_servers=[],
         _decode_servers=[],
         _prefill_server_addresses=[],
         _decode_server_addresses=[],
         _is_ascend_platform=lambda: device == "npu",
         _collect_cuda_devices=lambda infos: ",".join(info[1] for info in infos),
-        _reserve_pd_ports=Mock(return_value=(39000, 39010, [39020, 39030], [], False)),
+        _reserve_pd_ports=Mock(
+            return_value=(
+                [39000 + i * 10 for i in range(n_prefill)],
+                40000,
+                [41000 + i * 10 for i in range(n_decode)],
+                [],
+                False,
+            )
+        ),
         _build_kv_transfer_config=methods._build_kv_transfer_config,
         _format_server_address=methods._format_server_address,
         _spawn_pd_server=spawn,
     )
     replica.launch_servers = types.MethodType(methods.launch_servers, replica)
     replica.get_metrics_server_endpoints = types.MethodType(methods.get_metrics_server_endpoints, replica)
+    replica.get_request_server_endpoints = types.MethodType(methods.get_request_server_endpoints, replica)
     return replica, spawned
 
 
@@ -143,7 +161,10 @@ def test_launch_discovers_every_pd_metrics_endpoint_without_changing_request_ent
     ],
 )
 @pytest.mark.parametrize("prometheus,insight", [(False, False), (True, False), (False, True), (True, True)])
-def test_manager_registers_metrics_separately_from_request_routing(name, device, backend, prometheus, insight):
+@pytest.mark.parametrize("n_prefill", [1, 2])
+def test_manager_registers_metrics_separately_from_request_routing(
+    name, device, backend, prometheus, insight, n_prefill
+):
     register = Mock()
     update_prometheus = Mock()
     initialize = _load_functions(
@@ -157,10 +178,13 @@ def test_manager_registers_metrics_separately_from_request_routing(name, device,
     default_metrics = _load_functions(
         BASE_REPLICA, ["get_metrics_server_endpoints"], "RolloutReplica"
     ).get_metrics_server_endpoints
+    default_requests = _load_functions(
+        BASE_REPLICA, ["get_request_server_endpoints"], "RolloutReplica"
+    ).get_request_server_endpoints
 
     def make_replica(replica_rank, **kwargs):
         if backend:
-            replica, _ = _metrics_pd_replica(replica_rank, device, backend)
+            replica, _ = _metrics_pd_replica(replica_rank, device, backend, n_prefill=n_prefill)
 
             async def init(*args):
                 await replica.launch_servers()
@@ -172,6 +196,7 @@ def test_manager_registers_metrics_separately_from_request_routing(name, device,
                 _server_handle=object(),
             )
             replica.get_metrics_server_endpoints = types.MethodType(default_metrics, replica)
+            replica.get_request_server_endpoints = types.MethodType(default_requests, replica)
             init = AsyncMock()
         replica.init_hybrid = init
         replica.init_hybrid_colocated = init
@@ -182,9 +207,9 @@ def test_manager_registers_metrics_separately_from_request_routing(name, device,
         tensor_model_parallel_size=4,
         data_parallel_size=1,
         pipeline_model_parallel_size=1,
-        n_gpus_per_node=8,
+        n_gpus_per_node=16,
         disaggregation=types.SimpleNamespace(
-            enabled=bool(backend), decode_tensor_model_parallel_size=2, prefill_replicas=1, decode_replicas=2
+            enabled=bool(backend), decode_tensor_model_parallel_size=2, prefill_replicas=n_prefill, decode_replicas=2
         ),
         prometheus=types.SimpleNamespace(enable=prometheus),
         disable_log_stats=False,
@@ -193,20 +218,26 @@ def test_manager_registers_metrics_separately_from_request_routing(name, device,
         start_rank=3,
         rollout_config=config,
         model_config=None,
-        worker_group=types.SimpleNamespace(world_size=16 if backend else 8),
+        worker_group=types.SimpleNamespace(world_size=(n_prefill * 4 + 4) * 2 if backend else 8),
         rollout_resource_pool=object(),
         rollout_replica_class=make_replica,
     )
     asyncio.run(initialize(manager))
 
-    assert manager.server_addresses == ["[::1]:8030", "[::1]:8040"]
-    assert manager.server_handles == [replica._server_handle for replica in manager.rollout_replicas]
+    assert manager.server_addresses == [
+        f"[::1]:{8000 + rank * 10 + index}" for rank in (3, 4) for index in range(n_prefill if backend else 1)
+    ]
+    assert manager.server_handles == [
+        handle for replica in manager.rollout_replicas for _, handle in replica.get_request_server_endpoints()
+    ]
     if backend:
-        expected_addresses = [f"[::1]:{8000 + rank * 10 + index}" for rank in (3, 4) for index in range(3)]
+        expected_addresses = [f"[::1]:{8000 + rank * 10 + index}" for rank in (3, 4) for index in range(n_prefill + 2)]
+        roles = [("prefill" if n_prefill == 1 else f"prefill{i}", "prefill", i) for i in range(n_prefill)]
+        roles += [("decode0", "decode", 0), ("decode1", "decode", 1)]
         expected_labels = [
             {"replica": f"{rank}-{suffix}", "pd_role": role, "pd_index": index}
             for rank in (3, 4)
-            for suffix, role, index in (("prefill", "prefill", 0), ("decode0", "decode", 0), ("decode1", "decode", 1))
+            for suffix, role, index in roles
         ]
     else:
         expected_addresses = ["[::1]:8030", "[::1]:8040"]
@@ -581,7 +612,9 @@ def test_partial_port_reservation_failure_closes_acquired_sockets(contiguous):
         "vLLMPDReplica",
         get_free_port=allocate,
     )._reserve_pd_ports
-    stub = types.SimpleNamespace(_prefill_tp=2, _decode_tp=2, world_size=4, _n_decode=1, _reserve_port_range=allocate)
+    stub = types.SimpleNamespace(
+        _prefill_tp=2, _decode_tp=2, world_size=4, _n_prefill=1, _n_decode=1, _reserve_port_range=allocate
+    )
     with pytest.raises(OSError, match="port unavailable"):
         reserve(stub, "127.0.0.1", contiguous)
     sock.close.assert_called_once()

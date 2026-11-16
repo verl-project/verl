@@ -383,10 +383,11 @@ def test_pd_replica_init_rejects_unsupported_backend(patched_replica_cls):
         patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
 
 
-def test_pd_replica_init_rejects_multi_prefill(patched_replica_cls):
-    cfg = _make_pd_config(prefill_replicas=2)
-    with pytest.raises(NotImplementedError, match="prefill_replicas=1"):
-        patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
+def test_pd_replica_init_accepts_multi_prefill(patched_replica_cls):
+    cfg = _make_pd_config(prefill_replicas=2, decode_replicas=2, tensor_model_parallel_size=4)
+    replica = patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=16)
+    assert replica._n_prefill == replica._n_decode == 2
+    assert replica.world_size == 16
 
 
 def test_pd_replica_init_rejects_dp_gt_1(patched_replica_cls):

@@ -258,6 +258,10 @@ class RolloutReplica(ABC):
         """Get rollout server handle for Token-in-token-out generation."""
         return self._server_handle
 
+    def get_request_server_endpoints(self) -> list[tuple[str, ActorHandle]]:
+        """Return the entries that can accept complete generation requests."""
+        return [(self._server_address, self._server_handle)]
+
     def get_metrics_server_endpoints(self) -> list[tuple[str, dict[str, Any]]]:
         """Return scrape addresses and RL-Insight labels after servers launch.
 
