@@ -257,18 +257,6 @@ def _custom_flash_attention_forward(
             "Set use_remove_padding=False and ulysses_sp_size=1 to use the model's native "
             "attention implementation instead."
         ) from _hub_kernel_load_error
-    # Assuming 4D tensors, key_states.shape[1] is the key/value sequence length (source length).
-    use_sliding_windows = (
-        flash_supports_window_size and sliding_window is not None and key_states.shape[1] > sliding_window
-    )
-    flash_kwargs = {"window_size": (sliding_window, sliding_window)} if use_sliding_windows else {}
-
-    if flash_supports_deterministic:
-        flash_kwargs["deterministic"] = deterministic if deterministic is not None else _flash_deterministic_enabled
-
-    if kwargs.get("softcap") is not None:
-        flash_kwargs["softcap"] = kwargs.pop("softcap")
-
     query_states, key_states, value_states = fa_peft_integration_check(
         query_states, key_states, value_states, target_dtype=torch.bfloat16
     )
@@ -286,6 +274,20 @@ def _custom_flash_attention_forward(
         position_ids_lst = [torch.empty_like(position_ids) for _ in range(sp_size)]
         position_ids = dist.all_gather(position_ids_lst, position_ids, group=get_ulysses_sequence_parallel_group())
         position_ids = torch.cat(position_ids_lst, dim=-1)  # (batch_size, seq_length)
+
+    # Built after the Ulysses gather: before it, key_states.shape[1] is only this rank's shard
+    # (seq_length / sp_size), which can fall under sliding_window and drop the window for the
+    # full-length packed sequences the varlen kernel actually sees.
+    use_sliding_windows = (
+        flash_supports_window_size and sliding_window is not None and key_states.shape[1] > sliding_window
+    )
+    flash_kwargs = {"window_size": (sliding_window, sliding_window)} if use_sliding_windows else {}
+
+    if flash_supports_deterministic:
+        flash_kwargs["deterministic"] = deterministic if deterministic is not None else _flash_deterministic_enabled
+
+    if kwargs.get("softcap") is not None:
+        flash_kwargs["softcap"] = kwargs.pop("softcap")
 
     if position_ids is not None and query_length != 1 and not (torch.diff(position_ids, dim=-1) >= 0).all():
         batch_size = query_states.size(0)
