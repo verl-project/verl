@@ -13,11 +13,15 @@
 # limitations under the License.
 import os
 
+import numpy as np
 import ray
+import torch
+import transfer_queue as tq
 from hydra import compose, initialize_config_dir
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
+from tests.experimental.agent_loop.agent_utils import generate_and_collect
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
@@ -98,6 +102,8 @@ def test_agent_reward_loop_standalone():
     actor_rollout_wg.init_model()
 
     llm_server_manager = LLMServerManager.create(config=config, worker_group=actor_rollout_wg)
+    config.transfer_queue.enable = True
+    tq.init(config.transfer_queue)
     agent_loop_manager = AgentLoopManager.create(
         config=config,
         llm_client=llm_server_manager.get_client(),
@@ -139,33 +145,22 @@ def test_agent_reward_loop_standalone():
     batch_dict = next(iter(dataloader))
     batch = DataProto.from_single_dict(batch_dict)
 
-    def _get_gen_batch(batch: DataProto) -> DataProto:
-        reward_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
-
-        # pop those keys for generation
-        batch_keys_to_pop = []
-        non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) - reward_keys
-        gen_batch = batch.pop(
-            batch_keys=batch_keys_to_pop,
-            non_tensor_batch_keys=list(non_tensor_batch_keys_to_pop),
-        )
-
-        # For agent loop, we need reward model keys to compute score.
-        gen_batch.non_tensor_batch.update(batch.non_tensor_batch)
-
-        return gen_batch
-
     # wake up rollout replicas via update_weight
     checkpoint_manager.update_weights()
-    gen_batch = _get_gen_batch(batch)
-    gen_batch = agent_loop_manager.generate_sequences(gen_batch)
+    rows = generate_and_collect(agent_loop_manager, batch.to_tensordict(), config.actor_rollout_ref.rollout.n)
     checkpoint_manager.sleep_replicas()
 
-    batch = batch.union(gen_batch)
-    rm_outputs = reward_loop_manager.compute_rm_score(batch)
-
-    for output in rm_outputs[:5]:
-        print(output.non_tensor_batch)
+    # Reward workers still consume DataProto; each trajectory is already unpadded.
+    for row in rows:
+        reward_input = DataProto.from_dict(
+            tensors={key: row[key].unsqueeze(0) for key in ["prompts", "responses", "input_ids", "position_ids"]}
+            | {"attention_mask": torch.ones_like(row["input_ids"]).unsqueeze(0)},
+            non_tensors={
+                key: np.array([row[key]], dtype=object) for key in ["data_source", "reward_model", "extra_info"]
+            },
+        )
+        rm_output = reward_loop_manager.compute_rm_score(reward_input)
+        assert rm_output.batch["rm_scores"].shape == reward_input.batch["responses"].shape
 
     print("done")
 

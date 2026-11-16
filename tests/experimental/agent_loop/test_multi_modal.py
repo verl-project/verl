@@ -22,11 +22,11 @@ from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from transformers.utils import get_json_schema
 
-from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
-from verl.protocol import DataProto
+from tests.experimental.agent_loop.agent_utils import generate_and_collect, init_agent_loop_manager
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
 from verl.utils import hf_tokenizer
+from verl.utils import tensordict_utils as tu
 
 VIDEO_PATH = os.path.expanduser("~/models/hf_data/test-videos/space_woaudio.mp4")
 
@@ -228,21 +228,21 @@ def test_multimodal_tool_agent(init_config):
             ]
         )
 
-    batch = DataProto(
-        non_tensor_batch={
+    batch = tu.get_tensordict(
+        {},
+        non_tensor_dict={
             "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
             "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
             "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
             "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
         },
     )
-    batch = batch.repeat(n)
-    result = agent_loop_manager.generate_sequences(prompts=batch)
+    result = generate_and_collect(agent_loop_manager, batch, n)
     assert len(result) == len(raw_prompts) * n
 
     # Check turns
-    num_turns = result.non_tensor_batch["__num_turns__"]
-    multi_modal_inputs = result.non_tensor_batch["multi_modal_inputs"]
+    num_turns = [row["num_turns"] for row in result]
+    multi_modal_inputs = [row["multi_modal_inputs"] for row in result]
     print(f"num_turns: {num_turns}")
     for i in range(len(num_turns)):
         multi_modal_type = parse_multi_modal_type(raw_prompts[i // n])
@@ -266,16 +266,14 @@ def test_multimodal_tool_agent(init_config):
 
     # Check that images were properly returned in the tool responses
     tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-    responses = result.batch["responses"]
-    response_mask = result.batch["response_mask"]
-    attention_mask = result.batch["attention_mask"]
-    assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
-    response_length = response_mask.size(1)
+    responses = [row["responses"] for row in result]
+    response_mask = [row["response_mask"] for row in result]
+    assert all(response.shape == mask.shape for response, mask in zip(responses, response_mask, strict=True))
 
     image_found_count = 0
     for i in range(len(responses)):
         # response with tool response (including images)
-        valid_tokens = responses[i][attention_mask[i][-response_length:].bool()]
+        valid_tokens = responses[i]
         response_with_obs = tokenizer.decode(valid_tokens)
 
         # response without tool response
@@ -396,8 +394,9 @@ def test_multimodal_single_turn_agent(init_config):
             ]
         )
 
-    batch = DataProto(
-        non_tensor_batch={
+    batch = tu.get_tensordict(
+        {},
+        non_tensor_dict={
             "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
             "agent_name": np.array(["single_turn_agent"] * len(raw_prompts)),
             "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
@@ -405,26 +404,25 @@ def test_multimodal_single_turn_agent(init_config):
         },
     )
 
-    batch = batch.repeat(n)
-    result = agent_loop_manager.generate_sequences(prompts=batch)
+    result = generate_and_collect(agent_loop_manager, batch, n)
     assert len(result) == len(raw_prompts) * n
 
     # Check turns - all should be single turn (2: user + assistant)
-    num_turns = result.non_tensor_batch["__num_turns__"]
+    num_turns = [row["num_turns"] for row in result]
     print(f"num_turns: {num_turns}")
     for i in range(len(num_turns)):
         assert num_turns[i] == 2, f"Expected 2 turns but got {num_turns[i]} for sample {i}"
 
     # Verify responses
     tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-    prompts = result.batch["prompts"]
-    responses = result.batch["responses"]
-    response_mask = result.batch["response_mask"]
-    input_ids = result.batch["input_ids"]
-    position_ids = result.batch["position_ids"]
-    multi_modal_inputs = result.non_tensor_batch["multi_modal_inputs"]
-    assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
-    assert position_ids.size() == (input_ids.size(0), 4, input_ids.size(1))  # (batch_size, 4, seq_len)
+    prompts = [row["prompts"] for row in result]
+    responses = [row["responses"] for row in result]
+    response_mask = [row["response_mask"] for row in result]
+    input_ids = [row["input_ids"] for row in result]
+    position_ids = [row["position_ids"] for row in result]
+    multi_modal_inputs = [row["multi_modal_inputs"] for row in result]
+    assert all(response.shape == mask.shape for response, mask in zip(responses, response_mask, strict=True))
+    assert all(pos.shape == (4, len(ids)) for pos, ids in zip(position_ids, input_ids, strict=True))
 
     # Check for image pads in prompts
     image_pad_count = 0

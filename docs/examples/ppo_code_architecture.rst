@@ -4,7 +4,7 @@ PPO Code Architecture
 Last updated: 11/10/2026.
 
 ``verl.trainer.main_ppo.TaskRunnerV1`` initializes TransferQueue, selects the
-trainer using ``trainer.v1.trainer_mode``, and creates ``AgentLoopManagerTQ``.
+trainer using ``trainer.v1.trainer_mode``, and creates ``AgentLoopManager``.
 The trainer initializes workers and runs the training loop.
 
 * ``verl/trainer/ppo/v1/trainer_base.py``: shared trainer lifecycle and PPO updates.

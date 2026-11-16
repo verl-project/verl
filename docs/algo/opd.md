@@ -833,7 +833,7 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `verl/trainer/distillation/tail_kl.py` — shared tail-bucket value and analytic logit-gradient helpers
 - `verl/workers/engine_workers.py` — `ActorRolloutRefWorker.init_model`; binds `distillation_ppo_loss` as the actor's `loss_fn` when distillation is enabled
 - `verl/workers/engine/{fsdp,megatron}/transformer_impl.py` — training-engine forward steps; invoke `distillation_ppo_loss` first as a logits processor (top-$k$ modes) and again as the final loss
-- `verl/trainer/main_ppo.py` — passes the trainer’s teacher clients to `AgentLoopManagerTQ`
+- `verl/trainer/main_ppo.py` — passes the trainer’s teacher clients to `AgentLoopManager`
 - `verl/trainer/ppo/v1/trainer_base.py` — allocates `teacher_pool`, constructs `MultiTeacherModelManager`, and exposes teacher clients through `get_teacher_client()`
 - `verl/workers/rollout/llm_server.py` — `LLMServerClient` used for both student rollout and teacher logprob computation
 - `verl/workers/rollout/router.py` — pluggable router (`GlobalRequestLoadBalancer`, `get_router_handle`) selecting the backing server
