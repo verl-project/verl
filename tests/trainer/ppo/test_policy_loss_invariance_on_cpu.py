@@ -19,8 +19,8 @@ splitting an optimizer minibatch into microbatches must not change the
 objective):
 
 1. Minibatch invariance: evaluating a loss once on the full minibatch must
-   equal recombining per-microbatch losses weighted by valid-token count
-   (what token-mean aggregation accumulates to). Losses that compute
+   equal recombining per-microbatch losses using each loss's effective
+   aggregation mode (valid-token, valid-sequence, or batch-row count). Losses that compute
    minibatch-level statistics — token selection quotas, covariance ranking,
    batch normalization factors — over whatever slice they receive violate
    this: clip_cov (#8634), kl_cov (#7829), and bypass_mode with
@@ -43,6 +43,40 @@ from verl.workers.config.actor import ActorConfig, PolicyLossConfig
 B, T = 8, 12
 RTOL = 1e-5
 ATOL = 1e-6
+
+
+class _InvarianceMismatch(AssertionError):
+    """The final scalar comparison failed, rather than loss setup or execution."""
+
+
+def _assert_invariant(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    # Only a finite scalar value mismatch is an expected invariance failure.
+    # Broken output contracts or numerical failures must fail even under xfail.
+    assert actual.ndim == expected.ndim == 0, "loss outputs must be scalars"
+    assert actual.dtype == expected.dtype, "loss output dtypes must match"
+    assert actual.device == expected.device, "loss output devices must match"
+    assert torch.isfinite(actual) and torch.isfinite(expected), "loss outputs must be finite"
+    try:
+        torch.testing.assert_close(actual, expected, rtol=RTOL, atol=ATOL)
+    except AssertionError as exc:
+        raise _InvarianceMismatch(str(exc)) from exc
+
+
+@pytest.mark.parametrize(
+    ("actual", "expected"),
+    [
+        (torch.ones(1), torch.tensor(1.0)),
+        (torch.tensor(1.0), torch.ones(1)),
+        (torch.tensor(1.0, dtype=torch.float64), torch.tensor(1.0)),
+        (torch.tensor(float("nan")), torch.tensor(1.0)),
+        (torch.tensor(1.0), torch.tensor(float("inf"))),
+    ],
+    ids=["actual-shape", "expected-shape", "dtype", "actual-nan", "expected-inf"],
+)
+def test_invariance_comparison_does_not_hide_invalid_outputs(actual, expected):
+    with pytest.raises(AssertionError) as exc:
+        _assert_invariant(actual, expected)
+    assert not isinstance(exc.value, _InvarianceMismatch)
 
 
 def _tensors() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -96,7 +130,9 @@ _SEQ_AGGREGATED = {"sapo"}
 _ROW_AGGREGATED = {"geo_mean"}
 
 
-def _recombine_microbatches(loss_mode, tensors, weights, n_mb, rollout_correction=None) -> torch.Tensor:
+def _recombine_microbatches(
+    loss_mode, tensors, weights, n_mb, rollout_correction=None
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Recombine per-microbatch losses the way the effective agg mode accumulates."""
     _, _, _, response_mask = tensors
 
@@ -130,11 +166,15 @@ MICROBATCH_MODES = [
     "cispo",
     pytest.param(
         "clip_cov",
-        marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="per-microbatch clip token selection, #8634"),
+        marks=pytest.mark.xfail(
+            strict=True, raises=_InvarianceMismatch, reason="per-microbatch clip token selection, #8634"
+        ),
     ),
     pytest.param(
         "kl_cov",
-        marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="per-microbatch cov-token selection, #7829"),
+        marks=pytest.mark.xfail(
+            strict=True, raises=_InvarianceMismatch, reason="per-microbatch cov-token selection, #7829"
+        ),
     ),
 ]
 
@@ -144,7 +184,7 @@ MICROBATCH_MODES = [
 def test_policy_loss_microbatch_invariance(loss_mode, n_mb):
     tensors = _tensors()
     loss_full, loss_recombined = _recombine_microbatches(loss_mode, tensors, weights=None, n_mb=n_mb)
-    torch.testing.assert_close(loss_recombined, loss_full, rtol=RTOL, atol=ATOL)
+    _assert_invariant(loss_recombined, loss_full)
 
 
 # reinforce loss_type is used so the computed IS weights actually multiply into the
@@ -152,7 +192,11 @@ def test_policy_loss_microbatch_invariance(loss_mode, n_mb):
 BYPASS_RC_BASE = dict(loss_type="reinforce", rollout_is="token", rollout_is_threshold=2.0, bypass_mode=True)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="batch_normalize is computed per microbatch in bypass_mode, see #8634")
+@pytest.mark.xfail(
+    strict=True,
+    raises=_InvarianceMismatch,
+    reason="batch_normalize is computed per microbatch in bypass_mode, see #8634",
+)
 def test_bypass_mode_batch_normalize_microbatch_invariant():
     """In bypass_mode the rollout-correction prepass runs inside the per-microbatch
     loss call, so batch_normalize divides by the microbatch mean rather than the
@@ -166,14 +210,14 @@ def test_bypass_mode_batch_normalize_microbatch_invariant():
     tensors = (old_log_prob, log_prob, advantages, response_mask)
     rc = RolloutCorrectionConfig(**BYPASS_RC_BASE, rollout_is_batch_normalize=True)
     loss_full, loss_recombined = _recombine_microbatches("bypass_mode", tensors, None, 2, rc)
-    torch.testing.assert_close(loss_recombined, loss_full, rtol=RTOL, atol=ATOL)
+    _assert_invariant(loss_recombined, loss_full)
 
 
 def test_bypass_mode_without_batch_normalize_is_microbatch_invariant():
     tensors = _tensors()
     rc = RolloutCorrectionConfig(**BYPASS_RC_BASE, rollout_is_batch_normalize=False)
     loss_full, loss_recombined = _recombine_microbatches("bypass_mode", tensors, None, 2, rc)
-    torch.testing.assert_close(loss_recombined, loss_full, rtol=RTOL, atol=ATOL)
+    _assert_invariant(loss_recombined, loss_full)
 
 
 REJECT_ISOLATION_MODES = [
@@ -183,28 +227,40 @@ REJECT_ISOLATION_MODES = [
     "gpg",
     "dro",
     "cispo",
-    pytest.param(
-        "gspo",
-        marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="rejected token pollutes sequence IS ratio, #8636"),
-    ),
+    "gspo",
     "sapo",
+    "geo_mean",
+    "clip_cov",
+    "kl_cov",
+]
+
+# GSPO's sequence ratio includes rejected log-probs, but its per-token
+# advantage is correctly masked. Keep advantage-only corruption as a passing
+# regression case rather than inheriting the log-prob case's expected failure.
+_REJECT_ISOLATION_FAILURES = {
+    "gspo": "rejected log-prob pollutes sequence IS ratio, #8636",
+    "geo_mean": "sequence aggregates include rejected inputs, #8636",
+    "clip_cov": "minibatch statistics include rejected tokens, #8636",
+    "kl_cov": "minibatch statistics include rejected tokens, #8636",
+}
+REJECT_ISOLATION_CASES = [
     pytest.param(
-        "geo_mean",
-        marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="rejected token pollutes sequence IS ratio, #8636"),
-    ),
-    pytest.param(
-        "clip_cov",
-        marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="minibatch statistics include rejected tokens, #8636"),
-    ),
-    pytest.param(
-        "kl_cov",
-        marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="minibatch statistics include rejected tokens, #8636"),
-    ),
+        loss_mode,
+        perturbation,
+        id=f"{loss_mode}-{perturbation}",
+        marks=(
+            pytest.mark.xfail(strict=True, raises=_InvarianceMismatch, reason=_REJECT_ISOLATION_FAILURES[loss_mode])
+            if loss_mode in _REJECT_ISOLATION_FAILURES and (loss_mode, perturbation) != ("gspo", "advantage")
+            else ()
+        ),
+    )
+    for loss_mode in REJECT_ISOLATION_MODES
+    for perturbation in ("log_prob", "advantage", "both")
 ]
 
 
-@pytest.mark.parametrize("loss_mode", REJECT_ISOLATION_MODES)
-def test_rejected_tokens_do_not_influence_loss(loss_mode):
+@pytest.mark.parametrize(("loss_mode", "perturbation"), REJECT_ISOLATION_CASES)
+def test_rejected_tokens_do_not_influence_loss(loss_mode, perturbation):
     """Zero-weight tokens must be fully inert: corrupting their inputs must not change the loss."""
     old_log_prob, log_prob, advantages, response_mask = _tensors()
 
@@ -215,8 +271,12 @@ def test_rejected_tokens_do_not_influence_loss(loss_mode):
     rejected[3, 5] = True
     weights[rejected] = 0.0
 
-    log_prob_corrupt = log_prob + torch.where(rejected, torch.full((B, T), 8.0), torch.zeros(B, T))
-    adv_corrupt = advantages + torch.where(rejected, torch.full((B, T), 50.0), torch.zeros(B, T))
+    log_prob_corrupt = log_prob
+    adv_corrupt = advantages
+    if perturbation in ("log_prob", "both"):
+        log_prob_corrupt = log_prob + torch.where(rejected, torch.full((B, T), 8.0), torch.zeros(B, T))
+    if perturbation in ("advantage", "both"):
+        adv_corrupt = advantages + torch.where(rejected, torch.full((B, T), 50.0), torch.zeros(B, T))
 
     base = (old_log_prob, log_prob, advantages, response_mask)
     corrupt = (old_log_prob, log_prob_corrupt, adv_corrupt, response_mask)
@@ -225,4 +285,4 @@ def test_rejected_tokens_do_not_influence_loss(loss_mode):
     loss_clean = _call(loss_mode, slice(0, B), base, weights)
     torch.manual_seed(0)
     loss_corrupt = _call(loss_mode, slice(0, B), corrupt, weights)
-    torch.testing.assert_close(loss_corrupt, loss_clean, rtol=RTOL, atol=ATOL)
+    _assert_invariant(loss_corrupt, loss_clean)
