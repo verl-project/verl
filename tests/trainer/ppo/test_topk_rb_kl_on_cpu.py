@@ -249,6 +249,24 @@ def test_policy_masked_token_in_reference_topk_stays_finite():
     assert torch.isfinite(coarse).all() and torch.isfinite(log_q_tail).all() and torch.isfinite(g).all()
 
 
+def test_off_policy_draw_of_a_policy_masked_token_contributes_only_the_coarse_term():
+    """pi_old drew a token the current policy masks (-inf): its weight is 0, and r = -inf must not turn the loss,
+    the value or the gradient into NaN."""
+    z = torch.randn(1, 20, dtype=torch.float64)
+    z[0, 7] = float("-inf")
+    ref_lp, ref_ids = compute_topk_log_probs(torch.randn(1, 20, dtype=torch.float64), 3)
+    assert not (ref_ids == 7).any()
+    zz = z.clone().requires_grad_(True)
+    coarse, log_q_tail = compute_coarse_reverse_kl(zz, ref_ids, ref_lp)
+    log_prob = zz.log_softmax(-1)[:, 7]
+    loss, value = compute_topk_rb_kl(
+        coarse, log_q_tail, ref_lp[:, -1], torch.tensor([False]), log_prob, torch.tensor([-3.0]), torch.tensor([-2.0])
+    )
+    (g,) = torch.autograd.grad(loss.sum(), zz)
+    torch.testing.assert_close(value, coarse.detach().double())
+    assert torch.isfinite(loss).all() and torch.isfinite(g).all()
+
+
 def test_topk_columns_marks_only_this_shards_ids():
     """Shard covers ids 10..19. Off-shard ids are clamped onto an edge column, here after a real id on that same
     column (3 -> column 0, 25 -> column 9), so a plain scatter would let them erase its mark."""

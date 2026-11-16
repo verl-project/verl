@@ -42,7 +42,9 @@ def _nested(values, cu):
     return torch.nested.nested_tensor_from_jagged(values, offsets=cu)
 
 
-def _engine_outputs(logits, labels, cu, flags, use_remove_padding=True, extra=None):
+def _engine_outputs(
+    logits, labels, cu, flags, use_remove_padding=True, extra=None, temperature=1.0, batch_invariant=False
+):
     """FSDPEngineWithLMHead.prepare_model_outputs on packed ``(N, V)`` logits, in either padding branch.
 
     ``logprobs_from_logits`` is patched to a plain gather (the flash-attn kernel needs CUDA) that also records
@@ -50,10 +52,11 @@ def _engine_outputs(logits, labels, cu, flags, use_remove_padding=True, extra=No
     """
     if use_remove_padding:
         output = SimpleNamespace(logits=logits.unsqueeze(0))
-        output_args = {"input_ids_rmpad_rolled": labels, "temperature_rmpad": torch.ones(len(labels)), "pad_size": 0}
+        output_args = {"temperature_rmpad": torch.full((len(labels),), temperature), "pad_size": 0}
     else:
         output = SimpleNamespace(logits=_nested(logits, cu).to_padded_tensor(0.0))
-        output_args = {"input_ids_rmpad_rolled": labels, "temperature": torch.ones(len(cu) - 1)}
+        output_args = {"temperature": torch.full((len(cu) - 1,), temperature)}
+    output_args.update(input_ids_rmpad_rolled=labels, temperature_is_one=temperature == 1.0)
     micro_batch = TensorDict({"input_ids": _nested(labels.roll(1), cu), **(extra or {})}, batch_size=[])
     tu.assign_non_tensor(
         micro_batch,
@@ -64,7 +67,7 @@ def _engine_outputs(logits, labels, cu, flags, use_remove_padding=True, extra=No
     )
     engine = object.__new__(FSDPEngineWithLMHead)
     engine.use_ulysses_sp = False
-    engine.engine_config = SimpleNamespace(entropy_checkpointing=False, batch_invariant=False)
+    engine.engine_config = SimpleNamespace(entropy_checkpointing=False, batch_invariant=batch_invariant)
     seen = {}
 
     def log_probs(logits, labels, inplace_backward, **kw):
@@ -105,6 +108,23 @@ def test_actor_pass_emits_coarse_terms_with_gradient(use_remove_padding):
         torch.autograd.grad(engine_objective.sum(), logits)[0],
         torch.autograd.grad((coarse * 1.3 + log_q_tail).sum(), logits)[0],
     )
+
+
+@pytest.mark.parametrize("use_remove_padding", [True, False])
+def test_batch_invariant_topk_terms_use_the_log_prob_distribution(use_remove_padding):
+    """batch_invariant log-probs scale fp32 unscaled logits by the temperature; with bf16 logits that differs from
+    scaling in bf16, so the top-k terms must be computed from the same fp32-scaled logits."""
+    cu = torch.tensor([0, 5, 8])
+    logits = (torch.randn(8, V) * 3).to(torch.bfloat16).requires_grad_(True)
+    ref_lp, ref_ids = compute_topk_log_probs(torch.randn(8, V), K)
+    extra = {"ref_topk_ids": _nested(ref_ids.to(torch.int32), cu), "ref_topk_log_probs": _nested(ref_lp, cu)}
+    out, _ = _engine_outputs(
+        logits, torch.randint(0, V, (8,)), cu, {"kl_topk_rb": True}, use_remove_padding, extra, 0.7, True
+    )
+    expected, _ = compute_coarse_reverse_kl(logits.float() / 0.7, ref_ids, ref_lp)
+    torch.testing.assert_close(out["kl_topk_coarse"].values(), expected, atol=1e-6, rtol=1e-6)
+    bf16_scaled, _ = compute_coarse_reverse_kl(logits / torch.tensor(0.7, dtype=torch.bfloat16), ref_ids, ref_lp)
+    assert (bf16_scaled - expected).abs().max() > 1e-4  # the fixture really distinguishes the two scalings
 
 
 def test_inplace_backward_kept_without_topk_rb():

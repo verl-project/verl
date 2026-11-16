@@ -211,7 +211,9 @@ def compute_topk_rb_kl(
         weight = weight * torch.exp(log_prob.detach() - old_log_prob)
     if rollout_is_weights is not None:
         weight = weight * rollout_is_weights
-    r = (log_prob - log_q_tail) - (ref_log_prob - log_p_tail)
-    loss = coarse_kl + weight * (r.detach() * log_q_tail + 0.5 * r.square())
-    value = coarse_kl.detach() + weight * r.detach()
+    # a token the policy cannot produce (log_prob = -inf) has weight 0 but r = -inf: select, don't multiply
+    active = (weight != 0) & (log_prob > -torch.inf)
+    r = torch.where(active, (log_prob - log_q_tail) - (ref_log_prob - log_p_tail), 0.0)
+    loss = coarse_kl + torch.where(active, weight * (r.detach() * log_q_tail + 0.5 * r.square()), 0.0)
+    value = coarse_kl.detach() + torch.where(active, weight * r.detach(), 0.0)
     return loss, value

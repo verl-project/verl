@@ -105,6 +105,12 @@ def _scale_logits_by_temperature(logits, temperature, *, is_unit_temperature: bo
     return logits / temperature.clamp(min=1e-8).to(logits.dtype)
 
 
+def _sampler_scaled_logits(unscaled_logits: torch.Tensor, temperature: torch.Tensor) -> torch.Tensor:
+    """fp32 logits scaled the way ``logprobs_from_logits(batch_invariant=True)`` scales them (vLLM sampler)."""
+    temperature = torch.where(temperature < 1e-5, 1.0, temperature.float())
+    return unscaled_logits.float() / temperature.unsqueeze(-1)
+
+
 def _slice_topk_labels_for_ulysses(topk_labels: torch.Tensor, pad_size: int) -> torch.Tensor:
     """Apply the token stream's Ulysses suffix padding and sequence slice."""
     if pad_size:
@@ -1424,8 +1430,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         v = self._gather_and_unpad_packed(v, output_args["pad_size"])
                         model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
 
+                # the top-k terms must describe the same distribution as log_probs below
                 topk_kl_outputs = _topk_kl_side_outputs(
-                    logits_rmpad,
+                    _sampler_scaled_logits(unscaled_logits_rmpad, temperature_rmpad)
+                    if batch_invariant and not temperature_is_one
+                    else logits_rmpad,
                     micro_batch,
                     pad_size=output_args["pad_size"],
                     use_ulysses_sp=self.use_ulysses_sp,
@@ -1559,7 +1568,14 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             )
                             model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
 
-                    topk_kl_outputs = _topk_kl_side_outputs(logits_rmpad, micro_batch, pad_size=0, use_ulysses_sp=False)
+                    if batch_invariant and not temperature_is_one:  # same distribution as log_probs below
+                        row_temperature = temperature.flatten().repeat_interleave(seq_lengths)
+                        topk_kl_logits = _sampler_scaled_logits(unscaled_logits_rmpad, row_temperature)
+                    else:
+                        topk_kl_logits = logits_rmpad
+                    topk_kl_outputs = _topk_kl_side_outputs(
+                        topk_kl_logits, micro_batch, pad_size=0, use_ulysses_sp=False
+                    )
                     for k, v in topk_kl_outputs.items():
                         model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
 
