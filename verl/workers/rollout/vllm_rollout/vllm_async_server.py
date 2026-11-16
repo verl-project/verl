@@ -1537,6 +1537,9 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
+        forced = getattr(self.config, "sleep_level", None)
+        if forced is not None:
+            return int(forced)
         if mtp_rollout_enabled or self.lora_as_adapter:
             return 1
         if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
