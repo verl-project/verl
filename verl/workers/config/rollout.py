@@ -320,6 +320,9 @@ class RolloutConfig(BaseConfig):
     # LoRA sync with param offload: free trainer grads and export the adapter before the rollout wakes.
     export_adapter_before_wake: bool = False
 
+    # Send each colocated rollout worker only its slice of the expert LoRA factors.
+    lora_expert_slice: bool = False
+
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)

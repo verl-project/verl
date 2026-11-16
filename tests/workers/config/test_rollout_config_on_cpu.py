@@ -31,6 +31,7 @@ def test_weight_sync_switches_default_off():
     assert config.sleep_level is None
     assert not config.reload_base_on_wake
     assert not config.export_adapter_before_wake
+    assert not config.lora_expert_slice
 
 
 @pytest.mark.parametrize("level", [None, 1, 2])

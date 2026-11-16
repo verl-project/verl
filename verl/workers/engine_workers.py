@@ -109,6 +109,22 @@ def _with_routing_replay_flag(enabled: bool):
     return decorator
 
 
+def _lora_expert_slice_kwargs(rollout, engine, enabled: bool) -> dict:
+    """Export kwargs for the colocated worker's expert LoRA slice: its EP block, else its TP shard.
+
+    Empty when disabled or when the engine (``supports_<key>``) or rollout layout does not support it.
+    """
+    if not enabled:
+        return {}
+    for key in ("lora_expert_slice", "lora_expert_tp_slice"):
+        placement = getattr(rollout, key, None)
+        if callable(placement) and getattr(engine, f"supports_{key}", False):
+            value = placement()
+            if value is not None:
+                return {key: value}
+    return {}
+
+
 def _release_trainer_grads(engine) -> None:
     """Drop the gradients left over from the last optimizer step (the next update zeroes them anyway)."""
     opt = getattr(getattr(engine, "handle", None), "_optimizer", None)
@@ -845,6 +861,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         get_torch_device().empty_cache()
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
+        export_kwargs = _lora_expert_slice_kwargs(
+            self.rollout, self.actor.engine, self.config.rollout.get("lora_expert_slice", False)
+        )
+
         # 0b. rollout.export_adapter_before_wake: export the adapter while the rollout still sleeps.
         early_export = None
         if self.config.rollout.get("export_adapter_before_wake", False):
@@ -855,7 +875,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 if not (self.config.model.get("lora_rank", 0) or lora_cfg.get("rank", 0)):
                     raise RuntimeError("rollout.export_adapter_before_wake needs a LoRA adapter (model.lora.rank > 0)")
                 per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-                    layered_summon=self.layered_summon, base_sync_done=True
+                    layered_summon=self.layered_summon, base_sync_done=True, **export_kwargs
                 )
                 if peft_config is None:
                     raise RuntimeError("rollout.export_adapter_before_wake needs an adapter-only (peft) export")
@@ -888,7 +908,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             early_export = None
         else:
             per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-                layered_summon=self.layered_summon, base_sync_done=True
+                layered_summon=self.layered_summon, base_sync_done=True, **export_kwargs
             )
 
         do_lora_base_sync = False
