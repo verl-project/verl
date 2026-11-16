@@ -98,6 +98,9 @@ def aggregate(inputs, destination, workflow):
                         continue
                     data = source.extractfile(member) if member.isfile() else None
                     member.name = f"{prefix}/{path.as_posix()}"
+                    # An inherited PAX path overrides member.name when the tar is read.
+                    # Let tarfile regenerate it from the namespaced name when needed.
+                    member.pax_headers.pop("path", None)
                     output.addfile(member, data)
         for item in index["workflows"].values():
             item["artifacts_present"] = bool(item["jobs"])
