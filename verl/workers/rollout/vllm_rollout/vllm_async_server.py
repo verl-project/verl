@@ -1222,8 +1222,7 @@ class vLLMHttpServer:
         partial_kv = getattr(self, "_partial_kv", None)
         if partial_kv is not None and not abort_only:
             request_ids = list(self.engine.output_processor.request_states)
-            await partial_kv.pause(False)
-            self._rejecting = reject_request
+            await partial_kv.pause(False, reject_request=reject_request)
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
         if partial_kv is not None:
             partial_kv._healthy()

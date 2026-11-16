@@ -139,6 +139,14 @@ When validation yields the GPUs to a colocated reward model, it restores weights
 with the current policy version, restores KV, and then reopens generation
 admission before the next batch. A failed restore leaves admission closed.
 
+With `trainer.v1.colocate_async.parameter_sync_step > 1`, the trainer first waits
+for all `data.train_batch_size` prompt groups needed by the local training cycle
+to become sampleable. Staleness filtering and refill finish while generation is
+still running. After the first local sample, KV stays offloaded through the
+remaining local updates; weights synchronize and generation resumes once at the
+end of the cycle. This requires enough completed groups for the whole cycle
+before training begins, rather than only enough for its first local update.
+
 Focused checks:
 
 ```bash

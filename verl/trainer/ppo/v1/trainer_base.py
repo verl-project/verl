@@ -1661,8 +1661,16 @@ class PPOTrainer(ABC):
 
     def prepare_step(self) -> dict:
         self._add_batch_to_generate()
-        if self.config.data.get("custom_dataloader") is not None and self.trainer_mode != "sync":
-            # Ensure EOF/refill cannot interrupt a parameter-sync cycle after weights have changed.
+        if self.trainer_mode != "sync" and (
+            self.config.data.get("custom_dataloader") is not None
+            or (
+                self.trainer_mode == "colocate_async"
+                and self.parameter_sync_step > 1
+                and self.config.actor_rollout_ref.rollout.get("partial_rollout_kv_offload", False)
+            )
+        ):
+            # Finish eviction/refill and collect the whole cycle while rollout is awake.
+            # After the first local sample, partial KV remains offloaded until on_step_end.
             _, metrics = self.replay_buffer.wait_for_sampleable(
                 self.global_steps, "train", self.config.data.train_batch_size
             )

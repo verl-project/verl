@@ -13,12 +13,13 @@
 # limitations under the License.
 """Exercise the actual lifecycle without importing CUDA, vLLM, Ray or torch."""
 
+import ast
 import asyncio
 import importlib.util
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -32,6 +33,31 @@ def _load_module(name):
 
 
 kv = _load_module("partial_kv")
+
+
+def _attach_server_methods(owner, lifecycle):
+    """Execute the real frontend method bodies without importing the CUDA-only vLLM package."""
+    path = Path(__file__).resolve().parents[4] / "verl/workers/rollout/vllm_rollout/vllm_async_server.py"
+    module = ast.parse(path.read_text())
+    cls = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "vLLMHttpServer")
+    names = {"_park_until_admitted", "_generate_admitted", "abort_all_requests"}
+    methods = [node for node in cls.body if isinstance(node, ast.AsyncFunctionDef) and node.name in names]
+    for node in methods:
+        node.decorator_list = []
+    cls.body, cls.bases, cls.decorator_list = methods, [], []
+    module.body = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), cls]
+    namespace = dict(
+        asyncio=asyncio,
+        logger=Mock(),
+        TokenOutput=SimpleNamespace,
+        STREAM_FINISHED=object(),
+        EngineDeadError=type("EngineDeadError", (Exception,), {}),
+    )
+    exec(compile(ast.fix_missing_locations(module), str(path), "exec"), namespace)
+    for name in names:
+        setattr(owner, name, getattr(namespace[cls.name], name).__get__(owner))
+    owner.node_rank = 0
+    owner._partial_kv = lifecycle
 
 
 @asynccontextmanager
@@ -201,6 +227,114 @@ def test_pause_waits_for_admissions_and_fails_closed_on_timeout():
             assert lifecycle.state == "failed"
             owner.engine.pause_generation.assert_not_awaited()
             assert not owner._resume_event.is_set()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("already_parked", [False, True])
+def test_rejecting_pause_releases_requests_without_a_future_resume(already_parked):
+    async def run():
+        async with _owner() as (owner, lifecycle):
+            _attach_server_methods(owner, lifecycle)
+            if already_parked:
+                await lifecycle.pause(False)
+                late = asyncio.create_task(owner._park_until_admitted("late"))
+                await asyncio.sleep(0)
+                assert not late.done()
+                await owner.abort_all_requests(reject_request=True)
+            else:
+                started, finish = asyncio.Event(), asyncio.Event()
+
+                async def pause(**kwargs):
+                    started.set()
+                    await finish.wait()
+
+                owner.engine.pause_generation.side_effect = pause
+                abort = asyncio.create_task(owner.abort_all_requests(reject_request=True))
+                await started.wait()
+                late = asyncio.create_task(owner._park_until_admitted("late"))
+                await asyncio.sleep(0)
+                finish.set()
+                await abort
+            result = await asyncio.wait_for(late, timeout=0.2)
+            assert result.stop_reason == "aborted"
+            assert owner._admitting == 0 and owner._submission_paused
+            owner.engine.resume_generation.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_duplicate_request_releases_only_its_own_admission():
+    async def run():
+        async with _owner() as (owner, lifecycle):
+            _attach_server_methods(owner, lifecycle)
+            finish = asyncio.Event()
+
+            async def get():
+                await finish.wait()
+                return SimpleNamespace(finished=True, outputs=[])
+
+            collector = SimpleNamespace(get_nowait=lambda: None, get=get, close=Mock())
+            owner.engine.add_request = AsyncMock(return_value=collector)
+            owner.engine.abort = AsyncMock()
+            assert await owner._park_until_admitted("same") is None
+            original = asyncio.create_task(
+                lifecycle.generate(request_id="same", prompt={}, sampling_params=None, lora_request=None, priority=0)
+            )
+            await asyncio.sleep(0)
+            assert owner._admitting == 0
+            trace = lifecycle.traces["same"]
+            assert await owner._park_until_admitted("same") is None
+            with pytest.raises(RuntimeError, match="Duplicate"):
+                await lifecycle.generate(request_id="same", prompt={})
+            assert owner._admitting == 0
+            assert lifecycle.traces["same"] is trace
+            finish.set()
+            await original
+            assert owner._admitting == 0 and not lifecycle.traces
+            collector.close.assert_called_once()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["submit_error", "decode_error", "cancel_before_submit", "cancel_after_submit"])
+def test_delegated_request_failures_release_admission_exactly_once(failure):
+    async def run():
+        async with _owner() as (owner, lifecycle):
+            _attach_server_methods(owner, lifecycle)
+            started, hold = asyncio.Event(), asyncio.Event()
+
+            async def get():
+                started.set()
+                if failure == "decode_error":
+                    raise RuntimeError("decode failed")
+                await hold.wait()
+
+            collector = SimpleNamespace(get_nowait=lambda: None, get=get, close=Mock())
+
+            async def add(*args, **kwargs):
+                if failure in ("submit_error", "cancel_before_submit"):
+                    started.set()
+                    if failure == "submit_error":
+                        raise RuntimeError("submit failed")
+                    await hold.wait()
+                return collector
+
+            owner.engine.add_request = AsyncMock(side_effect=add)
+            owner.engine.abort = AsyncMock()
+            await owner._park_until_admitted("failed")
+            task = asyncio.create_task(
+                lifecycle.generate(request_id="failed", prompt={}, sampling_params=None, lora_request=None, priority=0)
+            )
+            await started.wait()
+            if failure.startswith("cancel"):
+                task.cancel()
+                expected_error = asyncio.CancelledError
+            else:
+                expected_error = RuntimeError
+            with pytest.raises(expected_error):
+                await task
+            assert owner._admitting == 0 and not lifecycle.traces
 
     asyncio.run(run())
 

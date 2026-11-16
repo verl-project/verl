@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
+import sys
+from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +27,8 @@ from omegaconf import OmegaConf
 import verl.trainer.ppo.v1.trainer_base as trainer_base_module
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
+from verl.trainer.ppo.v1.trainer_colocate_async import PPOTrainerColocateAsync
+from verl.utils.dataset.dataloader import DataLoaderExhausted
 
 
 def test_greedy_reward_baseline_does_not_request_score_centering_heads():
@@ -37,6 +43,107 @@ class _StubTrainer(PPOTrainer):
 
     def on_sample_end(self):
         pass
+
+
+def _multistep_trainer(monkeypatch, parameter_sync_step, strategy):
+    """Use the real trainer and sampler: late completions require an awake generator."""
+    name = "verl.workers.rollout.vllm_rollout.partial_kv"
+    path = Path(__file__).resolve().parents[4] / "verl/workers/rollout/vllm_rollout/partial_kv.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    lifecycle_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lifecycle_module)
+    monkeypatch.setitem(sys.modules, name, lifecycle_module)
+    trainer = PPOTrainerColocateAsync.__new__(PPOTrainerColocateAsync)
+    trainer.config = OmegaConf.create(
+        {
+            "data": {"train_batch_size": 4},
+            "actor_rollout_ref": {"rollout": {"partial_rollout_kv_offload": True, "temperature": 1.0}},
+            "trainer": {"critic_warmup": 0, "save_freq": -1, "test_freq": -1},
+        }
+    )
+    trainer.trainer_mode = "colocate_async"
+    trainer.parameter_sync_step = parameter_sync_step
+    trainer.global_steps = 5
+    trainer.total_training_steps = 10
+    trainer.curr_step_profile = False
+    trainer.timing_raw = {}
+    trainer.use_critic = trainer.use_reference_policy = False
+    trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=[])
+    state = {"awake": True, "updates": 0}
+    queue = {f"p{i}": dict(is_prompt=True, status="finished" if i < 2 else "running", global_steps=5) for i in range(4)}
+    for i in range(2):
+        queue[f"p{i}_0_0"] = dict(seq_len=2)
+
+    monkeypatch.setattr(trainer_base_module.tq, "kv_list", lambda: {"train": deepcopy(queue)})
+
+    def clear(*, keys, **kwargs):
+        for key in keys:
+            queue.pop(key, None)
+
+    monkeypatch.setattr(trainer_base_module.tq, "kv_clear", clear)
+    trainer._add_batch_to_generate = MagicMock()
+    trainer.replay_buffer = ReplayBufferAsync(
+        trainer_mode="colocate_async",
+        trainer_config={},
+        max_off_policy_threshold=8,
+        max_off_policy_strategy=strategy,
+        sampler_kwargs={},
+    )
+
+    def complete_late_requests(partition_id, last_debug_time):
+        assert state["awake"], "sampling waited for completions after KV was offloaded"
+        assert state["updates"] == 0, "the cycle started training before all required samples were ready"
+        for i in range(2, 4):
+            queue[f"p{i}"]["status"] = "finished"
+            queue[f"p{i}_0_0"] = dict(seq_len=2)
+        return last_debug_time
+
+    trainer.replay_buffer._wait_for_next_poll = complete_late_requests
+
+    def sleep():
+        state["awake"] = False
+
+    trainer.checkpoint_manager = SimpleNamespace(
+        prepare_partial_rollout=MagicMock(),
+        sleep_replicas=MagicMock(side_effect=sleep),
+        update_weights=MagicMock(),
+        resume_generation_replicas=MagicMock(side_effect=lambda: state.update(awake=True)),
+    )
+    for method in ("_balance_batch", "_compute_old_log_prob", "_compute_advantage"):
+        setattr(trainer, method, lambda batch, **kwargs: batch)
+
+    def train(batch, **kwargs):
+        assert not state["awake"]
+        state["updates"] += 1
+        return batch
+
+    trainer._update_actor = train
+    return trainer, state, queue
+
+
+@pytest.mark.parametrize("parameter_sync_step", [2, 4])
+@pytest.mark.parametrize("strategy", ["drop", "wait"])
+def test_partial_kv_multistep_waits_for_all_samples_before_sleep(monkeypatch, parameter_sync_step, strategy):
+    trainer, state, _ = _multistep_trainer(monkeypatch, parameter_sync_step, strategy)
+    combined = trainer.step({}, trainer.timing_raw)
+    assert set(combined.keys) == {f"p{i}_0_0" for i in range(4)}
+    assert state["updates"] == parameter_sync_step
+    trainer.checkpoint_manager.update_weights.assert_not_called()
+    trainer.checkpoint_manager.resume_generation_replicas.assert_not_called()
+    trainer.on_step_end()
+    trainer.checkpoint_manager.update_weights.assert_called_once_with(5)
+    trainer.checkpoint_manager.resume_generation_replicas.assert_called_once_with()
+    assert state["awake"]
+
+
+def test_partial_kv_incomplete_cycle_exits_before_any_weight_update(monkeypatch):
+    trainer, state, queue = _multistep_trainer(monkeypatch, 2, "drop")
+    del queue["p2"], queue["p3"]
+    trainer.replay_buffer.input_exhausted = True
+    with pytest.raises(DataLoaderExhausted):
+        trainer.step({}, trainer.timing_raw)
+    assert state == {"awake": True, "updates": 0}
+    trainer.checkpoint_manager.sleep_replicas.assert_not_called()
 
 
 def _validation_trainer(monkeypatch, partial_kv, *, fail_restore=False):

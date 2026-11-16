@@ -160,7 +160,7 @@ class PartialKVOffload:
                 raise TimeoutError("Paused vLLM outputs did not drain")
             await asyncio.sleep(0.001)
 
-    async def pause(self, preserve, timeout=60):
+    async def pause(self, preserve, timeout=60, *, reject_request=False):
         """Close admission before acknowledging keep/abort on the scheduler."""
         self._healthy()
         if type(preserve) is not bool:
@@ -168,13 +168,18 @@ class PartialKVOffload:
         if self.paused:
             if self.preserve != preserve:
                 raise RuntimeError("Cannot change preservation mode during a handoff")
-            return
-        if self.state != "awake":
+        elif self.state != "awake":
             raise RuntimeError("Pause requests before offloading their memory")
         server = self.server
         server._submission_paused = True
-        server._rejecting = False
-        server._resume_event.clear()
+        server._rejecting = reject_request
+        if reject_request:
+            # Also wake callers parked by an earlier non-rejecting pause so they can reroute.
+            server._resume_event.set()
+        else:
+            server._resume_event.clear()
+        if self.paused:
+            return
         self.state = "failed"
         deadline = time.monotonic() + timeout
         while server._admitting:
@@ -266,16 +271,22 @@ class PartialKVOffload:
     async def generate(self, **kwargs):
         """Retain native tokens/logprobs and isolate each physical request's prefix."""
         request_id = kwargs["request_id"]
-        if request_id in self.traces:
-            raise RuntimeError("Duplicate partial-rollout request identity")
-        trace = NativeWeightVersions()
-        self.traces[request_id] = trace
-        # Salt at actual admission, after the server's submission gate. This
-        # also isolates a fresh retry with the same external request_id.
-        kwargs["prompt"]["cache_salt"] = f"verl:{request_id}:{self.server.global_steps}:{uuid4().hex}"
+        trace = None
+        delegated = False
         try:
+            if request_id in self.traces:
+                raise RuntimeError("Duplicate partial-rollout request identity")
+            trace = NativeWeightVersions()
+            self.traces[request_id] = trace
+            # Salt at actual admission, after the server's submission gate. This
+            # also isolates a fresh retry with the same external request_id.
+            kwargs["prompt"]["cache_salt"] = f"verl:{request_id}:{self.server.global_steps}:{uuid4().hex}"
+            delegated = True
             output = await self.server._generate_admitted(**kwargs)
             ids = output.outputs[0].token_ids if output.outputs else []
             return output, trace.finish(ids)
         finally:
-            self.traces.pop(request_id, None)
+            if not delegated:
+                self.server._admitting -= 1
+            if trace is not None:
+                self.traces.pop(request_id, None)
