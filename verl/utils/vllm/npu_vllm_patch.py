@@ -18,12 +18,13 @@
 import inspect
 import logging
 import os
+import sys
 from collections.abc import Iterable
 from functools import wraps
 
 import torch
 
-from verl.utils.device import is_torch_npu_available
+from verl.utils.device import get_device_name, is_torch_npu_available
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,61 @@ def patch_vllm_ascend_v030_sched_yield():
 
 def _glm52_patch_enabled() -> bool:
     return os.getenv(_GLM52_PATCH_ENV, "").strip().lower() in _GLM52_PATCH_TRUTHY_VALUES
+
+
+def _remove_inference_npu_op_paths() -> None:
+    for name in ("ASCEND_CUSTOM_OPP_PATH", "LD_LIBRARY_PATH"):
+        retained = [
+            entry
+            for entry in os.environ.get(name, "").split(os.pathsep)
+            if entry and "vllm_ascend/_cann_ops_custom" not in entry
+        ]
+        if retained:
+            os.environ[name] = os.pathsep.join(retained)
+        else:
+            os.environ.pop(name, None)
+
+
+def isolate_native_training_npu_ops() -> None:
+    """Keep GLM-5.2 inference CANN overrides out of training actor processes.
+
+    Temporary workaround: remove this isolation once the corresponding fix lands
+    in vllm-ascend.
+
+    Call before worker/model initialization. This cannot unload operators already
+    loaded by CANN, and must not be called in standalone vLLM server actors.
+    """
+    if not _glm52_patch_enabled() or get_device_name() != "npu":
+        return
+
+    # Set this only in the training actor, never in the Ray job environment.
+    os.environ["VERL_NPU_NATIVE_OPS_ONLY"] = "1"
+    _remove_inference_npu_op_paths()
+
+    from vllm_ascend import utils as ascend_utils
+
+    original = ascend_utils.bootstrap_custom_op_env
+    if not getattr(original, "_verl_native_training_ops_patched", False):
+
+        @wraps(original)
+        def bootstrap_custom_op_env(*, include_vendor_lib: bool = False) -> None:
+            if os.environ.get("VERL_NPU_NATIVE_OPS_ONLY") == "1":
+                return
+            return original(include_vendor_lib=include_vendor_lib)
+
+        bootstrap_custom_op_env._verl_native_training_ops_patched = True
+        ascend_utils.bootstrap_custom_op_env = bootstrap_custom_op_env
+        # platform.py imports the function by value and may already be loaded.
+        for name, module in tuple(sys.modules.items()):
+            if (
+                name.startswith("vllm_ascend.")
+                and module is not None
+                and vars(module).get("bootstrap_custom_op_env") is original
+            ):
+                module.bootstrap_custom_op_env = bootstrap_custom_op_env
+
+    # Importing vllm-ascend can itself bootstrap the vendor environment.
+    _remove_inference_npu_op_paths()
 
 
 def _normalized_source(fn) -> str:
