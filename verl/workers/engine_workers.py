@@ -205,6 +205,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def set_loss_fn(self, loss_fn):
         self.loss_fn = loss_fn
 
+    def get_tq_get_spec(self, method_name: str):
+        """The part of each sample this rank reads from TransferQueue; see ``tqbridge``."""
+        get_spec = getattr(self.engine, "get_tq_get_spec", None)
+        return get_spec() if get_spec is not None else None
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def reset(self):
         """
@@ -568,6 +573,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_loss_fn(self, loss_fn):
         self.actor.set_loss_fn(loss_fn=loss_fn)
+
+    def get_tq_get_spec(self, method_name: str):
+        """The part of each sample this rank reads from TransferQueue; see ``tqbridge``."""
+        worker = self.ref if method_name == "compute_ref_log_prob" else self.actor
+        return worker.get_tq_get_spec(method_name) if worker is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):

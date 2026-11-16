@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -55,7 +56,7 @@ except ImportError:
             def _raise(*args, **kwargs):
                 raise RuntimeError(
                     f"transfer_queue is not installed. Cannot use tq.{name}(). "
-                    "Please install it by calling `pip install TransferQueue==0.1.11`"
+                    "Please install it by calling `pip install TransferQueue==0.1.12`"
                 )
 
             return _raise
@@ -69,6 +70,52 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 TQ_INITIALIZED = False
+_GET_PARSER_SUPPORTED: bool | None = None
+
+# Per-sample TransferQueue key and its partition, attached when a rank fetches more fields later.
+TQ_KEY_FIELD = "__tq_key__"
+TQ_PARTITION_KEY = "__tq_partition_id__"
+
+
+@dataclass
+class TQGetSpec:
+    """How a rank reads its share of a batch from TransferQueue.
+
+    Attributes:
+        data_parser: ``data_parser(data, args)`` the storage units apply before replying.
+        non_tensor: Non-tensor data assigned to the fetched batch, e.g. what ``data_parser`` kept.
+        attach_keys: Whether to attach each sample's key and partition for a later fetch.
+    """
+
+    data_parser: Callable | None = None
+    non_tensor: dict[str, Any] = field(default_factory=dict)
+    attach_keys: bool = False
+
+
+def tq_get_parser_supported() -> bool:
+    """Whether the connected TransferQueue runs ``data_parser`` on get (SimpleStorage, TransferQueue>=0.1.12)."""
+    global _GET_PARSER_SUPPORTED
+    if _GET_PARSER_SUPPORTED is None:
+        try:
+            from transfer_queue.storage.managers.simple_storage_manager import AsyncSimpleStorageManager
+
+            tq_client = tq.get_client()
+            _GET_PARSER_SUPPORTED = "data_parser" in inspect.signature(
+                tq_client.async_get_data
+            ).parameters and isinstance(tq_client.storage_manager, AsyncSimpleStorageManager)
+        except Exception as e:
+            logger.warning(f"TransferQueue get parser is unavailable, every rank fetches whole samples: {e}")
+            _GET_PARSER_SUPPORTED = False
+    return _GET_PARSER_SUPPORTED
+
+
+def _get_tq_get_spec(args, func_name: str) -> TQGetSpec | None:
+    get_spec = getattr(args[0], "get_tq_get_spec", None) if args else None
+    if get_spec is None or not tq_get_parser_supported():
+        return None
+    return get_spec(func_name)
+
+
 _ASYNC_BRIDGE_LOOP: asyncio.AbstractEventLoop | None = None
 _ASYNC_BRIDGE_THREAD: threading.Thread | None = None
 _ASYNC_BRIDGE_LOCK = threading.Lock()
@@ -157,7 +204,7 @@ def _find_meta(*args, **kwargs):
     return None
 
 
-async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
+async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta, spec: TQGetSpec | None = None) -> TensorDict:
     if isinstance(meta, KVBatchMeta):
         meta = await async_kv_batch_meta2batch_meta(meta)
     meta_info = copy.deepcopy(meta.extra_info)
@@ -167,7 +214,20 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
         return empty_td
 
     tq_client = tq.get_client()
-    tensordict = await tq_client.async_get_data(meta)
+    if spec is not None and spec.data_parser is not None:
+        tensordict = await tq_client.async_get_data(meta, data_parser=spec.data_parser)
+    else:
+        tensordict = await tq_client.async_get_data(meta)
+
+    if spec is not None:
+        if spec.attach_keys:
+            partition_id = meta.partition_ids[0]
+            assert all(pid == partition_id for pid in meta.partition_ids)
+            keys = await tq_client.async_kv_retrieve_keys(global_indexes=meta.global_indexes, partition_id=partition_id)
+            tu.assign_non_tensor_stack(tensor_dict=tensordict, key=TQ_KEY_FIELD, val=keys)
+            tu.assign_non_tensor_data(tensor_dict=tensordict, key=TQ_PARTITION_KEY, val=partition_id)
+        for key, val in spec.non_tensor.items():
+            tu.assign_non_tensor_data(tensor_dict=tensordict, key=key, val=val)
 
     for key, val in meta_info.items():
         if isinstance(val, (NonTensorData | NonTensorStack)):
@@ -177,8 +237,22 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
     return tensordict
 
 
-def _meta_to_realdata(meta: BatchMeta) -> TensorDict:
-    return _run_async_in_temp_loop(_async_meta_to_realdata, meta)
+def _meta_to_realdata(meta: BatchMeta, spec: TQGetSpec | None = None) -> TensorDict:
+    return _run_async_in_temp_loop(_async_meta_to_realdata, meta, spec)
+
+
+def kv_batch_get_parsed(
+    keys: list[str], partition_id: str, select_fields: list[str] | str, data_parser: Callable, parser_args: list
+) -> TensorDict:
+    """``tq.kv_batch_get`` with a get parser, run on the shared bridge loop like the other TQ calls here."""
+    return _run_async_in_temp_loop(
+        tq.async_kv_batch_get,
+        keys=keys,
+        partition_id=partition_id,
+        select_fields=select_fields,
+        data_parser=data_parser,
+        parser_args=parser_args,
+    )
 
 
 async def _async_update_meta_with_output(output: TensorDict, meta: BatchMeta, func_name=None) -> BatchMeta:
@@ -386,10 +460,14 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
                 if is_kv_batch_meta:
                     tags = batch_meta.tags
                     batch_meta = kv_batch_meta2batch_meta(batch_meta)
+                spec = _get_tq_get_spec(args, func.__name__)
                 t1 = time.time()
-                args = [_meta_to_realdata(arg) if isinstance(arg, BatchMeta | KVBatchMeta) else arg for arg in args]
+                args = [
+                    _meta_to_realdata(arg, spec) if isinstance(arg, BatchMeta | KVBatchMeta) else arg for arg in args
+                ]
                 kwargs = {
-                    k: _meta_to_realdata(v) if isinstance(v, BatchMeta | KVBatchMeta) else v for k, v in kwargs.items()
+                    k: _meta_to_realdata(v, spec) if isinstance(v, BatchMeta | KVBatchMeta) else v
+                    for k, v in kwargs.items()
                 }
                 t2 = time.time()
                 logger.info(
@@ -434,13 +512,14 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
                     tags = batch_meta.tags
                     batch_meta = await async_kv_batch_meta2batch_meta(batch_meta)
 
+                spec = _get_tq_get_spec(args, func.__name__)
                 t1 = time.time()
                 args = [
-                    await _async_meta_to_realdata(arg) if isinstance(arg, BatchMeta | KVBatchMeta) else arg
+                    await _async_meta_to_realdata(arg, spec) if isinstance(arg, BatchMeta | KVBatchMeta) else arg
                     for arg in args
                 ]
                 kwargs = {
-                    k: await _async_meta_to_realdata(v) if isinstance(v, BatchMeta | KVBatchMeta) else v
+                    k: await _async_meta_to_realdata(v, spec) if isinstance(v, BatchMeta | KVBatchMeta) else v
                     for k, v in kwargs.items()
                 }
                 t2 = time.time()

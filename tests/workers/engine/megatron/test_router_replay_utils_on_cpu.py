@@ -474,3 +474,32 @@ def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
             tf_config,
             model=object(),
         )
+
+
+def test_set_router_replay_data_maps_routes_of_local_layers(monkeypatch):
+    """Routes fetched for this pipeline rank's layers only are matched by their absolute layer index."""
+    routers = [_FakeRouter(), _FakeRouter()]
+    tf_config = _config(num_layers=4)
+    all_routes = torch.arange(24, dtype=torch.int64).reshape(1, 3, 4, 2)
+    local_routes = all_routes[:, :, [1, 3]]
+
+    monkeypatch.setattr(rr_utils, "device_name", "cpu")
+    monkeypatch.setattr(rr_utils, "preprocess_packed_seqs", lambda tensor, _mask, **_kwargs: (tensor, object()))
+    monkeypatch.setattr(rr_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
+    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda model: iter([(2, routers[0]), (4, routers[1])]))
+
+    rr_utils.set_router_replay_data(
+        local_routes, torch.ones(1, 3, dtype=torch.bool), tf_config, model=object(), route_layer_ids=[1, 3]
+    )
+    assert torch.equal(routers[0].target_topk_idx, all_routes[0, :, 1, :])
+    assert torch.equal(routers[1].target_topk_idx, all_routes[0, :, 3, :])
+
+    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda model: iter([(3, routers[0])]))
+    with pytest.raises(RuntimeError, match="does not cover every forwarded MoE layer"):
+        rr_utils.set_router_replay_data(
+            local_routes, torch.ones(1, 3, dtype=torch.bool), tf_config, model=object(), route_layer_ids=[1, 3]
+        )
+    with pytest.raises(RuntimeError, match="route layers"):
+        rr_utils.set_router_replay_data(
+            local_routes, torch.ones(1, 3, dtype=torch.bool), tf_config, model=object(), route_layer_ids=[1]
+        )

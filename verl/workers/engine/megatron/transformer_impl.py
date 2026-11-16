@@ -43,11 +43,18 @@ from verl.utils.dynamic_cp_scheduler import (
     postprocess_dynamic_cp_batch,
 )
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
+from verl.utils.megatron.qwen_vl_vision_inputs import (
+    cp_local_vision_inputs,
+    enable_cp_local_vision,
+    is_qwen_vl_model,
+    plan_cp_vision_rows,
+)
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     align_r3_router_replay_data,
     build_r3_replay_mask,
+    iter_model_routers,
     merge_nested_router_maps,
     merge_router_topk_indices,
     pp_gather,
@@ -76,6 +83,8 @@ from verl.utils.megatron_utils import (
 )
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
 from verl.utils.seqlen_balancing import restore_dynamic_batch
+from verl.utils.tq_get_parsers import PIXEL_KEYS, select_multi_modal_rows, slice_for_rank
+from verl.utils.transferqueue_utils import TQ_KEY_FIELD, TQ_PARTITION_KEY, TQGetSpec, kv_batch_get_parsed
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
@@ -133,6 +142,10 @@ def _check_dcp_unsupported_features(engine_config, model_config, tf_config=None,
             batch, key="distillation_only", default=False
         ):
             raise NotImplementedError("Dynamic CP does not support distillation")
+
+
+# Absolute layer index of each layer kept in ``routed_experts`` when a rank fetched only its own layers.
+ROUTE_LAYERS_KEY = "routed_experts_layers"
 
 
 def _attach_dcp_recorded_routes(losses_reduced: list[dict], layers_topk_idx: torch.Tensor) -> None:
@@ -752,6 +765,74 @@ class MegatronEngine(BaseEngine):
     def get_context_parallel_group(self):
         return mpu.get_context_parallel_group()
 
+    def _cp_local_vision_enabled(self) -> bool:
+        return (
+            mpu.get_context_parallel_world_size() > 1
+            and not self.engine_config.dynamic_context_parallel
+            and enable_cp_local_vision(unwrap_model(self.module[0]))
+        )
+
+    def get_tq_get_spec(self) -> TQGetSpec | None:
+        """The part of each sample this rank reads from TransferQueue.
+
+        Only the first pipeline stage runs a Qwen-VL ViT; with ``vision_dp_when_cp`` its CP ranks fetch
+        their share of the pixels per micro-batch instead (see ``_fetch_cp_local_vision``). Under R3 a
+        rank replays the routes of its own MoE layers only.
+        """
+        drop_keys, attach_keys = (), False
+        if is_qwen_vl_model(unwrap_model(self.module[0])):
+            if not mpu.is_pipeline_first_stage(ignore_virtual=True):
+                drop_keys = PIXEL_KEYS
+            elif self._cp_local_vision_enabled():
+                drop_keys, attach_keys = PIXEL_KEYS, True
+
+        route_layers = None
+        if self.engine_config.router_replay.mode == "R3":
+            layers = sorted({n - 1 for n, _ in iter_model_routers([unwrap_model(m) for m in self.module])})
+            if len(layers) < self.tf_config.num_layers:
+                route_layers = layers
+
+        if not drop_keys and route_layers is None:
+            return None
+        return TQGetSpec(
+            data_parser=partial(slice_for_rank, drop_multi_modal_keys=drop_keys, route_layers=route_layers),
+            non_tensor={} if route_layers is None else {ROUTE_LAYERS_KEY: route_layers},
+            attach_keys=attach_keys,
+        )
+
+    def _fetch_cp_local_vision(self, batch: TensorDict, unwrapped_model) -> bool:
+        """Fetch the pixels this CP rank encodes into ``batch``; whether the model must treat them as local.
+
+        A micro-batch mixing images and videos is fetched whole and run through the model's own split.
+        """
+        if TQ_KEY_FIELD not in batch.keys() or not getattr(unwrapped_model, "pre_process", False):
+            return False
+        multi_modal_inputs = tu.get(batch, "multi_modal_inputs")
+        plan = plan_cp_vision_rows(
+            multi_modal_inputs, mpu.get_context_parallel_rank(), mpu.get_context_parallel_world_size()
+        )
+        cp_local = plan is not None
+        if not cp_local:
+            pixel_keys = {"image_grid_thw": "pixel_values", "video_grid_thw": "pixel_values_videos"}
+            plan = [
+                [[key, 0, None] for grid_key, key in pixel_keys.items() if (inputs or {}).get(grid_key) is not None]
+                for inputs in multi_modal_inputs
+            ]
+        rows = [i for i, ranges in enumerate(plan) if ranges]
+        if rows:
+            keys = tu.get(batch, TQ_KEY_FIELD)
+            fetched = kv_batch_get_parsed(
+                keys=[keys[i] for i in rows],
+                partition_id=tu.get_non_tensor_data(batch, TQ_PARTITION_KEY, None),
+                select_fields="multi_modal_inputs",
+                data_parser=select_multi_modal_rows,
+                parser_args=[plan[i] for i in rows],
+            )
+            for i, pixels in zip(rows, tu.get(fetched, "multi_modal_inputs"), strict=True):
+                multi_modal_inputs[i] = {**multi_modal_inputs[i], **pixels}
+            tu.assign_non_tensor_stack(batch, "multi_modal_inputs", multi_modal_inputs)
+        return cp_local
+
     def save_checkpoint(
         self,
         local_path: str,
@@ -1278,6 +1359,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
             )
         pad_mode = tu.get_non_tensor_data(batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         temperature = batch["temperature"]
+        cp_local_vision = self._fetch_cp_local_vision(batch, unwrap_model(model))
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
         attention_mask = model_inputs["attention_mask"]
@@ -1326,6 +1408,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 replay_mask=replay_mask,
                 local_cp_size=local_cp_size,
                 model=unwrapped_model,
+                route_layer_ids=tu.get_non_tensor_data(batch, key=ROUTE_LAYERS_KEY, default=None),
             )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
@@ -1340,20 +1423,21 @@ class MegatronEngineWithLMHead(MegatronEngine):
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
 
             fused_forward_fn = get_mcore_forward_fused_model_engine_fn(self.model_config.hf_config)
-            output = fused_forward_fn(
-                model=model,
-                input_ids=input_ids,
-                labels=label,
-                multi_modal_inputs=multi_modal_inputs,
-                temperature=temperature_value,
-                calculate_entropy=calculate_entropy,
-                pad_token_id=self.model_config.tokenizer.pad_token_id,
-                cp_layout=cp_layout,
-                local_cp_size=local_cp_size,
-                router_padding_mask=router_padding_mask,
-                pad_to_length_bucket=pad_to_length_bucket,
-                position_ids=batch.get("position_ids", None),
-            )
+            with cp_local_vision_inputs(cp_local_vision):
+                output = fused_forward_fn(
+                    model=model,
+                    input_ids=input_ids,
+                    labels=label,
+                    multi_modal_inputs=multi_modal_inputs,
+                    temperature=temperature_value,
+                    calculate_entropy=calculate_entropy,
+                    pad_token_id=self.model_config.tokenizer.pad_token_id,
+                    cp_layout=cp_layout,
+                    local_cp_size=local_cp_size,
+                    router_padding_mask=router_padding_mask,
+                    pad_to_length_bucket=pad_to_length_bucket,
+                    position_ids=batch.get("position_ids", None),
+                )
         else:
             if not isinstance(temperature, torch.Tensor):
                 temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
@@ -1400,24 +1484,25 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 if batch_num_tokens > 0:
                     mtp_loss_normalization_factor = routed_num_tokens / batch_num_tokens
 
-            output = forward_fn(
-                model,
-                input_ids,
-                multi_modal_inputs,
-                logits_processor=logits_processor,
-                logits_processor_args=logits_processor_args,
-                vision_model=hasattr(self.model_config.hf_config, "vision_config"),
-                pad_token_id=self.model_config.tokenizer.pad_token_id,
-                data_format=data_format,
-                mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
-                local_cp_size=local_cp_size,
-                router_padding_mask=router_padding_mask,
-                mtp_loss_normalization_factor=mtp_loss_normalization_factor,
-                forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
-                pad_to_length_bucket=pad_to_length_bucket,
-                cp_layout=cp_layout,
-                position_ids=batch.get("position_ids", None),
-            )
+            with cp_local_vision_inputs(cp_local_vision):
+                output = forward_fn(
+                    model,
+                    input_ids,
+                    multi_modal_inputs,
+                    logits_processor=logits_processor,
+                    logits_processor_args=logits_processor_args,
+                    vision_model=hasattr(self.model_config.hf_config, "vision_config"),
+                    pad_token_id=self.model_config.tokenizer.pad_token_id,
+                    data_format=data_format,
+                    mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
+                    local_cp_size=local_cp_size,
+                    router_padding_mask=router_padding_mask,
+                    mtp_loss_normalization_factor=mtp_loss_normalization_factor,
+                    forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                    pad_to_length_bucket=pad_to_length_bucket,
+                    cp_layout=cp_layout,
+                    position_ids=batch.get("position_ids", None),
+                )
 
         # Router replay: record routing decisions for R2 mode
         if tu.get_non_tensor_data(batch, key="record_r2_routes", default=False):
@@ -1513,6 +1598,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
     def forward_step(self, batch_iter, model, logits_processor_func, postprocess_micro_batch_func):
         batch: TensorDict = next(batch_iter)
         batch = batch.to(get_device_id())
+        cp_local_vision = self._fetch_cp_local_vision(batch, unwrap_model(model))
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
@@ -1522,23 +1608,24 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
 
         forward_fn = get_mcore_engine_forward_fn(self.model_config.hf_config)
 
-        output = forward_fn(
-            model,
-            input_ids,
-            multi_modal_inputs,
-            value_model=True,
-            vision_model=hasattr(self.model_config.hf_config, "vision_config"),
-            pad_token_id=self.model_config.tokenizer.pad_token_id,
-            data_format="thd" if self.engine_config.use_remove_padding else "bshd",
-            forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
-            pad_to_length_bucket=(
-                self.engine_config.pad_to_length_bucket
-                if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
-                else None
-            ),
-            cp_layout=cp_layout,
-            position_ids=batch.get("position_ids", None),
-        )
+        with cp_local_vision_inputs(cp_local_vision):
+            output = forward_fn(
+                model,
+                input_ids,
+                multi_modal_inputs,
+                value_model=True,
+                vision_model=hasattr(self.model_config.hf_config, "vision_config"),
+                pad_token_id=self.model_config.tokenizer.pad_token_id,
+                data_format="thd" if self.engine_config.use_remove_padding else "bshd",
+                forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                pad_to_length_bucket=(
+                    self.engine_config.pad_to_length_bucket
+                    if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
+                    else None
+                ),
+                cp_layout=cp_layout,
+                position_ids=batch.get("position_ids", None),
+            )
 
         return output, partial(postprocess_micro_batch_func, data=batch)
 

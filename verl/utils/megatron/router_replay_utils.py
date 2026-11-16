@@ -440,6 +440,7 @@ def set_router_replay_data(
     replay_mask=None,
     local_cp_size=None,
     model=None,
+    route_layer_ids=None,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -459,6 +460,8 @@ def set_router_replay_data(
             unmasked tokens keep native Megatron routes.
         model: The forwarded model (or list of VPP chunks). When given, targets are written to its own
             routers instead of a positional slice of the global RouterReplay.router_instances list.
+        route_layer_ids (Optional[list[int]]): Absolute layer index of each ``layer_num`` entry when the
+            routes hold only some layers, e.g. the ones on this pipeline rank.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -522,6 +525,19 @@ def set_router_replay_data(
         # index by absolute layer_idx; otherwise (R2 with mixed dense/MoE),
         # dim-0 only contains MoE layers, index by MoE-layer ordinal.
         index_by_layer = len(layers_topk_idx_reshape) == tf_config.num_layers
+        route_positions = None
+        if route_layer_ids is not None:
+            if len(route_layer_ids) != len(layers_topk_idx_reshape):
+                raise RuntimeError(
+                    f"router_replay REPLAY got {len(layers_topk_idx_reshape)} route layers for "
+                    f"route_layer_ids={route_layer_ids}"
+                )
+            route_positions = {layer_idx: pos for pos, layer_idx in enumerate(route_layer_ids)}
+
+        def route_index(layer_idx: int, moe_ordinal: int) -> int:
+            if route_positions is not None:
+                return route_positions.get(layer_idx, -1)
+            return layer_idx if index_by_layer else moe_ordinal
 
         if model is not None:
             model_routers = list(iter_model_routers(model))
@@ -531,7 +547,7 @@ def set_router_replay_data(
             missing_layer_numbers = []
             for layer_number, router in model_routers:
                 layer_idx = layer_number - 1
-                idx = layer_idx if index_by_layer else sum(1 for i in range(layer_idx) if is_moe_layer(tf_config, i))
+                idx = route_index(layer_idx, sum(1 for i in range(layer_idx) if is_moe_layer(tf_config, i)))
                 if not 0 <= idx < layers_topk_idx_reshape.shape[0]:
                     missing_layer_numbers.append(layer_number)
                     continue
@@ -559,7 +575,9 @@ def set_router_replay_data(
             if not is_moe_layer(tf_config, layer_idx):
                 continue
             router = router_instances_list[router_offset]
-            idx = layer_idx if index_by_layer else moe_idx
+            idx = route_index(layer_idx, moe_idx)
+            if not 0 <= idx < layers_topk_idx_reshape.shape[0]:
+                raise RuntimeError(f"router_replay REPLAY data does not cover layer {layer_idx}")
             router.set_target_indices(
                 layers_topk_idx_reshape[idx].to(torch.int64),
                 replay_mask=replay_mask_rmpad_split,
