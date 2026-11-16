@@ -158,27 +158,17 @@ def test_customized_worker_env():
         output = worker_group.execute_all_sync("getenv", key="test_key")
         assert output == ["test_value", "test_value", "test_value", "test_value"]
 
-        try:
-            worker_group = RayWorkerGroup(
-                resource_pool=resource_pool,
-                ray_cls_with_init=class_with_args,
-                name_prefix="worker_group_error",
-                worker_env={
-                    "WORLD_SIZE": "100",  # override system env will result in error
-                },
-            )
-        except ValueError as e:
-            assert "WORLD_SIZE" in str(e)
-        else:
-            raise ValueError("test failed")
-
-        with pytest.raises(ValueError, match="WG_MASTER_ENDPOINT_CONFIG"):
-            RayWorkerGroup(
-                resource_pool=resource_pool,
-                ray_cls_with_init=class_with_args,
-                name_prefix="worker_group_endpoint_config_error",
-                worker_env={"WG_MASTER_ENDPOINT_CONFIG": "user override"},
-            )
+        for key, value in (
+            ("WORLD_SIZE", "100"),
+            ("WG_MASTER_ENDPOINT_CONFIG", "user override"),
+        ):
+            with pytest.raises(ValueError, match=key):
+                RayWorkerGroup(
+                    resource_pool=resource_pool,
+                    ray_cls_with_init=class_with_args,
+                    name_prefix="worker_group_error",
+                    worker_env={key: value},
+                )
     finally:
         ray.shutdown()
 
