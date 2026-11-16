@@ -31,7 +31,6 @@ os.environ["NCCL_DEBUG"] = "WARN"
 @ray.remote
 class ModelActor(Worker):
     def __init__(self):
-        """Initialize the worker endpoint before receiving driver-side functions."""
         super().__init__()
 
 

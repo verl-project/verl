@@ -36,9 +36,6 @@ from verl.utils.net_utils import is_valid_ipv6_address
 
 from .decorator import Dispatch, Execute, register
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
 
 def _bind_master_tcp_store(addr: str, port_range: Optional[list[int]]):
     """Bind a master TCPStore using this worker's env:// rendezvous backend."""
@@ -57,7 +54,7 @@ def _bind_master_tcp_store(addr: str, port_range: Optional[list[int]]):
             except OSError:
                 if os_assigned_port:
                     raise
-                logger.info("Could not bind master port %d, trying port %d", port, port + 1)
+                logging.info("Port %d is already in use, trying port %d", port, port + 1)
                 continue
 
             # create_tcp_store detaches the socket, so leaving this context keeps the port bound.
@@ -223,12 +220,6 @@ class Worker(WorkerHelper):
     def __init__(self, cuda_visible_devices=None) -> None:
         """Initialize the worker with environment settings and device configuration.
 
-        Subclasses must call this before initializing their process group so rank zero
-        can publish its bound master endpoint and let the driver launch the other ranks.
-        Automatic rendezvous retains a multi-tenant TCPStore in rank zero's
-        ``master_tcp_store``. Custom rendezvous code must reuse that store or connect
-        to its endpoint instead of binding an independent server on the same port.
-
         Args:
             cuda_visible_devices (str, optional):
                 CUDA visible devices configuration. Defaults to None.
@@ -237,17 +228,7 @@ class Worker(WorkerHelper):
         # it is executed remotely
         import os
 
-        # Consume the startup configuration once: nested workers reuse the outer worker's store.
-        master_endpoint_config = os.environ.pop("VERL_MASTER_ENDPOINT_CONFIG", None)
-        if master_endpoint_config is not None:
-            metadata_name, metadata_namespace, master_port_range = json.loads(master_endpoint_config)
-            addr = self._get_node_ip().strip("[]")
-            self.master_tcp_store = _bind_master_tcp_store(addr, master_port_range)
-            os.environ["MASTER_ADDR"] = addr
-            os.environ["MASTER_PORT"] = str(self.master_tcp_store.port)
-            master_endpoint_metadata = ray.get_actor(metadata_name, namespace=metadata_namespace)
-            master_endpoint_metadata.publish_master_endpoint.remote(addr, os.environ["MASTER_PORT"])
-
+        self._setup_master_endpoint()
         self._setup_env_cuda_visible_devices()
 
         world_size = int(os.environ["WORLD_SIZE"])
@@ -286,6 +267,19 @@ class Worker(WorkerHelper):
                 Name of the worker to retrieve
         """
         return self.fused_worker_dict.get(worker_name, None)
+
+    def _setup_master_endpoint(self):
+        """Bind rank zero's retained store and publish its endpoint once per actor."""
+        # Consume the startup configuration once: nested workers reuse the outer worker's store.
+        master_endpoint_config = os.environ.pop("WG_MASTER_ENDPOINT_CONFIG", None)
+        if master_endpoint_config:
+            metadata_name, metadata_namespace, master_port_range = json.loads(master_endpoint_config)
+            addr = self._get_node_ip().strip("[]")
+            self.master_tcp_store = _bind_master_tcp_store(addr, master_port_range)
+            os.environ["MASTER_ADDR"] = addr
+            os.environ["MASTER_PORT"] = str(self.master_tcp_store.port)
+            master_endpoint_metadata = ray.get_actor(metadata_name, namespace=metadata_namespace)
+            master_endpoint_metadata.set_master_endpoint.remote(addr, os.environ["MASTER_PORT"])
 
     def _setup_env_cuda_visible_devices(self):
         from verl.utils.ray_utils import ray_noset_visible_devices

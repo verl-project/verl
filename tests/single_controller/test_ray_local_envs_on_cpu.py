@@ -172,12 +172,12 @@ def test_customized_worker_env():
         else:
             raise ValueError("test failed")
 
-        with pytest.raises(ValueError, match="VERL_MASTER_ENDPOINT_CONFIG"):
+        with pytest.raises(ValueError, match="WG_MASTER_ENDPOINT_CONFIG"):
             RayWorkerGroup(
                 resource_pool=resource_pool,
                 ray_cls_with_init=class_with_args,
                 name_prefix="worker_group_endpoint_config_error",
-                worker_env={"VERL_MASTER_ENDPOINT_CONFIG": "user override"},
+                worker_env={"WG_MASTER_ENDPOINT_CONFIG": "user override"},
             )
     finally:
         ray.shutdown()

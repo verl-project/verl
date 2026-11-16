@@ -570,7 +570,10 @@ class RayWorkerGroup(WorkerGroup):
                     detached=detached,
                 )
 
-        self.wait_for_worker_initialization()
+        ray.get(
+            [worker.get_master_addr_port.remote() for worker in self._workers],
+            timeout=self._ray_wait_register_center_timeout,
+        )
 
     def _init_with_subresource_pool(self, resource_pool, ray_cls_with_init, bin_pack, detached, worker_env=None):
         """Initialize the worker group by creating new workers from a resource pool or sub resource pool.
@@ -607,19 +610,10 @@ class RayWorkerGroup(WorkerGroup):
                 detached=detached,
             )
 
-        self.wait_for_worker_initialization()
-
-    def wait_for_worker_initialization(self):
-        """Observe constructor failures after all ranks can join, releasing workers on failure."""
-        try:
-            ray.get(
-                [worker.get_master_addr_port.remote() for worker in self._workers],
-                timeout=self._ray_wait_register_center_timeout,
-            )
-        except BaseException:
-            for worker in self._workers:
-                ray.kill(worker, no_restart=True)
-            raise
+        ray.get(
+            [worker.get_master_addr_port.remote() for worker in self._workers],
+            timeout=self._ray_wait_register_center_timeout,
+        )
 
     def _create_worker(self, rank, pg_idx, pg, local_rank, resource_pool, ray_cls_with_init, worker_env, detached):
         world_size = resource_pool.world_size
@@ -636,8 +630,13 @@ class RayWorkerGroup(WorkerGroup):
             # Use the provided or previously published endpoint as-is.
             allocate_master_endpoint = False
             master_addr, master_port = self._master_addr, self._master_port
+            if rank == 0:
+                logger.debug(f"{self._master_addr=} {self._master_port=}")
         else:
-            raise ValueError("Both 'master_addr' and 'master_port' must be provided, or neither.")
+            raise ValueError(
+                "Both 'master_addr' and 'master_port' must be provided if you intend to manually specify them, "
+                "or neither should be provided to use Ray's default assignment."
+            )
 
         # we pass in environment variable at option so that Worker can use environment variable to set
         env_vars = {
@@ -645,6 +644,7 @@ class RayWorkerGroup(WorkerGroup):
             "RANK": str(rank),
             "WG_PREFIX": self.name_prefix,
             "WG_BACKEND": "ray",
+            "WG_MASTER_ENDPOINT_CONFIG": "",
             "RAY_LOCAL_WORLD_SIZE": str(local_world_size),
             "MASTER_ADDR": master_addr,
             "MASTER_PORT": str(master_port),
@@ -667,7 +667,7 @@ class RayWorkerGroup(WorkerGroup):
             )
         if worker_env is not None:
             logging.debug(f"Appending ray class env, origin: {env_vars}, customized env: {worker_env}")
-            conflict_env_vars = (set(env_vars.keys()) | {"VERL_MASTER_ENDPOINT_CONFIG"}) & set(worker_env.keys())
+            conflict_env_vars = set(env_vars.keys()) & set(worker_env.keys())
             if len(conflict_env_vars) > 0:
                 logging.error(
                     f"User customized env vars conflict with system env: {conflict_env_vars} "
@@ -1166,12 +1166,12 @@ class MasterEndpointMetadata:
         """Let the driver wait for rank zero to publish its endpoint."""
         self.endpoint_ready = asyncio.Event()
 
-    async def publish_master_endpoint(self, addr: str, port: str):
+    async def set_master_endpoint(self, addr: str, port: str):
         """Record the bound endpoint and wake the waiting driver."""
         self.master_endpoint = (addr, port)
         self.endpoint_ready.set()
 
-    async def wait_for_master_endpoint(self) -> tuple[str, str]:
+    async def get_master_endpoint(self) -> tuple[str, str]:
         """Wait for the master endpoint to become ready."""
         await self.endpoint_ready.wait()
         return self.master_endpoint
@@ -1179,7 +1179,7 @@ class MasterEndpointMetadata:
 
 def _create_master_store_worker(worker_factory, worker_kwargs, master_port_range, env_vars):
     """Start the master store worker and return it with its published endpoint."""
-    metadata_name = f"master_endpoint_{get_random_string(12)}"
+    metadata_name = f"master_endpoint_{get_random_string(length=6)}"
     master_endpoint_metadata = MasterEndpointMetadata.options(
         name=metadata_name,
         scheduling_strategy=PlacementGroupSchedulingStrategy(
@@ -1190,11 +1190,11 @@ def _create_master_store_worker(worker_factory, worker_kwargs, master_port_range
     worker = None
     try:
         # This is the same env_vars object installed in the rank-zero actor's runtime_env.
-        env_vars["VERL_MASTER_ENDPOINT_CONFIG"] = json.dumps(
+        env_vars["WG_MASTER_ENDPOINT_CONFIG"] = json.dumps(
             (metadata_name, ray.get_runtime_context().namespace, master_port_range)
         )
         worker = worker_factory(**worker_kwargs)
-        master_addr_port_ref = master_endpoint_metadata.wait_for_master_endpoint.remote()
+        master_addr_port_ref = master_endpoint_metadata.get_master_endpoint.remote()
         completed, _ = ray.wait([master_addr_port_ref, worker.get_master_addr_port.remote()], num_returns=1)
         # Watch for constructor failures while waiting for the master endpoint.
         ray.get(completed[0])
