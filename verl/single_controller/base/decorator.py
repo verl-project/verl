@@ -427,7 +427,11 @@ def _wrap_worker_preprocess_fn(func, worker_preprocess_fn):
     if worker_preprocess_fn is None:
         return func
 
-    if inspect.iscoroutinefunction(func) or inspect.iscoroutinefunction(worker_preprocess_fn):
+    if (
+        inspect.iscoroutinefunction(func)
+        or inspect.iscoroutinefunction(worker_preprocess_fn)
+        or inspect.iscoroutinefunction(inspect.getattr_static(worker_preprocess_fn, "__call__", None))
+    ):
 
         @wraps(func)
         async def async_inner(self, *args, **kwargs):

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+
 import pytest
 
 import verl.single_controller.base.decorator as decorator_module
@@ -20,6 +22,7 @@ from verl.single_controller.base.decorator import (
     Dispatch,
     _check_dispatch_mode,
     get_predefined_dispatch_fn,
+    register,
     register_dispatch_mode,
     update_dispatch_mode,
 )
@@ -74,3 +77,16 @@ def test_update_existing_dispatch_mode(reset_dispatch_registry):
     # Verify update
     assert get_predefined_dispatch_fn(original_mode)["dispatch_fn"] == new_dispatch
     assert get_predefined_dispatch_fn(original_mode)["collect_fn"] == new_collect
+
+
+class _AsyncPreprocess:
+    async def __call__(self, worker, *args, **kwargs):
+        return (args[0] + 1,), kwargs
+
+
+def test_async_callable_instance_preprocess_is_awaited():
+    @register(worker_preprocess_fn=_AsyncPreprocess())
+    def add_one(self, value):
+        return value
+
+    assert asyncio.run(add_one(None, 1)) == 2

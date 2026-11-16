@@ -27,6 +27,16 @@ from verl.utils.device import get_device_name, get_nccl_backend, get_torch_devic
 
 def _broadcast_preprocess(mesh_name: str):
     def preprocess(worker, *args, **kwargs):
+        is_mp_src = worker._query_dispatch_info(mesh_name).is_mp_src
+        values = (*args, *kwargs.values())
+        if is_mp_src:
+            assert values and all(value is not None for value in values), (
+                "MP source rank must receive the dispatched shard"
+            )
+        else:
+            assert values and all(value is None for value in values), (
+                "Non-source ranks must receive None before the model-parallel broadcast"
+            )
         return worker.broadcast_data(mesh_name, *args, **kwargs)
 
     return preprocess
@@ -70,7 +80,7 @@ class TestActor(Worker):
         mesh = self.infer_device_mesh if mesh_name == "infer" else self.train_device_mesh
 
         def _broadcast(value, group):
-            device = torch.device("cuda", torch.cuda.current_device())
+            device = torch.device(get_device_name(), get_torch_device().current_device())
             objects = [value]
             dist.broadcast_object_list(objects, group=group, group_src=0, device=device)
             return objects[0]
