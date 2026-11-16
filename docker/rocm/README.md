@@ -75,6 +75,38 @@ The vLLM build uses `MAX_JOBS=64`.
 | `BASE_IMAGE` | `rocm/primus:v26.4` | Base image providing ROCm, torch, Flash Attention, TransformerEngine and aiter. |
 | `VLLM_TAG` / `SGLANG_TAG` / `VERL_TAG` | pinned | Source commits for the from-source components. |
 
+## Kimi-K3.1 true on-policy (MI355X)
+
+[`Dockerfile.rocm.kimi-k31.true-on-policy`](Dockerfile.rocm.kimi-k31.true-on-policy) builds the image for
+[`examples/grpo_trainer/run_kimi_k3_1_megatron_lite.sh`](../../examples/grpo_trainer/run_kimi_k3_1_megatron_lite.sh):
+LoRA GRPO on Kimi-K3.1 (MXFP4 routed experts) where the vLLM rollout log-probs and the trainer log-probs of the same
+tokens are bitwise equal (`rollout_probs_diff_max` = 0).
+
+- Base: a ROCm vLLM build with Kimi-K3.1 support (vLLM 0.0.0+f5926fb with AITER), passed with
+  `--build-arg BASE_IMAGE=<image>@sha256:<digest>` (no default; pin it by digest).
+- Megatron-LM: `megatron.core` from NVIDIA/Megatron-LM, and mLite (`experimental/lite`) with its vLLM-aligned
+  Kimi-K3.1 implementation (`impl=vllm`) ported to ROCm, from [a fork of zero-mismatch-rl](https://github.com/indianspeedster/zero-mismatch-rl/tree/megatron/kimi-k3.1-rocm)
+  (branch `megatron/kimi-k3.1-rocm`).
+- vLLM general plugins from [kimi-k31-rocm-vllm-plugins](https://github.com/indianspeedster/kimi-k31-rocm-vllm-plugins):
+  `k31lora` (LoRA for the ROCm Kimi-K3.1 model, both arms), `k31kdabi` and `k31dsabi` (batch-invariant KDA and DSA),
+  and `k31xlora` (W4A16 expert LoRA for the batch-variant arm). Each plugin picks its arm from `VLLM_BATCH_INVARIANT`.
+- Every fork is fetched at a full commit SHA (`*_REPO` / `*_REVISION` build args) and the build fails if the checkout
+  does not resolve to it.
+
+```sh
+DOCKER_BUILDKIT=1 docker build \
+    -f docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy \
+    --build-arg BASE_IMAGE=<image>@sha256:<digest> \
+    -t verl-rocm:kimi-k31-true-on-policy .
+```
+
+The recipe selects the arm with `VLLM_BATCH_INVARIANT` (1: batch-invariant rollout + mLite `impl=vllm` actor; 0:
+default vLLM kernels with token-level truncated IS). The validated layout is 2 nodes x 8 GPUs: actor PP4 x EP4, one
+TP8 + EP8 rollout engine per node. Export the arm's environment before `ray start` on every node, and start the
+containers with `--device /dev/infiniband --ulimit memlock=-1:-1 --ulimit nofile=1048576:1048576`. RDMA over AMD ionic
+NICs works as for the DeepSeek-V4 image: run `eval "$(ionic-rdma-env.sh)"` before `ray start` and pass the cluster's
+RCCL/RoCE settings into the containers.
+
 ## Release History
 
 - 2026/11/13: vLLM v0.32.0 @`5df63a720` (+ vllm#61872), aligned with verl's CUDA
