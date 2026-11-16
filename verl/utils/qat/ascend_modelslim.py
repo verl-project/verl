@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import re
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,14 @@ def detect_ascend_modelslim(model_path: str) -> bool:
     except ImportError:
         return False
     return detect_quantization_method(model_path) == "ascend"
+
+
+_EXPERT_INDEX_RE = re.compile(r"(\.experts\.)\d+(\.)")
+
+
+def _modelslim_template_key(name: str) -> str:
+    """Fold an expert index to the description's experts.0 template key."""
+    return _EXPERT_INDEX_RE.sub(r"\g<1>0\g<2>", name, count=1)
 
 
 class ModelSlimMxfp8WeightExporter:
@@ -60,10 +69,11 @@ class ModelSlimMxfp8WeightExporter:
     def _export_weight(name: str, weight: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:
         import torch_npu
 
-        quantized, scale = torch_npu.npu_dynamic_mx_quant(weight, axis=-1, dst_type=torch.float8_e4m3fn)
-        groups = (weight.shape[-1] + 31) // 32
+        quantized, scale = torch_npu.npu_dynamic_mx_quant(
+            weight.to(torch.bfloat16).contiguous(), axis=-1, dst_type=torch.float8_e4m3fn
+        )
         yield name, quantized
-        yield name + "_scale", scale.flatten(-2, -1)[..., :groups]
+        yield name + "_scale", scale.flatten(-2, -1).squeeze(-1)
 
     def __call__(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterator[tuple[str, torch.Tensor]]:
         for name, tensor in weights:
@@ -75,8 +85,11 @@ class ModelSlimMxfp8WeightExporter:
                 yield from self._export_selected_weight(name, tensor)
 
     def _export_selected_weight(self, name: str, tensor: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:
+        quant_type = self.quant_description.get(name)
+        if quant_type is None and ".experts." in name:
+            quant_type = self.quant_description.get(_modelslim_template_key(name))
         if (
-            self.quant_description.get(name) != "W8A8_MXFP8"
+            quant_type != "W8A8_MXFP8"
             or tensor.ndim != 2
             or tensor.dtype not in _HIGH_PRECISION_DTYPES
         ):

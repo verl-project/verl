@@ -280,6 +280,7 @@ def process_quanted_weights_after_loading(model, reload_state):
     # Last: the rebuild reads ``wo_a``, which is only back in its inference
     # layout once the staged FP8 params above have been reinstated.
     refresh_rocm_attention_weight_caches(model)
+    refresh_ascend_gdn_conv_weights(model)
 
 
 def reset_uncalibrated_kv_cache_scales(model):
@@ -311,6 +312,31 @@ def reset_uncalibrated_kv_cache_scales(model):
             set_default_quant_scales(module, register_buffer=False)
 
 
+def refresh_ascend_gdn_conv_weights(model):
+    """Repack the GDN conv kernel-layout buffers after every refit."""
+    refreshed = 0
+    for module in model.modules():
+        pack = getattr(module, "_pack_conv_weights", None)
+        if pack is None:
+            continue
+        pack()
+        refreshed += 1
+    if refreshed:
+        logger.info("[GDN-REPACK] refreshed %d GDN conv packs", refreshed)
+
+
+def translate_weight_names_for_vllm(weights, model):
+    """Map HF-checkpoint weight names to the vLLM module tree before loading."""
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+    if mapper is None or not hasattr(mapper, "_map_name"):
+        yield from weights
+        return
+    for name, tensor in weights:
+        mapped_name = mapper._map_name(name)
+        if mapped_name is not None:
+            yield mapped_name, tensor
+
+
 def load_quanted_weights(weights, model_runner, is_drafter=False):
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
@@ -322,6 +348,7 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
     else:
         model = model_runner.model
     weights = list(weights)
+    weights = list(translate_weight_names_for_vllm(weights, model))
 
     # Monkey patch the param class to their subclass, as certain models
     # will check the param type to call the proper weightloader

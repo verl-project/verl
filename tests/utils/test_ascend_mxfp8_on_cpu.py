@@ -179,6 +179,22 @@ def test_ascend_quantizer_expands_packed_experts(monkeypatch):
     assert output[f"{prefix}.down_proj.weight_scale"].shape == (64, 1)
 
 
+def test_ascend_quantizer_uses_experts_zero_template(monkeypatch):
+    from verl.utils.qat.ascend_modelslim import ModelSlimMxfp8WeightExporter
+
+    calls = _patch_torch_npu(monkeypatch)
+    name = "model.layers.0.mlp.experts.7.gate_proj.weight"
+    template = "model.layers.0.mlp.experts.0.gate_proj.weight"
+    quantizer = ModelSlimMxfp8WeightExporter({template: "W8A8_MXFP8"})
+    weight = torch.randn(32, 64, dtype=torch.bfloat16)
+
+    output = dict(quantizer([(name, weight)]))
+
+    assert set(output) == {name, name + "_scale"}
+    assert output[name + "_scale"].shape == (32, 2)
+    assert calls == [(weight, -1, torch.float8_e4m3fn)]
+
+
 def test_ascend_quantizer_rejects_unsupported_weight_types():
     from verl.utils.qat.ascend_modelslim import ModelSlimMxfp8WeightExporter
 

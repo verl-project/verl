@@ -162,6 +162,7 @@ class FSDPEngine(BaseEngine):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
+        self._rollout_weight_quantizer = None
         # Set in _build_fsdp_module when FSDP2 CPUOffloadPolicy is configured (see #5995).
         self._uses_fsdp2_cpu_offload_policy = False
 
@@ -972,8 +973,18 @@ class FSDPEngine(BaseEngine):
             )
             per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
 
+        if self._rollout_weight_quantizer is not None and not (peft_config is not None and base_sync_done):
+            refresh_scales = getattr(self._rollout_weight_quantizer, "refresh_input_global_scales", None)
+            if refresh_scales is not None:
+                refresh_scales(self.module)
+            per_tensor_param = self._rollout_weight_quantizer(per_tensor_param)
+
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
+
+    def set_rollout_weight_quantizer(self, quantizer) -> None:
+        """See :meth:`BaseEngine.set_rollout_weight_quantizer`."""
+        self._rollout_weight_quantizer = quantizer
 
     def _merged_lora_per_tensor_param(self):
         """Stream merged (base + LoRA) weights for rollout weight sync.
@@ -1010,7 +1021,11 @@ class FSDPEngine(BaseEngine):
         """Full HF-format weights for the checkpoint 'hf_model' export, with LoRA adapters merged."""
         if self._is_lora:
             return self._merged_lora_per_tensor_param(), None
-        return self.get_per_tensor_param()
+        quantizer, self._rollout_weight_quantizer = self._rollout_weight_quantizer, None
+        try:
+            return self.get_per_tensor_param()
+        finally:
+            self._rollout_weight_quantizer = quantizer
 
     def disable_adapter(self) -> ContextManager:
         return self.module.disable_adapter()
