@@ -120,11 +120,6 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
             is_collect = is_collect and self._parallel_state.get_ulysses_rank() == 0
         return is_collect
 
-    @contextmanager
-    def _gradient_sync_context(self, *, is_last_micro_batch: bool):
-        # FSDP-Turbo owns gradient synchronization.
-        yield
-
     def optimizer_step(self):
         """
         Clip gradients, skip update if non-finite, and step optimizer.
