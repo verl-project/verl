@@ -113,6 +113,10 @@ DEFAULT_IGNORE_FILES = (
     # does not yet carry a ROCm platform switch; migrate by folding ``_rocm``
     # into a platform/DEVICE env-var toggle rather than in this PR.
     "examples/grpo_trainer/run_deepseek_v4_flash_megatron_rocm.sh",
+    # Backend-agnostic Score Centering recipe script that selects its training
+    # backend at runtime via the ``TRAIN_BACKEND`` env-var toggle (``megatron``,
+    # ``veomni``, or ``fsdp2``).
+    "examples/rollout_correction/run_qwen3_30b_a3b_score_centering.sh",
 )
 
 

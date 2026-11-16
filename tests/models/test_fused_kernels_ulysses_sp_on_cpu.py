@@ -406,3 +406,83 @@ def test_veomni_adapter_promotes_unified_topk_log_probs():
     assert captured["impl_backend"] == "tilelang"
     assert torch.equal(captured["input_ids"], expected_labels)
     assert output.topk_log_probs.shape == topk_labels.shape
+
+
+def test_veomni_adapter_skips_eager_lm_head_and_non_eager_opslot():
+    """Real VeOmni generated forwards run veomni_causal_lm_loss OpSlot (if bound) or
+    self.lm_head(hidden_states) before self.loss_function; verify both are bypassed on return_log_probs=True."""
+    import sys
+
+    model = _make_fake_lm()
+    input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
+    shift_labels = torch.tensor([[20, 30, 40, 50]], dtype=torch.long)
+    topk_labels = torch.tensor([[[3, 4], [5, 6], [7, 8], [9, 10]]], dtype=torch.long)
+
+    class _FakeOpSlot:
+        def __init__(self, kernel):
+            self._kernel = kernel
+
+        @property
+        def use_non_eager_impl(self) -> bool:
+            return self._kernel is not None
+
+        def __call__(self, *args, **kwargs):
+            return self._kernel(*args, **kwargs)
+
+    slot = _FakeOpSlot(
+        lambda **_kw: (_ for _ in ()).throw(AssertionError("OpSlot must not intercept return_log_probs"))
+    )
+    lm_head_calls = 0
+    orig_lm_head_fwd = model.lm_head.forward
+
+    def fail_if_lm_head_called(x):
+        nonlocal lm_head_calls
+        lm_head_calls += 1
+        return orig_lm_head_fwd(x)
+
+    model.lm_head.forward = fail_if_lm_head_called
+
+    def realistic_veomni_forward(input_ids, labels=None, **kwargs):
+        hidden_states = model.model(input_ids)[0]
+        if labels is not None:
+            if slot.use_non_eager_impl:
+                _, logits, fused_linear_aux = slot(
+                    logits=None, labels=labels, hidden_states=hidden_states, weights=model.lm_head.weight, **kwargs
+                )
+            else:
+                logits = model.lm_head(hidden_states)
+                _, _, fused_linear_aux = model.loss_function(
+                    logits=logits, labels=labels, hidden_states=hidden_states, weights=model.lm_head.weight, **kwargs
+                )
+                if fused_linear_aux is not None:
+                    logits = None
+        else:
+            logits = model.lm_head(hidden_states)
+            fused_linear_aux = None
+        return SimpleNamespace(logits=logits, fused_linear_aux=fused_linear_aux)
+
+    model.loss_function = lambda **_kw: (torch.tensor(0.0), None, None)
+    model.forward = realistic_veomni_forward
+    this_mod = sys.modules[type(model).__module__]
+    old_slot = getattr(this_mod, "veomni_causal_lm_loss", None)
+    this_mod.veomni_causal_lm_loss = slot
+    try:
+        patch_veomni_forward_with_backends(model, use_fused_kernels=True, fused_kernels_backend="tilelang")
+        with _patch_fused_kernels() as captured:
+            output = model(
+                input_ids,
+                labels=input_ids,
+                shift_labels=shift_labels,
+                topk_labels=topk_labels,
+                temperature=1.0,
+                return_log_probs=True,
+            )
+        assert lm_head_calls == 0
+        assert slot.use_non_eager_impl is True
+        assert captured["impl_backend"] == "tilelang"
+        assert output.topk_log_probs.shape == topk_labels.shape
+    finally:
+        if old_slot is None:
+            delattr(this_mod, "veomni_causal_lm_loss")
+        else:
+            this_mod.veomni_causal_lm_loss = old_slot
