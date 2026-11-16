@@ -128,4 +128,5 @@ def test_agent_reward_loop_standalone():
     sample_scores = [row["rm_scores"].sum().item() for row in gen_batch]
     print(sample_scores)
 
+    tq.close()
     ray.shutdown()

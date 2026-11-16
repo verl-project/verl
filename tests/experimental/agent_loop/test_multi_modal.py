@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import pytest
 import ray
+import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from transformers.utils import get_json_schema
@@ -137,6 +138,7 @@ class ImageGeneratorTool(BaseTool):
 
 def test_multimodal_tool_agent(init_config):
     """Test agent loop with multimodal tool that returns images using Qwen VL model."""
+    tq.close()
     ray.shutdown()
     ray.init(
         runtime_env={
@@ -229,8 +231,7 @@ def test_multimodal_tool_agent(init_config):
         )
 
     batch = tu.get_tensordict(
-        {},
-        non_tensor_dict={
+        {
             "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
             "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
             "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
@@ -309,11 +310,13 @@ def test_multimodal_tool_agent(init_config):
     )
 
     print("Multimodal tool test passed!")
+    tq.close()
     ray.shutdown()
 
 
 def test_multimodal_single_turn_agent(init_config):
     """Test single turn agent loop with multimodal inputs using Qwen VL model."""
+    tq.close()
     ray.shutdown()
     ray.init(
         runtime_env={
@@ -395,8 +398,7 @@ def test_multimodal_single_turn_agent(init_config):
         )
 
     batch = tu.get_tensordict(
-        {},
-        non_tensor_dict={
+        {
             "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
             "agent_name": np.array(["single_turn_agent"] * len(raw_prompts)),
             "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
@@ -464,4 +466,5 @@ def test_multimodal_single_turn_agent(init_config):
     print(f"\nFound {image_pad_count} samples with image_pad out of {expected_multimodal_samples} expected")
 
     print("Single turn multimodal test passed!")
+    tq.close()
     ray.shutdown()

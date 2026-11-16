@@ -34,6 +34,7 @@ import os
 import time
 
 import ray
+import transfer_queue as tq
 from omegaconf import DictConfig
 from torch.utils.data import SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -130,6 +131,7 @@ def perf_rollout(mode, backend, n_gpus_per_node, num_steps):
         if step + 1 >= num_steps:
             break
 
+    tq.close()
     ray.shutdown()
 
 

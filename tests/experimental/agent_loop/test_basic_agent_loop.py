@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import pytest
 import ray
+import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf
 from transformers.utils import get_json_schema
 
@@ -89,8 +90,7 @@ def test_single_turn(init_config):
         [{"role": "user", "content": "Let's play a role playing game. Your name is Bob, your favorite color is red."}],
     ]
     batch = tu.get_tensordict(
-        {},
-        non_tensor_dict={
+        {
             "raw_prompt": np.array(raw_prompts),
             "agent_name": np.array(["single_turn_agent"] * len(raw_prompts)),
             "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
@@ -115,6 +115,7 @@ def test_single_turn(init_config):
     assert all(turns == 2 for turns in num_turns)
 
     print("Test passed!")
+    tq.close()
     ray.shutdown()
 
 
@@ -181,6 +182,7 @@ class WeatherToolWithData(BaseTool):
 
 
 def test_tool_agent(init_config):
+    tq.close()
     ray.shutdown()
     ray.init(
         runtime_env={
@@ -241,8 +243,7 @@ def test_tool_agent(init_config):
         ],
     ]
     batch = tu.get_tensordict(
-        {},
-        non_tensor_dict={
+        {
             "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
             "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
             "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
@@ -292,12 +293,14 @@ def test_tool_agent(init_config):
         print(response_without_obs)
 
     print("Test passed!")
+    tq.close()
     ray.shutdown()
 
 
 def test_function_tool_agent(init_config):
     """End-to-end coverage for ``rollout.multi_turn.function_tool_path``."""
     # See ``test_tool_agent`` for why we shut Ray down first.
+    tq.close()
     ray.shutdown()
     ray.init(
         runtime_env={
@@ -324,8 +327,7 @@ def test_function_tool_agent(init_config):
         [{"role": "user", "content": "What is the current temperature in Tokyo, in celsius?"}],
     ]
     batch = tu.get_tensordict(
-        {},
-        non_tensor_dict={
+        {
             "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
             "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
             "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
@@ -379,6 +381,7 @@ def test_function_tool_agent(init_config):
         )
 
     print("Test passed!")
+    tq.close()
     ray.shutdown()
 
 
@@ -409,6 +412,7 @@ async def test_get_trajectory_info():
 def ray_for_lb():
     ray.init(ignore_reinit_error=True)
     yield
+    tq.close()
     ray.shutdown()
 
 

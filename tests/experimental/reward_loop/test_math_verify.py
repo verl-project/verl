@@ -14,6 +14,7 @@
 import os
 
 import ray
+import transfer_queue as tq
 from hydra import compose, initialize_config_dir
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
@@ -96,4 +97,5 @@ def test_agent_reward_loop_standalone():
     accuracy = sum(row["rm_scores"].sum().item() for row in gen_batch) / len(gen_batch)
     print(accuracy)
 
+    tq.close()
     ray.shutdown()

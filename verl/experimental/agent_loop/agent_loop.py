@@ -531,8 +531,6 @@ class AgentLoopWorker:
         teacher_client: dict[str, LLMServerClient] = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        tq.init()
-        self.background_tasks = set()
         self.config = config
         self.llm_client = llm_client
         self.teacher_client = teacher_client
@@ -596,6 +594,8 @@ class AgentLoopWorker:
             trace_config.get("token2text", False),
             trace_config.get("max_samples_per_step_per_worker", None),
         )
+        tq.init()
+        self.background_tasks = set()
 
     def _check_continuous_token_builder(self, custom_agent_names: list[str]) -> None:
         """Check the Continuous Token builder against the chat template before the first rollout.

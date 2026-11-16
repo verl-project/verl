@@ -164,4 +164,5 @@ def test_agent_reward_loop_standalone():
 
     print("done")
 
+    tq.close()
     ray.shutdown()
