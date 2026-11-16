@@ -16,6 +16,7 @@ import functools
 import logging
 import os
 import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -114,6 +115,12 @@ def build_trace_basename(
     return "_".join(parts)
 
 
+def _call_platform_hook(platform, name: str, **kwargs):
+    """Call an optional platform hook; None if the platform has none."""
+    hook = getattr(platform, name, None)
+    return hook(**kwargs) if callable(hook) else None
+
+
 def get_torch_profiler(
     contents: list[str],
     save_path: str,
@@ -205,8 +212,12 @@ def get_torch_profiler(
     # The platform's own device type is both the activity to record and the `contents` keyword that
     # asks for it, so no per-backend branch is needed: NVIDIA/ROCm resolve "cuda" exactly as before,
     # and a device torch cannot profile resolves to nothing.
-    device = get_platform().device_name
-    device_activity = DEVICE_ACTIVITIES.get(device)
+    platform = get_platform()
+    device = platform.device_name
+    # A platform may name its activity (e.g. PrivateUse1); otherwise use torch's for the device.
+    device_activity = _call_platform_hook(platform, "torch_profiler_activity")
+    if not isinstance(device_activity, torch.profiler.ProfilerActivity):
+        device_activity = DEVICE_ACTIVITIES.get(device)
     device_requested = not contents or device in contents
     if device_requested and device_activity is not None:
         activities.append(device_activity)
@@ -233,6 +244,11 @@ def get_torch_profiler(
         profile_memory="memory" in contents,
         on_trace_ready=_trace_handler,
     )
+    # Platform-specific profiler kwargs, e.g. an experimental_config for a device trace.
+    if device_activity is not None and device_requested:
+        extra_kwargs = _call_platform_hook(platform, "torch_profiler_kwargs", save_path=save_path, rank=rank)
+        if isinstance(extra_kwargs, Mapping):
+            profile_kwargs.update(extra_kwargs)
     # With a schedule the caller drives prof.step() per mini-batch to walk the
     # skip_first/wait/warmup/active/repeat state machine; without one, collection runs
     # continuously from start() to stop().
