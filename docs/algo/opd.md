@@ -2,7 +2,7 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 10/03/2026.
+Last updated: 11/09/2026.
 
 ## Background
 
@@ -331,6 +331,50 @@ coarse-grained KL definition.
 Minimum student probability mass used for the aggregate non-top-k bucket in
 `forward_kl_topk_tail`. Default: `1e-6`. This only guards `log(0)` when the
 student top-k mass rounds to one in finite precision.
+
+### `distillation.distillation_loss.semantic_eos_token_ids` (list[int], optional)
+
+Token ids that mean "end". Default: `null` (disabled). A base student
+and its post-trained teacher often end with different tokens, 
+
+e.g. a Qwen
+base model stops on `<|endoftext|>` (151643) while the instruct teacher stops on
+`<|im_end|>` (151645).
+
+
+Every student stop then gets a
+near-zero teacher probability for ending because student end token and teacher end token is differet, so under sampled-token OPD the student is trained out of stopping until responses run to `max_response_length`
+([arXiv:2609.20511](https://arxiv.org/abs/2609.20511)).
+
+When set, e.g. `[151643,151645]`, rollouts stop on any of these tokens, and a
+sampled stop is scored by both student and teacher as the log-sum-exp over the
+whole set. Requires a single-sample estimator `loss_mode` (`k1`, `k3`, ...) and
+the FSDP engine with `use_remove_padding=True` and fused kernels disabled.
+
+For example, at a position where the student samples `<|endoftext|>`:
+
+| | `<\|endoftext\|>` | `<\|im_end\|>` | scored log-prob |
+|---|---|---|---|
+| student | 0.50 | 0.49 | `log(0.50 + 0.49) = log 0.99` |
+| teacher | 0.00001 | 0.99 | `log(0.00001 + 0.99) ≈ log 0.99` |
+
+Without the option the teacher scores only `<|endoftext|>`, giving
+`log 0.50 - log 0.00001 ≈ 10.8` per stop; with it the stop costs about `0`.
+
+```bash
+distillation.distillation_loss.loss_mode=k1 \
+"distillation.distillation_loss.semantic_eos_token_ids=[151643,151645]"
+```
+
+### `distillation.distillation_loss.semantic_eos_teacher_topk` (int)
+
+Number of teacher prompt log-probs requested per position when
+`semantic_eos_token_ids` is set. 
+
+Teacher's probability for the sampled (student)
+terminal token is always returned, but its probability for the other terminal tokens (teacher) is in its top-k, so `k` must be large enough to contain them. 
+
+This is needed because we use the merge of student and teacher's termianl token as terminal token probabililty. Terminal tokens outside the teacher top-k are treated as zero mass. Default: `20`.
 
 ### `distillation.distillation_loss.use_policy_gradient` (bool)
 

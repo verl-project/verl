@@ -651,6 +651,13 @@ class AgentLoopWorker:
                 mm_processor_kwargs["sampling_rate"] = int(sampling_rate)
         return mm_processor_kwargs
 
+    def _add_semantic_eos_stop_token_ids(self, sampling_params: dict[str, Any]) -> None:
+        # Stop on every terminal token, not just the student tokenizer's EOS.
+        if self.distillation_enabled:
+            semantic_eos_token_ids = self.config.distillation.distillation_loss.get("semantic_eos_token_ids")
+            if semantic_eos_token_ids:
+                sampling_params["stop_token_ids"] = list(semantic_eos_token_ids)
+
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         """Generate sequences from agent loop.
 
@@ -681,6 +688,7 @@ class AgentLoopWorker:
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
         )
+        self._add_semantic_eos_stop_token_ids(sampling_params)
 
         def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
             params.pop("topk_log_probs", None)

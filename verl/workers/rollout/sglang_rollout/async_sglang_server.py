@@ -85,7 +85,8 @@ def _extract_prompt_logprobs_sglang(
 ) -> None:
     """Shape SGLang input-logprobs into the vLLM ``extract_prompt_logprobs`` contract.
     Populates ``result_dict`` with two ``[sequence_length, max(num_prompt_logprobs, 1)]``
-    lists — ``prompt_ids`` and ``prompt_logprobs`` — so the distillation teacher
+    lists — ``prompt_ids`` and ``prompt_logprobs`` — plus, when top-k is requested, the
+    ``[sequence_length]`` ``prompt_token_logprobs`` of the actual tokens, so the distillation teacher
     consumer in ``teacher_manager.AsyncTeacherLLMServerManager`` can treat vLLM and
     SGLang teachers interchangeably.
     SGLang returns input logprobs with length ``S == len(input_ids)`` whose first
@@ -98,6 +99,7 @@ def _extract_prompt_logprobs_sglang(
         input_top_logprobs = meta_info.get("input_top_logprobs") or []
     prompt_ids_ls: list[list[int]] = []
     prompt_logprobs_ls: list[list[float]] = []
+    token_logprobs_ls: list[float] = []
     # Entry 0 has logprob=None (no predicting context); skip it, matching vLLM.
     for position in range(1, len(input_token_logprobs)):
         if num_prompt_logprobs == 0:
@@ -115,6 +117,7 @@ def _extract_prompt_logprobs_sglang(
             )
             prompt_ids_ls.append(ids)
             prompt_logprobs_ls.append(logprobs)
+            token_logprobs_ls.append(float(input_token_logprobs[position][0]))
     # Trailing dummy row so total length == len(sequence_ids), matching vLLM.
     pad_width = max(num_prompt_logprobs, 1)
     prompt_ids_ls.append([0] * pad_width)
@@ -125,6 +128,9 @@ def _extract_prompt_logprobs_sglang(
     )
     result_dict["prompt_ids"] = prompt_ids_ls
     result_dict["prompt_logprobs"] = prompt_logprobs_ls
+    if num_prompt_logprobs > 0:
+        token_logprobs_ls.append(0.0)
+        result_dict["prompt_token_logprobs"] = token_logprobs_ls
 
 
 class SGLangHttpServer:
