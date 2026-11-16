@@ -326,6 +326,9 @@ class RLInsightLogger:
             yield
             return
 
+        # SDKs before 0.4.0 cannot buffer state traces before initialization.
+        if cls._rl_insight_version() < Version("0.4.0"):
+            cls._ensure_rl_insight_init()
         with cls._get_rl_insight().trace_state(state_name, state_lane_id=state_lane_id, **labels):
             yield
 
