@@ -117,7 +117,6 @@ class vLLMHttpServer:
         node_rank: int,
         gpus_per_node: int,
         nnodes: int,
-        cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
     ):
@@ -130,7 +129,6 @@ class vLLMHttpServer:
             node_rank (int): node rank.
             gpus_per_node (int): number of gpus per node.
             nnodes (int): number of nodes.
-            cuda_visible_devices (str): cuda visible devices.
             disaggregation_role: PD role, or ``"null"`` for normal rollout.
             disaggregation_kv_transfer_config: vLLM KVTransferConfig dict for PD.
         """
@@ -148,7 +146,6 @@ class vLLMHttpServer:
         self._pd_prefill_engine_id: Optional[str] = None
         self._pd_peer_idx: int = 0
 
-        os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
         # Forward the Ray job id into the vLLM worker subprocess so the
         # colocated weight-transfer IPC socket path is unique per Ray job.
@@ -211,7 +208,7 @@ class vLLMHttpServer:
             self._dp_rpc_port = None
             self._dp_master_port = None
 
-        self._post_init(cuda_visible_devices)
+        self._post_init()
 
     def _init_profiler(self) -> None:
         # used for controlling vllm server profiler
@@ -1065,35 +1062,25 @@ class vLLMHttpServer:
         )
 
     async def start_profile(self, **kwargs):
-        is_nsys = self.profiler_controller._tool == "nsys"
-        profile_engine = self.node_rank == 0 and self._should_profile()
-        if is_nsys:
+        if self.profiler_controller._tool == "nsys":
+            # One controller per Nsight session; its capture includes engine subprocesses.
+            # Forwarding the same CUDA-profiler calls can discard repeated capture ranges.
             self.profiler_controller.start(**kwargs)
-        try:
-            if profile_engine:
-                await self.engine.start_profile(**({} if is_nsys else kwargs))
-        except Exception:
-            if is_nsys:
-                self.profiler_controller.stop(run_command=False)
-            raise
+        elif self.node_rank == 0 and self._should_profile():
+            await self.engine.start_profile(**kwargs)
 
     async def stop_profile(self):
-        is_nsys = self.profiler_controller._tool == "nsys"
-        profile_engine = self.node_rank == 0 and self._should_profile()
-        try:
-            if profile_engine:
-                await self.engine.stop_profile()
-                if not is_nsys:
-                    # Collect engine traces for the training worker's end-of-run upload.
-                    relocate_rollout_traces(
-                        self.profiler_controller.config,
-                        self.replica_rank,
-                        self.replica_world_size,
-                        self.profiler_keep_global_ranks,
-                    )
-        finally:
-            if is_nsys:
-                self.profiler_controller.stop(run_command=False)
+        if self.profiler_controller._tool == "nsys":
+            self.profiler_controller.stop(run_command=False)
+        elif self.node_rank == 0 and self._should_profile():
+            await self.engine.stop_profile()
+            # Collect engine traces for the training worker's end-of-run upload.
+            relocate_rollout_traces(
+                self.profiler_controller.config,
+                self.replica_rank,
+                self.replica_world_size,
+                self.profiler_keep_global_ranks,
+            )
 
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""
@@ -1318,11 +1305,11 @@ class vLLMHttpServer:
             )
             self.config.max_num_batched_tokens = self.config.max_model_len
 
-    def _post_init(self, cuda_visible_devices: str) -> None:
+    def _post_init(self) -> None:
         """Called at the end of __init__. Default logs server metadata."""
         logger.info(
             f"{self.__class__.__name__}, replica_rank: {self.replica_rank}, node_rank: {self.node_rank}, "
-            f"{get_visible_devices_keyword()}: {cuda_visible_devices}, "
+            f"{get_visible_devices_keyword()}: {os.environ.get(get_visible_devices_keyword())}, "
             f"master_address: {self._master_address}, master_port: {self._master_port}, "
             f"data_parallel_rpc_port: {self._dp_rpc_port}, data_parallel_master_port: {self._dp_master_port}"
         )
@@ -1509,12 +1496,14 @@ class vLLMReplica(RolloutReplica):
         )
         self.server_class = ray.remote(vLLMHttpServer)
 
-    def _build_server_runtime_env(self, node_rank: int) -> dict:
-        """Combine platform environment variables and node-local Nsight options."""
+    def _build_server_runtime_env(self, node_rank: int, cuda_visible_devices: str) -> dict:
+        """Bind assigned devices and Nsight options before the server starts."""
         runtime_env = {
             "env_vars": {
                 **{var: "1" for var in get_platform().ray_noset_envvars()},
                 **get_platform().rollout_env_vars(),
+                # Nsight can initialize CUDA before the server constructor runs.
+                get_visible_devices_keyword(): cuda_visible_devices,
             }
         }
         nsight_options = _build_rollout_ray_actor_nsight_launch_options(
@@ -1568,7 +1557,7 @@ class vLLMReplica(RolloutReplica):
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env=self._build_server_runtime_env(node_rank),
+                runtime_env=self._build_server_runtime_env(node_rank, node_cuda_visible_devices),
                 name=name,
                 max_concurrency=self.config.ray_actor_max_concurrency,
             ).remote(
@@ -1580,7 +1569,6 @@ class vLLMReplica(RolloutReplica):
                 node_rank=node_rank,
                 gpus_per_node=gpus_per_replica_node,
                 nnodes=nnodes,
-                cuda_visible_devices=node_cuda_visible_devices,
             )
             self.servers.append(server)
 

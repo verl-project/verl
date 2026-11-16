@@ -39,9 +39,7 @@ def _run_check(check, enabled):
         patch("ray.get_runtime_context", return_value=context),
         patch("ray.util.get_node_ip_address", return_value="127.0.0.1"),
     ):
-        server = vLLMHttpServer(
-            config, model, RolloutMode.STANDALONE, [], 0, 0, 1, 1, os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "0")
-        )
+        server = vLLMHttpServer(config, model, RolloutMode.STANDALONE, [], 0, 0, 1, 1)
     for sock in (server._master_sock, server._dp_rpc_sock, server._dp_master_sock):
         sock.close()
     assert os.environ.get("VLLM_BATCH_INVARIANT", "0") == ("1" if enabled else "0")

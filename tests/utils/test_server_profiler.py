@@ -374,8 +374,6 @@ class TestVllmProfiler:
                 False,
                 [
                     call.server_start(profile_step=3),
-                    call.engine_start(),
-                    call.engine_stop(),
                     call.server_stop(run_command=False),
                 ],
                 False,
@@ -433,20 +431,6 @@ class TestVllmProfiler:
         relocate.assert_not_called()
         assert server.profiler_controller.start.call_count == server_calls
         assert server.profiler_controller.stop.call_count == server_calls
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("action", ["start", "stop"])
-    async def test_engine_failure_still_stops_server_profiler(self, backend, server, action):
-        error = RuntimeError("engine failed")
-        getattr(server.engine, f"{action}_profile").side_effect = error
-
-        with patch.object(backend, "relocate_rollout_traces") as relocate:
-            with pytest.raises(RuntimeError, match="engine") as exc:
-                await getattr(server, f"{action}_profile")()
-
-        assert exc.value is error
-        server.profiler_controller.stop.assert_called_once_with(run_command=False)
-        relocate.assert_not_called()
 
     def test_init_accepts_nsight_and_sets_report_role(self, backend):
         profiler_config = ProfilerConfig(tool="nsys", tool_config={"nsys": NsightToolConfig()})
@@ -525,9 +509,12 @@ class TestSGLangProfiler(unittest.IsolatedAsyncioTestCase):
     [
         (
             {"o": "rendered_%p"},
-            {"env_vars": {"NOSET_DEVICE": "1", "EXTRA": "value"}, "nsight": {"o": "rendered_%p"}},
+            {
+                "env_vars": {"NOSET_DEVICE": "1", "EXTRA": "value", "VISIBLE_DEVICES": "2,3"},
+                "nsight": {"o": "rendered_%p"},
+            },
         ),
-        (None, {"env_vars": {"NOSET_DEVICE": "1", "EXTRA": "value"}}),
+        (None, {"env_vars": {"NOSET_DEVICE": "1", "EXTRA": "value", "VISIBLE_DEVICES": "2,3"}}),
     ],
     ids=["nsight", "no-nsight"],
 )
@@ -544,14 +531,60 @@ def test_vllm_replica_build_server_runtime_env(options, expected_env):
     platform.rollout_env_vars.return_value = {"EXTRA": "value"}
     with (
         patch.object(backend, "get_platform", return_value=platform),
+        patch.object(backend, "get_visible_devices_keyword", return_value="VISIBLE_DEVICES"),
         patch.object(backend, "_build_rollout_ray_actor_nsight_launch_options", return_value=options) as build_options,
     ):
-        runtime_env = backend.vLLMReplica._build_server_runtime_env(replica, node_rank=1)
+        runtime_env = backend.vLLMReplica._build_server_runtime_env(replica, node_rank=1, cuda_visible_devices="2,3")
 
     build_options.assert_called_once_with(
         replica.config.profiler, replica_rank=3, replica_world_size=4, role="rollout_server_node_1"
     )
     assert runtime_env == expected_env
+
+
+@pytest.mark.asyncio
+async def test_vllm_replica_sets_assigned_devices_before_server_creation():
+    """The runtime must expose the assigned GPU before Nsight imports CUDA."""
+    backend = pytest.importorskip("verl.workers.rollout.vllm_rollout.vllm_async_server")
+    node_id = backend.ray.NodeID.from_random().hex()
+    worker = Mock()
+    worker.__ray_call__ = Mock(remote=AsyncMock(return_value=(node_id, "2")))
+    server = Mock()
+    server.get_master_address.remote = AsyncMock(return_value=("127.0.0.1", 10000, 10001))
+    server.launch_server.remote = AsyncMock()
+    server.get_server_address.remote = AsyncMock(return_value=("127.0.0.1", 10002))
+    actor_class = Mock()
+    actor_class.options.return_value.remote.return_value = server
+    replica = SimpleNamespace(
+        workers=[worker],
+        world_size=1,
+        nnodes=1,
+        gpus_per_replica_node=1,
+        replica_rank=2,
+        config=SimpleNamespace(profiler={}, ray_actor_max_concurrency=1),
+        model_config=None,
+        rollout_mode=None,
+        is_reward_model=False,
+        is_teacher_model=False,
+        name_suffix="",
+        servers=[],
+        server_class=actor_class,
+        _get_server_name_prefix=lambda: "test_",
+    )
+    replica._build_server_runtime_env = lambda *args, **kwargs: backend.vLLMReplica._build_server_runtime_env(
+        replica, *args, **kwargs
+    )
+    platform = Mock()
+    platform.ray_noset_envvars.return_value = ["NOSET_DEVICE"]
+    platform.rollout_env_vars.return_value = {}
+    with (
+        patch.object(backend, "get_platform", return_value=platform),
+        patch.object(backend, "get_visible_devices_keyword", return_value="VISIBLE_DEVICES"),
+        patch.object(backend, "_build_rollout_ray_actor_nsight_launch_options", return_value={"o": "test_%p"}),
+    ):
+        await backend.vLLMReplica.launch_servers(replica)
+
+    assert actor_class.options.call_args.kwargs["runtime_env"]["env_vars"]["VISIBLE_DEVICES"] == "2"
 
 
 if __name__ == "__main__":

@@ -392,18 +392,14 @@ def test_ray_actor_profile_enabled(config, expected):
     "config, output, expected",
     [
         (
-            ProfilerConfig(
-                ray_actor_nsight_options={"o": "template", "trace": "cuda", "session-new": "run_{role}_{rank}"}
-            ),
+            ProfilerConfig(ray_actor_nsight_options={"o": "template", "trace": "cuda"}),
             "template",
-            {"o": "rendered", "trace": "cuda", "session-new": "run_reward_loop_1"},
+            {"o": "rendered", "trace": "cuda"},
         ),
         (
-            OmegaConf.create(
-                {"ray_actor_nsight_options": {"o": "template", "trace": "cuda", "session-new": "run_{role}_{rank}"}}
-            ),
+            OmegaConf.create({"ray_actor_nsight_options": {"o": "template", "trace": "cuda"}}),
             "template",
-            {"o": "rendered", "trace": "cuda", "session-new": "run_reward_loop_1"},
+            {"o": "rendered", "trace": "cuda"},
         ),
         (ProfilerConfig(ray_actor_nsight_options={}), None, {"o": "rendered"}),
     ],
