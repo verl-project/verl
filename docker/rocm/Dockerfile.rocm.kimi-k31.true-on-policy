@@ -20,7 +20,8 @@ ENV PIP_CONSTRAINT=/opt/base-constraints.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install flash-linear-attention==0.5.2 mathruler==0.1.0 codetiming==1.4.0 pylatexenc==2.11 \
       torchdata==0.11.0 tensorboard wandb hydra-core omegaconf dill "ray[default]>=2.41.0" tensordict==0.10.0 \
-      peft accelerate pyarrow pandas "datasets>=4.0"
+      peft accelerate pyarrow pandas "datasets>=4.0" && \
+    pip install --no-deps TransferQueue==0.1.11
 
 # --- Sources pinned by commit: every clone must resolve to its exact revision ----------------------------------------
 COPY --chmod=755 <<'EOF' /usr/local/bin/clone_exact

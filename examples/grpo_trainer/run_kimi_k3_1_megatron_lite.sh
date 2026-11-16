@@ -322,7 +322,6 @@ HYDRA_ARGS=(
   trainer.test_freq="${TEST_FREQ}"
   trainer.default_local_dir="${CKPT_DIR}"
   trainer.val_before_train=False
-  trainer.use_v1=False
   critic.enable=False
 )
 
