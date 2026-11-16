@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import contextmanager
-
 import torch
 
 from verl.utils.fsdp_utils import fsdp2_load_full_state_dict
