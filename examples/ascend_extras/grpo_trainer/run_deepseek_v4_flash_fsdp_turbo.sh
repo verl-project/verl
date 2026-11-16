@@ -3,16 +3,25 @@
 # with FSDPTurbo: https://gitcode.com/Ascend/FSDPTurbo
 
 set -xeuo pipefail
+# ===================================================================
+# Detached docker exec does not inherit the interactive CANN environment.
+# Pin this launch to the installed toolkit used by torch_npu in this container.
+CANN_DIR=/usr/local/Ascend
+source $CANN_DIR/ascend-toolkit/set_env.sh
+set +u
+source $CANN_DIR/nnal/atb/set_env.sh --cxx_abi=1
+set -u
+#=======================================================================
 
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 PROJECT_NAME=${PROJECT_NAME:-GRPO-DeepSeekV4}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-GRPO-DeepSeekV4-Flash}
 
-RAY_DATA_HOME="/verl"
-MODEL_PATH="/models/DeepSeek-V4-Flash-BF16"
+RAY_DATA_HOME="/efs_rl/z00886395"
+MODEL_PATH="/efs_rl/z00886395/models/DeepSeek-V4-Flash-BF16"
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${PROJECT_NAME}/${EXPERIMENT_NAME}"}
-TRAIN_FILE="/datasets/dapo-math-17k.parquet"
-TEST_FILE="/datasets/dapo-math-17k.parquet"
+TRAIN_FILE="/efs_rl/c00833002/datasets/dapo-math-17k.parquet"
+TEST_FILE="/efs_rl/c00833002/datasets/dapo-math-17k.parquet"
 
 ########################### derived defaults ###########################
 NNODES=${NNODES:-4}
@@ -22,11 +31,11 @@ GEN_TP=${GEN_TP:-4}
 GEN_DP=${GEN_DP:-8}
 GEN_EP=${GEN_EP:-32}
 SP_SIZE=${SP_SIZE:-1}
-EP_SIZE=${EP_SIZE:-32}
+EP_SIZE=${EP_SIZE:-64}
 TP_SIZE=${TP_SIZE:-1}
 FSDP_SIZE=${FSDP_SIZE:-64}
 
-ep_dispatcher=fused
+ep_dispatcher=mc2
 max_prompt_length=$((1024 * 2))
 max_response_length=$((1024 * 6))
 max_model_len=$((max_prompt_length + max_response_length))
@@ -61,7 +70,13 @@ RECOMPUTE_PLAN="['model.layers.{*}']"
 MODULE_PATCHES="[{target:transformers.models.deepseek_v4.modeling_deepseek_v4.DeepseekV4RMSNorm,"\
 "replacement:examples.deepseekv4.modeling_deepseek_v4.FSDPTurboDeepSeekV4RMSNorm},"\
 "{target:transformers.models.deepseek_v4.modeling_deepseek_v4.DeepseekV4HyperConnection,"\
-"replacement:examples.deepseekv4.modeling_deepseek_v4.FSDPTurboDeepSeekV4HyperConnection}]"
+"replacement:examples.deepseekv4.modeling_deepseek_v4.FSDPTurboDeepSeekV4HyperConnection},"\
+"{target:transformers.models.deepseek_v4.modeling_deepseek_v4.DeepseekV4HCACompressor.forward,"\
+"replacement:fsdp_turbo.models.deepseek.deepseek_v4.modeling.DeepseekV4HCACompressor.forward},"\
+"{target:transformers.models.deepseek_v4.modeling_deepseek_v4.DeepseekV4CSACompressor.forward,"\
+"replacement:fsdp_turbo.models.deepseek.deepseek_v4.modeling.DeepseekV4CSACompressor.forward},"\
+"{target:transformers.models.deepseek_v4.modeling_deepseek_v4.DeepseekV4Attention.forward,"\
+"replacement:fsdp_turbo.models.deepseek.deepseek_v4.modeling.DeepseekV4Attention.forward}]"
 
 ########################### parameter arrays ###########################
 DATA=(
@@ -70,13 +85,13 @@ DATA=(
 
     data.train_files="${TRAIN_FILE}"
     data.val_files="${TEST_FILE}"
-    data.train_batch_size=64
+    data.train_batch_size=128
     data.max_prompt_length=${max_prompt_length}
     data.max_response_length=${max_response_length}
     data.filter_overlong_prompts=False
     data.filter_overlong_prompts_workers=0
-    data.truncation='error'
-    data.shuffle=False
+    data.truncation='left'
+    data.shuffle=True
 )
 
 MODEL=(
@@ -85,7 +100,9 @@ MODEL=(
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=False
     +actor_rollout_ref.model.override_config.attn_implementation=eager
+    +actor_rollout_ref.model.override_config.use_sparse_flash_attn=True
     +actor_rollout_ref.model.override_config._experts_implementation=eager
+    actor_rollout_ref.model.external_lib=examples.deepseekv4.register_dcp_loader
 )
 
 ACTOR=(
@@ -94,7 +111,7 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr=1e-6
     actor_rollout_ref.actor.optim.optimizer=AdamW
 
-    actor_rollout_ref.actor.ppo_mini_batch_size=32
+    actor_rollout_ref.actor.ppo_mini_batch_size=128
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     actor_rollout_ref.actor.use_dynamic_bsz=False
 
@@ -115,7 +132,7 @@ ACTOR=(
 
     "${ACTOR_TURBO}.distributed.fully_shard_parallel_size=${FSDP_SIZE}"
     "${ACTOR_TURBO}.distributed.expert_parallel_size=${EP_SIZE}"
-    "${ACTOR_TURBO}.distributed.expert_fully_shard_parallel_size=2"
+    "${ACTOR_TURBO}.distributed.expert_fully_shard_parallel_size=1"
     "${ACTOR_TURBO}.distributed.tensor_parallel_size=${TP_SIZE}"
     "${ACTOR_TURBO}.distributed.ulysses_parallel_size=${SP_SIZE}"
 
@@ -127,6 +144,7 @@ ACTOR=(
 
     "+${ACTOR_TURBO}.distributed.ep_plan.apply_modules=${EXPERT_APPLY_MODULES}"
     "+${ACTOR_TURBO}.distributed.ep_plan.dispatcher=${ep_dispatcher}"
+    "+${ACTOR_TURBO}.model.use_sparse_flash_attn=True"
 
     "+${ACTOR_TURBO}.memory.recompute=True"
     "+${ACTOR_TURBO}.memory.recompute_plan=${RECOMPUTE_PLAN}"
@@ -147,7 +165,7 @@ REF=(
 
     "${REF_TURBO}.distributed.fully_shard_parallel_size=${FSDP_SIZE}"
     "${REF_TURBO}.distributed.expert_parallel_size=${EP_SIZE}"
-    "${REF_TURBO}.distributed.expert_fully_shard_parallel_size=2"
+    "${REF_TURBO}.distributed.expert_fully_shard_parallel_size=1"
     "${REF_TURBO}.distributed.tensor_parallel_size=${TP_SIZE}"
     "${REF_TURBO}.distributed.ulysses_parallel_size=${SP_SIZE}"
 
@@ -159,6 +177,8 @@ REF=(
 
     "+${REF_TURBO}.distributed.ep_plan.apply_modules=${EXPERT_APPLY_MODULES}"
     "+${REF_TURBO}.distributed.ep_plan.dispatcher=${ep_dispatcher}"
+    "+${REF_TURBO}.model.use_sparse_flash_attn=True"
+    "+${REF_TURBO}.memory.recompute=False"
 
     "+${REF_TURBO}.module_patches=${MODULE_PATCHES}"
 )
@@ -184,7 +204,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.rollout.enforce_eager=False
 
-    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=512
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
 
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
     +actor_rollout_ref.rollout.engine_kwargs.vllm.max_num_seqs=48
@@ -203,6 +223,8 @@ TRAINER=(
     trainer.balance_batch=False
     trainer.total_epochs=100
     trainer.total_training_steps=100
+    trainer.use_v1=True
+    trainer.v1.trainer_mode=sync
 
     trainer.resume_from_path=checkpoints/
     trainer.val_before_train=False
