@@ -151,7 +151,7 @@ class vLLMPDReplica(vLLMReplica):
                     side_channel_host=prefill_host_ip,
                     side_channel_port=prefill_side_channel_port,
                     mooncake_bootstrap_port=prefill_side_channel_port,
-                    actor_name=f"vllm_server_{self.replica_rank}_0{self.name_suffix}",
+                    actor_name=f"{self._get_server_name_prefix()}server_{self.replica_rank}_0{self.name_suffix}",
                     zmq_base_trainer_rank=0,
                 )
             ]
@@ -182,7 +182,7 @@ class vLLMPDReplica(vLLMReplica):
                         side_channel_host=prefill_host_ip,
                         side_channel_port=decode_side_channel_port,
                         mooncake_bootstrap_port=prefill_side_channel_port,
-                        actor_name=f"vllm_server_decode_{self.replica_rank}_{i}{self.name_suffix}",
+                        actor_name=f"{self._get_server_name_prefix()}server_decode_{self.replica_rank}_{i}{self.name_suffix}",
                         zmq_base_trainer_rank=start,
                     )
                 )
@@ -280,6 +280,7 @@ class vLLMPDReplica(vLLMReplica):
             "MC_TCP_ENABLE_CONNECTION_POOL": os.environ.get("MC_TCP_ENABLE_CONNECTION_POOL", "1"),
             "VERL_ZMQ_BASE_TRAINER_RANK": str(zmq_base_trainer_rank),
             "VERL_RAY_JOB_ID": ray.get_runtime_context().get_job_id(),
+            "VERL_INSTANCE_ID": self.instance_id or "",
         }
 
         return self.server_class.options(

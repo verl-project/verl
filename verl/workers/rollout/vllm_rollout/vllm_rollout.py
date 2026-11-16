@@ -36,6 +36,11 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 
 from verl import DataProto
+from verl.single_controller.ray.instance_naming import (
+    build_vllm_server_prefix,
+    build_weight_transfer_socket,
+    get_instance_id,
+)
 from verl.third_party.vllm import VLLM_SLEEP_LEVEL
 from verl.utils.device import is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
@@ -60,6 +65,7 @@ class ServerAdapter(BaseRollout):
         replica_rank: int = -1,
     ):
         super().__init__(config, model_config, device_mesh)
+        self.instance_id = get_instance_id(self.config)
         self.server_handle: ray.actor.ActorHandle = None
 
         rank = int(os.environ["RANK"])
@@ -138,7 +144,12 @@ class ServerAdapter(BaseRollout):
         # stale socket file) cannot collide on the shared /tmp namespace.
         local_rank = self.rollout_rank % local_world_size
         job_id = ray.get_runtime_context().get_job_id()
-        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
+        self.zmq_handle = build_weight_transfer_socket(
+            job_id,
+            self.instance_id,
+            self.replica_rank,
+            local_rank,
+        )
 
         self.use_shm = not is_support_ipc()
         self._delta_weight_transfer_engine_initialized = False
@@ -320,7 +331,7 @@ class ServerAdapter(BaseRollout):
 
     def _get_server_name_prefix(self) -> str:
         """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_')."""
-        return f"{self.config.get('name', 'vllm')}_"
+        return build_vllm_server_prefix(self.instance_id, f"{self.config.get('name', 'vllm')}_")
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Batch generate sequences in sync mode.

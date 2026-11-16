@@ -49,6 +49,14 @@ defaults:
   # self config override anything above
   - _self_
 
+# Optional instance identifier. When set, it scopes the names of Ray actors,
+# placement groups and the weight-transfer IPC socket to this trainer, so that
+# several trainers can be initialized inside the same Ray job.
+instance:
+
+  # Identifier applied as a name prefix; null keeps the existing names.
+  id: null
+
 # config for actor, rollout and reference model
 actor_rollout_ref:
 
