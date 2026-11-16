@@ -15,7 +15,7 @@ import inspect
 from functools import partial, wraps
 from types import FunctionType
 
-from verl.protocol import DataProtoFuture, _padding_size_key
+from verl.protocol import DataProtoFuture
 from verl.utils.py_functional import DynamicEnum
 from verl.utils.transferqueue_utils import tqbridge
 
@@ -88,35 +88,6 @@ def _split_args_kwargs_data_proto(chunks, *args, **kwargs):
     return splitted_args, splitted_kwargs
 
 
-def _split_args_kwargs_data_proto_with_auto_padding(chunks, *args, **kwargs):
-    from verl.protocol import DataProto, DataProtoFuture
-
-    data_proto_len = None
-    padding_size = None
-
-    def _padding_and_split_data(obj, chunks):
-        nonlocal data_proto_len, padding_size
-        assert isinstance(obj, DataProto | DataProtoFuture)
-        if isinstance(obj, DataProto) and obj.is_padding_enabled():
-            # for padding, we only support DataProto with same length
-            if data_proto_len is None:
-                data_proto_len = len(obj)
-                padding_size = (chunks - (data_proto_len % chunks)) if (data_proto_len % chunks > 0) else 0
-            else:
-                assert data_proto_len == len(obj), (
-                    f"expecting all arg share same length of {data_proto_len}, but got {len(obj)}"
-                )
-            obj.padding(padding_size=padding_size)
-        return obj.chunk(chunks=chunks)
-
-    splitted_args = [_padding_and_split_data(arg, chunks) for arg in args]
-    splitted_kwargs = {key: _padding_and_split_data(val, chunks) for key, val in kwargs.items()}
-    if padding_size is not None:
-        splitted_kwargs[_padding_size_key] = padding_size
-
-    return splitted_args, splitted_kwargs
-
-
 def dispatch_one_to_all(worker_group, *args, **kwargs):
     args = tuple([arg] * worker_group.world_size for arg in args)
     kwargs = {k: [v] * worker_group.world_size for k, v in kwargs.items()}
@@ -168,8 +139,7 @@ def dispatch_dp_compute_data_proto(worker_group, *args, **kwargs):
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
-    # Note: enable auto padding for dp compute DatapProto
-    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto_with_auto_padding(
+    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(
         worker_group.world_size,
         *args,
         **kwargs,
