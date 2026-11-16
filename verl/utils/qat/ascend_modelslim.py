@@ -73,7 +73,7 @@ class ModelSlimMxfp8WeightExporter:
             weight.to(torch.bfloat16).contiguous(), axis=-1, dst_type=torch.float8_e4m3fn
         )
         yield name, quantized
-        yield name + "_scale", scale.flatten(-2, -1).squeeze(-1)
+        yield name + "_scale", scale.flatten(-2, -1)
 
     def __call__(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterator[tuple[str, torch.Tensor]]:
         for name, tensor in weights:
