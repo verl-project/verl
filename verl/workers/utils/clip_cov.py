@@ -74,9 +74,19 @@ def prepare_clip_cov_batch(engine, data, config):
     The caller has entered train mode and supplied the training microbatch settings.
     Restore RNG states so the additional no-grad forward does not consume the
     training pass's random stream. Recompute for every optimizer update.
+
+    Score centering is not supported: selection would need the same support-
+    corrected log probabilities as the training loss, not the raw prepass output.
+    Reject it before inference rather than silently changing the distribution.
     """
     if tu.get(data, "distillation_only", default=False):
         return
+    rollout_correction = config.policy_loss.get("rollout_correction", None) or {}
+    if rollout_correction.get("score_centering", False) or tu.get(data, "score_centering", default=False):
+        raise NotImplementedError(
+            "Clip-Cov minibatch selection does not yet support score centering. "
+            "The prepass must use the same support-corrected log probabilities as the training loss."
+        )
     prepass_data = data.copy()
     # The selection pass only needs policy log probabilities, not teacher losses.
     tu.assign_non_tensor(prepass_data, distillation_use_topk=False)
