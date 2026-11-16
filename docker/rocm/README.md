@@ -81,6 +81,7 @@ The vLLM build uses `MAX_JOBS=64`.
   stack; TileLang 0.1.10 kept (no longer uninstalled); transformers==5.16.1,
   mcore_bridge==1.7.0, TransferQueue==0.1.11, verl @`3503bec34`. Same ROCm 7.14
   base (`rocm/primus:v26.4`), torch==2.12.0, triton==3.7.0; targets gfx942 / gfx950.
+  Prebuilt as `verlai/verl:rocm7.14_torch2.12_release_1112`.
 
 - 2026/07/20: ROCm 7.14 stack — torch==2.12.0, triton==3.7.0, vLLM @`18d87a87d`,   SGLang @`0801cc05ed`, 
   Flash Attention (CK) @`v2.8.3`, TransformerEngine @`e6ede467`,

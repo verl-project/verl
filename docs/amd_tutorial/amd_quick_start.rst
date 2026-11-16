@@ -27,17 +27,11 @@ Software Baseline
 
 Use the following prebuilt image for tutorial and validation:
 
-- ``amdagi/verl-dev:rocm7.14_torch2.12_release_0724``
+- ``verlai/verl:rocm7.14_torch2.12_release_1112``
 
 Or build from source:
 
 - `docker/rocm/Dockerfile.rocm <https://github.com/verl-project/verl/blob/main/docker/rocm/Dockerfile.rocm>`_
-
-.. note::
-
-   The prebuilt image above predates the current ``Dockerfile.rocm`` (it ships an
-   older vLLM source build). To get vLLM v0.32.0, build the image from
-   ``Dockerfile.rocm``.
 
 Host Prerequisites
 ------------------
@@ -54,7 +48,7 @@ Launch Container
 .. code-block:: bash
 
     NAME=verl_release
-    DOCKER=amdagi/verl-dev:rocm7.14_torch2.12_release_0724
+    DOCKER=verlai/verl:rocm7.14_torch2.12_release_1112
 
     docker pull $DOCKER
 
