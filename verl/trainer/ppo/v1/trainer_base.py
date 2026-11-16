@@ -72,7 +72,11 @@ from verl.trainer.ppo.utils import (
     need_teacher_policy,
 )
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
-from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
+from verl.trainer.ppo.v1.utils import (
+    MetricsAggregator,
+    compute_advantage_for_multi_trajectories,
+    rollout_logprob_dump_fields,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass
@@ -1403,7 +1407,13 @@ class PPOTrainer(ABC):
         """Fetch rollout data from TransferQueue and dump sorted by uid."""
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
             fields = ["uid", "prompts", "responses", "rm_scores", "reward_model"]
+            dump_logprobs = self.config.trainer.get("rollout_data_dump_logprobs", False)
+            if dump_logprobs:
+                fields.append("old_log_probs")
+                if self.config.actor_rollout_ref.rollout.calculate_log_probs:
+                    fields.append("rollout_log_probs")
             data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+            logprob_fields = rollout_logprob_dump_fields(data) if dump_logprobs else {}
             data["prompts"] = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
             data["responses"] = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
 
@@ -1434,6 +1444,8 @@ class PPOTrainer(ABC):
             scores = [scores[i] for i in sorted_indices]
 
             reward_extra_infos_dict = {"uid": [batch.keys[i] for i in sorted_indices]}
+            for name, values in logprob_fields.items():
+                reward_extra_infos_dict[name] = [values[i] for i in sorted_indices]
 
             self._dump_generations(
                 inputs=inputs,

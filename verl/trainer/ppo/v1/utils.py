@@ -216,3 +216,14 @@ def compute_advantage_for_multi_trajectories(
     data.batch["advantages"] = scores
     data.batch["returns"] = scores
     return data
+
+
+def rollout_logprob_dump_fields(data, names=("old_log_probs", "rollout_log_probs")) -> dict[str, list]:
+    """Per-sample response log-prob lists and prompt lengths for the rollout dump, from nested (jagged) fields."""
+    out = {}
+    for name in names:
+        if name in data.keys():
+            out[name] = [row.float().tolist() for row in data[name].unbind()]
+    if "prompts" in data.keys():
+        out["prompt_len"] = data["prompts"].offsets().diff().tolist()
+    return out

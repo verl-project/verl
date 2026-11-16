@@ -161,6 +161,9 @@ trainer:
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
 
+  # Add per-token trainer and rollout log-probs (response tokens) and prompt lengths to the rollout dump
+  rollout_data_dump_logprobs: False
+
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
 
