@@ -148,6 +148,11 @@ ENV ROCPROFILER_LOG_LEVEL=fatal
 ENV HSA_ENABLE_IPC_MODE_LEGACY=1
 ENV PYTORCH_ALLOC_CONF=expandable_segments:True
 ENV MIOPEN_DEBUG_FORCE_IMMED_MODE_FALLBACK=1
+# scikit-learn and joblib (imported via transformers) default KMP_INIT_AT_FORK to
+# FALSE. torch here uses the ROCm SDK's LLVM OpenMP, which then skips its at-fork
+# reset, and a fork-started dataloader worker can deadlock in torch.set_num_threads(1).
+# Set it explicitly so that default is not applied.
+ENV KMP_INIT_AT_FORK=TRUE
 RUN SP="$(python -c 'import site; print(site.getsitepackages()[0])')"; \
     ln -sfn "$SP/_rocm_sdk_core/share/amd_smi/amdsmi" "$SP/amdsmi"
 RUN apt-get update && apt-get install -y --no-install-recommends vim \

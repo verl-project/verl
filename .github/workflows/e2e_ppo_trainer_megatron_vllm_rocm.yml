@@ -95,6 +95,11 @@ env:
   # cores these jobs are pinned to and roughly doubles the Megatron job. This keeps
   # the runtime from registering, at the cost of GPU records in profiler traces.
   HSA_TOOLS_DISABLE_REGISTER: "1"
+  # scikit-learn and joblib (imported via transformers) default KMP_INIT_AT_FORK to
+  # FALSE. The ROCm torch build uses LLVM OpenMP, which then skips its at-fork reset,
+  # and a fork-started dataloader worker can deadlock in torch.set_num_threads(1),
+  # hanging the step until the job timeout. Set it explicitly so the default is not applied.
+  KMP_INIT_AT_FORK: "TRUE"
 
 jobs:
   e2e_ppo_trainer_fsdp_vllm_rocm:
