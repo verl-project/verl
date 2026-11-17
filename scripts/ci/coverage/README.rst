@@ -138,9 +138,14 @@ publishes ``ascend-coverage-combined-<run-attempt>`` containing one
     index.json
     workflows/<workflow.yml>/<job-id>/manifest.json
     workflows/<workflow.yml>/<job-id>/coverage/step-NN/coverage.<host>.<pid>.<suffix>
-    workflows/<workflow.yml>/<job-id>/covstub/verl/...
+    covstub/verl/...
 
-All other retained job files also live under that workflow/job directory.
+The combined archive keeps one shared source snapshot at ``covstub/verl/``,
+beside ``workflows/``. The top-level ``covstub`` field in ``index.json`` points
+to it. Aggregation verifies that every selected job has the same source file
+paths and SHA-256 contents; missing or differing snapshots fail aggregation.
+Individual job artifacts still include their own snapshot. All other retained
+job files live under their workflow/job directory.
 ``index.json`` maps every called workflow filename to its caller result and
 available jobs, then each job to its manifest and step directories. Failed or
 skipped workflows with no artifacts remain in the index with

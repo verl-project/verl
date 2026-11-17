@@ -15,6 +15,7 @@
 """Bundle job archives with an index keyed by workflow filename; never import torch."""
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -35,6 +36,7 @@ def aggregate(inputs, destination, workflow):
         "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
         "source_sha": os.environ["GITHUB_SHA"],
         "selection_ready": False,
+        "covstub": "covstub",
         "workflows": {},
     }
     for caller, job in definition["jobs"].items():
@@ -68,6 +70,7 @@ def aggregate(inputs, destination, workflow):
         raise ValueError("No job coverage archives were downloaded")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(".partial")
+    shared_snapshot = None
     with tarfile.open(temporary, "w:gz") as output:
         for (filename, job), (attempt, archive, manifest) in sorted(selected.items()):
             prefix = f"workflows/{filename}/{job}"
@@ -87,6 +90,7 @@ def aggregate(inputs, destination, workflow):
             }
             with tarfile.open(archive, "r:gz") as source:
                 seen = set()
+                snapshot = {}
                 for member in source:
                     path = PurePosixPath(member.name)
                     if path.is_absolute() or ".." in path.parts or "\\" in member.name:
@@ -97,11 +101,26 @@ def aggregate(inputs, destination, workflow):
                     if path.name == "command.sh" or (path.name.startswith("process-") and path.suffix == ".json"):
                         continue
                     data = source.extractfile(member) if member.isfile() else None
-                    member.name = f"{prefix}/{path.as_posix()}"
+                    if path.parts[0] == "covstub":
+                        if member.isfile():
+                            payload = data.read()
+                            snapshot[path.as_posix()] = hashlib.sha256(payload).hexdigest()
+                            data = io.BytesIO(payload)
+                        if shared_snapshot is not None:
+                            continue
+                        member.name = path.as_posix()
+                    else:
+                        member.name = f"{prefix}/{path.as_posix()}"
                     # An inherited PAX path overrides member.name when the tar is read.
                     # Let tarfile regenerate it from the namespaced name when needed.
                     member.pax_headers.pop("path", None)
                     output.addfile(member, data)
+                if not snapshot:
+                    raise ValueError(f"Missing or empty source snapshot: {archive}")
+                if shared_snapshot is None:
+                    shared_snapshot = snapshot
+                elif snapshot != shared_snapshot:
+                    raise ValueError(f"Source snapshots differ: {archive}")
         for item in index["workflows"].values():
             item["artifacts_present"] = bool(item["jobs"])
         payload = (json.dumps(index, indent=2) + "\n").encode()
