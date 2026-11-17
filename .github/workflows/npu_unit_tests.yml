@@ -122,7 +122,7 @@ jobs:
         env:
           VERL_TEST_N_GPUS_PER_NODE: "16"
         run: |
-          python -m pytest -s -x \
+          pytest -s -x \
             --ignore-glob="*test_special_*.py" \
             --ignore-glob="*on_cpu.py" \
             --ignore-glob="*test_vllm*" \
@@ -145,7 +145,7 @@ jobs:
             tests/ -k "not test_sender_accepts_strided_tensor"
       - name: Running NPU profiling unit tests
         run: |
-          python -m pytest -s -x tests/utils/test_special_mstx_profile.py
+          pytest -s -x tests/utils/test_special_mstx_profile.py
       - name: Running FSDP2 NPU model transfer regression
         run: |
           PYTHONPATH="$PWD:$PYTHONPATH" torchrun --standalone --nproc-per-node=16 tests/special_distributed/test_fsdp2_model_cpu_offload.py
@@ -154,10 +154,10 @@ jobs:
           PYTHONPATH="$PWD:$PYTHONPATH" torchrun --standalone --nproc-per-node=2 tests/utils/test_special_megatron_kl_loss_tp.py
       - name: Running NPU checkpoint_engine unit tests
         run: |
-          python -m pytest -s -x tests/checkpoint_engine/test_correctness_on_npu.py
+          pytest -s -x tests/checkpoint_engine/test_correctness_on_npu.py
       - name: Running CPU checkpoint_engine unit tests
         run: |
-          python -m pytest -s -x \
+          pytest -s -x \
             tests/checkpoint_engine/test_global_steps_on_cpu.py \
             tests/checkpoint_engine/test_block_placement.py \
             tests/checkpoint_engine/test_sharded_delta.py

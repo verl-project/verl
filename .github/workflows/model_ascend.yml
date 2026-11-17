@@ -117,7 +117,7 @@ jobs:
           VERL_USE_EXTERNAL_MODULES: megatron_adaptor
         run: |
           # Preload verl so Ascend patches run before test modules import Megatron.
-          python -m pytest -p verl -s -x tests/models/test_model_forward_fused.py
+          pytest -p verl -s -x tests/models/test_model_forward_fused.py
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # TODO: Move test_engine.py's check_dtype=False, when npu's vllm0.23.0 is ok, run pytest -s -x tests/models/test_engine.py::test_actor_engine[fsdp] check it
