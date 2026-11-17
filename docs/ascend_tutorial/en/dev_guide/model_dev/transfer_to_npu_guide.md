@@ -15,7 +15,7 @@ Refer to the official [Ascend Installation Guide](../../get_start/install_guidan
 
 ### 1.2 Model Weights
 
-BF16 is the **default mixed-precision training data type** for training backends such as FSDP and Megatron in the VeRL framework. The Ascend NPU environment uniformly uses **BF16** as the baseline precision format, and weights need to be aligned and dequantized to BF16. Currently, A2 and A3 models **do not support FP8 precision training** and only support BF16 precision; the Ascend 950PR & 950DT series products will open up FP8 low-precision training capabilities in later versions.
+BF16 is the **default mixed-precision training data type** for training backends such as FSDP and Megatron in the VeRL framework. The Ascend NPU environment uniformly uses **BF16** as the baseline precision format, and weights need to be aligned and dequantized to BF16. Currently, A2 and A3 models **do not support FP8 precision training** and only support BF16 precision; the Ascend 950PR&950DT products will open up FP8 low-precision training capabilities in later versions.
 
 ### 1.3 Data Preparation
 

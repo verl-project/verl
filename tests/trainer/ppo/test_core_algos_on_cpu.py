@@ -366,7 +366,7 @@ def test_codapo_value_and_weighted_grpo_advantage():
 
 
 def test_codapo_dispatches_grpo_normalization_setting():
-    from verl.trainer.ppo.ray_trainer import compute_advantage
+    from verl.trainer.ppo.trainer_utils import compute_advantage
 
     data = SimpleNamespace(
         batch={
@@ -378,7 +378,7 @@ def test_codapo_dispatches_grpo_normalization_setting():
     )
 
     with patch(
-        "verl.trainer.ppo.ray_trainer.core_algos.get_adv_estimator_fn",
+        "verl.trainer.ppo.trainer_utils.core_algos.get_adv_estimator_fn",
         return_value=compute_codapo_outcome_advantage,
     ):
         compute_advantage(

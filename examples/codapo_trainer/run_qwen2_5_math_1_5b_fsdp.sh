@@ -74,7 +74,6 @@ REWARD=(
 )
 
 TRAINER=(
-    trainer.use_v1=True
     trainer.v1.trainer_mode=sync
     trainer.critic_warmup=0
     trainer.logger='["console","wandb"]'

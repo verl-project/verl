@@ -68,7 +68,16 @@ Using TensorRT-LLM rollout for DAPO with FP8
 
 Using TensorRT-LLM rollout in fully async with GRPO
 ----------------------------------------------------
+
+Follow the `recipe setup <https://github.com/verl-project/verl-recipe/tree/main/fully_async_policy/README.md#required-verl-version>`_
+and run from the pinned verl v0.9.1 checkout with the recipe repository at ``recipe/``.
+
+The default layout requires 16 GPUs: two training nodes and two rollout nodes,
+with four GPUs per node. Set ``NNODES_TRAIN``, ``NNODES_ROLLOUT``, and
+``NGPUS_PER_NODE`` to change the layout. For a 4+4 split, set
+``NNODES_TRAIN=1``, ``NNODES_ROLLOUT=1``, and ``NGPUS_PER_NODE=4``.
+
 .. code-block:: bash
 
-    # Fully async policy with Megatron-Core training engine
-    bash verl/experimental/fully_async_policy/shell/grpo_30b_a3b_base_math_megatron_4_4_mis_trtllm.sh
+    # Fully async policy with Megatron-Core training engine (verl v0.9.1)
+    bash recipe/fully_async_policy/shell/grpo_30b_a3b_base_math_megatron_8_8_mis_trtllm.sh

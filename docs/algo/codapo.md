@@ -103,7 +103,6 @@ actor_rollout_ref:
     n: 8
 
 trainer:
-  use_v1: true
   v1:
     trainer_mode: sync
 ```

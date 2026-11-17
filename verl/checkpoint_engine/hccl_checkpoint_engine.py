@@ -149,7 +149,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
         """Destroy the HCCL process group if rebuild_group is True."""
         if self.rebuild_group:
             if self.rank >= 0:
-                self.pyhccl.destroyComm(self.pyhccl.comm)
+                self.pyhccl.close()
                 self.pyhccl = None
             self.rank = None
             self.world_size = None

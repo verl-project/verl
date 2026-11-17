@@ -1192,6 +1192,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         logits_processor_func: Callable,
         batch: TensorDict,
         data_format: str,
+        pad_to_length_bucket: int | None = None,
         cp_layout: str = "zigzag",
         local_cp_size: int | None = None,
     ):
@@ -1236,6 +1237,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     data=batch,
                     data_format=data_format,
                     quant_align_size=get_thd_quant_align_size(self.tf_config),
+                    pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                     local_cp_size=local_cp_size,
                 )
@@ -1273,20 +1275,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
             else None
         )
 
-        if pad_to_length_bucket is not None and (distillation_use_topk or score_centering):
-            raise RuntimeError("pad_to_length is not supported with top-K distillation or score centering")
-        if pad_to_length_bucket is not None and self.enable_routing_replay:
-            raise RuntimeError("pad_to_length is not supported with router replay")
-
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
                 "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
                 "fused kernels do not materialize the full logits tensor needed for Σπ²."
-            )
-        if score_centering and use_fused_kernels:
-            raise NotImplementedError(
-                "score_centering=True is not supported with use_fused_kernels=True: "
-                "fused kernels do not materialize the logits tensor score centering needs."
             )
         pad_mode = tu.get_non_tensor_data(batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         temperature = batch["temperature"]
@@ -1307,6 +1299,11 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         unwrapped_model = unwrap_model(model)
         cp_layout = self._get_context_parallel_layout(unwrapped_model)
+        min_local_rows = (
+            self.tf_config.csa_window_size
+            if getattr(self.tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
+            else None
+        )
         if hasattr(unwrapped_model, "vp_stage"):
             vp_rank = unwrapped_model.vp_stage
         else:
@@ -1337,6 +1334,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 vp_rank,
                 replay_mask=replay_mask,
                 local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
                 model=unwrapped_model,
             )
 
@@ -1350,8 +1348,24 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         if use_fused_kernels:
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
+            from verl.models.mcore.util import get_thd_quant_align_size
 
             fused_forward_fn = get_mcore_forward_fused_model_engine_fn(self.model_config.hf_config)
+            topk_labels = None
+            auxiliary_logits_processor = None
+            if distillation_use_topk or score_centering:
+                topk_key = "teacher_ids" if distillation_use_topk else "rollout_topk_ids"
+                topk_labels = batch[topk_key]
+                auxiliary_logits_processor = partial(
+                    logits_processor_func,
+                    data=batch,
+                    data_format="thd",
+                    quant_align_size=get_thd_quant_align_size(self.tf_config),
+                    min_local_rows=min_local_rows,
+                    pad_to_length_bucket=pad_to_length_bucket,
+                    cp_layout=cp_layout,
+                    local_cp_size=local_cp_size,
+                )
             output = fused_forward_fn(
                 model=model,
                 input_ids=input_ids,
@@ -1365,6 +1379,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 router_padding_mask=router_padding_mask,
                 pad_to_length_bucket=pad_to_length_bucket,
                 position_ids=batch.get("position_ids", None),
+                topk_labels=topk_labels,
+                auxiliary_logits_processor=auxiliary_logits_processor,
+                distillation_only=distillation_only,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1388,6 +1405,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 logits_processor_func=logits_processor_func,
                 batch=batch,
                 data_format=data_format,
+                pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
                 local_cp_size=local_cp_size,
             )
@@ -1441,6 +1459,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 self.tf_config,
                 vp_rank,
                 local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
                 model=unwrapped_model,
             )
 
