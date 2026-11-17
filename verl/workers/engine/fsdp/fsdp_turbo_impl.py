@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import contextmanager
-
 import torch
 
 from verl.utils.fsdp_utils import fsdp2_load_full_state_dict
@@ -119,11 +117,6 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
         if self._is_ulysses_enabled():
             is_collect = is_collect and self._parallel_state.get_ulysses_rank() == 0
         return is_collect
-
-    @contextmanager
-    def _gradient_sync_context(self, *, is_last_micro_batch: bool):
-        # FSDP-Turbo owns gradient synchronization.
-        yield
 
     def optimizer_step(self):
         """

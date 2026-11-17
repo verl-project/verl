@@ -48,8 +48,9 @@ Last updated: 09/21/2026.
 | 42 | Qwen3-VL-30B-A3B-Instruct | GRPO | [30B](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct) | VeOmni | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_vl_30b_moe_veomni.sh) | - | Atlas A3训练系列产品 |
 | 43 | DeepSeek-V4-Flash | GRPO | [284B](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash ) | MindSpeed-llm | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/DeepSeek-V4-Flash/examples/train_deepseek_v4_grpo_mindspeed_vllm.sh) | - | Atlas A3训练系列产品 |
 | 44 | DeepSeek-V4-Flash | GRPO | [284B](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash ) | MindSpeed-llm | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/DeepSeek-V4-Flash/examples/train_deepseek_v4_grpo_mindspeed_vllm_A5.sh) | - | Ascend 950PR&950DT系列产品 |
-| 45 | Qwen3.8-27B | GRPO | [27B](https://huggingface.co/Qwen/Qwen3.8-27B) | Megatron | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8_27b_megatron.sh) | - | Atlas A3训练系列产品 |
-| 46 | GLM-5.2 | GRPO | [753B](https://huggingface.co/zai-org/GLM-5.2) | Megatron | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/ascend_extras/grpo_trainer/run_glm5_2_megatron.sh) | - | Atlas A3训练系列产品 |
+| 45 | DeepSeek-V4-Flash | GRPO | [284B](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash ) | FSDPTurbo | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/ascend_extras/grpo_trainer/run_deepseek_v4_flash_fsdp_turbo.sh) | - | Atlas A3训练系列产品 |
+| 46 | Qwen3.8-27B | GRPO | [27B](https://huggingface.co/Qwen/Qwen3.8-27B) | Megatron | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8_27b_megatron.sh) | - | Atlas A3训练系列产品 |
+| 47 | GLM-5.2 | GRPO | [753B](https://huggingface.co/zai-org/GLM-5.2) | Megatron | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/ascend_extras/grpo_trainer/run_glm5_2_megatron.sh) | - | Atlas A3训练系列产品 |
 
 ## Table 2 SFT Algorithms
 
