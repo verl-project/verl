@@ -102,7 +102,6 @@ Each executed job retains a GitHub Actions artifact for 14 days, named
     source-workflow.yml
     npu_pytest_suites.json
     coveragerc
-    covstub/verl/...
     coverage/step-NN/coverage.<host>.<pid>.<suffix>
 
 The source SHA, run/attempt, original workflow/job, step identities, aggregate process
@@ -142,10 +141,12 @@ publishes ``ascend-coverage-combined-<run-attempt>`` containing one
 
 The combined archive keeps one shared source snapshot at ``covstub/verl/``,
 beside ``workflows/``. The top-level ``covstub`` field in ``index.json`` points
-to it. Aggregation verifies that every selected job has the same source file
-paths and SHA-256 contents; missing or differing snapshots fail aggregation.
-Individual job artifacts still include their own snapshot. All other retained
-job files live under their workflow/job directory.
+to it. Aggregation creates this snapshot once using ``git archive`` from the
+run's exact source SHA in its checkout. Each selected job's manifest must match
+that SHA. Individual job artifacts do not include source snapshots; redundant
+snapshots from older attempts are ignored. The snapshot contains committed source,
+not any uncommitted changes made by workloads. All retained job files live under
+their workflow/job directory.
 ``index.json`` maps every called workflow filename to its caller result and
 available jobs, then each job to its manifest and step directories. Failed or
 skipped workflows with no artifacts remain in the index with

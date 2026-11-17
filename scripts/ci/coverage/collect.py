@@ -66,7 +66,7 @@ def write_json(path, value):
 
 
 def initialize():
-    """Snapshot the source and install an inert hook in the workload interpreter."""
+    """Record the collection plan and install an inert hook in the workload interpreter."""
     import coverage
 
     output = output_dir()
@@ -90,7 +90,6 @@ def initialize():
         "targets": [{**entry, "status": "pending"} for entry in plan],
     }
     write_json(output / "manifest.json", manifest)
-    shutil.copytree(ROOT / "verl", output / "covstub" / "verl", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copyfile(source_workflow, output / "source-workflow.yml")
     shutil.copyfile(ROOT / "scripts/ci/npu_pytest_suites.json", output / "npu_pytest_suites.json")
     with (output / "packages.txt").open("w", encoding="utf-8") as stream:
