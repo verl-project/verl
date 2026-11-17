@@ -74,6 +74,8 @@ jobs:
       options: >-
         --shm-size 16g
     env:
+      VERL_TEST_DISTRIBUTED_DEBUG: "1"
+      RAY_DEDUP_LOGS: "0"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       VERL_USE_EXTERNAL_MODULES: "megatron_adaptor" # import megatron_adaptor to patch megatron-lm
@@ -154,6 +156,22 @@ jobs:
               "not test_sender_accepts_strided_tensor",
           ]))
           '
+      - name: Collect NPU state after unit tests
+        if: ${{ always() }}
+        continue-on-error: true
+        run: |
+          echo '::group::NPU devices and device processes after unit tests'
+          timeout 30s npu-smi info || true
+          echo '::endgroup::'
+          echo '::group::Host memory, shared memory and resource limits'
+          free -h || true
+          df -h /dev/shm || true
+          ulimit -a || true
+          echo '::endgroup::'
+          echo '::group::Remaining processes and listening TCP sockets'
+          ps -eo pid,ppid,stat,comm || true
+          ss -lntp || true
+          echo '::endgroup::'
       - name: Running NPU profiling unit tests
         run: |
           # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
