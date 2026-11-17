@@ -13,15 +13,13 @@
 # limitations under the License.
 """CPU regression tests for outer-chunk loss-mask ownership and lifetime."""
 
-import sys
-import types
 from types import SimpleNamespace
 
 import pytest
 import torch
+from megatron.core.pipeline_parallel import outer_chunk
 from tensordict import TensorDict
 
-from verl.workers.engine.megatron import outer_chunk
 from verl.workers.engine.megatron.chunk_loss_mask import chunk_loss_data, reset_chunk_loss_mask_state
 from verl.workers.engine.megatron.transformer_impl import MegatronEngineWithLMHead
 
@@ -114,34 +112,28 @@ def test_each_logical_step_starts_without_previous_mask_state():
 
 
 def test_chunk_driver_resets_mask_state_at_each_logical_step(monkeypatch):
-    class _Tape:
-        def __init__(self, count):
-            self.count = count
-
-        def begin(self, index, mode):
-            pass
-
-    chunk_tape_module = types.ModuleType("megatron.core.pipeline_parallel.chunk_tape")
-    chunk_tape_module.ChunkTape = _Tape
-    monkeypatch.setitem(sys.modules, "megatron.core.pipeline_parallel.chunk_tape", chunk_tape_module)
-    monkeypatch.setattr("verl.workers.engine.megatron.transformer_impl.unwrap_model", lambda model: model)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 1)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 2)
 
     engine = object.__new__(MegatronEngineWithLMHead)
     engine._dsv41_mask_full = torch.ones(8)
     engine._dsv41_n0 = 4
     engine.get_context_parallel_group = lambda: None
-    model = torch.nn.Linear(1, 1)
-    from megatron.core.transformer.transformer_config import TransformerConfig
-
-    model.config = TransformerConfig(num_layers=1, hidden_size=16, num_attention_heads=2)
-    batch = _Batch()
+    model = object()
+    batch = _Batch(num_micro_batch=3)
+    tape = object()
     observed = []
     pass_contexts = []
+    objective_contexts = []
 
-    def forward_step(*args, **kwargs):
+    def forward_step(batch_iter, passed_model, logits_processor, postprocess):
+        assert next(batch_iter) is batch
+        assert passed_model is model
+        assert engine._dsv41_in_chunk
+        pass_contexts.append(engine._dsv41_chunk_ctx)
+
         def loss_callback(output):
-            pass_contexts.append(engine._dsv41_chunk_ctx)
+            assert not engine._dsv41_in_chunk
+            objective_contexts.append(engine._dsv41_chunk_ctx)
             return output["log_probs"].sum() * 0.0, {"loss": 0.0, "metrics": {}}
 
         return {"log_probs": torch.ones(4)}, loss_callback
@@ -150,16 +142,22 @@ def test_chunk_driver_resets_mask_state_at_each_logical_step(monkeypatch):
 
     def run_one_step(**kwargs):
         observed.append((engine._dsv41_mask_full, engine._dsv41_n0))
-        return kwargs["run_pass"](1).detach()
+        assert kwargs["model"] is model
+        assert kwargs["chunk_count"] == 2
+        assert kwargs["num_microbatches"] == 3
+        assert kwargs["cp_group_size"] == 2
+        output, loss_callback = kwargs["forward_pass"](1, tape)
+        return loss_callback(output)
 
-    monkeypatch.setattr(outer_chunk, "run_chunked_step", run_one_step)
+    monkeypatch.setattr(outer_chunk, "forward_backward_outer_chunks", run_one_step)
     engine._dsv41_chunked_forward_step(batch, model, None, None, 2)
     engine._dsv41_mask_full = torch.zeros(8)
     engine._dsv41_n0 = 99
     engine._dsv41_chunked_forward_step(batch, model, None, None, 2)
 
     assert observed == [(None, None), (None, None)]
-    assert pass_contexts == [None, None]
+    assert pass_contexts == [(1, 2, tape), (1, 2, tape)]
+    assert objective_contexts == [None, None]
 
 
 def test_mask_shorter_than_log_probs_raises():

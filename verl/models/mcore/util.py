@@ -361,15 +361,12 @@ def preprocess_thd_engine(
         cp_rank = mpu.get_context_parallel_rank()
     if _packed_seq_params_supports("cp_partition_mode"):
         extra_packed_args["cp_partition_mode"] = cp_layout
-    # Outer-sequence chunking: pass g of a K-way temporal split of one sequence presents
-    # itself as virtual rank g*cp_size + cp_rank of a group that is K times wider, so the
-    # row arithmetic below (alignment and the per-rank slice) covers this pass's window of
-    # the *whole* sequence. The process group stays physical.
     if cp_chunk_count > 1:
-        if not 0 <= cp_chunk_index < cp_chunk_count:
-            raise ValueError("cp_chunk_index must be within cp_chunk_count")
-        cp_rank = cp_chunk_index * cp_size + cp_rank
-        cp_size = cp_size * cp_chunk_count
+        from megatron.core.pipeline_parallel.outer_chunk_layout import get_outer_chunk_cp_coordinates
+
+        cp_rank, cp_size = get_outer_chunk_cp_coordinates(
+            cp_rank=cp_rank, cp_size=cp_size, chunk_index=cp_chunk_index, chunk_count=cp_chunk_count
+        )
     cp_layout_factor = 2 if cp_layout == "zigzag" and cp_size > 1 else 1
     align_size = tp_size * cp_size * cp_layout_factor
     # One contract: the alignment the model's quantization needs (32 for mxfp8, 16 for nvfp4
@@ -587,30 +584,6 @@ def preprocess_thd_engine(
         return input_ids, packed_seq_params, None
 
 
-def _place_chunk_rows(rows: torch.Tensor, seq_len: int, chunk_index: int, chunk_count: int) -> torch.Tensor:
-    """Scatter one pass's rows into a full-sequence buffer at their global positions.
-
-    Each pass computes one contiguous window of the packed timeline, but everything
-    downstream (``loss_mask``, ``batch_num_tokens``) is expressed in whole-sequence
-    coordinates. Without this the pass's rows stay anchored at row 0 and the loss
-    compares them against a mask that points somewhere else entirely - shapes match,
-    values do not.
-
-    Pass 0 owns the head, the last pass owns the tail (``seq_len - n``), and any middle
-    pass starts at ``index * n``. Passes that already return the whole sequence are
-    handed back untouched.
-    """
-    n = int(rows.shape[0])
-    total = int(seq_len)
-    if chunk_count <= 1 or total <= n:
-        return rows
-    start = 0 if chunk_index <= 0 else min(chunk_index * n, total - n)
-    take = min(n, total - start)
-    full = rows.new_zeros(total)
-    full[start : start + take] = rows[:take]
-    return full
-
-
 def postprocess_thd_engine(
     output: torch.Tensor,
     packed_seq_params: PackedSeqParams,
@@ -622,24 +595,12 @@ def postprocess_thd_engine(
     cp_chunk_index: int = 0,
     cp_chunk_count: int = 1,
 ) -> torch.Tensor:
-    """
-    Postprocess packed sequences
-
-    ``cp_chunk_index``/``cp_chunk_count`` mirror the preprocess arguments: pass g of K owns
-    the rows a K-times-wider CP group would give to virtual rank g*cp + rank, so the gather
-    must widen by chunk_count. They are explicit parameters because the packed_seq_params
-    object reaching this function does not carry them.
-    """
+    """Restore packed model output to its original jagged batch layout."""
     if cp_layout not in ("zigzag", "contiguous"):
         raise ValueError(f"Unsupported context parallel layout: {cp_layout}")
     if not post_process:
         return output
     if batch_size > 1 and cp_chunk_count > 1:
-        # Both layouts place a chunked pass's rows with `_place_chunk_rows`, which takes ONE
-        # sequence length, so a chunked multi-sequence batch would leave every sequence after
-        # the first anchored at row 0 and then compare those rows against a mask expressed in
-        # whole-sequence coordinates: shapes match, values do not, silently. Guarding here
-        # rather than inside the contiguous branch covers the zigzag layout too.
         raise NotImplementedError(
             f"outer-sequence chunking (cp_chunk_count={cp_chunk_count}) does not support "
             f"batch_size={batch_size}: the per-pass row placement is defined for a single "
@@ -666,40 +627,25 @@ def postprocess_thd_engine(
         cp_size = mpu.get_context_parallel_world_size()
         cp_group = mpu.get_context_parallel_group()
         cp_rank = mpu.get_context_parallel_rank()
-    # Outer-sequence chunking: pass g of K owns the rows a K-times-wider CP group would give
-    # to virtual rank g*cp + rank. This must run for BOTH branches above - verl always passes
-    # an explicit local_cp_size, so keeping it in the fallback branch silently skipped it and
-    # every pass reassembled at the physical width (the 2-chunk read then ran past each rank's
-    # data, filling the back half of the buffer with garbage).
-    # The collective stays physical; only the layout arithmetic widens. Keep the physical
-    # width so the gather can be sized to the group it actually runs over.
-    _phys_cp = cp_size
-    _cc2 = int(cp_chunk_count or 1)
-    if _cc2 > 1:
-        _ci2 = int(cp_chunk_index or 0)
-        cp_rank = _ci2 * cp_size + cp_rank
-        cp_size = cp_size * _cc2
-    # all gather output across context parallel group
+    if cp_chunk_count > 1:
+        from megatron.core.pipeline_parallel.outer_chunk_layout import restore_outer_chunk_thd_rows
+
+        rows = restore_outer_chunk_thd_rows(
+            output,
+            cp_group=cp_group,
+            chunk_index=cp_chunk_index,
+            chunk_count=cp_chunk_count,
+            sequence_length=seq_lens_cpu[0],
+            padded_length=cu_padded_cpu[1],
+            cp_layout=cp_layout,
+        )
+        offsets = torch.tensor([0, rows.size(0)], dtype=torch.int64, device=rows.device)
+        return torch.nested.nested_tensor_from_jagged(rows, offsets=offsets)
+
     if cp_size > 1:
-        # output shape: [1, packed_len, hidden_dim]
-        # need to gather across cp group and concatenate in sequence dimension
-        if cp_size != _phys_cp:
-            # Chunked pass: all_gather runs over the PHYSICAL group, and its result list must
-            # be exactly that wide. Handing it a list widened to the virtual width leaves the
-            # slots no rank writes untouched - they keep whatever the allocator handed back,
-            # which is the integer garbage that reached the K=2 loss. Gather narrow, then
-            # place every physical shard at its virtual index so the unused half stays zero.
-            _gathered = [torch.zeros_like(output) for _ in range(_phys_cp)]
-            torch.distributed.all_gather(_gathered, output.detach(), group=cp_group)
-            output_list = [torch.zeros_like(output) for _ in range(cp_size)]
-            _ci3 = int(cp_chunk_index or 0)
-            for _r in range(_phys_cp):
-                output_list[_ci3 * _phys_cp + _r] = _gathered[_r]
-            output_list[cp_rank] = output
-        else:
-            output_list = [torch.zeros_like(output) for _ in range(cp_size)]
-            torch.distributed.all_gather(output_list, output.detach(), group=cp_group)
-            output_list[cp_rank] = output
+        output_list = [torch.zeros_like(output) for _ in range(cp_size)]
+        torch.distributed.all_gather(output_list, output.detach(), group=cp_group)
+        output_list[cp_rank] = output
     else:
         output_list = [output]
 
@@ -715,7 +661,7 @@ def postprocess_thd_engine(
             # (logits, entropy), so the ranks drift far enough apart that the
             # following per-token all-gather hits the 600 s watchdog. Wrapping the
             # rows we already have is O(1) and produces the same jagged object.
-            rows = _place_chunk_rows(output_new[0], seq_lens_cpu[0], cp_chunk_index, cp_chunk_count)
+            rows = output_new[0]
             offsets = torch.tensor([0, rows.size(0)], dtype=torch.int64, device=rows.device)
             return torch.nested.nested_tensor_from_jagged(rows, offsets=offsets)
         return torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
@@ -746,31 +692,7 @@ def postprocess_thd_engine(
             tmp[s_len_padded - (j + 1) * half_seqlen : s_len_padded - j * half_seqlen] = o1
         output_new.append(tmp[:s_len])
 
-    output_new_tensor = torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
-
-    # --- 外层序列分块：还原成整段布局，只填本 pass 的行（GPT 会诊方案）---
-    # 每个 pass 只算了自己那段，把它写回全局位置、其余置 0，
-    # 于是 mask 无需改动、batch_num_tokens(=12) 保持整段口径，K 段 loss 相加 = 整段。
-    # global_start 不需要跨调用状态：pass 0 -> 0；最后一个 pass -> total - n
-    # （K=2 时 pass 1 就是最后一个 pass）。
-    _ccs = int(cp_chunk_count or 1)
-    if _ccs > 1 and hasattr(output_new_tensor, "values"):
-        _vals = output_new_tensor.values()
-        _n = int(_vals.numel())
-        try:
-            # 真实长度（不是 padded 总长）：缓冲区里每个真实 token 一个 log_prob。
-            # 用 cu_padded_cpu[-1] 会多出 8,025 行，使最后一个 pass 的窗口整体偏移。
-            _tot = int(s_len)
-        except Exception:
-            _tot = _n
-        _ci = int(cp_chunk_index or 0)
-        _ran = _tot > _n
-        _gs = 0 if _ci == 0 else max(0, _tot - _n)
-        _take = min(_n, _tot - _gs)
-        if _ran:
-            _full = _place_chunk_rows(_vals.reshape(-1), _tot, _ci, _ccs)
-            output_new_tensor = torch.nested.nested_tensor([_full], layout=torch.jagged)
-    return output_new_tensor
+    return torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
 
 
 def _build_npu_attn_mask(original_attention_mask: torch.Tensor) -> torch.Tensor:

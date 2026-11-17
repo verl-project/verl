@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from megatron.core.pipeline_parallel.outer_chunk import validate_outer_chunk_config
 from megatron.core.pipeline_parallel.schedules import forward_step_calc_loss
 from megatron.core.transformer.transformer_config import TransformerConfig
 
@@ -111,6 +112,74 @@ def test_chunk_rejects_unpartitioned_router_replay(monkeypatch, engine_replay, b
     with pytest.raises(NotImplementedError, match="router replay"):
         _check_cp_seq_chunk_config(engine.engine_config, engine.tf_config)
         engine.forward_step(iter([{"enable_routing_replay": batch_replay}]), model, None, post)
+
+
+@pytest.mark.parametrize(
+    "overrides,observed",
+    [
+        ({"dynamic_context_parallel": True}, "dynamic_context_parallel=True"),
+        ({"pipeline_model_parallel_size": 2}, "pipeline_model_parallel_size=2"),
+        ({"use_remove_padding": False}, "use_remove_padding=False"),
+        ({"use_fused_kernels": True}, "use_fused_kernels=True"),
+        ({"overlap_grad_reduce": True}, "overlap_grad_reduce=True"),
+        ({"transformer_config": SimpleNamespace(experimental_attention_variant="mla")}, "variant='mla'"),
+    ],
+)
+def test_core_rejects_unsupported_outer_chunk_config(overrides, observed):
+    config = {"context_parallel_size": 2, "pipeline_model_parallel_size": 1, **overrides}
+    with pytest.raises(NotImplementedError, match=observed):
+        validate_outer_chunk_config(**config)
+
+
+@pytest.mark.parametrize(
+    "cp_layout,chunk_positions",
+    [
+        ("contiguous", (((0, 1), (2, 3)), ((4, 5), (6, 7)), ((8, 9), (10, 11)))),
+        ("zigzag", (((0, 11), (1, 10)), ((2, 9), (3, 8)), ((4, 7), (5, 6)))),
+    ],
+)
+def test_chunk_thd_packing_restores_logical_rows_and_local_gradients(monkeypatch, cp_layout, chunk_positions):
+    from verl.models.mcore import util
+
+    group = SimpleNamespace(size=lambda: 2, rank=lambda: 1)
+    monkeypatch.setattr(util.mpu, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(util.mpu, "get_context_parallel_world_size", group.size)
+    monkeypatch.setattr(util.mpu, "get_context_parallel_rank", group.rank)
+    monkeypatch.setattr(util.mpu, "get_context_parallel_group", lambda: group)
+
+    logical_ids = torch.arange(1, 8)
+    input_ids = torch.nested.as_nested_tensor([logical_ids], layout=torch.jagged)
+    padded_ids = torch.cat([logical_ids, torch.zeros(5, dtype=logical_ids.dtype)])
+    # Give padding nonzero model output so an incorrect restored position stays visible.
+    padded_values = torch.arange(1.0, 25.0).reshape(12, 2)
+
+    for chunk_index, (peer_positions, local_positions) in enumerate(chunk_positions):
+        chunk = {"cp_chunk_index": chunk_index, "cp_chunk_count": 3, "cp_layout": cp_layout}
+        local_ids, packed, _ = util.preprocess_thd_engine(input_ids, **chunk)
+        torch.testing.assert_close(local_ids[0], padded_ids[list(local_positions)])
+        assert packed.cu_seqlens_q_padded.tolist() == [0, 12]
+
+        peer = padded_values[list(peer_positions)].requires_grad_()
+        local = padded_values[list(local_positions)].requires_grad_()
+
+        def gather(destinations, shard, group, *, expected_local=local, expected_peer=peer):
+            assert group.size() == len(destinations) == 2
+            assert not shard.requires_grad
+            torch.testing.assert_close(shard, expected_local)
+            destinations[0].copy_(expected_peer.detach())
+            destinations[1].copy_(shard)
+
+        monkeypatch.setattr(torch.distributed, "all_gather", gather)
+        restored = util.postprocess_thd_engine(local.unsqueeze(0), packed, input_ids, batch_size=1, **chunk)
+
+        visible = [position for position in (*peer_positions, *local_positions) if position < len(logical_ids)]
+        expected = torch.zeros_like(padded_values[: len(logical_ids)])
+        expected[visible] = padded_values[visible]
+        torch.testing.assert_close(restored.values(), expected)
+        restored.values().sum().backward()
+        expected_grad = (torch.tensor(local_positions) < len(logical_ids)).to(local.dtype)
+        torch.testing.assert_close(local.grad, expected_grad[:, None].expand_as(local))
+        assert peer.grad is None
 
 
 @pytest.mark.parametrize("chunks", [2, 3])
@@ -276,6 +345,7 @@ def test_chunk_keeps_text_only_vlm_batches_supported(monkeypatch, metadata):
         (["aux_loss", "seq_aux_loss", "global_aux_loss"], [0.0, 0.0, 0.0], False),
         ("none", 0.01, False),
         (["none", "aux_loss"], [0.01, 0.0], False),
+        ("aux_loss", None, False),
     ],
 )
 def test_chunk_rejects_only_enabled_nonadditive_balancing_losses(

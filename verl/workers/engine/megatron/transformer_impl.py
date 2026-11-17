@@ -116,127 +116,37 @@ def _resolve_cp_seq_chunks(engine_config) -> int:
 
 
 def _check_cp_seq_chunk_config(engine_config, tf_config=None) -> None:
-    """Reject unsupported chunking before any step can allocate a full sequence."""
+    """Resolve veRL settings before checking the Core schedule's requirements."""
     if _resolve_cp_seq_chunks(engine_config) == 1:
         return
-    if engine_config.dynamic_context_parallel:
-        raise NotImplementedError(
-            "Outer-sequence chunking requires static CP: "
-            f"dynamic_context_parallel={engine_config.dynamic_context_parallel!r}"
-        )
-    if engine_config.pipeline_model_parallel_size != 1:
-        raise NotImplementedError(
-            "Outer-sequence chunking requires pipeline_model_parallel_size == 1: "
-            f"pipeline_model_parallel_size={engine_config.pipeline_model_parallel_size!r}"
-        )
-    if not engine_config.use_remove_padding or engine_config.use_fused_kernels:
-        raise NotImplementedError(
-            "Outer-sequence chunking requires the non-fused THD forward: "
-            f"use_remove_padding={engine_config.use_remove_padding!r}, "
-            f"use_fused_kernels={engine_config.use_fused_kernels!r}"
-        )
-    # These are the DDP defaults used by make_megatron_module; forward-only
-    # engines are not wrapped in DDP. An explicit override wins for either wrapper.
+
+    from megatron.core.pipeline_parallel.outer_chunk import validate_outer_chunk_config
+
     overlap = not engine_config.forward_only and (engine_config.override_ddp_config or {}).get(
         "overlap_grad_reduce", engine_config.use_megatron_fsdp
     )
-    if overlap:
-        raise NotImplementedError(
-            f"Outer-sequence chunking requires overlap_grad_reduce=False: overlap_grad_reduce={overlap!r}"
-        )
-    replay_mode = engine_config.router_replay.mode
-    if replay_mode != "disabled":
-        raise NotImplementedError(
-            f"Outer-sequence chunking does not support router replay: router_replay.mode={replay_mode!r}"
-        )
-    if engine_config.context_parallel_size < 2:
-        raise NotImplementedError(
-            "Outer-sequence chunking requires physical context_parallel_size > 1: "
-            f"context_parallel_size={engine_config.context_parallel_size!r}; "
-            "CSA compression's CP1 path cannot address a later chunk's global token indices"
-        )
-    if tf_config is None:
-        return
-    attention = getattr(tf_config, "experimental_attention_variant", None)
-    if attention != "dsv4_hybrid":
-        raise NotImplementedError(
-            "Outer-sequence chunking requires DSV4 hybrid attention and its chunk tape: "
-            f"experimental_attention_variant={attention!r}"
-        )
-    balancing_types = getattr(tf_config, "moe_router_load_balancing_type", "aux_loss")
-    balancing_coeff = getattr(tf_config, "moe_aux_loss_coeff", 0)
-    balancing_losses = (
-        [(balancing_types, balancing_coeff)]
-        if isinstance(balancing_types, str)
-        else zip(balancing_types, balancing_coeff, strict=True)
+    validate_outer_chunk_config(
+        context_parallel_size=engine_config.context_parallel_size,
+        pipeline_model_parallel_size=engine_config.pipeline_model_parallel_size,
+        dynamic_context_parallel=engine_config.dynamic_context_parallel,
+        use_remove_padding=engine_config.use_remove_padding,
+        use_fused_kernels=engine_config.use_fused_kernels,
+        overlap_grad_reduce=overlap,
+        router_replay_mode=engine_config.router_replay.mode,
+        forward_only=engine_config.forward_only,
+        transformer_config=tf_config,
     )
-    if not engine_config.forward_only and any(
-        kind in ("aux_loss", "seq_aux_loss", "global_aux_loss") and coeff is not None and coeff > 0
-        for kind, coeff in balancing_losses
-    ):
-        raise NotImplementedError(
-            "Outer-sequence chunking does not support MoE balancing auxiliary losses: "
-            "their expert-frequency products require the complete logical sequence; "
-            "per-token scaling only supports additive z-loss; "
-            f"moe_router_load_balancing_type={balancing_types!r}, moe_aux_loss_coeff={balancing_coeff!r}"
-        )
-    z_loss = getattr(tf_config, "moe_z_loss_coeff", None)
-    if not tf_config.calculate_per_token_loss and z_loss:
-        raise NotImplementedError(
-            "Outer-sequence chunking with MoE z-loss requires calculate_per_token_loss=True: "
-            f"calculate_per_token_loss={tf_config.calculate_per_token_loss!r}, moe_z_loss_coeff={z_loss!r}"
-        )
 
 
 def _check_cp_seq_chunk_models(models, *, engine_config):
     """Validate actual routers while Bridge constructs models, before wrapping."""
-    for model in models if isinstance(models, list) else [models]:
-        _check_cp_seq_chunk_config(engine_config, unwrap_model(model).config)
-        from megatron.core.transformer.moe.router import TopKRouter
+    if _resolve_cp_seq_chunks(engine_config) == 1:
+        return models
 
-        # Inspect initialized routers: hash layers bypass balancing algorithms,
-        # and frozen/eval routers do not update QB's per-microbatch quantile.
-        for router in unwrap_model(model).modules():
-            if not isinstance(router, TopKRouter):
-                continue
-            hash_router = getattr(router, "is_hash_layer", False)
-            if (
-                router.training
-                and not hash_router
-                and router.routing_type == "sinkhorn"
-                and router.topk < router.num_experts
-            ):
-                raise NotImplementedError(
-                    "Outer-sequence chunking does not support training-mode Sinkhorn routing: "
-                    "its assignments require the complete token population; "
-                    f"training={router.training!r}, is_hash_layer={hash_router!r}, "
-                    f"routing_type={router.routing_type!r}, topk={router.topk!r}, num_experts={router.num_experts!r}"
-                )
-            if (
-                router.training
-                and not engine_config.forward_only
-                and not hash_router
-                and router.routing_type == "quantile_balancing"
-                and router.config.moe_router_quantile_balancing_ema != 1
-            ):
-                raise NotImplementedError(
-                    "Outer-sequence chunking does not support quantile-balancing updates: "
-                    "averaging chunk quantiles changes the next step's router bias; use frozen EMA=1 or inference; "
-                    f"training={router.training!r}, forward_only={engine_config.forward_only!r}, "
-                    f"is_hash_layer={hash_router!r}, "
-                    f"moe_router_quantile_balancing_ema={router.config.moe_router_quantile_balancing_ema!r}"
-                )
-            capacity_factor = router.config.moe_expert_capacity_factor
-            # ceil(T*topk/E*factor) >= T for every T at this boundary.
-            # Smaller positive factors can select different surviving tokens
-            # in each chunk; a short batch's ceil may only hide the mismatch.
-            if capacity_factor is not None and 0 < capacity_factor * router.topk < router.num_experts:
-                raise NotImplementedError(
-                    "Outer-sequence chunking does not support competitive MoE token dropping: "
-                    "disable capacity or set capacity_factor * router_topk >= num_experts; "
-                    f"capacity_factor={capacity_factor!r}, topk={router.topk!r}, num_experts={router.num_experts!r}"
-                )
-    return models
+    from megatron.core.pipeline_parallel.outer_chunk import validate_outer_chunk_models
+
+    _check_cp_seq_chunk_config(engine_config)
+    return validate_outer_chunk_models(models, forward_only=engine_config.forward_only)
 
 
 def _check_cp_seq_chunk_batch(batch, model) -> None:
@@ -1740,192 +1650,29 @@ class MegatronEngineWithLMHead(MegatronEngine):
     def _dsv41_chunked_forward_step(
         self, batch, model, logits_processor_func, postprocess_micro_batch_func, chunk_count, *, forward_only=False
     ):
-        """Differentiate the complete logical output, then replay one model graph at a time.
+        """Expose the engine's single-pass THD forward to the Core schedule."""
+        from megatron.core.pipeline_parallel.outer_chunk import forward_backward_outer_chunks
 
-        A sequence-level policy objective cannot be evaluated independently on
-        zero-filled chunk outputs: its importance ratio or clipping decision can
-        depend on every token. Scan the complete output without activations,
-        differentiate that objective once, and replay each chunk with the resulting
-        output adjoints. The tape additionally carries model-state adjoints across
-        chunk boundaries.
-        """
-        from megatron.core.pipeline_parallel.chunk_tape import ChunkTape
-        from megatron.core.pipeline_parallel.schedules import backward_step, forward_step_calc_loss
-
-        from verl.workers.engine.megatron.outer_chunk import run_chunked_step
-
-        config = unwrap_model(model).config
-        tape = ChunkTape(chunk_count)
         reset_chunk_loss_mask_state(self)
-        cp_size = torch.distributed.get_world_size(self.get_context_parallel_group())
-        num_microbatches = tu.get_non_tensor_data(batch, key="num_micro_batch", default=1)
-        model_output = {}
-        report_loss_func = None
-        replay_rng = {}
-        final_rng = None
 
-        def capture_rng():
-            from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
-
-            return (
-                torch.get_rng_state(),
-                torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
-                get_cuda_rng_tracker().get_states(),
-            )
-
-        def restore_rng(state):
-            from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
-
-            torch.set_rng_state(state[0])
-            if state[1] is not None:
-                torch.cuda.set_rng_state(state[1])
-            get_cuda_rng_tracker().set_states(state[2])
-
-        def accumulate_output(output):
-            # Postprocessing already scatters each pass into its true padded-stream
-            # coordinates. A second window based on real_length // K drops valid rows
-            # whenever the packed stream contains alignment padding.
-            for key, value in output.items():
-                value = detach_tree(value)
-                if key not in model_output:
-                    model_output[key] = value
-                elif value.is_nested:
-                    previous = model_output[key]
-                    model_output[key] = torch.nested.nested_tensor_from_jagged(
-                        previous.values() + value.values(), offsets=previous.offsets()
-                    )
-                else:
-                    model_output[key] = model_output[key] + value
-
-        def forward_pass(index):
-            nonlocal report_loss_func
-            if not forward_only:
-                if index in replay_rng:
-                    restore_rng(replay_rng[index])
-                else:
-                    replay_rng[index] = capture_rng()
+        def forward_pass(index, tape):
             self._dsv41_chunk_ctx = (index, chunk_count, tape)
             self._dsv41_in_chunk = True
             try:
-                output, loss_func = self.forward_step(
-                    iter([batch]), model, logits_processor_func, postprocess_micro_batch_func
-                )
-                report_loss_func = loss_func
-                return output
+                return self.forward_step(iter([batch]), model, logits_processor_func, postprocess_micro_batch_func)
             finally:
                 self._dsv41_in_chunk = False
                 self._dsv41_chunk_ctx = None
 
-        # The full-output loss closure captures the complete device-local batch.
-        # Evaluate it outside any chunk context so masking/reduction sees the
-        # original logical sequence, including sequence-level PPO objectives.
-        with torch.no_grad():
-            for index in range(chunk_count):
-                tape.begin(index, "prefill")
-                accumulate_output(forward_pass(index))
-
-        if forward_only:
-            with torch.no_grad():
-                full_result = report_loss_func(model_output)
-        else:
-            leaves = {}
-            differentiable_output = {}
-            with torch.enable_grad():
-                for key, value in model_output.items():
-                    if not value.is_floating_point():
-                        differentiable_output[key] = value
-                        continue
-                    values = value.values() if value.is_nested else value
-                    leaf = values.detach().requires_grad_(True)
-                    leaves[key] = leaf
-                    differentiable_output[key] = (
-                        torch.nested.nested_tensor_from_jagged(leaf, offsets=value.offsets(), lengths=value.lengths())
-                        if value.is_nested
-                        else leaf
-                    )
-                if not leaves:
-                    raise ValueError("Outer-sequence chunk training requires floating-point model outputs")
-                full_result = report_loss_func(differentiable_output)
-                # This is the unscaled engine loss ABI: legacy loss*n_microbatches
-                # or a per-token loss sum. Core applies CP/microbatch and optimizer
-                # scaling once to each replay surrogate, exactly as for K=1.
-                full_loss = full_result[0]
-                gradients = (
-                    torch.autograd.grad(full_loss, tuple(leaves.values()), allow_unused=True)
-                    if full_loss.requires_grad
-                    else (None,) * len(leaves)
-                )
-                output_adjoints = dict(zip(leaves, gradients, strict=True))
-            # Keep loss-function RNG consumption (e.g. Clip-Cov sampling), while
-            # model replays below use each pass's original RNG snapshot.
-            final_rng = capture_rng()
-
-            def run_pass(index):
-                if not torch.is_grad_enabled():
-                    # run_chunked_step's prefill is already complete. Avoid a
-                    # second scan while retaining its reverse-adjoint driver.
-                    return full_result[0].detach()
-                output = forward_pass(index)
-                surrogate = None
-                for key, adjoint in output_adjoints.items():
-                    if adjoint is None:
-                        continue
-                    value = output[key]
-                    values = value.values() if value.is_nested else value
-                    contribution = (values * adjoint).sum()
-                    surrogate = contribution if surrogate is None else surrogate + contribution
-                if surrogate is None:
-                    # A constant objective can still have model auxiliary losses.
-                    value = next(value for value in output.values() if value.is_floating_point())
-                    surrogate = (value.values() if value.is_nested else value).sum() * 0.0
-
-                def surrogate_loss(_output):
-                    if len(full_result) == 3:
-                        return surrogate, full_result[1], full_result[-1]
-                    return surrogate, full_result[-1]
-
-                records = []
-                loss, _num_tokens = forward_step_calc_loss(
-                    model=model,
-                    output_tensor=output,
-                    loss_func=surrogate_loss,
-                    config=config,
-                    vp_stage=getattr(unwrap_model(model), "vp_stage", None),
-                    collect_non_loss_data=False,
-                    num_microbatches=num_microbatches,
-                    forward_data_store=records,
-                    cp_group_size=cp_size,
-                    is_last_stage=True,
-                )
-                return loss
-
-            def backward(loss):
-                backward_step(None, loss, None, config)
-
-            chunk_step_kwargs = {
-                "run_pass": run_pass,
-                "tape": tape,
-                "chunk_count": chunk_count,
-                "backward": backward,
-            }
-            if os.environ.get("DSV41_MEM_PROFILE") == "1":
-                chunk_step_kwargs["profile_phase"] = log_memory_phase
-            try:
-                run_chunked_step(**chunk_step_kwargs)
-            finally:
-                if final_rng is not None:
-                    restore_rng(final_rng)
-
-        # Parameter gradients were accumulated inside the driver. The outer schedule
-        # still finalizes DDP gradients, using the original logical token divisor.
-        seed = torch.zeros_like(full_result[0], requires_grad=not forward_only) * 1.0
-        logged = full_result[-1]
-        if config.calculate_per_token_loss:
-            logical_num_tokens = (
-                full_result[1] if len(full_result) == 3 else torch.zeros((), dtype=torch.int, device=seed.device)
-            )
-            return seed, lambda _out: (seed, logical_num_tokens, logged)
-        return seed, lambda _out: (seed, logged)
+        return forward_backward_outer_chunks(
+            model=model,
+            forward_pass=forward_pass,
+            chunk_count=chunk_count,
+            num_microbatches=tu.get_non_tensor_data(batch, key="num_micro_batch", default=1),
+            cp_group_size=torch.distributed.get_world_size(self.get_context_parallel_group()),
+            forward_only=forward_only,
+            profile_phase=log_memory_phase if os.environ.get("DSV41_MEM_PROFILE") == "1" else None,
+        )
 
     def forward_step(
         self, batch_iter: Iterator[TensorDict], model, logits_processor_func, postprocess_micro_batch_func

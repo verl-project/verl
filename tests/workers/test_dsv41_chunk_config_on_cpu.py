@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Execute production configuration and guards without importing GPU backends."""
+"""Execute veRL's chunk configuration and Core integration without GPU backends."""
 
 import ast
 import builtins
@@ -121,15 +121,13 @@ def _engine_namespace(monkeypatch):
     megatron_utils.McoreModuleWrapperConfig = SimpleNamespace
     model_utils = ModuleType("verl.utils.model")
     model_utils.print_model_size = Mock()
-    router = ModuleType("megatron.core.transformer.moe.router")
-    router.TopKRouter = type("TopKRouter", (), {})
-    outer_chunk = ModuleType("verl.workers.engine.megatron.outer_chunk")
-    outer_chunk.run_chunked_step = Mock(return_value="chunk-driver")
+    outer_chunk = ModuleType("megatron.core.pipeline_parallel.outer_chunk")
+    outer_chunk.validate_outer_chunk_config = Mock()
+    outer_chunk.validate_outer_chunk_models = Mock()
     namespace["torch"] = SimpleNamespace(distributed=SimpleNamespace(get_rank=lambda: 1))
-    for module in (low_precision, real_nvfp4, device, optimizer, megatron_utils, model_utils, router, outer_chunk):
+    for module in (low_precision, real_nvfp4, device, optimizer, megatron_utils, model_utils, outer_chunk):
         monkeypatch.setitem(sys.modules, module.__name__, module)
-    namespace["run_chunked_step"] = outer_chunk.run_chunked_step
-    namespace["TopKRouter"] = router.TopKRouter
+    namespace["outer_chunk"] = outer_chunk
     namespace["megatron_utils"] = megatron_utils
     return namespace
 
@@ -186,45 +184,37 @@ def constructor(monkeypatch):
     return namespace, cls
 
 
-CONSTRUCTION_CASES = [
-    ("static_cp", {"dynamic_context_parallel": True}, {}, "dynamic_context_parallel=True"),
-    ("pipeline", {"pipeline_model_parallel_size": 2}, {}, "pipeline_model_parallel_size=2"),
-    ("remove_padding", {"use_remove_padding": False}, {}, "use_remove_padding=False"),
-    ("fused", {"use_fused_kernels": True}, {}, "use_fused_kernels=True"),
-    ("attention", {}, {"experimental_attention_variant": "mla"}, "experimental_attention_variant='mla'"),
-    ("overlap", {"override_ddp_config": {"overlap_grad_reduce": True}}, {}, "overlap_grad_reduce=True"),
-    ("router_replay", {"router_replay": SimpleNamespace(mode="R2")}, {}, "router_replay.mode='R2'"),
-    ("cp_size", {"context_parallel_size": 1}, {}, "context_parallel_size=1"),
-    (
-        "aux_loss",
-        {},
-        {"moe_router_load_balancing_type": "aux_loss", "moe_aux_loss_coeff": 0.01},
-        "moe_aux_loss_coeff=0.01",
-    ),
-    ("z_loss", {}, {"moe_z_loss_coeff": 0.02, "calculate_per_token_loss": False}, "calculate_per_token_loss=False"),
-]
-
-
-@pytest.mark.parametrize(
-    "name,engine_overrides,tf_overrides,observed", CONSTRUCTION_CASES, ids=[c[0] for c in CONSTRUCTION_CASES]
-)
-def test_chunk_preconditions_fail_during_construction(constructor, name, engine_overrides, tf_overrides, observed):
+def test_chunk_config_reaches_core_during_construction(constructor):
     namespace, cls = constructor
-    with pytest.raises(NotImplementedError) as error:
-        cls(
-            SimpleNamespace(provider=_transformer_config(**tf_overrides)),
-            _engine_config(**engine_overrides),
-            None,
-            None,
-        )
-    assert observed in str(error.value)
-    namespace["run_chunked_step"].assert_not_called()
+    config = _engine_config(
+        context_parallel_size=4,
+        pipeline_model_parallel_size=2,
+        dynamic_context_parallel=True,
+        use_remove_padding=False,
+        use_fused_kernels=True,
+        router_replay=SimpleNamespace(mode="R2"),
+        forward_only=True,
+    )
+    provider = _transformer_config(experimental_attention_variant="mla")
+    guard = namespace["outer_chunk"].validate_outer_chunk_config
+    guard.side_effect = [None, NotImplementedError("unsupported chunk config")]
 
+    with pytest.raises(NotImplementedError, match="unsupported chunk config"):
+        cls(SimpleNamespace(provider=provider), config, None, None)
 
-def test_valid_chunk_engine_can_be_constructed(constructor):
-    _, cls = constructor
-    engine = cls(SimpleNamespace(provider=_transformer_config()), _engine_config(), None, None)
-    assert engine.provider.experimental_attention_variant == "dsv4_hybrid"
+    expected = dict(
+        context_parallel_size=4,
+        pipeline_model_parallel_size=2,
+        dynamic_context_parallel=True,
+        use_remove_padding=False,
+        use_fused_kernels=True,
+        overlap_grad_reduce=False,
+        router_replay_mode="R2",
+        forward_only=True,
+    )
+    early_check, provider_check = guard.call_args_list
+    assert early_check.kwargs == dict(expected, transformer_config=None)
+    assert provider_check.kwargs == dict(expected, transformer_config=provider)
 
 
 @pytest.mark.parametrize(
@@ -248,10 +238,10 @@ def test_chunk_count_resolution(monkeypatch, declared, legacy, expected):
     assert namespace["_resolve_cp_seq_chunks"](config) == expected
 
 
-def _model_construction(namespace, engine, routers=()):
+def _model_construction(namespace, engine):
     hooks = []
     engine.provider.register_pre_wrap_hook = hooks.append
-    model = SimpleNamespace(config=engine.provider, modules=lambda: iter(routers))
+    model = SimpleNamespace(config=engine.provider)
     engine.is_value_model = False
     engine.peft_cls = None
     engine.model_config.hf_config = SimpleNamespace()
@@ -270,85 +260,23 @@ def _model_construction(namespace, engine, routers=()):
     return model
 
 
-def _router(namespace, **overrides):
-    router = namespace["TopKRouter"]()
-    values = dict(
-        training=True,
-        is_hash_layer=False,
-        routing_type="none",
-        topk=1,
-        num_experts=2,
-        config=SimpleNamespace(moe_router_quantile_balancing_ema=0.0, moe_expert_capacity_factor=None),
-    )
-    values.update(overrides)
-    vars(router).update(values)
-    return router
-
-
-@pytest.mark.parametrize(
-    "kind,observed",
-    [
-        ("sinkhorn", "routing_type='sinkhorn'"),
-        ("quantile_balancing", "moe_router_quantile_balancing_ema=0.0"),
-        ("capacity", "capacity_factor=0.5"),
-    ],
-)
-def test_router_preconditions_fail_in_model_construction(constructor, kind, observed):
+@pytest.mark.parametrize("forward_only", [False, True])
+def test_constructed_models_reach_core_guard_before_weight_loading(constructor, forward_only):
     namespace, cls = constructor
-    engine = cls(SimpleNamespace(provider=_transformer_config()), _engine_config(), None, None)
-    router = _router(namespace, routing_type=kind)
-    if kind == "capacity":
-        router.config.moe_expert_capacity_factor = 0.5
-    _model_construction(namespace, engine, [router])
-    with pytest.raises(NotImplementedError) as error:
-        engine._build_megatron_module()
-    assert observed in str(error.value)
-    engine.bridge.load_hf_weights.assert_not_called()
-    namespace["run_chunked_step"].assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "kind,overrides,forward_only",
-    [
-        ("sinkhorn", {"is_hash_layer": True}, False),
-        ("sinkhorn", {"training": False}, False),
-        ("sinkhorn", {"topk": 2}, False),
-        ("quantile_balancing", {"is_hash_layer": True}, False),
-        ("quantile_balancing", {"training": False}, False),
-        ("quantile_balancing", {}, True),
-    ],
-)
-def test_tokenwise_router_exceptions_remain_supported(constructor, kind, overrides, forward_only):
-    namespace, cls = constructor
-    engine = cls(SimpleNamespace(provider=_transformer_config()), _engine_config(forward_only=forward_only), None, None)
-    model = _model_construction(namespace, engine, [_router(namespace, routing_type=kind, **overrides)])
-    assert engine._build_megatron_module() == [model]
-
-
-@pytest.mark.parametrize(
-    "types,coefficients,forward_only,rejected",
-    [
-        ("aux_loss", 0.01, False, True),
-        ("seq_aux_loss", 0.01, False, True),
-        ("global_aux_loss", 0.01, False, True),
-        (["none", "aux_loss"], [0.0, 0.01], False, True),
-        (["aux_loss", "seq_aux_loss"], [0.0, 0.0], False, False),
-        ("none", 0.01, False, False),
-        ("aux_loss", 0.01, True, False),
-        ("aux_loss", None, False, False),
-    ],
-)
-def test_aux_loss_preserves_balancing_and_inference_semantics(constructor, types, coefficients, forward_only, rejected):
-    _, cls = constructor
-    model = SimpleNamespace(
-        provider=_transformer_config(moe_router_load_balancing_type=types, moe_aux_loss_coeff=coefficients)
-    )
     config = _engine_config(forward_only=forward_only)
-    if rejected:
-        with pytest.raises(NotImplementedError, match="moe_aux_loss_coeff="):
-            cls(model, config, None, None)
-    else:
-        cls(model, config, None, None)
+    engine = cls(SimpleNamespace(provider=_transformer_config()), config, None, None)
+    model = _model_construction(namespace, engine)
+    guard = namespace["outer_chunk"].validate_outer_chunk_models
+    guard.side_effect = NotImplementedError("unsupported chunk router")
+
+    with pytest.raises(NotImplementedError, match="unsupported chunk router"):
+        engine._build_megatron_module()
+
+    guard.assert_called_once_with([model], forward_only=forward_only)
+    engine.bridge.load_hf_weights.assert_not_called()
+    guard.side_effect = None
+    guard.return_value = [model]
+    assert engine._build_megatron_module() == [model]
 
 
 class _Tensor:
@@ -371,29 +299,23 @@ class _Tensor:
     ],
 )
 def test_batch_preconditions_reject_before_chunk_driver(constructor, kind, key, observed):
-    namespace, cls = constructor
+    _, cls = constructor
     engine = cls(SimpleNamespace(provider=_transformer_config()), _engine_config(), None, None)
-
-    def chunked(*args, **kwargs):
-        from verl.workers.engine.megatron.outer_chunk import run_chunked_step
-
-        return run_chunked_step(*args, **kwargs)
-
-    engine._dsv41_chunked_forward_step = chunked
+    engine._dsv41_chunked_forward_step = Mock()
     batch = {key: True} if kind == "replay" else {"multi_modal_inputs": [{key: _Tensor(2)}]}
     with pytest.raises(NotImplementedError) as error:
         engine.forward_step(iter([batch]), SimpleNamespace(), None, SimpleNamespace(keywords={"forward_only": False}))
     assert observed in str(error.value)
-    namespace["run_chunked_step"].assert_not_called()
+    engine._dsv41_chunked_forward_step.assert_not_called()
 
 
 @pytest.mark.parametrize(
     "payload,support", [({}, False), ({"pixel_values": _Tensor(0)}, False), ({"pixel_values": _Tensor(2)}, True)]
 )
 def test_valid_payload_reaches_chunk_driver(constructor, payload, support):
-    namespace, cls = constructor
+    _, cls = constructor
     engine = cls(SimpleNamespace(provider=_transformer_config()), _engine_config(), None, None)
-    engine._dsv41_chunked_forward_step = namespace["run_chunked_step"]
+    engine._dsv41_chunked_forward_step = Mock(return_value="chunk-driver")
     result = engine.forward_step(
         iter([{"multi_modal_inputs": [payload]}]),
         SimpleNamespace(supports_cp_chunk_images=support),
@@ -401,7 +323,7 @@ def test_valid_payload_reaches_chunk_driver(constructor, payload, support):
         SimpleNamespace(keywords={"forward_only": False}),
     )
     assert result == "chunk-driver"
-    namespace["run_chunked_step"].assert_called_once()
+    engine._dsv41_chunked_forward_step.assert_called_once()
 
 
 def test_single_pass_enters_unchanged_forward_without_chunk_imports(constructor, monkeypatch):
@@ -424,7 +346,7 @@ def test_single_pass_enters_unchanged_forward_without_chunk_imports(constructor,
     with pytest.raises(RuntimeError, match="Per-batch use_fused_kernels must match"):
         engine.forward_step(iter([Batch(use_fused_kernels=True)]), SimpleNamespace(), None, None)
     assert not hasattr(engine, "provider")
-    namespace["run_chunked_step"].assert_not_called()
+    namespace["outer_chunk"].validate_outer_chunk_config.assert_not_called()
 
 
 def test_single_pass_returns_legacy_forward_output(constructor, monkeypatch):
@@ -469,11 +391,11 @@ def test_single_pass_returns_legacy_forward_output(constructor, monkeypatch):
     legacy_forward.assert_called_once()
     assert not ({"chunk_tape", "cp_chunk_count", "cp_chunk_index"} & legacy_forward.call_args.kwargs.keys())
     assert not hasattr(engine, "provider")
-    namespace["run_chunked_step"].assert_not_called()
+    namespace["outer_chunk"].validate_outer_chunk_config.assert_not_called()
 
 
 @pytest.mark.parametrize(
-    "megatron_fsdp,ddp_override,forward_only,rejected",
+    "megatron_fsdp,ddp_override,forward_only,overlap",
     [
         (False, {}, False, False),
         (True, {}, False, True),
@@ -481,28 +403,11 @@ def test_single_pass_returns_legacy_forward_output(constructor, monkeypatch):
         (False, {"overlap_grad_reduce": True}, True, False),
     ],
 )
-def test_overlap_uses_effective_wrapper_defaults(constructor, megatron_fsdp, ddp_override, forward_only, rejected):
-    _, cls = constructor
+def test_overlap_uses_effective_wrapper_defaults(constructor, megatron_fsdp, ddp_override, forward_only, overlap):
+    namespace, cls = constructor
     config = _engine_config(
         use_megatron_fsdp=megatron_fsdp, override_ddp_config=ddp_override, forward_only=forward_only
     )
-    if rejected:
-        with pytest.raises(NotImplementedError, match="overlap_grad_reduce=True"):
-            cls(SimpleNamespace(provider=_transformer_config()), config, None, None)
-    else:
-        cls(SimpleNamespace(provider=_transformer_config()), config, None, None)
-
-
-@pytest.mark.parametrize(
-    "kind,factor", [("quantile_balancing", 1), ("capacity", None), ("capacity", 0.0), ("capacity", 2.0)]
-)
-def test_frozen_quantile_and_nonbinding_capacity_remain_supported(constructor, kind, factor):
-    namespace, cls = constructor
-    engine = cls(SimpleNamespace(provider=_transformer_config()), _engine_config(), None, None)
-    router = _router(namespace, routing_type=kind)
-    if kind == "quantile_balancing":
-        router.config.moe_router_quantile_balancing_ema = factor
-    else:
-        router.config.moe_expert_capacity_factor = factor
-    model = _model_construction(namespace, engine, [router])
-    assert engine._build_megatron_module() == [model]
+    cls(SimpleNamespace(provider=_transformer_config()), config, None, None)
+    guard = namespace["outer_chunk"].validate_outer_chunk_config
+    assert guard.call_args.kwargs["overlap_grad_reduce"] is overlap
