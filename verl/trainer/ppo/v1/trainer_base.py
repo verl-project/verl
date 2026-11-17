@@ -2021,9 +2021,10 @@ class PPOTrainer(ABC):
             "advantages",
             "returns",
             "rm_scores",
-            "token_level_rewards",
             "num_turns",
         ]
+        if self.config.algorithm.use_kl_in_reward:
+            fields.append("token_level_rewards")
         if self.use_critic:
             fields.append("values")
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
