@@ -35,15 +35,15 @@ PUBLIC_PARTITION = getattr(tq, "PUBLIC_PARTITION", "__public__")
 _PRIVATE_PROMPT_FIELDS = frozenset({"agent_name", "multi_modal_data", "__rollout_n__", "__do_sample__"})
 
 
-def prompt_sharing_requested(tq_config: DictConfig) -> bool:
-    """Whether ``transfer_queue.share_prompts`` asks the trajectories of a prompt to share preprocessing and storage."""
-    return bool(tq_config.get("share_prompts", True))
+def prompt_sharing_requested(config: DictConfig) -> bool:
+    """Whether ``trainer.v1.share_prompts`` asks the trajectories of a prompt to share preprocessing and storage."""
+    return bool(config.trainer.v1.get("share_prompts", True))
 
 
-def prompt_sharing_enabled(tq_config: DictConfig) -> bool:
-    """Whether to store prompts once, which needs links (TransferQueue > 0.1.11) on the configured storage backend."""
-    storage_backend = tq_config.get("backend", {}).get("storage_backend", "SimpleStorage")
-    return prompt_sharing_requested(tq_config) and hasattr(tq, "kv_link") and storage_backend == "SimpleStorage"
+def prompt_sharing_enabled(config: DictConfig) -> bool:
+    """Whether to store prompts once, which needs links (TransferQueue >= 0.1.12) on the configured storage backend."""
+    storage_backend = config.transfer_queue.get("backend", {}).get("storage_backend", "SimpleStorage")
+    return prompt_sharing_requested(config) and hasattr(tq, "kv_link") and storage_backend == "SimpleStorage"
 
 
 def shared_prompt_fields(batch: TensorDict) -> list[str]:

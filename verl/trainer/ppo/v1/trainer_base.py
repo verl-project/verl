@@ -136,7 +136,7 @@ class PPOTrainer(ABC):
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.trainer_mode = self.config.trainer.v1.trainer_mode
-        self.share_prompt_fields = prompt_sharing_enabled(self.config.transfer_queue)
+        self.share_prompt_fields = prompt_sharing_enabled(self.config)
         self.parameter_sync_step = self.config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
         self.replay_buffer = self._build_replay_buffer()
         self._rollout_moe_lb_metrics_accumulator = RolloutMoELoadBalanceMetricsAccumulator(
