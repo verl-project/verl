@@ -24,12 +24,17 @@ import pytest
 import torch
 from vllm import LLM, SamplingParams
 from vllm.logprobs import FlatLogprobs, append_logprobs_for_next_position
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 
 from verl.utils.device import get_device_name
 from verl.workers.rollout.utils import extract_response_topk_logprobs_with_coverage
 
 DEVICE = get_device_name()
+
+if DEVICE == "npu":
+    # Match the provider used by AscendSampler instead of vLLM's generic Triton kernel.
+    from vllm_ascend.sample.sampler import apply_top_k_top_p
+else:
+    from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 
 MODEL_PATH = os.path.expanduser(os.getenv("VLLM_TOPK_SUPPORT_MODEL_PATH", "~/models/Qwen/Qwen2.5-0.5B-Instruct"))
 
@@ -55,6 +60,7 @@ def test_processed_topk_support_evidence(llm, top_k, top_p):
     complete_rows = 0
     for output in outputs:
         completion = output.outputs[0]
+        assert len(completion.logprobs) == len(completion.token_ids) > 0
         sampled, ids, log_probs, complete = extract_response_topk_logprobs_with_coverage(
             completion.logprobs, k, vocab_size=llm.llm_engine.model_config.get_vocab_size()
         )
@@ -77,7 +83,7 @@ def test_processed_topk_support_evidence(llm, top_k, top_p):
 
 @pytest.mark.parametrize("k,expected_complete", [(2, False), (4, True)])
 def test_small_decode_batch_provider_support_coverage(k, expected_complete):
-    # vLLM 0.29 retains both cutoff ties, while 0.32 keeps exactly top_k entries.
+    # Ascend and vLLM 0.29 retain cutoff ties, while 0.32 keeps exactly top_k entries.
     # Either way, an all-finite partial head does not prove complete support.
     logits = torch.tensor([[2.0, 1.0, 1.0, 0.0]], device=DEVICE)
     logits = apply_top_k_top_p(logits, torch.tensor([2], device=DEVICE), None)
@@ -85,7 +91,7 @@ def test_small_decode_batch_provider_support_coverage(k, expected_complete):
     support_ids = log_probs[0].isfinite().nonzero().flatten().tolist()
     assert len(support_ids) in (2, 3)
     head, ids = log_probs.topk(k, -1)
-    # When 0.29 retains the cutoff tie, sample the omitted support member. Otherwise
+    # When the provider retains the cutoff tie, sample the omitted support member. Otherwise
     # sample from the recorded head; duplicated sampled/top-k entries are valid.
     omitted_support_ids = [token_id for token_id in support_ids if token_id not in ids[0].tolist()]
     sampled_id = omitted_support_ids[0] if omitted_support_ids else ids[0, 0].item()
