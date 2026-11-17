@@ -19,7 +19,6 @@ from omegaconf import OmegaConf
 from transfer_queue import KVBatchMeta
 
 from verl.single_controller.base.worker import DispatchInfo
-from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY
 from verl.trainer.ppo.utils import (
     get_minibatch_padding_multiple,
     validate_minibatching_config,
@@ -30,6 +29,7 @@ from verl.utils.seqlen_balancing import (
     coalesce_unit_layout,
     get_unit_balanced_partitions,
 )
+from verl.utils.tensordict_utils import PADDING_MASK_KEY
 
 
 class _StubTrainer(PPOTrainer):
@@ -212,8 +212,8 @@ def test_fixed_trajectory_multi_epoch_shuffle_uses_whole_batch_fallback(stub_pad
 
     assert "_minibatch_layout" not in result.extra_info
     assert batching_info == {
-        "global_batch_size": 8,
         "mini_batch_size": 8,
+        "seed": 42,
         "dataloader_kwargs": {"shuffle": True},
         PADDING_MASK_KEY: [bool(tag.get("is_padding", False)) for tag in result.tags],
     }

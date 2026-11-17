@@ -30,7 +30,6 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY
 from verl.utils import tensordict_utils as tu
 from verl.workers.engine_workers import TrainingWorker
 
@@ -144,16 +143,25 @@ def test_worker_layout_counts_shuffled_non_padding_rows_across_dp(monkeypatch, d
     tu.assign_non_tensor(
         data,
         mini_batch_size=4,
-        global_batch_size=4,
         dataloader_kwargs={"shuffle": True},
     )
-    tu.assign_non_tensor_data(data, PADDING_MASK_KEY, [False, True, False, False] * 2)
+    tu.assign_non_tensor_data(data, tu.PADDING_MASK_KEY, [False, True, False, False] * 2)
 
     assert TrainingWorker.train_mini_batch(worker, data) is None
     assert len(seen_batches) == 2
     assert sum(global_batch_size for _, global_batch_size in seen_batches) == 7
     for rows, global_batch_size in seen_batches:
         assert global_batch_size == sum(row != 1 for row in rows) + 2
+
+
+def test_worker_layout_rejects_non_global_padding_mask():
+    worker = _worker(_engine(get_data_parallel_size=lambda: 2))
+    data = TensorDict({"row": torch.arange(4)}, batch_size=[4])
+    tu.assign_non_tensor(data, mini_batch_size=4)
+    tu.assign_non_tensor_data(data, tu.PADDING_MASK_KEY, [False, True, False, False])
+
+    with pytest.raises(ValueError, match="must describe the global batch"):
+        TrainingWorker.train_mini_batch(worker, data)
 
 
 def test_forward_only_stage_is_not_a_profiler_step():

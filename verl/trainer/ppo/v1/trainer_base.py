@@ -60,7 +60,7 @@ from verl.trainer.ppo.metric_utils import (
     get_metric_data_with_optional_routed_experts,
     process_validation_metrics,
 )
-from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY, append_padding_samples
+from verl.trainer.ppo.padding_utils import append_padding_samples
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.trainer_utils import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.utils import (
@@ -1770,7 +1770,7 @@ class PPOTrainer(ABC):
         )
 
     def _get_mini_batch_mode(self) -> str:
-        """Return the configured V1 optimizer mini-batch split mode."""
+        """Return the configured PPO optimizer mini-batch split mode."""
         return self.config.trainer.v1.get("mini_batch_mode", MINI_BATCH_MODE_FIXED_TRAJECTORY)
 
     def _get_active_model_configs(self) -> list[DictConfig]:
@@ -1836,7 +1836,7 @@ class PPOTrainer(ABC):
             # TODO: Build and attach role-specific layouts before supporting different actor and critic DP sizes.
             if actor_dp_size != critic_dp_size:
                 raise NotImplementedError(
-                    "V1 mini-batch balancing requires actor and critic to use the same data-parallel size, "
+                    "PPO mini-batch balancing requires actor and critic to use the same data-parallel size, "
                     f"got actor_dp_size={actor_dp_size} and critic_dp_size={critic_dp_size}."
                 )
         dp_size = actor_dp_size
@@ -2096,22 +2096,18 @@ class PPOTrainer(ABC):
         mini_batch_size = self._get_model_mini_batch_size(model_config)
         if self._use_worker_side_shuffle():
             return {
-                "global_batch_size": mini_batch_size,
                 "mini_batch_size": mini_batch_size,
+                "seed": model_config.data_loader_seed,
                 "dataloader_kwargs": {"shuffle": model_config.shuffle},
-                PADDING_MASK_KEY: [bool(tag.get("is_padding", False)) for tag in batch.tags],
+                tu.PADDING_MASK_KEY: [bool(tag.get("is_padding", False)) for tag in batch.tags],
             }
-        return {
-            **self._get_global_mini_batch_layout(batch, mini_batch_size),
-            "dataloader_kwargs": {"shuffle": False},
-        }
+        return self._get_global_mini_batch_layout(batch, mini_batch_size)
 
     def _update_critic(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Update the critic network."""
         extra_info = {
             **self._get_update_minibatching_info(batch, self.config.critic),
             "epochs": self.config.critic.ppo_epochs,
-            "seed": self.config.critic.data_loader_seed,
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)
@@ -2153,7 +2149,6 @@ class PPOTrainer(ABC):
             "score_centering": score_centering,
             **self._get_update_minibatching_info(batch, self.config.actor_rollout_ref.actor),
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
-            "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)

@@ -113,8 +113,9 @@ def need_critic(config: DictConfig) -> bool:
 
 
 def validate_minibatching_config(config: DictConfig, use_critic: bool) -> None:
-    """Validate the V1 optimizer mini-batch mode and its shuffle constraints."""
-    mode = config.trainer.v1.get("mini_batch_mode", MINI_BATCH_MODE_FIXED_TRAJECTORY)
+    """Validate the PPO optimizer mini-batch mode and its shuffle constraints."""
+    v1_config = config.trainer.get("v1") or {}
+    mode = v1_config.get("mini_batch_mode", MINI_BATCH_MODE_FIXED_TRAJECTORY)
     if mode not in MINI_BATCH_MODES:
         raise ValueError(f"trainer.v1.mini_batch_mode must be one of {MINI_BATCH_MODES}, got {mode!r}")
     if mode == MINI_BATCH_MODE_FIXED_TRAJECTORY:

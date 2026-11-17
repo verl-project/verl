@@ -30,7 +30,7 @@ Despite that many configurations start with the `ppo_` prefix, they work across 
 
 - `data.train_batch_size`: The global batch size of prompts used to generate a set of sampled trajectories/rollouts. The number of responses/trajectories is `data.train_batch_size * actor_rollout.ref.rollout.n`
 
-- `actor_rollout_ref.actor.ppo_mini_batch_size`: Base global PPO actor mini-batch size. V0 and the default V1 `trainer.v1.mini_batch_mode=fixed_trajectory` use `ppo_mini_batch_size * actor_rollout_ref.rollout.n` as the target trajectory count per optimizer update. V1 `fixed_sample` instead uses `ppo_mini_batch_size` source-prompt/UID samples and keeps all trajectories from one UID together.
+- `actor_rollout_ref.actor.ppo_mini_batch_size`: Base global PPO actor mini-batch size. The default `trainer.v1.mini_batch_mode=fixed_trajectory` uses `ppo_mini_batch_size * actor_rollout_ref.rollout.n` as the target trajectory count per optimizer update. `fixed_sample` instead uses `ppo_mini_batch_size` source-prompt/UID samples and keeps all trajectories from one UID together.
 
 - `actor_rollout_ref.actor.ppo_epochs`: Number of epochs for GRPO updates on one set of sampled trajectories for actor
 

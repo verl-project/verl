@@ -36,7 +36,6 @@ except ImportError:
 
 from verl.trainer.ppo.score_centering import dummy_rollout_topk
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.tensordict_utils import PADDING_MASK_KEY as PADDING_MASK_KEY
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 logger = logging.getLogger(__name__)
