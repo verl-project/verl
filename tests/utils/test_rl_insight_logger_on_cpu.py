@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from omegaconf import OmegaConf
 
 from verl.utils.tracking import RLInsightLogger
 
@@ -42,6 +44,9 @@ def mock_rl_insight(monkeypatch):
     module.metric_gauge = MagicMock()
     # Released 0.3.0 has no metric_log. MagicMock would otherwise invent one.
     module.metric_log = None
+    module.get_context = MagicMock(
+        return_value=SimpleNamespace(project="proj", experiment_name="exp")
+    )
 
     @contextmanager
     def _trace_state(*args, **kwargs):
@@ -82,7 +87,7 @@ def test_init_registers_transfer_queue_after_client_init(monkeypatch, mock_rl_in
     fake_tq.get_metrics_endpoint.return_value = "127.0.0.1:9000"
     monkeypatch.setitem(__import__("sys").modules, "transfer_queue", fake_tq)
 
-    RLInsightLogger.init(project_name="proj", experiment_name="exp", config=config)
+    RLInsightLogger(project_name="proj", experiment_name="exp", config=config)
 
     mock_rl_insight.init.assert_called_once_with(
         project="proj",
@@ -93,12 +98,71 @@ def test_init_registers_transfer_queue_after_client_init(monkeypatch, mock_rl_in
     assert RLInsightLogger._init_done is True
 
 
+def test_logger_constructor_registers_transfer_queue_after_init(monkeypatch, mock_rl_insight):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    config = OmegaConf.create(
+        {
+            "trainer": {"project_name": "proj", "experiment_name": "exp"},
+            "transfer_queue": {"metrics": {"enabled": True}},
+        }
+    )
+    fake_tq = MagicMock()
+    fake_tq.get_metrics_endpoint.return_value = "127.0.0.1:9000"
+    monkeypatch.setitem(__import__("sys").modules, "transfer_queue", fake_tq)
+
+    RLInsightLogger.init(project_name="proj", experiment_name="exp", config=config)
+    RLInsightLogger(project_name="proj", experiment_name="exp", config=config)
+
+    mock_rl_insight.init.assert_called_once()
+    mock_rl_insight.update_prometheus_config.assert_called_once_with(["127.0.0.1:9000"], "transfer_queue", None)
+
+
+def test_init_initializes_before_fit(monkeypatch, mock_rl_insight):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    config = OmegaConf.create(
+        {
+            "trainer": {
+                "project_name": "proj",
+                "experiment_name": "exp",
+                "rl_insight": {"server": {"url": "http://127.0.0.1:18080"}},
+            },
+            "actor_rollout_ref": {"rollout": {"trace": {"enable_otel": False}}},
+        }
+    )
+
+    RLInsightLogger.init(project_name="proj", experiment_name="exp", config=config)
+
+    mock_rl_insight.init.assert_called_once()
+    assert mock_rl_insight.init.call_args.kwargs["project"] == "proj"
+    assert mock_rl_insight.init.call_args.kwargs["experiment_name"] == "exp"
+    assert OmegaConf.to_container(mock_rl_insight.init.call_args.kwargs["config"]) == {
+        "server": {"url": "http://127.0.0.1:18080"}
+    }
+    mock_rl_insight.update_prometheus_config.assert_not_called()
+    assert RLInsightLogger._init_done is True
+
+
+def test_init_is_idempotent(monkeypatch, mock_rl_insight):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    config = OmegaConf.create(
+        {
+            "trainer": {"project_name": "proj", "experiment_name": "exp"},
+        }
+    )
+
+    RLInsightLogger.init(project_name="proj", experiment_name="exp", config=config)
+    RLInsightLogger.init(project_name="proj", experiment_name="exp", config=config)
+
+    mock_rl_insight.init.assert_called_once()
+    assert RLInsightLogger._init_done is True
+
+
 def test_log_lazy_inits_and_writes_gauge(monkeypatch, mock_rl_insight):
     monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
 
     RLInsightLogger.log({"reward/mean": 1.25, "bad": object()}, step=3)
 
-    mock_rl_insight.init.assert_called_once_with()
+    mock_rl_insight.init.assert_called_once_with(project="proj", experiment_name="exp", config={})
     mock_rl_insight.metric_gauge.assert_called_once_with("reward_mean", 1.25)
     assert RLInsightLogger._init_done is True
 
@@ -111,6 +175,30 @@ def test_log_uses_metric_log_with_step_when_available(monkeypatch, mock_rl_insig
 
     mock_rl_insight.metric_log.assert_called_once_with("actor/pg_loss", 0.12, step=100)
     mock_rl_insight.metric_gauge.assert_not_called()
+
+
+def test_log_does_not_init_without_run_context(monkeypatch, mock_rl_insight):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    mock_rl_insight.get_context.return_value = None
+
+    RLInsightLogger.log({"reward/mean": 1.0}, step=1)
+
+    mock_rl_insight.init.assert_not_called()
+    mock_rl_insight.metric_gauge.assert_not_called()
+    assert RLInsightLogger._init_done is False
+
+
+def test_trace_span_does_not_init_without_run_context(monkeypatch, mock_rl_insight):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    mock_rl_insight.__version__ = "0.4.0"
+    mock_rl_insight.trace_span = MagicMock()
+    mock_rl_insight.get_context.return_value = None
+
+    RLInsightLogger.trace_span("agent_task", start_time_ns=1, end_time_ns=2)
+
+    mock_rl_insight.init.assert_not_called()
+    mock_rl_insight.trace_span.assert_not_called()
+    assert RLInsightLogger._init_done is False
 
 
 def test_trace_state_decorator_resolves_callable_lane(monkeypatch, mock_rl_insight):
@@ -166,7 +254,7 @@ def test_trace_state_decorator_rejects_sync_method():
             return None
 
 
-def test_trace_state_lazy_inits_once_under_concurrent_async_tasks(monkeypatch, mock_rl_insight):
+def test_trace_state_does_not_init_under_concurrent_async_tasks(monkeypatch, mock_rl_insight):
     monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
 
     async def _one(i: int):
@@ -178,9 +266,9 @@ def test_trace_state_lazy_inits_once_under_concurrent_async_tasks(monkeypatch, m
 
     asyncio.run(_run())
 
-    mock_rl_insight.init.assert_called_once_with()
+    mock_rl_insight.init.assert_not_called()
     assert mock_rl_insight.trace_state.call_count == 16
-    assert RLInsightLogger._init_done is True
+    assert RLInsightLogger._init_done is False
 
 
 def test_register_metrics_dedups_and_finish_resets(monkeypatch, mock_rl_insight):
@@ -232,3 +320,70 @@ def test_agent_loop_session_falls_back_with_old_rl_insight(monkeypatch, mock_rl_
     assert session.identity["global_steps"] == 3
     session.finish(status="success", trajectories=[])
     assert "RL-Insight does not support agent_loop_session" in caplog.text
+
+
+def _install_fake_rl_insight_server(monkeypatch, services):
+    import sys
+    import types
+
+    package = types.ModuleType("rl_insight")
+    package.__path__ = []
+    server = types.ModuleType("rl_insight.server")
+    server.__path__ = []
+    http_api = types.ModuleType("rl_insight.server.http_api")
+    http_api.get_server_services = lambda: services
+    http_api.server_url = lambda: "http://127.0.0.1:18080"
+    network = types.ModuleType("rl_insight.server.network")
+    network.service_url_from_server_url = lambda base, port, path: (f"http://127.0.0.1:{port}{path}" if port else "")
+    monkeypatch.setitem(sys.modules, "rl_insight", package)
+    monkeypatch.setitem(sys.modules, "rl_insight.server", server)
+    monkeypatch.setitem(sys.modules, "rl_insight.server.http_api", http_api)
+    monkeypatch.setitem(sys.modules, "rl_insight.server.network", network)
+    return http_api
+
+
+def test_otlp_traces_endpoint_requires_rl_insight_enabled(monkeypatch):
+    monkeypatch.delenv(RLInsightLogger.ENABLE_ENV, raising=False)
+
+    assert RLInsightLogger.otlp_traces_endpoint() is None
+
+
+def test_otlp_traces_endpoint_uses_server_otlp_port(monkeypatch):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    _install_fake_rl_insight_server(monkeypatch, {"otlp_port": 4318})
+
+    assert RLInsightLogger.otlp_traces_endpoint() == "http://127.0.0.1:4318/v1/traces"
+
+
+def test_otlp_traces_endpoint_returns_none_without_otlp_port(monkeypatch):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    _install_fake_rl_insight_server(monkeypatch, {"otlp_port": None})
+
+    assert RLInsightLogger.otlp_traces_endpoint() is None
+
+
+def test_otlp_traces_endpoint_returns_none_when_discovery_raises(monkeypatch, caplog):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    http_api = _install_fake_rl_insight_server(monkeypatch, {"otlp_port": 4318})
+
+    def _raise():
+        raise RuntimeError("discovery boom")
+
+    http_api.get_server_services = _raise
+
+    with caplog.at_level("WARNING", logger="verl.utils.tracking"):
+        assert RLInsightLogger.otlp_traces_endpoint() is None
+
+    assert "OTLP endpoint discovery failed" in caplog.text
+
+
+def test_otlp_traces_endpoint_warns_when_discovery_is_missing(monkeypatch, caplog):
+    import sys
+
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    monkeypatch.setitem(sys.modules, "rl_insight.server.http_api", None)
+
+    with caplog.at_level("WARNING", logger="verl.utils.tracking"):
+        assert RLInsightLogger.otlp_traces_endpoint() is None
+
+    assert "OTLP endpoint discovery is unavailable" in caplog.text

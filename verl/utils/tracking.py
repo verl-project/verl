@@ -228,14 +228,15 @@ class RLInsightLogger:
     """Logger backend that exports scalar metrics and rl-insight runtime signals."""
 
     ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
-    MINIMUM_RL_INSIGHT_VERSION = Version("0.3.0")
+    MINIMUM_RL_INSIGHT_VERSION = Version("0.4.0")
     _init_done = False
     _rl_insight_module = None
     _registered_metrics: set[tuple[str | None, tuple[str, ...], str | None]] = set()
     _warned_unsupported_features: set[str] = set()
 
     def __init__(self, project_name, experiment_name, config=None):
-        self.init(project_name=project_name, experiment_name=experiment_name, config=config)
+        if self.init(project_name, experiment_name, config) and config is not None:
+            self.register_transfer_queue_metrics(config)
 
     @classmethod
     def _get_rl_insight(cls):
@@ -249,6 +250,40 @@ class RLInsightLogger:
     def enabled(cls) -> bool:
         """Return whether rl-insight is globally enabled in this process."""
         return os.getenv(cls.ENABLE_ENV) == "1"
+
+    @classmethod
+    def otlp_traces_endpoint(cls) -> str | None:
+        """Return the RL-Insight Tempo OTLP/HTTP traces endpoint, if available.
+
+        The RL-Insight server exposes ``otlp_port`` in its service status.
+        Returns ``None`` when RL-Insight is disabled, the server is unreachable,
+        or the installed RL-Insight version lacks the service-discovery helpers.
+        """
+        if not cls.enabled():
+            return None
+
+        try:
+            from rl_insight.server.http_api import get_server_services, server_url
+            from rl_insight.server.network import service_url_from_server_url
+        except ImportError as exc:
+            logger.warning(
+                "RL-Insight OTLP endpoint discovery is unavailable; engine tracing stays disabled: %s",
+                exc,
+            )
+            return None
+
+        try:
+            services = get_server_services()
+            if not services:
+                return None
+            endpoint = service_url_from_server_url(server_url(), services.get("otlp_port"), "/v1/traces")
+        except Exception as exc:
+            logger.warning(
+                "RL-Insight OTLP endpoint discovery failed; engine tracing stays disabled: %s",
+                exc,
+            )
+            return None
+        return endpoint or None
 
     @classmethod
     def _warn_unsupported_rl_insight(cls, feature: str) -> None:
@@ -267,27 +302,47 @@ class RLInsightLogger:
         module = cls._get_rl_insight()
         return Version(getattr(module, "__version__", "0"))
 
-    @classmethod
-    def init(cls, project_name=None, experiment_name=None, config=None):
-        if not cls.enabled() or cls._init_done:
-            return
+    @staticmethod
+    def _rl_insight_config(config) -> Any:
+        """Return ``trainer.rl_insight`` overrides from a dict-like or DictConfig object."""
+        if config is None:
+            return {}
+        try:
+            return config.get("trainer", {}).get("rl_insight", {}) or {}
+        except (AttributeError, KeyError, TypeError):
+            return {}
 
-        rl_insight_config = {}
-        if config is not None:
-            try:
-                rl_insight_config = config.get("trainer", {}).get("rl_insight", {}) or {}
-            except (AttributeError, KeyError, TypeError):
-                pass
-        cls._get_rl_insight().init(project=project_name, experiment_name=experiment_name, config=rl_insight_config)
-        cls._init_done = True
-        if config is not None:
-            cls.register_transfer_queue_metrics(config)
+    @classmethod
+    def init(cls, project_name=None, experiment_name=None, config=None) -> bool:
+        """Initialize RL-Insight with an explicit Run identity.
+
+        With no project/experiment names, attach only to an existing Run; never
+        initialize with default names. Returns whether the client is ready.
+        """
+        if not cls.enabled():
+            return False
+
+        if not cls._init_done:
+            module = cls._get_rl_insight()
+            if project_name is None and experiment_name is None:
+                get_context = getattr(module, "get_context", None)
+                context = get_context() if callable(get_context) else None
+                if context is None:
+                    return False
+                project_name, experiment_name = context.project, context.experiment_name
+            module.init(
+                project=project_name,
+                experiment_name=experiment_name,
+                config=cls._rl_insight_config(config),
+            )
+            cls._init_done = True
+        return True
 
     @classmethod
     def log(cls, data, step):
-        if not cls.enabled():
+        if not cls.init():
             return
-        cls._ensure_rl_insight_init()
+
         module = cls._get_rl_insight()
         # Present on current main, but not in the released 0.3.0 package.
         metric_log = getattr(module, "metric_log", None)
@@ -326,7 +381,7 @@ class RLInsightLogger:
             yield
             return
 
-        cls._ensure_rl_insight_init()
+        # RL-Insight >= 0.4.0 buffers early state traces until formal initialization.
         with cls._get_rl_insight().trace_state(state_name, state_lane_id=state_lane_id, **labels):
             yield
 
@@ -365,7 +420,10 @@ class RLInsightLogger:
         end_time_ns: int,
         attributes: dict[str, Any] | None = None,
     ) -> None:
-        """Report one completed span through rl-insight's direct trace API."""
+        """Report one completed span through rl-insight's direct trace API.
+
+        No-op until the training logger has established the RL-Insight Run.
+        """
         if not cls.enabled():
             return
 
@@ -375,19 +433,14 @@ class RLInsightLogger:
         ):
             cls._warn_unsupported_rl_insight("trace_span")
             return
-        cls._ensure_rl_insight_init()
-        cls._get_rl_insight().trace_span(
+        if not cls.init():
+            return
+        module.trace_span(
             name=name,
             start_time_ns=start_time_ns,
             end_time_ns=end_time_ns,
             attributes=dict(attributes or {}),
         )
-
-    @classmethod
-    def _ensure_rl_insight_init(cls) -> None:
-        if not cls._init_done:
-            cls._get_rl_insight().init()
-            cls._init_done = True
 
     @classmethod
     def agent_loop_session(
@@ -428,8 +481,7 @@ class RLInsightLogger:
         if cls.enabled() and cls._rl_insight_version() < cls.MINIMUM_RL_INSIGHT_VERSION:
             cls._warn_unsupported_rl_insight("agent_loop_session")
             return fallback_session()
-        if cls.enabled() and not cls._init_done:
-            cls.init(project_name=project_name, experiment_name=experiment_name)
+        cls.init(project_name=project_name, experiment_name=experiment_name)
 
         try:
             from rl_insight.agent_loop import agent_loop_session
