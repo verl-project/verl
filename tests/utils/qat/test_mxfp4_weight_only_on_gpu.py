@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Experts-only MXFP4 QAT (``qat.mode=mxfp4_experts``) for DeepSeek-V4-style checkpoints.
+"""Weight-only MXFP4 QAT (``qat.mode=mxfp4``, ``qat.activation=none``) for DeepSeek-V4-style checkpoints.
 
-The mode fake-quantizes only the routed-expert weights (E2M1 values, E8M0 scale per 32 elements, the grid
-Megatron-Bridge re-quantizes those tensors to on every rollout sync) and leaves every other linear alone, so it
-can be stacked on Transformer Engine's real FP8 GEMMs.
+It fake-quantizes only the routed-expert weights (E2M1 values, E8M0 scale per 32 elements, the grid
+Megatron-Bridge re-quantizes those tensors to on every rollout sync) with verl's TileLang MXFP4 kernel and
+leaves every other linear and every activation alone, so it serves a W4A16 rollout or stacks on Transformer
+Engine's real FP8 GEMMs.
 """
 
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ import torch.nn as nn
 # flash_attn.cute probe that megatron-core's attention module otherwise trips over on cutlass-dsl mismatches.
 import verl.models.mcore  # noqa: F401  # isort: skip
 from verl.utils.qat import compressed_tensors as ct
-from verl.utils.qat.modelopt import _check_mxfp4_experts, apply_qat_to_modules, build_quantize_config
+from verl.utils.qat.modelopt import _check_mxfp4_routed_experts, apply_qat_to_modules, build_quantize_config
 
 _DSV4_NATIVE_FP8 = {
     "activation_scheme": "dynamic",
@@ -41,7 +42,13 @@ _DSV4_NATIVE_FP8 = {
 
 # What MegatronEngine hands to apply_qat_to_modules (QATEngineConfig fields); a namespace keeps this test free of the
 # worker-config import chain.
-_QAT_CFG = SimpleNamespace(enable=True, mode="mxfp4_experts", group_size=16, ignore_patterns=["lm_head", "embed_tokens", "re:.*mlp.gate$"])
+_QAT_CFG = SimpleNamespace(
+    enable=True,
+    mode="mxfp4",
+    activation="none",
+    group_size=16,
+    ignore_patterns=["lm_head", "embed_tokens", "re:.*mlp.gate$"],
+)
 
 
 def _dispatch(model_type: str, qat_mode: str | None, native=_DSV4_NATIVE_FP8):
@@ -55,29 +62,42 @@ def _dispatch(model_type: str, qat_mode: str | None, native=_DSV4_NATIVE_FP8):
 
 
 def test_quantize_config_enables_only_routed_expert_weights():
-    cfg = build_quantize_config("mxfp4_experts", ["lm_head"])
+    cfg = build_quantize_config("mxfp4", ["lm_head"], activation="none")
     assert cfg["algorithm"] is None
     quant_cfg = cfg["quant_cfg"]
     assert quant_cfg[0] == {"quantizer_name": "*", "enable": False}
     expert = quant_cfg[1]
-    assert expert["quantizer_name"] == "*mlp.experts*weight_quantizer" and expert["enable"] is True
+    assert expert["quantizer_name"] == "*mlp.experts*weight_quantizer" and expert.get("enable", True) is True
     assert expert["cfg"]["num_bits"] == (2, 1)
-    assert expert["cfg"]["block_sizes"] == {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
+    assert expert["cfg"]["block_sizes"]["scale_bits"] == (8, 0) and expert["cfg"]["block_sizes"][-1] == 32
+    assert expert["cfg"]["backend"] == "verl_mxfp4"  # verl's TileLang MXFP4 QDQ
     # Nothing re-enables the activations or any other linear afterwards.
     assert all(not entry.get("enable", False) for entry in quant_cfg[2:])
 
 
-def test_dispatch_pairs_mxfp4_experts_with_deepseek_v4_native_fp8():
-    quantizer = _dispatch("deepseek_v4", "mxfp4_experts")
+def test_quantize_config_default_activation_keeps_mxfp8_expert_inputs():
+    names = [entry["quantizer_name"] for entry in build_quantize_config("mxfp4")["quant_cfg"]]
+    assert "*mlp.experts*input_quantizer" in names
+
+
+def test_activation_none_is_mxfp4_only():
+    with pytest.raises(ValueError, match="only with qat.mode=mxfp4"):
+        build_quantize_config("mxfp4_mxfp8", activation="none")
+    with pytest.raises(ValueError, match="Supported QAT activations"):
+        build_quantize_config("mxfp4", activation="fp8")
+
+
+def test_dispatch_pairs_mxfp4_with_deepseek_v4_native_fp8():
+    quantizer = _dispatch("deepseek_v4", "mxfp4")
     assert isinstance(quantizer, ct.Fp8ConfigWeightQuantizer)
     # Plain FP8 QAT on the same checkpoint keeps working.
     assert isinstance(_dispatch("deepseek_v4", "fp8"), ct.Fp8ConfigWeightQuantizer)
     assert isinstance(_dispatch("deepseek_v4", None), ct.Fp8ConfigWeightQuantizer)
 
 
-def test_dispatch_rejects_mxfp4_experts_on_other_native_fp8_models():
+def test_dispatch_rejects_mxfp4_on_other_native_fp8_models():
     with pytest.raises(ValueError, match="does not match rollout quantization"):
-        _dispatch("qwen3_moe", "mxfp4_experts")
+        _dispatch("qwen3_moe", "mxfp4")
 
 
 class _MoELayer(nn.Module):
@@ -105,6 +125,9 @@ def test_apply_qat_fake_quantizes_routed_experts_only():
     fq = expert.weight_quantizer(weight)
     assert not torch.equal(fq, weight), "random bf16 weights are not on the MXFP4 grid"
     assert torch.equal(expert.weight_quantizer(fq), fq), "fake-quant must be idempotent on-grid"
+    from verl.utils.qat.fp4 import fp4_quant
+
+    assert torch.equal(fq, fp4_quant(weight, dequant=True)), "QDQ must be verl's TileLang MXFP4 kernel"
     # E2M1 keeps at most 1 mantissa bit: the relative step inside a 32-block is coarse but bounded.
     assert (fq.float() - weight.float()).abs().max() < 0.1
 
@@ -116,18 +139,18 @@ def test_apply_qat_fake_quantizes_routed_experts_only():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="modelopt fake-quant kernels need a GPU")
-def test_check_mxfp4_experts_fails_fast_on_stray_quantizers():
+def test_check_mxfp4_routed_experts_fails_fast_on_stray_quantizers():
     pytest.importorskip("modelopt.torch.quantization")
     model = _MoELayer().cuda().bfloat16()
     apply_qat_to_modules([model], _QAT_CFG)
-    _check_mxfp4_experts([model])  # the sanctioned layout passes
+    _check_mxfp4_routed_experts([model], expert_inputs=False)  # the sanctioned layout passes
 
     model.mlp.shared_experts.weight_quantizer.enable()
     with pytest.raises(RuntimeError, match="unexpected quantizers enabled"):
-        _check_mxfp4_experts([model])
+        _check_mxfp4_routed_experts([model], expert_inputs=False)
 
     for expert in model.mlp.experts:
         expert.weight_quantizer.disable()
     model.mlp.shared_experts.weight_quantizer.disable()
     with pytest.raises(RuntimeError, match="no routed-expert weight_quantizer enabled"):
-        _check_mxfp4_experts([model])
+        _check_mxfp4_routed_experts([model], expert_inputs=False)

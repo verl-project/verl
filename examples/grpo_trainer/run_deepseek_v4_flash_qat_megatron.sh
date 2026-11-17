@@ -23,14 +23,15 @@
 #
 # Knobs
 #   QAT_ENABLE=True               turn the fake-quant on (default False, i.e. plain fp8 training)
-#   QAT_MODE=mxfp4_experts        verl/utils/qat/modelopt.py; scopes to *mlp.experts*
-#                                 That guard exists to keep pure simulation faithful; here the
+#   QAT_MODE=mxfp4 with qat.activation=none: weight-only MXFP4 on *mlp.experts* (verl's TileLang
+#                                 kernel, see docs/low_precision/mxfp4_qat.md). ModelOpt refuses any
+#                                 quantizer under TE's fp8_autocast. That guard exists to keep pure simulation faithful; here the
 #                                 stacking is intentional (FP4 weights feeding a real FP8 GEMM), so
 #                                 it is lifted at runtime. Activations are quantized once, by TE --
 #                                 do not also enable ModelOpt's input_quantizer.
 #
-# Requires nvidia-modelopt (its MX fake-quant CUDA extension is JIT-built on first use, so nvcc must
-# be available on the workers) and Megatron-Bridge importable on every node.
+# Requires nvidia-modelopt and TileLang (its MXFP4 kernel is JIT-compiled on first use) and
+# Megatron-Bridge importable on every node.
 #
 # With:
 # - Megatron-Bridge: https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/c7774d44d4b3101dc6bdf8c8d38a32e909e1ea11
@@ -118,7 +119,7 @@ ROLLOUT_IS_THRESHOLD=${ROLLOUT_IS_THRESHOLD:-2.0}
 
 # MXFP4 quantization-aware training on the routed MoE experts. See the header.
 QAT_ENABLE=${QAT_ENABLE:-False}
-QAT_MODE=${QAT_MODE:-mxfp4_experts}
+QAT_MODE=${QAT_MODE:-mxfp4}
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
@@ -241,6 +242,8 @@ if [ "${QAT_ENABLE}" = "True" ]; then
     QAT_ARGS=(
         ++actor_rollout_ref.actor.megatron.qat.enable=True
         ++actor_rollout_ref.actor.megatron.qat.mode=${QAT_MODE}
+        # Weight-only: TE's FP8 GEMM quantizes the expert activations (on Hopper the rollout is Marlin W4A16).
+        ++actor_rollout_ref.actor.megatron.qat.activation=none
     )
 fi
 

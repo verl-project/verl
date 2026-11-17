@@ -206,12 +206,12 @@ class MegatronEngine(BaseEngine):
         self._qat_config = getattr(self.engine_config, "qat", None)
         self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
         if self._qat_enabled:
-            # mxfp4_experts is the one mode built to stack on TE FP8: weight-only fake-quant feeds TE's real FP8 GEMM.
-            if self.engine_config.override_transformer_config.get("fp8") and self._qat_config.mode != "mxfp4_experts":
+            if self.engine_config.override_transformer_config.get("fp8") and not self._qat_feeds_te_fp8():
                 raise ValueError(
                     "QAT and Transformer Engine FP8 training are mutually exclusive: QAT fake-quantizes weights "
-                    "inside bf16 GEMMs, while override_transformer_config.fp8 switches the GEMMs themselves to "
-                    "FP8. Disable one of them."
+                    "and activations inside bf16 GEMMs, while override_transformer_config.fp8 switches the GEMMs "
+                    "themselves to FP8. The one combination allowed is qat.mode=mxfp4 with qat.activation=none: "
+                    "weight-only MXFP4 fake-quant feeding TE's FP8 GEMM, which quantizes the activations once."
                 )
             logger.info(f"QAT enabled in MegatronEngine: mode={self._qat_config.mode}")
         self._rollout_weight_quantizer = None
@@ -533,6 +533,10 @@ class MegatronEngine(BaseEngine):
             provider.hybrid_layer_pattern,
         )
 
+    def _qat_feeds_te_fp8(self) -> bool:
+        """Weight-only MXFP4 QAT, whose fake-quantized expert weights feed TE's real FP8 GEMM."""
+        return self._qat_config.mode == "mxfp4" and (getattr(self._qat_config, "activation", "mxfp8") == "none")
+
     def _maybe_enable_fused_kernels(self):
         if not self.engine_config.use_fused_kernels:
             return
@@ -612,7 +616,7 @@ class MegatronEngine(BaseEngine):
             )
 
         if self._qat_enabled and not self.engine_config.forward_only:
-            if self._qat_config.mode == "mxfp4_experts":
+            if self.engine_config.override_transformer_config.get("fp8") and self._qat_feeds_te_fp8():
                 # Weight-only fake-quant feeding TE's real FP8 GEMM is the intended stack (DeepSeek-V4 does FP4 QAT
                 # inside FP8 training). modelopt refuses any quantizer under fp8_autocast; lift that guard at
                 # runtime. Activations are quantized once, by TE. modelopt's call sites resolve this module global

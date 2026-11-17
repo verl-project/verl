@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""``qat.mode=mxfp4_experts`` on a real Megatron-Core MoE (TE grouped-GEMM experts), single GPU.
+"""Weight-only ``qat.mode=mxfp4`` (``qat.activation=none``) on a real Megatron-Core MoE (TE grouped-GEMM experts), single GPU.
 
 modelopt quantizes a TE grouped linear with one quantizer per expert (``...linear_fc1.weight_quantizer.{i}``),
 so this is the layout the DeepSeek-V4 recipe actually sees; the toy nn.Linear tests cannot reach it.
@@ -34,13 +34,13 @@ from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig  # noqa: E402
 from modelopt.torch.quantization.nn import TensorQuantizer  # noqa: E402
 
-from verl.utils.qat.modelopt import _check_mxfp4_experts, _is_expert_weight_quantizer, apply_qat_to_modules  # noqa: E402
+from verl.utils.qat.modelopt import _check_mxfp4_routed_experts, _is_expert_weight_quantizer, apply_qat_to_modules  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
 NUM_LAYERS, NUM_EXPERTS, HIDDEN, SEQ, VOCAB = 2, 4, 256, 64, 128
 _QAT_CFG = SimpleNamespace(
-    enable=True, mode="mxfp4_experts", group_size=16, ignore_patterns=["lm_head", "embed_tokens", "re:.*mlp.gate$"]
+    enable=True, mode="mxfp4", activation="none", group_size=16, ignore_patterns=["lm_head", "embed_tokens", "re:.*mlp.gate$"]
 )
 
 
@@ -94,13 +94,16 @@ def test_grouped_gemm_experts_get_one_mxfp4_quantizer_per_expert(moe_model):
     assert all(_is_expert_weight_quantizer(n) for n in enabled), enabled[:5]
     # one per expert, per expert linear (fc1, fc2), per layer
     assert len(enabled) == NUM_LAYERS * 2 * NUM_EXPERTS, (len(enabled), enabled[:5])
-    _check_mxfp4_experts([model])
+    _check_mxfp4_routed_experts([model], expert_inputs=False)
 
     fc1 = model.decoder.layers[0].mlp.experts.linear_fc1
     w = getattr(fc1, "weight0").detach()
     fq = fc1.weight_quantizer[0](w)
     assert not torch.equal(fq, w), "random bf16 weights are not on the MXFP4 grid"
     assert torch.equal(fc1.weight_quantizer[0](fq), fq), "fake-quant must be idempotent on-grid"
+    from verl.utils.qat.fp4 import fp4_quant
+
+    assert torch.equal(fq, fp4_quant(w, dequant=True)), "per-expert QDQ must be verl's TileLang MXFP4 kernel"
 
     # Forward + backward through the fake-quantized grouped GEMM reach every expert weight (STE).
     tokens = torch.randint(0, VOCAB, (2, SEQ), device="cuda")
