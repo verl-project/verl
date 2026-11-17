@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 10/01/2026.
+Last updated: 11/02/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -36,6 +36,7 @@ Data
      custom_cls:
         path: null
         name: null
+     custom_dataloader: null
 
 - ``data.train_files``: Training set parquet. Can be a list or a single
   file. The program will read all files into memory, so it can't be too
@@ -87,7 +88,7 @@ Data
 Customized Dataset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Customized dataset extension is implemented for the SFT trainer and can be extended to other trainers with similar changes.
+``data.custom_cls`` selects a custom dataset class; the trainer still constructs its dataloader.
 
 .. code:: yaml
 
@@ -97,6 +98,39 @@ Customized dataset extension is implemented for the SFT trainer and can be exten
 
 - ``data.custom_cls.path``: The path to the file containing your customized dataset class. If not specified, pre-implemented dataset will be used.
 - ``data.custom_cls.name``: The name of the dataset class within the specified file.
+
+.. _custom-ppo-dataloader:
+
+Custom Dataloader
+~~~~~~~~~~~~~~~~~
+
+``data.custom_dataloader`` selects a custom loading pipeline for V1 PPO
+(sync or async), replacing the default dataset, sampler, and dataloader.
+
+.. code:: yaml
+
+   data:
+     custom_dataloader:
+       _target_: my_project.StreamingLoader
+       arg1: value1
+       arg2:
+         arg2_1: value2
+   trainer:
+     total_training_steps: 1000
+
+- ``data.custom_dataloader._target_``: Import path of the loader class. Other fields
+  are constructor arguments, passed intact without instantiating nested targets.
+- Verl creates separate train/validation instances and supplies ``_split``,
+  ``_batch_size``, ``_data_config``, ``_tokenizer``, ``_processor``, and ``_collate_fn``.
+  Implement ``__iter__()`` yielding collated batches containing ``raw_prompt``;
+  only the training loader may repeat. Each validation iteration must start fresh
+  and terminate. See the `loader contract <https://github.com/verl-project/verl/blob/main/verl/utils/dataset/dataloader.py>`_.
+- Unsized loaders require ``trainer.total_training_steps``. Resume requires paired
+  ``state_dict()`` / ``load_state_dict()`` methods; model-only saving does not.
+
+Defaults to ``null``. Leave unset or set ``data.custom_dataloader: null`` to use
+the default dataset, sampler, and dataloader. Do not combine a custom loader with
+``data.custom_cls``.
 
 Actor/Rollout/Reference Policy
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -252,13 +286,18 @@ Actor/Rollout/Reference Policy
 
   - ``actor_rollout_ref.model.fused_kernel_options.impl_backend``: The
     implementation backend for fused kernels. Options: "triton", "torch",
-    or "liger". The "torch" backend always uses verl's native
+    "liger", or "tilelang". The "torch" backend always uses verl's native
     output-head implementation; select "liger" explicitly to use Liger's fused
-    output-head kernel. Default is "torch".
-    Megatron does not use this option. With Megatron fused kernels enabled,
-    ``actor_rollout_ref.model.use_liger=False`` keeps Verl's Triton
-    tensor-parallel output head, while ``use_liger=True`` calls Liger's public
+    output-head kernel. ``tilelang`` is CUDA-only and additionally supports
+    querying multiple token log probabilities for top-k distillation and score
+    centering without materializing logits. Default is "torch".
+    With Megatron fused kernels enabled, ``impl_backend=tilelang`` selects the
+    TileLang tensor-parallel output head; otherwise ``use_liger=False`` keeps
+    Verl's Triton head and ``use_liger=True`` calls Liger's public
     tensor-parallel fused scaled cross entropy operator.
+    The VeOmni engine uses the same verl output-head implementations rather
+    than VeOmni's ``chunk_topk_distill`` path; select ``tilelang`` when
+    distillation or score centering requests auxiliary top-k log probabilities.
 
 - ``actor_rollout_ref.model.use_remove_padding``: Whether to use remove
   padding in the model. If set to True, the model will remove padding

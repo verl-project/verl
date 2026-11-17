@@ -27,28 +27,43 @@ RUN cd /workspace \
     && cd .. \
     && rm -fr causal-conv1d
 
-ARG VLLM_TAG="18d87a87dc39c1a50f452b218fdcc3aeec48d18e"
+# vLLM v0.32.0 — same version as verl's CUDA stack (pyproject.toml / uv.lock: vllm==0.32.0).
+# PR #44972 (ROCm cuMem zeroing), #46009 (MoE weight storage) and #60367 (host
+# access to sleep-mode cuMem; supersedes the unmerged #51369) are already in v0.32.0.
+ARG VLLM_TAG="5df63a7203cdb9328d824a27b682e77c7b9928be"
+# [Bugfix][ROCm] Restore MoE weight padding dropped by #46009 (merged after v0.32.0)
+# Ref: https://github.com/vllm-project/vllm/pull/61872
+ARG VLLM_PR_61872="3b43d2b01c2fb667101746e1acd33b6a3c9d0863"
 RUN pip install --no-cache-dir setuptools_scm && \
     cd /workspace && git clone https://github.com/vllm-project/vllm && \
     cd vllm && git checkout ${VLLM_TAG} && \
-    # [V1] Add sleep/wake correctness regression test for hybrid GDN
-    # Ref: https://github.com/vllm-project/vllm/pull/44972
-    sed -i 's|\(  // std::cout << "create_and_map:\)|#ifdef USE_ROCM\n  // ROCm: zero freshly mapped VRAM to avoid stale data (PR #44972)\n  CUDA_CHECK((CUresult)hipMemset(reinterpret_cast<void*>(d_mem), 0, size));\n  if (error_code != 0) {\n    return;\n  }\n#endif\n\1|' csrc/cumem_allocator.cpp && \
-    # [Bugfix][MoE] Preserve unquantized weight storage on ROCm
-    # Ref: https://github.com/vllm-project/vllm/pull/46009
-    sed -i 's/layer\.w13_weight\.data = self\._maybe_pad_weight(layer\.w13_weight\.data)/layer.w13_weight.data.copy_(self._maybe_pad_weight(layer.w13_weight.data))/' \
-      /workspace/vllm/vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py && \
-    sed -i 's/layer\.w2_weight\.data = self\._maybe_pad_weight(layer\.w2_weight\.data)/layer.w2_weight.data.copy_(self._maybe_pad_weight(layer.w2_weight.data))/' \
-      /workspace/vllm/vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py && \
-    sed -i 's/return w13_weight\.contiguous(), w2_weight\.contiguous()/return w13_weight, w2_weight/' \
-      /workspace/vllm/vllm/model_executor/layers/fused_moe/oracle/unquantized.py && \
+    # Apply only the vllm/ source change; its test file conflicts on v0.32.0.
+    git show ${VLLM_PR_61872} -- vllm/ | git apply && \
     pip install --no-cache-dir -r requirements/rocm.txt && \
     MAX_JOBS=64 python3 setup.py develop --no-deps
-RUN pip uninstall tilelang -y && pip install --no-cache-dir --no-deps xgrammar==0.1.32
+# Put the runtime ROCm (_rocm_sdk_core) ahead of the base image's _rocm_sdk_devel
+# entries. vLLM >= #56190 dlopens libtorch_cpu.so RTLD_GLOBAL before `import torch`;
+# with _rocm_sdk_devel first on LD_LIBRARY_PATH that pulls in devel's comgr/libLLVM
+# next to core's, and `import vllm` aborts with "Option 'spirv-expand-step'
+# registered more than once". Upstream fix (not merged yet):
+# https://github.com/vllm-project/vllm/pull/60911
+# Set after the vLLM build so compilation keeps the base image's environment.
+ENV ROCM_CORE=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core
+ENV LD_LIBRARY_PATH="${ROCM_CORE}/lib:${ROCM_CORE}/lib/rocm_sysdeps/lib:${LD_LIBRARY_PATH}"
+# Keep tilelang (0.1.10 from vLLM's requirements; apache-tvm-ffi==0.1.11 also
+# satisfies xgrammar==0.2.8). The base image installs z3-solver as an .egg, so
+# libz3.so.4.15 is not at site-packages/z3/lib where tilelang's RUNPATH looks;
+# reinstall the same version from the wheel.
+RUN pip install --no-cache-dir --force-reinstall --no-deps z3-solver==4.15.4.0
+RUN python -c "import vllm, tilelang, xgrammar, tvm_ffi, transformers; \
+from importlib.metadata import version as v; \
+print(*[f'{p} {v(p)}' for p in ['vllm', 'tilelang', 'xgrammar', 'apache-tvm-ffi', 'transformers']], sep=' | ')"
 
 
 FROM install_vllm AS install_verl
-ARG VERL_TAG="7b19203c52503760f92e0368067c7eb744236274"
+# verl main as of 2026-11-13: transformers<5.17, so it stays compatible with
+# vLLM v0.32.0 (transformers>=5.16.1,<5.20).
+ARG VERL_TAG="3503bec3420dbb8ee67f8c9da6c0721570ae75ac"
 RUN cd /workspace && git clone https://github.com/verl-project/verl.git && \
     cd verl && git checkout ${VERL_TAG} && \
     git submodule update --init --recursive && \
@@ -56,10 +71,11 @@ RUN cd /workspace && git clone https://github.com/verl-project/verl.git && \
     sed -i 's/^  sglang: {}/  sglang:\n    disable_custom_all_reduce: True\n    attention_backend: triton/' /workspace/verl/verl/trainer/config/rollout/rollout.yaml && \
     pip install --no-cache-dir . 
     
-# for qwen3.5 — versions pinned to what was validated on this image for reproducibility.
+# for qwen3.5 — versions pinned for reproducibility. mcore_bridge 1.7.0: 1.5.x/1.6.x cap
+# transformers<5.13, which would downgrade below vLLM 0.32.0's transformers>=5.16.1.
 RUN pip install --no-cache-dir \
     "git+https://github.com/ISEEKYAN/mbridge.git@a61943d7fcb34a190471cfeb0a0eb8bbda621ddf" \
-    mcore_bridge==1.5.2 \
+    mcore_bridge==1.7.0 \
     megatron-core==0.18.0 \
     mathruler==0.1.0 \
     qwen_vl_utils==0.0.14 \
@@ -67,6 +83,17 @@ RUN pip install --no-cache-dir \
     accelerate==1.14.0 \
     TransferQueue==0.1.11 \
     flash-linear-attention==0.5.1
+
+RUN pip install --no-cache-dir --no-deps \
+    megatron-bridge==0.5.1 \
+    nvidia-modelopt==0.45.0 \
+    pulp==3.3.2
+# megatron-bridge 0.5.1 registers qwen3_asr unconditionally, but transformers 5.16.1
+# already ships it ("'qwen3_asr' is already used by a Transformers config").
+# Tolerate the existing entry, as megatron-bridge 0.6.2 does.
+RUN F=/opt/venv/lib/python3.12/site-packages/megatron/bridge/models/qwen3_asr/hf_qwen3_asr/__init__.py && \
+    sed -i 's/^\(Auto\(Config\|Model\|Processor\)\.register(.*\))$/\1, exist_ok=True)/' "$F" && \
+    test "$(grep -c 'exist_ok=True' "$F")" = 3
 
 RUN pip install --no-cache-dir cupy-rocm-7-0==14.1.1
 
@@ -84,12 +111,18 @@ RUN cd /workspace && git clone https://github.com/sgl-project/sglang.git && \
       python/sglang/srt/layers/layernorm.py && \
     sed -zi 's/                out = torch.empty_like(x)\n                residual_out = torch.empty_like(x)\n                if post_residual_addition is not None:\n                    residual = residual + post_residual_addition\n                fused_add_rms_norm(\n                    out, x, residual_out, residual, w, self.variance_epsilon\n                )\n                return out, residual_out/                if post_residual_addition is not None:\n                    residual = residual + post_residual_addition\n                residual = residual.contiguous()\n                fused_add_rms_norm(x, residual, w, self.variance_epsilon)\n                return x, residual/' \
       python/sglang/srt/layers/layernorm.py && \
+    # [Bugfix][VLM] Qwen2.5-VL vision rotary embedding vs transformers >5.8:
+    # forward(seqlen) became forward(position_ids), so the GPU scalar sglang passes
+    # in hit "cuda:0 and cpu" against the CPU inv_freq buffer and killed the
+    # scheduler. Build the sequence locally so both transformers APIs work.
+    sed -zi 's|        max_grid_size = grid_thw\[:, 1:\]\.max()\n        rotary_pos_emb_full = self\.rotary_pos_emb(max_grid_size)|        max_grid_size = int(grid_thw[:, 1:].max())\n        # transformers >5.8 changed forward(seqlen) to forward(position_ids); build\n        # the sequence here so both APIs work. inv_freq stays on CPU like pos_ids.\n        inv_freq = self.rotary_pos_emb.inv_freq\n        seq = torch.arange(max_grid_size, device=inv_freq.device, dtype=inv_freq.dtype)\n        rotary_pos_emb_full = torch.outer(seq, inv_freq)|' \
+      python/sglang/srt/models/qwen2_5_vl.py && \
     sed -i 's|^\[\[tool.setuptools-rust.ext-modules\]\]|# [[tool.setuptools-rust.ext-modules]]|; s|^target = "sglang.srt.grpc._core"|# target = "sglang.srt.grpc._core"|; s|^path = "../rust/sglang-grpc/Cargo.toml"|# path = "../rust/sglang-grpc/Cargo.toml"|; s|^binding = "PyO3"|# binding = "PyO3"|' python/pyproject.toml && \
     pip install --no-cache-dir --no-build-isolation --no-deps \
       -e ./python \
-      IPython \
       soundfile==0.13.1 \
       "git+https://github.com/fzyzcjy/torch_memory_saver.git" && \
+    pip install --no-cache-dir IPython==9.15.0 && \
     cd sgl-kernel && cp pyproject_rocm.toml pyproject.toml && rm -rf build && \
     sed -i 's|f"--amdgpu-target={amdgpu_target}"|"--offload-arch=gfx942", "--offload-arch=gfx950"|' setup_rocm.py && \
     sed -i '/amdgpu_target not in \["gfx942", "gfx950"\]/,/sys.exit(1)/d' setup_rocm.py && \
@@ -120,6 +153,12 @@ RUN SP="$(python -c 'import site; print(site.getsitepackages()[0])')"; \
 RUN apt-get update && apt-get install -y --no-install-recommends vim \
     && rm -rf /var/lib/apt/lists/*
 
+# Fail if any later pip step left vLLM with unmet requirements (e.g. a transformers downgrade).
+RUN ! pip check 2>/dev/null | grep -E '^vllm '
+RUN python -c "import vllm, tilelang, xgrammar, transformers, verl; \
+from importlib.metadata import version as v; \
+print('final:', *[f'{p} {v(p)}' for p in ['vllm', 'tilelang', 'xgrammar', 'transformers', 'verl']], sep=' | ')"
+
 # Clean build artifacts and caches
 RUN rm -rf /*.whl \
     && rm -rf /root/.cache \
@@ -137,6 +176,5 @@ RUN mkdir -p /workspace/.manifest \
     && pip list > /workspace/.manifest/requirements.txt \
     && dpkg -l > /workspace/.manifest/dpkg-list.txt \
     && echo "${GIT_COMMIT_TAG}" > /workspace/.manifest/training_docker_version
-
 
 CMD ["/usr/bin/bash"]

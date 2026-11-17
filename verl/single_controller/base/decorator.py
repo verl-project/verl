@@ -14,10 +14,11 @@
 import inspect
 from functools import partial, wraps
 from types import FunctionType
+from typing import Callable
 
-from verl.protocol import DataProtoFuture, _padding_size_key
+from verl.protocol import DataProtoFuture
 from verl.utils.py_functional import DynamicEnum
-from verl.utils.transferqueue_utils import tqbridge
+from verl.utils.transferqueue_utils import _find_meta, tqbridge
 
 # here we add a magic number of avoid user-defined function already have this attribute
 MAGIC_ATTR = "attrs_3141562937"
@@ -88,35 +89,6 @@ def _split_args_kwargs_data_proto(chunks, *args, **kwargs):
     return splitted_args, splitted_kwargs
 
 
-def _split_args_kwargs_data_proto_with_auto_padding(chunks, *args, **kwargs):
-    from verl.protocol import DataProto, DataProtoFuture
-
-    data_proto_len = None
-    padding_size = None
-
-    def _padding_and_split_data(obj, chunks):
-        nonlocal data_proto_len, padding_size
-        assert isinstance(obj, DataProto | DataProtoFuture)
-        if isinstance(obj, DataProto) and obj.is_padding_enabled():
-            # for padding, we only support DataProto with same length
-            if data_proto_len is None:
-                data_proto_len = len(obj)
-                padding_size = (chunks - (data_proto_len % chunks)) if (data_proto_len % chunks > 0) else 0
-            else:
-                assert data_proto_len == len(obj), (
-                    f"expecting all arg share same length of {data_proto_len}, but got {len(obj)}"
-                )
-            obj.padding(padding_size=padding_size)
-        return obj.chunk(chunks=chunks)
-
-    splitted_args = [_padding_and_split_data(arg, chunks) for arg in args]
-    splitted_kwargs = {key: _padding_and_split_data(val, chunks) for key, val in kwargs.items()}
-    if padding_size is not None:
-        splitted_kwargs[_padding_size_key] = padding_size
-
-    return splitted_args, splitted_kwargs
-
-
 def dispatch_one_to_all(worker_group, *args, **kwargs):
     args = tuple([arg] * worker_group.world_size for arg in args)
     kwargs = {k: [v] * worker_group.world_size for k, v in kwargs.items()}
@@ -168,8 +140,7 @@ def dispatch_dp_compute_data_proto(worker_group, *args, **kwargs):
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
-    # Note: enable auto padding for dp compute DatapProto
-    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto_with_auto_padding(
+    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(
         worker_group.world_size,
         *args,
         **kwargs,
@@ -199,7 +170,14 @@ def collect_dp_compute_data_proto(worker_group, output):
     return _concat_data_proto_or_future(output)
 
 
-def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs):
+def dispatch_nd_compute(
+    dispatch_infos: list,
+    dp_size,
+    worker_group,
+    *args,
+    dispatch_mp_src_only: bool = False,
+    **kwargs,
+):
     import os
 
     from verl.single_controller.base.worker_group import WorkerGroup
@@ -207,7 +185,7 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
 
     assert isinstance(worker_group, WorkerGroup)
 
-    max_workers = max(1, min(len(args[0]), os.cpu_count()))
+    max_workers = max(1, min(dp_size, os.cpu_count() or 1))
 
     args = [parallel_put(arg, max_workers=max_workers) for arg in args]
     kwargs = {k: parallel_put(v, max_workers=max_workers) for k, v in kwargs.items()}
@@ -217,8 +195,10 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
         assert isinstance(arg, tuple | list) and len(arg) == dp_size
         transformed_args = []
         for i in range(worker_group.world_size):
-            local_dp_rank = dp_rank_mapping[i]
-            transformed_args.append(arg[local_dp_rank])
+            dispatch_info = dispatch_infos[i]
+            transformed_args.append(
+                arg[dispatch_info.dp_rank] if not dispatch_mp_src_only or dispatch_info.is_mp_src else None
+            )
         all_args.append(transformed_args)
     all_args = tuple(all_args)
 
@@ -227,13 +207,15 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
         assert isinstance(v, tuple | list) and len(v) == dp_size
         transformed_v = []
         for i in range(worker_group.world_size):
-            local_dp_rank = dp_rank_mapping[i]
-            transformed_v.append(v[local_dp_rank])
+            dispatch_info = dispatch_infos[i]
+            transformed_v.append(
+                v[dispatch_info.dp_rank] if not dispatch_mp_src_only or dispatch_info.is_mp_src else None
+            )
         all_kwargs[k] = transformed_v
     return all_args, all_kwargs
 
 
-def collect_nd_compute(collect_mask: list[bool], worker_group, output):
+def collect_nd_compute(collect_infos: list, worker_group, output):
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
@@ -241,19 +223,32 @@ def collect_nd_compute(collect_mask: list[bool], worker_group, output):
 
     output_in_dp = []
     for global_rank in range(worker_group.world_size):
-        collect_dp_rank = collect_mask[global_rank]
-        if collect_dp_rank:
+        if collect_infos[global_rank].is_collect:
             output_in_dp.append(output[global_rank])
     return output_in_dp
 
 
-def dispatch_nd_compute_dataproto(dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs):
+def dispatch_nd_compute_dataproto(
+    dispatch_infos: list,
+    dp_size,
+    worker_group,
+    *args,
+    dispatch_mp_src_only: bool = False,
+    **kwargs,
+):
     splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(dp_size, *args, **kwargs)
-    return dispatch_nd_compute(dp_rank_mapping, dp_size, worker_group, *splitted_args, **splitted_kwargs)
+    return dispatch_nd_compute(
+        dispatch_infos,
+        dp_size,
+        worker_group,
+        *splitted_args,
+        dispatch_mp_src_only=dispatch_mp_src_only,
+        **splitted_kwargs,
+    )
 
 
-def collect_nd_compute_dataproto(collect_mask: list[bool], worker_group, output):
-    output = collect_nd_compute(collect_mask, worker_group, output)
+def collect_nd_compute_dataproto(collect_infos: list, worker_group, output):
+    output = collect_nd_compute(collect_infos, worker_group, output)
 
     from verl.protocol import BatchData
 
@@ -263,7 +258,15 @@ def collect_nd_compute_dataproto(collect_mask: list[bool], worker_group, output)
     return _concat_data_proto_or_future(output)
 
 
-def dispatch_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
+def _check_one_mp_src_per_dp_rank(mesh_name, dispatch_infos, dp_size):
+    for dp_rank in range(dp_size):
+        num_src_ranks = sum(info.dp_rank == dp_rank and info.is_mp_src for info in dispatch_infos)
+        assert num_src_ranks == 1, (
+            f"mesh {mesh_name} dp_rank {dp_rank} must have exactly one MP source rank, but got {num_src_ranks}"
+        )
+
+
+def dispatch_lazy_compute_data_proto(mesh_name, worker_group, *args, dispatch_mp_src_only: bool = False, **kwargs):
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
@@ -273,10 +276,18 @@ def dispatch_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
         worker_group._dispatch_info[mesh_name] = worker_group._query_dispatch_info(mesh_name)
         assert len(worker_group._dispatch_info[mesh_name]) == worker_group.world_size
 
-    dp_rank_mapping = worker_group._dispatch_info[mesh_name]
-    # perform dispatch
-    dp_size = max(dp_rank_mapping) + 1
-    return dispatch_nd_compute_dataproto(dp_rank_mapping, dp_size, worker_group, *args, **kwargs)
+    dispatch_infos = worker_group._dispatch_info[mesh_name]
+    dp_size = max(info.dp_rank for info in dispatch_infos) + 1
+    if dispatch_mp_src_only:
+        _check_one_mp_src_per_dp_rank(mesh_name, dispatch_infos, dp_size)
+    return dispatch_nd_compute_dataproto(
+        dispatch_infos,
+        dp_size,
+        worker_group,
+        *args,
+        dispatch_mp_src_only=dispatch_mp_src_only,
+        **kwargs,
+    )
 
 
 def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
@@ -291,15 +302,17 @@ def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
         worker_group._collect_info[mesh_name] = worker_group._query_collect_info(mesh_name)
         assert len(worker_group._collect_info[mesh_name]) == worker_group.world_size
 
-    # a boolean of whether the dp_rank is used for collect
-    collect_mask = worker_group._collect_info[mesh_name]
-    # perform dispatch
-    return collect_nd_compute_dataproto(collect_mask, worker_group, *args, **kwargs)
+    collect_infos = worker_group._collect_info[mesh_name]
+    return collect_nd_compute_dataproto(collect_infos, worker_group, *args, **kwargs)
 
 
-def make_nd_compute_dataproto_dispatch_fn(mesh_name):
+def make_nd_compute_dataproto_dispatch_fn(mesh_name, dispatch_mp_src_only: bool = False):
     return {
-        "dispatch_fn": partial(dispatch_lazy_compute_data_proto, mesh_name),
+        "dispatch_fn": partial(
+            dispatch_lazy_compute_data_proto,
+            mesh_name,
+            dispatch_mp_src_only=dispatch_mp_src_only,
+        ),
         "collect_fn": partial(collect_lazy_compute_data_proto, mesh_name),
     }
 
@@ -380,6 +393,68 @@ def _check_execute_mode(execute_mode):
     assert isinstance(execute_mode, Execute), f"execute_mode must be a Execute. Got {execute_mode}"
 
 
+def _is_async_worker_hook(hook) -> bool:
+    if hook is None:
+        return False
+    return inspect.iscoroutinefunction(hook) or inspect.iscoroutinefunction(
+        inspect.getattr_static(hook, "__call__", None)
+    )
+
+
+def _wrap_worker_hooks(func, worker_preprocess_fn, worker_postprocess_fn):
+    if worker_preprocess_fn is None and worker_postprocess_fn is None:
+        return func
+
+    if (
+        inspect.iscoroutinefunction(func)
+        or _is_async_worker_hook(worker_preprocess_fn)
+        or _is_async_worker_hook(worker_postprocess_fn)
+    ):
+
+        @wraps(func)
+        async def async_inner(self, *args, **kwargs):
+            if worker_preprocess_fn is not None:
+                preprocessed = worker_preprocess_fn(self, *args, **kwargs)
+                if inspect.isawaitable(preprocessed):
+                    preprocessed = await preprocessed
+                args, kwargs = preprocessed
+            output = func(self, *args, **kwargs)
+            if inspect.isawaitable(output):
+                output = await output
+            if worker_postprocess_fn is not None:
+                output = worker_postprocess_fn(self, output)
+                if inspect.isawaitable(output):
+                    output = await output
+            return output
+
+        return async_inner
+
+    @wraps(func)
+    def inner(self, *args, **kwargs):
+        if worker_preprocess_fn is not None:
+            args, kwargs = worker_preprocess_fn(self, *args, **kwargs)
+        output = func(self, *args, **kwargs)
+        if worker_postprocess_fn is not None:
+            output = worker_postprocess_fn(self, output)
+        return output
+
+    return inner
+
+
+def _assert_no_worker_hooks_when_transfer_queue_enabled(worker_preprocess_fn, worker_postprocess_fn, *args, **kwargs):
+    """Reject worker hooks when this call carries TransferQueue metadata.
+
+    ``tqbridge`` reads metadata before worker hooks run. Hooks that redistribute data
+    across ranks, such as a model-parallel broadcast, drop that metadata on ranks that
+    were not the dispatch target.
+    """
+    if _find_meta(*args, **kwargs) is None:
+        return
+    assert worker_preprocess_fn is None and worker_postprocess_fn is None, (
+        "worker_preprocess_fn and worker_postprocess_fn must be None when TransferQueue is enabled"
+    )
+
+
 def _materialize_futures(*args, **kwargs):
     new_args = []
     for arg in args:
@@ -395,7 +470,14 @@ def _materialize_futures(*args, **kwargs):
     return new_args, kwargs
 
 
-def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocking=True, materialize_futures=True):
+def register(
+    dispatch_mode=Dispatch.ALL_TO_ALL,
+    execute_mode=Execute.ALL,
+    blocking=True,
+    materialize_futures=True,
+    worker_preprocess_fn: Callable | None = None,
+    worker_postprocess_fn: Callable | None = None,
+):
     """Register a function with distributed execution configuration.
 
     This decorator registers a function with specific dispatch and execution modes
@@ -411,6 +493,14 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
             Whether the execution should be blocking. Defaults to True.
         materialize_futures:
             Whether to materialize the data before dispatching. Defaults to True.
+        worker_preprocess_fn:
+            Optional function executed inside each worker before the registered method.
+            It receives ``(self, *args, **kwargs)`` and returns ``(args, kwargs)``.
+            Defaults to None.
+        worker_postprocess_fn:
+            Optional function executed inside each worker after the registered method.
+            It receives ``(self, output)`` and returns the output to send back.
+            Defaults to None. Must be None when the call carries TransferQueue metadata.
 
 
     Returns:
@@ -420,20 +510,33 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
 
     _check_dispatch_mode(dispatch_mode=dispatch_mode)
     _check_execute_mode(execute_mode=execute_mode)
+    assert worker_preprocess_fn is None or callable(worker_preprocess_fn), (
+        f"worker_preprocess_fn must be callable or None. Got {worker_preprocess_fn}"
+    )
+    assert worker_postprocess_fn is None or callable(worker_postprocess_fn), (
+        f"worker_postprocess_fn must be callable or None. Got {worker_postprocess_fn}"
+    )
 
     def decorator(func):
+        func = _wrap_worker_hooks(func, worker_preprocess_fn, worker_postprocess_fn)
         func = tqbridge(dispatch_mode=dispatch_mode)(func)
+
+        def _prepare_call(args, kwargs):
+            if materialize_futures:
+                args, kwargs = _materialize_futures(*args, **kwargs)
+            _assert_no_worker_hooks_when_transfer_queue_enabled(
+                worker_preprocess_fn, worker_postprocess_fn, *args, **kwargs
+            )
+            return args, kwargs
 
         @wraps(func)
         def inner(*args, **kwargs):
-            if materialize_futures:
-                args, kwargs = _materialize_futures(*args, **kwargs)
+            args, kwargs = _prepare_call(args, kwargs)
             return func(*args, **kwargs)
 
         @wraps(func)
         async def async_inner(*args, **kwargs):
-            if materialize_futures:
-                args, kwargs = _materialize_futures(*args, **kwargs)
+            args, kwargs = _prepare_call(args, kwargs)
             return await func(*args, **kwargs)
 
         wrapper = async_inner if inspect.iscoroutinefunction(func) else inner

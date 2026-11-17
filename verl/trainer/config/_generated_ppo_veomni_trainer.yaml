@@ -512,6 +512,7 @@ data:
   custom_cls:
     path: null
     name: null
+  custom_dataloader: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
   mm_processor_kwargs: {}
@@ -754,6 +755,7 @@ sandbox_fusion:
 reward:
   _target_: verl.workers.config.RewardConfig
   num_workers: 8
+  preset: null
   custom_reward_function:
     path: null
     name: compute_score
@@ -1025,17 +1027,7 @@ global_profiler:
       strict: false
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
-  rollout:
-    enable: false
-    dump_dir: ~/.verl/rollout_dump
-    steps: []
-    action: cache
   rollout_tq:
-    enable: false
-    dump_dir: ~/.verl/rollout_dump
-    steps: []
-    action: cache
-  async_rollout:
     enable: false
     dump_dir: ~/.verl/rollout_dump
     steps: []

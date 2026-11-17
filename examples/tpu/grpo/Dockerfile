@@ -4,13 +4,13 @@
 FROM rayproject/ray:2.56.0-py312
 
 ARG TORCH_TPU_VERSION=0.2.0
-ARG TPU_SYNC_VERSION=0.0.1.dev20261012084241
+ARG TPU_SYNC_VERSION=0.0.1.dev20261103081657
 # 11/05/2026 HEAD of torchtitan. Qwen3.5 with expert parallelism (EP > 1, e.g. Qwen3.5-397B-A17B) needs
 # google-pytorch/torchtitan#142 (Qwen3.5 TPU optimizations and fast dropless EP); build with
 # --build-arg TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4 (head of #142).
 ARG TORCHTITAN_COMMIT=109bd61829a97f647e4d0d623e77e0a518151ac2
 
-ARG VLLM_TORCHTPU_COMMIT=732c43464b5d4601d2529f2ee42af20c3be11c99
+ARG VLLM_TORCHTPU_COMMIT=281b52666c6a4f1e64e97ad573a66d1082d178c3
 
 USER root
 RUN apt-get update && apt-get install -y gcc-12 g++-12 build-essential cmake ninja-build \
