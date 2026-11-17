@@ -932,7 +932,6 @@ distillation:
   teacher_key: data_source
 transfer_queue:
   enable: false
-  share_prompts: true
   backend:
     storage_backend: SimpleStorage
     SimpleStorage:
@@ -982,6 +981,7 @@ trainer:
   use_v1: true
   v1:
     trainer_mode: sync
+    share_prompts: true
     sync: {}
     colocate_async:
       num_warmup_batches: 1

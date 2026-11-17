@@ -85,8 +85,8 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
-        self.share_prompt_fields = prompt_sharing_enabled(self.config.transfer_queue)
-        self.share_preprocessing = prompt_sharing_requested(self.config.transfer_queue)
+        self.share_prompt_fields = prompt_sharing_enabled(self.config)
+        self.share_preprocessing = prompt_sharing_requested(self.config)
         # uid => fields its trajectories link from the public prompt the trainer put under uid
         self.public_prompt_fields: dict[str, list[str]] = {}
         # uid => multi_modal_inputs the first finished session of uid put under public_multi_modal_key(uid)

@@ -91,16 +91,22 @@ def _public_keys(uids: list[str]) -> set[str]:
     return set(tq.kv_exists(keys=uids, partition_id=PUBLIC_PARTITION))
 
 
+def _config(storage_backend: str = "SimpleStorage", share_prompts: bool | None = None) -> OmegaConf:
+    v1 = {} if share_prompts is None else {"share_prompts": share_prompts}
+    return OmegaConf.create(
+        {"trainer": {"v1": v1}, "transfer_queue": {"backend": {"storage_backend": storage_backend}}}
+    )
+
+
 def test_prompt_sharing_needs_simple_storage():
-    assert prompt_sharing_enabled(OmegaConf.create({"backend": {"storage_backend": "SimpleStorage"}}))
-    assert not prompt_sharing_enabled(OmegaConf.create({"backend": {"storage_backend": "MooncakeStore"}}))
+    assert prompt_sharing_enabled(_config())
+    assert not prompt_sharing_enabled(_config(storage_backend="MooncakeStore"))
 
 
 def test_share_prompts_switch_turns_off_storage_and_preprocessing_sharing():
-    off = OmegaConf.create({"share_prompts": False, "backend": {"storage_backend": "SimpleStorage"}})
+    off = _config(share_prompts=False)
     assert not prompt_sharing_enabled(off) and not prompt_sharing_requested(off)
-    mooncake = OmegaConf.create({"backend": {"storage_backend": "MooncakeStore"}})
-    assert prompt_sharing_requested(mooncake)
+    assert prompt_sharing_requested(_config(storage_backend="MooncakeStore"))
 
 
 @pytest.mark.asyncio
