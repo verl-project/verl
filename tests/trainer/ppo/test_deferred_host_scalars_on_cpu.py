@@ -18,6 +18,10 @@ The loss, the log-prob gradient, every metric value (Python type and bits) and a
 inside the scope the loss must not read a device value on the host. Device values are tracked by provenance: the
 loss inputs are marked as device tensors and every op with a device input produces device tensors; nested-tensor
 offsets stay host metadata.
+
+The device ops between two host reads are what a lazy backend runs as one program. With a materialize callback the
+scope must cut the ops into the same programs (plus any std it computes only to discard it), and the eager path must
+read `mask_count > 1` before it computes the IS std, as `if mask_count > 1:` does.
 """
 
 import collections
@@ -36,15 +40,17 @@ from verl.workers.config.actor import PolicyLossConfig
 from verl.workers.utils.losses import ppo_loss
 
 _SYNCS = {"item", "__bool__", "__float__", "__int__", "__index__", "tolist", "numpy", "cpu", "nonzero"}
+_NO_DEVICE_WORK = {"detach", "numel", "dim", "__get__"}
 
 
 class _DeviceSyncCounter(TorchFunctionMode):
-    """Counts host reads of tensors that would live on the accelerator."""
+    """Counts host reads of tensors that would live on the accelerator, and logs the device ops between them."""
 
     def __init__(self):
         super().__init__()
         self._device_ids = {}
         self.syncs = collections.Counter()
+        self.events = []  # device op names, and ("cut", dtype) at each host read (or materialize call)
 
     def mark(self, *objs):
         for obj in objs:
@@ -64,6 +70,9 @@ class _DeviceSyncCounter(TorchFunctionMode):
         device_input = any(self._on_device(t) for t in flat)
         if name in _SYNCS and args and self._on_device(args[0]):
             self.syncs[name] += 1
+            self.events.append(("cut", str(args[0].dtype)))
+        elif device_input and name not in _NO_DEVICE_WORK:
+            self.events.append(name)
         out = func(*args, **kwargs)
         if device_input and name not in _SYNCS:
             self.mark(out)
@@ -161,19 +170,35 @@ def _values(metrics):
     return out
 
 
+def _programs(events):
+    """The logged device ops split at the cut points: one (ops, dtype read at the cut) pair per program."""
+    programs, ops = [], []
+    for event in events:
+        if isinstance(event, tuple):
+            programs.append((tuple(ops), event[1]))
+            ops = []
+        else:
+            ops.append(event)
+    return programs
+
+
 def _run(batch_kwargs, config_kwargs, mode):
-    """ppo_loss + backward in ``mode`` (eager, deferred or cut): results, device syncs, materialize calls."""
+    """ppo_loss + backward in ``mode`` (eager, deferred or cut): results, host reads, programs (cut at the host reads,
+    or at the materialize calls in mode cut)."""
     config = _config(**config_kwargs)
     model_output, data, leaf = _batch(**batch_kwargs)
-    counter, materialized = _DeviceSyncCounter(), []
+    counter = _DeviceSyncCounter()
     counter.mark(leaf, model_output["log_probs"], *(data[k] for k in ("response_mask", "old_log_probs", "advantages")))
+
+    def materialize(t):
+        counter.events.append(("cut", str(t.dtype)))
+
     try:
         if mode == "eager":
             with counter:
                 loss, metrics = ppo_loss(config, model_output, data)
         else:
-            materialize = materialized.append if mode == "cut" else None
-            with defer_host_scalars(materialize=materialize) as scope:
+            with defer_host_scalars(materialize=materialize if mode == "cut" else None) as scope:
                 with counter:
                     loss, metrics = ppo_loss(config, model_output, data)
                 scope.resolve(metrics)
@@ -181,14 +206,16 @@ def _run(batch_kwargs, config_kwargs, mode):
         result = (loss.detach(), leaf.grad.detach(), _values(metrics), None)
     except Exception as exc:  # the same exception must come out in every mode
         result = (None, None, None, (type(exc).__name__, str(exc)))
-    return result, sum(counter.syncs.values()), len(materialized)
+    return result, sum(counter.syncs.values()), _programs(counter.events)
 
 
 @pytest.mark.parametrize("name,batch_kwargs,config_kwargs", _cases(), ids=[c[0] for c in _cases()])
 def test_deferred_policy_loss_matches_eager_bitwise(name, batch_kwargs, config_kwargs):
-    eager, eager_syncs, _ = _run(batch_kwargs, config_kwargs, "eager")
+    eager, eager_syncs, eager_programs = _run(batch_kwargs, config_kwargs, "eager")
+    zero_rows = batch_kwargs.get("zero_rows", ())
+    valid_tokens = sum(r for i, (_, r) in enumerate(batch_kwargs["lengths"]) if i not in zero_rows)
     for mode in ("deferred", "cut"):
-        deferred, deferred_syncs, materialized = _run(batch_kwargs, config_kwargs, mode)
+        deferred, deferred_syncs, programs = _run(batch_kwargs, config_kwargs, mode)
         assert deferred[3] == eager[3], f"{mode}: exception"
         if eager[3] is not None:
             continue
@@ -197,7 +224,16 @@ def test_deferred_policy_loss_matches_eager_bitwise(name, batch_kwargs, config_k
         assert deferred[2] == eager[2], f"{mode}: metric values"
         assert deferred_syncs == 0, f"{mode}: the loss read a device value on the host"
         if mode == "cut":
-            # One materialization per host read of the eager path, at the same place.
-            assert materialized == eager_syncs
+            # One materialization per host read of the eager path, at the same place: the same programs, except a std
+            # (a program ending in sqrt) that the eager path skips for lack of valid tokens; the scope computes it and
+            # resolve() discards it.
+            programs = [p for p in programs if p in eager_programs or p[0][-1:] != ("sqrt",)]
+            assert programs == eager_programs, "materialize does not cut where the eager path reads"
     if eager[3] is None:
         assert eager_syncs > 0
+        # `if mask_count > 1:` reads the comparison on its own, then computes the IS std only if more than one token
+        # is valid.
+        count_gt_1 = (("sum", "gt"), "torch.bool")
+        assert count_gt_1 in eager_programs, "mask_count > 1 is not read on its own"
+        std_follows = eager_programs[eager_programs.index(count_gt_1) + 1][0][-1:] == ("sqrt",)
+        assert std_follows == (valid_tokens > 1), "the IS std must follow that read iff more than one token is valid"

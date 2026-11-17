@@ -62,9 +62,12 @@ def test_host_functions_run_on_the_host_values():
     with defer_host_scalars() as scope:
         ratio = host_scalar(torch.tensor(4.0), fn=lambda x: 1.0 / x)
         gated = host_scalar(torch.tensor(True), torch.tensor(2.0), fn=lambda ok, x: x if ok else 0.0)
-        tree = [ratio, gated]
+        # A host function may use an earlier placeholder of the scope: it is resolved first.
+        cond = host_scalar(torch.tensor(False))
+        later = host_scalar(torch.tensor(5.0), fn=lambda x: x if cond else 0.0)
+        tree = [ratio, gated, later]
         scope.resolve(tree)
-    assert tree == [0.25, 2.0]
+    assert tree == [0.25, 2.0, 0.0]
     assert host_scalar(torch.tensor(4.0), torch.tensor(False), fn=lambda a, b: a if b else 0.0) == 0.0
 
 

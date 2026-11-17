@@ -26,7 +26,8 @@ Inside ``with defer_host_scalars() as scope:``
   place by ``resolve()`` (for host copies that nothing reads before the scope resolves, e.g. per-micro-batch outputs);
 * ``scope.resolve(tree, ...)`` reads every pending tensor with one stacked device->host copy per (device, dtype), runs
   the placeholders' host functions, raises the first failed check (same exception type and message), and replaces the
-  placeholders inside ``tree`` (dicts, lists, ``Metric.values``) by the plain Python numbers.
+  placeholders inside ``tree`` (dicts, lists, ``Metric.values``) by the plain Python numbers. Host functions run in
+  the order their placeholders were created, so one may use an earlier placeholder of the scope (e.g. a condition).
 
 Outside a scope the helpers are the eager code they replace (``t.item()``; ``if not cond: raise``; ``t.cpu()``), in the
 same order.
@@ -175,6 +176,7 @@ class HostScalarScope:
     def resolve(self, *trees: Any) -> int:
         """Reads every pending value, raises the first failed check, then fills the placeholders inside ``trees``.
 
+        Placeholders are resolved in creation order, so a host function may use an earlier placeholder of this scope.
         Returns the number of placeholders replaced in ``trees``.
         """
         if self.resolved:

@@ -60,6 +60,7 @@ tracking metrics to diagnose and correct off-policy issues.
 - Off-policy RL (theoretical basis for IS): https://fengyao.notion.site/off-policy-rl
 """
 
+import functools
 import math
 from typing import Any, Optional
 
@@ -68,7 +69,7 @@ import torch
 import verl.utils.torch_functional as verl_F
 from verl.protocol import DataProto
 from verl.trainer.config.algorithm import RolloutCorrectionConfig
-from verl.utils.metric.deferred import check, host_scalar
+from verl.utils.metric.deferred import active_scope, check, host_scalar
 from verl.workers.config.actor import PolicyLossConfig
 
 # Safety bound to prevent numerical overflow/underflow when exponentiating
@@ -200,8 +201,11 @@ def _reciprocal(value: float) -> float:
     return 1.0 / value
 
 
-def _std_if_count_gt_1(count_gt_1: bool, std: float) -> float:
-    """The IS std metric when more than one token is valid, else 0.0 (host-side branch)."""
+def _std_if_count_gt_1(count_gt_1: Any, std: float) -> float:
+    """The IS std metric when more than one token is valid, else 0.0 (host-side branch).
+
+    ``count_gt_1`` is a bool, or inside a deferral scope the placeholder of ``mask_count > 1``, resolved by then.
+    """
     return std if count_gt_1 else 0.0
 
 
@@ -749,16 +753,22 @@ def compute_is_metrics(
 
     # Compute standard deviation / ESS from the actual applied weights so exact
     # IcePop diagnostics preserve zeroed-out coefficients.
-    # `if mask_count > 1:` with the std's .item() inside, as one host_scalar: the comparison is read (and branched on)
-    # on the host after the std, so the std is also computed (not used) when at most one token is valid.
     mask_count: torch.Tensor = response_mask.sum()
-    mask_count_gt_1: torch.Tensor = mask_count > 1
-    weights_for_std: torch.Tensor = rollout_is_weights.clamp(min=0.0, max=rollout_is_threshold)
-    mean_clamped: torch.Tensor = verl_F.masked_mean(weights_for_std, response_mask)
-    rollout_is_var: torch.Tensor = verl_F.masked_mean(weights_for_std.square(), response_mask) - mean_clamped.square()
-    metrics["rollout_is_std"] = host_scalar(
-        mask_count_gt_1, torch.sqrt(torch.clamp(rollout_is_var, min=0.0)), fn=_std_if_count_gt_1
-    )
+    # Outside a deferral scope this is `if mask_count > 1:`: the comparison is read before the std is computed. Inside
+    # one the comparison is a placeholder the host cannot branch on, so the std is always computed and resolves to 0.0
+    # unless more than one token is valid (resolve() runs host functions in creation order, so count_gt_1 is ready).
+    count_gt_1 = host_scalar(mask_count > 1)
+    if active_scope() is not None or count_gt_1:
+        weights_for_std: torch.Tensor = rollout_is_weights.clamp(min=0.0, max=rollout_is_threshold)
+        mean_clamped: torch.Tensor = verl_F.masked_mean(weights_for_std, response_mask)
+        rollout_is_var: torch.Tensor = (
+            verl_F.masked_mean(weights_for_std.square(), response_mask) - mean_clamped.square()
+        )
+        metrics["rollout_is_std"] = host_scalar(
+            torch.sqrt(torch.clamp(rollout_is_var, min=0.0)), fn=functools.partial(_std_if_count_gt_1, count_gt_1)
+        )
+    else:
+        metrics["rollout_is_std"] = 0.0
 
     # Compute Effective Sample Size (ESS) for truncated weights
     weights_for_ess: torch.Tensor = rollout_is_weights.clamp(min=0.0, max=rollout_is_threshold)
