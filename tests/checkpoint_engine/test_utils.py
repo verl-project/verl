@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import sys
 from typing import Generator
 
 import ray
@@ -72,7 +73,7 @@ class MockServerAdapter(BaseRollout):
             if self.check_allclose:
                 self.received_weights[name] = weight.clone()
 
-    def check_weights(self):
+    def check_weights(self, checkpoint_engine=None):
         if not self.check_allclose:
             return
 
@@ -83,11 +84,54 @@ class MockServerAdapter(BaseRollout):
         for name, weight in self.model.state_dict().items():
             assert name in self.received_weights, f"weight {name} not received"
             received = self.received_weights[name]
-            assert torch.allclose(weight.to(received.device, dtype=received.dtype), received), (
-                f"weight {name} not equal"
+            expected = weight.to(received.device, dtype=received.dtype)
+            assert torch.allclose(expected, received), self._weight_mismatch_details(
+                name, expected, received, checkpoint_engine
             )
         self.received_weights.clear()
         print("Check passed, all weights are equal!")
+
+    def _weight_mismatch_details(self, name, expected, received, checkpoint_engine):
+        expected_cpu = expected.detach().cpu()
+        received_cpu = received.detach().cpu()
+        mismatch = ~torch.isclose(expected_cpu, received_cpu)
+        mismatch_count = mismatch.sum().item()
+        first_flat = mismatch.flatten().to(torch.int8).argmax()
+        first_index = (
+            tuple(int(index) for index in torch.unravel_index(first_flat, mismatch.shape)) if mismatch_count else None
+        )
+        difference = (expected_cpu.float() - received_cpu.float()).abs()
+        device_api = getattr(torch, received.device.type, None)
+        current_device = device_api.current_device() if hasattr(device_api, "current_device") else None
+        check_time_npu_stream = None
+        check_time_cached_pyhccl_stream = None
+        if received.device.type == "npu" and device_api.is_initialized():
+            check_time_npu_stream = device_api.current_stream().npu_stream
+            provider = sys.modules.get("vllm_ascend.utils")
+            check_time_cached_pyhccl_stream = getattr(getattr(provider, "_CURRENT_STREAM", None), "npu_stream", None)
+        details = {
+            "expected_shape": tuple(expected.shape),
+            "received_shape": tuple(received.shape),
+            "expected_dtype": str(expected.dtype),
+            "received_dtype": str(received.dtype),
+            "expected_device": str(expected.device),
+            "received_device": str(received.device),
+            "current_device": current_device,
+            "check_time_torch_npu_stream": check_time_npu_stream,
+            "check_time_cached_pyhccl_stream": check_time_cached_pyhccl_stream,
+            "rank": torch.distributed.get_rank() if torch.distributed.is_initialized() else None,
+            "engine": type(checkpoint_engine).__name__,
+            "engine_rank": getattr(checkpoint_engine, "rank", None),
+            "engine_device": getattr(checkpoint_engine, "device", None),
+            "cpu_mismatch_count": mismatch_count,
+            "first_mismatch_index": first_index,
+            "expected_value": expected_cpu[first_index].item() if first_index is not None else None,
+            "received_value": received_cpu[first_index].item() if first_index is not None else None,
+            "max_abs_error": difference.max().item(),
+            "expected_nonfinite": (~torch.isfinite(expected_cpu)).sum().item(),
+            "received_nonfinite": (~torch.isfinite(received_cpu)).sum().item(),
+        }
+        return f"weight {name} not equal: {details}"
 
 
 class MockReplica(RolloutReplica):
@@ -119,7 +163,7 @@ class CheckpointEngineWorkerTest(CheckpointEngineWorker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def check_weights(self):
-        self.server_adapter.check_weights()
+        self.server_adapter.check_weights(self.checkpoint_engine)
 
 
 def create_trainer_worker_group(

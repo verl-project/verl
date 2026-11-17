@@ -15,7 +15,7 @@
 
 Puts the delta on the trainer->rollout wire: the trainer byte-diffs against a
 pinned-CPU snapshot and broadcasts only the changed ``(position, value)`` pairs
-over the same ``ray.util.collective`` NCCL group the full-weight
+over the same engine-owned Ray NCCL group the full-weight
 :class:`NCCLCheckpointEngine` uses (actor rank0 -> rollout CheckpointEngineWorkers).
 With SGLang, each rollout worker hands its local copy of the sparse payload to
 its colocated SGLang TP worker via same-GPU ``update_weights_from_tensor`` IPC,
@@ -56,7 +56,6 @@ from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from unittest.mock import patch
 
-import ray.util.collective as collective
 import torch
 import zmq
 
@@ -284,17 +283,18 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         }
         self.socket.send_string(self.topic, flags=zmq.SNDMORE)
         self.socket.send_pyobj(meta)
-        pos_u8 = flush.positions_cpu.to("cuda", non_blocking=True).contiguous().view(torch.uint8)
+        pos_u8 = flush.positions_cpu.to(f"cuda:{self.device}", non_blocking=True).contiguous().view(torch.uint8)
         val_u8 = flush.values_gpu.contiguous().view(torch.uint8)
         # Stage into cupy-owned buffers: ray's NCCL broadcast is enqueued on a separate
         # stream with no recordStream on its inputs, so broadcasting a zero-copy view of
         # these torch tensors (freed right after this call) would race with allocator reuse.
-        pos_cp = cp.empty(pos_u8.numel(), dtype=cp.uint8)
-        val_cp = cp.empty(val_u8.numel(), dtype=cp.uint8)
-        pos_cp[:] = cp.asarray(pos_u8)
-        val_cp[:] = cp.asarray(val_u8)
-        collective.broadcast(pos_cp, src_rank=0, group_name=self.group_name)
-        collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
+        with cp.cuda.Device(self.device):
+            pos_cp = cp.empty(pos_u8.numel(), dtype=cp.uint8)
+            val_cp = cp.empty(val_u8.numel(), dtype=cp.uint8)
+            pos_cp[:] = cp.asarray(pos_u8)
+            val_cp[:] = cp.asarray(val_u8)
+        self._broadcast(pos_cp)
+        self._broadcast(val_cp)
 
     def _publish_values_flush(
         self, params: list[DeltaParam], values: torch.Tensor, is_last: bool, verify: bool = False
@@ -324,9 +324,10 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         self.socket.send_pyobj(meta)
         val_u8 = values.view(torch.uint8)
         # cupy-owned staging: same lifetime rationale as _publish_flush.
-        val_cp = cp.empty(val_u8.numel(), dtype=cp.uint8)
-        val_cp[:] = cp.asarray(val_u8)
-        collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
+        with cp.cuda.Device(self.device):
+            val_cp = cp.empty(val_u8.numel(), dtype=cp.uint8)
+            val_cp[:] = cp.asarray(val_u8)
+        self._broadcast(val_cp)
 
     def _release_staging_pool(self, phase: str) -> None:
         """Return the cupy staging pool's blocks to CUDA and log the evidence:
@@ -335,18 +336,19 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         back (warning level so the default worker log level records it)."""
         from verl.utils.device import get_torch_device
 
-        pool = cp.get_default_memory_pool()
-        held = pool.total_bytes()
-        free_before, _ = get_torch_device().mem_get_info()
-        pool.free_all_blocks()
-        free_after, _ = get_torch_device().mem_get_info()
-        logger.warning(
-            "cupy staging pool after %s send: held %.2fGB; device free %.2f->%.2fGB on release",
-            phase,
-            held / (1 << 30),
-            free_before / (1 << 30),
-            free_after / (1 << 30),
-        )
+        with torch.cuda.device(self.device), cp.cuda.Device(self.device):
+            pool = cp.get_default_memory_pool()
+            held = pool.total_bytes()
+            free_before, _ = get_torch_device().mem_get_info()
+            pool.free_all_blocks()
+            free_after, _ = get_torch_device().mem_get_info()
+            logger.warning(
+                "cupy staging pool after %s send: held %.2fGB; device free %.2f->%.2fGB on release",
+                phase,
+                held / (1 << 30),
+                free_before / (1 << 30),
+                free_after / (1 << 30),
+            )
 
     def _publish_terminal(self, first: bool) -> None:
         """End-of-stream marker when zero flushes were produced (no broadcast, just a signal)."""
@@ -373,17 +375,17 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             dense = meta.get("encoding") == "dense"
             val_dtype = getattr(torch, meta["val_dtype"])
             elem = torch.empty(0, dtype=val_dtype).element_size()
-            val_u8 = torch.empty(meta["val_numel"] * elem, dtype=torch.uint8, device="cuda")
+            val_u8 = torch.empty(meta["val_numel"] * elem, dtype=torch.uint8, device=f"cuda:{self.device}")
             if dense:
                 pos = None
-                collective.broadcast(val_u8, src_rank=0, group_name=self.group_name)
+                self._broadcast(val_u8)
             else:
-                pos = torch.empty(meta["pos_numel"], dtype=torch.uint8, device="cuda")
-                collective.broadcast(pos, src_rank=0, group_name=self.group_name)
-                collective.broadcast(val_u8, src_rank=0, group_name=self.group_name)
+                pos = torch.empty(meta["pos_numel"], dtype=torch.uint8, device=f"cuda:{self.device}")
+                self._broadcast(pos)
+                self._broadcast(val_u8)
             val = val_u8.view(val_dtype)
             spec_bytes = json.dumps(meta["spec"]).encode()
-            spec_t = torch.frombuffer(bytearray(spec_bytes), dtype=torch.uint8).to("cuda")
+            spec_t = torch.frombuffer(bytearray(spec_bytes), dtype=torch.uint8).to(f"cuda:{self.device}")
             named = [("__delta_spec__", spec_t), ("__values__", val)]
             if pos is not None:
                 named.insert(1, ("__positions__", pos))
@@ -456,7 +458,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             pos_off += nnz * 4
             val_off += nnz
 
-        values_gpu = torch.cat(val_pieces) if val_pieces else torch.empty(0, dtype=self.rollout_dtype, device="cuda")
+        values_gpu = (
+            torch.cat(val_pieces)
+            if val_pieces
+            else torch.empty(0, dtype=self.rollout_dtype, device=f"cuda:{self.device}")
+        )
         positions_u8 = (
             torch.cat(idx_pieces).contiguous().view(torch.uint8)
             if idx_pieces
