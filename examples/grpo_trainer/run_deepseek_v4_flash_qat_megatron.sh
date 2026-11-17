@@ -45,17 +45,16 @@ export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export VLLM_USE_V1=1
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-# Hopper has no ue8m0 block-scaling GEMM: keep TE and vLLM on FP32 block scales so both sides agree on
-# the FP8 grid. Blackwell uses ue8m0 natively, and must leave both variables unset (docs/low_precision/fp8.md).
+# Transformer Engine keeps its default power-of-two FP8 block scales on every GPU (do not set
+# NVTE_FP8_BLOCK_SCALING_FP32_SCALES): the experts' MXFP4 grid then dequantizes to FP8 losslessly, as in
+# DeepSeek-V4's FP4 QAT. With FP32 scales on Hopper, about half of the FP4-grid expert weights would be
+# re-rounded by the FP8 cast. Megatron-Bridge exports the FP8 weights with UE8M0 scales either way.
 # compute_cap of GPU 0 (no pipeline: the script runs under pipefail). Empty when nvidia-smi is unavailable.
 _cc=$(nvidia-smi -i 0 --query-gpu=compute_cap --format=csv,noheader 2>/dev/null || true)
-case "${HOPPER_FP32_SCALES:-}" in
-    "") case "${_cc}" in 9.*) HOPPER_FP32_SCALES=1 ;; *) HOPPER_FP32_SCALES=0 ;; esac ;;
+case "${_cc}" in
+    # Hopper's DeepGEMM has no packed-UE8M0 path; keep vLLM on unpacked scale values (docs/low_precision/fp8.md).
+    9.*) export VLLM_USE_DEEP_GEMM_E8M0=0 ;;
 esac
-if [ "${HOPPER_FP32_SCALES}" = 1 ]; then
-    export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
-    export VLLM_USE_DEEP_GEMM_E8M0=0
-fi
 # The ModelOpt MX fake-quant kernel is JIT-compiled for the visible device; pinning the arch keeps the
 # one-off nvcc time from multiplying on images that list many architectures (9.0 Hopper, 10.0 Blackwell).
 if [ -z "${TORCH_CUDA_ARCH_LIST:-}" ] && [ -n "${_cc}" ]; then
