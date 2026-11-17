@@ -27,6 +27,7 @@ import torch
 
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
 from verl.trainer.ppo.v1.utils import MetricsAggregator
+from verl.utils.debug.metrics import calculate_train_infer_discrepancy
 
 
 def test_empty_aggregator_returns_empty():
@@ -226,3 +227,25 @@ def test_rollout_failure_evicted_samples_are_summed_across_iterations():
     agg.add_step_metrics({"training/rollout_failure/evicted_samples": 1})
     agg.add_step_metrics({"training/rollout_failure/evicted_samples": 2})
     assert agg.get_aggregated_metrics()["training/rollout_failure/evicted_samples"] == pytest.approx(3.0)
+
+
+def test_train_infer_metrics_are_token_weighted_across_a_cycle():
+    # A cycle's discrepancy must weight each iteration by its tokens, not by being an iteration.
+    rollout = torch.zeros(1, 2)
+    # Two extreme tokens in one iteration, one matching token in the next.
+    steps = [
+        calculate_train_infer_discrepancy(
+            torch.full((1, 2), math.log(4.0)), rollout, torch.ones(1, 2, dtype=torch.long)
+        ),
+        calculate_train_infer_discrepancy(torch.zeros(1, 2), rollout, torch.tensor([[1, 0]])),
+    ]
+
+    agg = MetricsAggregator()
+    for step in steps:
+        agg.add_step_metrics(step, sample_count=1)
+    aggregated = agg.get_aggregated_metrics()
+
+    k3 = 4.0 - 1 - math.log(4.0)
+    assert aggregated["training/train_infer_extreme_token_frac"] == pytest.approx(2 / 3)
+    assert aggregated["training/train_infer_kl_k3"] == pytest.approx(2 * k3 / 3, rel=1e-5)
+    assert aggregated["training/train_infer_tokens_sum"] == 3

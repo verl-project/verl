@@ -126,6 +126,45 @@ class _KVSlots:
         self._released.set()
 
 
+class _CacheSaltMiddleware:
+    """Stamp the current weight version on OpenAI requests that carry no salt of their own."""
+
+    PATHS = ("/v1/completions", "/v1/chat/completions")
+
+    def __init__(self, app, salt: Callable[[], str]):
+        self.app = app
+        self.salt = salt
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("method") != "POST" or scope.get("path") not in self.PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        body, more_body = b"", True
+        while more_body:
+            message = await receive()
+            body += message.get("body", b"")
+            more_body = message.get("more_body", False)
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and not payload.get("cache_salt"):
+            payload["cache_salt"] = self.salt()
+            body = json.dumps(payload).encode()
+
+        replayed = False
+
+        async def replay():
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.disconnect"}
+            replayed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        await self.app(scope, replay, send)
+
+
 if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
     get_encoding()
 
@@ -216,6 +255,10 @@ class vLLMHttpServer:
         self.nnodes = nnodes
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+        # Counts weight installations. global_steps is optional (ServerAdapter skips
+        # set_global_steps when the trainer passes global_steps=None), so it cannot be
+        # used to version the prefix cache; this advances on every install.
+        self._weight_epoch = 0
         self._warned_missing_spec_decode_stats = False
 
         # vLLM's pause stops requests being scheduled but still accepts them, and a request
@@ -602,6 +645,10 @@ class vLLMHttpServer:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
         if _keeps_kv_cache(self.config, self.rollout_mode):
+            # vLLM's own OpenAI routes call engine_client.generate() directly, bypassing the
+            # salting in generate(); without it they would reuse old weights' prefix blocks,
+            # which this mode never resets.
+            app.add_middleware(_CacheSaltMiddleware, salt=self._cache_salt)
             # Reaches one DP engine's workers; DP engines are assumed to have identical KV caches.
             slots = min(await engine_client.collective_rpc("get_max_kv_concurrency"))
             if slots < 1:
@@ -762,6 +809,12 @@ class vLLMHttpServer:
 
         dp_rank = self._dp_rank_for_session(session_id)
         keeps_kv_cache = _keeps_kv_cache(self.config, self.rollout_mode)
+        if keeps_kv_cache and sampling_params.n != 1:
+            # vLLM expands n into n scheduler requests, so one slot would under-count the
+            # KV this call consumes and a kept request could be preempted after all.
+            raise ValueError(
+                f"partial_rollout_recompute=False admits one sequence per request, got n={sampling_params.n}."
+            )
         if self._kv_slots is not None:
             slot_engine = await self._kv_slots.acquire(dp_rank)
             if self.config.data_parallel_size > 1:
@@ -775,7 +828,7 @@ class vLLMHttpServer:
             start_global_steps = self.global_steps
             if keeps_kv_cache:
                 # The prefix cache is never reset in this mode; salt it so new requests skip old weights' blocks.
-                prompt["cache_salt"] = f"verl-weights-v{start_global_steps}"
+                prompt["cache_salt"] = self._cache_salt()
 
             with RLInsightLogger.trace_state(
                 "vllm_generate",
@@ -1036,20 +1089,28 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
+    def _cache_salt(self) -> str:
+        return f"verl-weights-v{self._weight_epoch}"
+
     @RLInsightLogger.trace_state_decorator(
         "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
     )
     async def clear_kv_cache(self):
-        # Kept requests still hold their blocks; new requests are isolated by cache_salt instead.
-        if self.node_rank == 0 and not _keeps_kv_cache(self.config, self.rollout_mode):
+        if self.node_rank != 0:
+            return
+        self._weight_epoch += 1
+        if not _keeps_kv_cache(self.config, self.rollout_mode):
             # reset_connector=True drops any attached external KV store
             # (e.g. MooncakeStoreConnector) whose entries were computed
             # against the previous model weights. With no connector it
             # is a no-op success, so we can pass it unconditionally.
             await self.engine.reset_prefix_cache(reset_connector=True)
 
-            await self.engine.reset_mm_cache()
-            await self.engine.reset_encoder_cache()
+        # The encoder cache is keyed by the multimodal hash, which cache_salt does not
+        # version, so stale embeddings would survive a vision-encoder update. Resetting
+        # it only costs a re-encode for any request still waiting on its prefill.
+        await self.engine.reset_mm_cache()
+        await self.engine.reset_encoder_cache()
 
     @RLInsightLogger.trace_state_decorator(
         "release_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()

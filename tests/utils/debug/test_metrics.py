@@ -14,7 +14,6 @@
 import math
 import unittest
 
-import numpy as np
 import pytest
 import torch
 
@@ -167,17 +166,26 @@ class TestMetrics(unittest.TestCase):
         assert metrics["training/train_infer_tokens_sum"] == 2
         assert metrics["training/train_infer_nonfinite_token_frac"] == pytest.approx(0.5)
         # The cause matters: an impossible token is a discrepancy, a nan input is a bug.
-        assert metrics["training/train_infer_impossible_under_rollout_token_frac"] == pytest.approx(0.5)
-        assert metrics["training/train_infer_impossible_under_actor_token_frac"] == pytest.approx(0.0)
-        assert metrics["training/train_infer_nan_input_token_frac"] == pytest.approx(0.0)
+        assert metrics["training/train_infer_impossible_under_rollout_tokens_sum"] == 1
+        assert metrics["training/train_infer_impossible_under_actor_tokens_sum"] == 0
+        assert metrics["training/train_infer_nan_input_tokens_sum"] == 0
+
+    def test_train_infer_discrepancy_reports_causes_when_nothing_is_scorable(self):
+        # Every token non-finite is when the cause breakdown matters most.
+        rollout = torch.tensor([[-float("inf"), -float("inf")]])
+
+        metrics = calculate_train_infer_discrepancy(torch.tensor([[-1.0, -2.0]]), rollout, torch.tensor([[1, 1]]))
+
+        assert "training/train_infer_kl_k3" not in metrics
+        assert metrics["training/train_infer_nonfinite_token_frac"] == pytest.approx(1.0)
+        assert metrics["training/train_infer_impossible_under_rollout_tokens_sum"] == 2
 
     def test_partial_rollout_mask_needs_both_weight_versions(self):
         def tags(starts, ends=None):
             if ends is None:
                 return [{"min_global_steps": start} for start in starts]
             return [
-                {"min_global_steps": start, "max_global_steps": end}
-                for start, end in zip(starts, ends, strict=True)
+                {"min_global_steps": start, "max_global_steps": end} for start, end in zip(starts, ends, strict=True)
             ]
 
         assert partial_rollout_mask(tags([3, 4], [3, 6])).tolist() == [False, True]

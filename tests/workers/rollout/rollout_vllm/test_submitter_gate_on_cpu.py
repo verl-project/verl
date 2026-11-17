@@ -57,6 +57,8 @@ class _FakeEngine:
         self.abort_calls = []
         self.drain_calls = 0
         self.reset_prefix_calls = 0
+        self.reset_mm_calls = 0
+        self.reset_encoder_calls = 0
         self.outputs = []
         self.prompts = []
         self.sampling_params = []
@@ -101,6 +103,12 @@ class _FakeEngine:
     async def reset_prefix_cache(self, reset_connector=True):
         self.reset_prefix_calls += 1
 
+    async def reset_mm_cache(self):
+        self.reset_mm_calls += 1
+
+    async def reset_encoder_cache(self):
+        self.reset_encoder_calls += 1
+
 
 def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
     server = object.__new__(cls)
@@ -116,6 +124,7 @@ def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
     server._disaggregation_role = "null"
     server.rollout_mode = vllm_async_server.RolloutMode.STANDALONE
     server._kv_slots = None
+    server._weight_epoch = 0
     return server
 
 
@@ -572,6 +581,9 @@ def test_keep_requests_pauses_without_clearing_kv_cache(monkeypatch):
 
         await server.clear_kv_cache()
         assert server.engine.reset_prefix_calls == 0
+        # cache_salt does not version the encoder cache, which is keyed by the multimodal
+        # hash, so stale embeddings must still be dropped.
+        assert server.engine.reset_encoder_calls == 1
 
         await server.resume_generation()
         assert server.engine.resume_calls == 1
@@ -587,8 +599,24 @@ def test_keeping_kv_cache_salts_prefix_cache_per_weight_version(monkeypatch):
 
         output = await server.generate([1, 2, 3], {}, "r")
 
-        assert server.engine.prompts[0]["cache_salt"] == "verl-weights-v7"
+        assert server.engine.prompts[0]["cache_salt"] == "verl-weights-v0"
         assert output.extra_fields["start_global_steps"] == 7
+
+    asyncio.run(main())
+
+
+def test_cache_salt_advances_on_weight_installs_that_carry_no_global_step(monkeypatch):
+    # update_weights(global_steps=None) installs weights without calling set_global_steps, so a
+    # salt keyed on the step would keep pointing new requests at the previous weights' blocks.
+    async def main():
+        server = _make_keeping_server(monkeypatch, [_request_output([5]), _request_output([6])])
+
+        await server.generate([1, 2, 3], {}, "a")
+        await server.clear_kv_cache()
+        await server.generate([1, 2, 3], {}, "b")
+
+        assert server.global_steps == 7
+        assert server.engine.prompts[0]["cache_salt"] != server.engine.prompts[1]["cache_salt"]
 
     asyncio.run(main())
 

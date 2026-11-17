@@ -135,8 +135,8 @@ def calculate_train_infer_discrepancy(
             metrics[f"training/train_infer_kl_k3{suffix}"] = k3_sum / num_scored
         if num_scored < num_tokens:
             for cause, hit in causes.items():
-                metrics[f"training/train_infer_{cause}_token_frac{suffix}"] = (
-                    torch.masked_select(hit, mask).float().mean().item()
+                metrics[f"training/train_infer_{cause}_tokens_sum{suffix}"] = int(
+                    torch.masked_select(hit, mask).sum().item()
                 )
     return metrics
 
@@ -214,9 +214,7 @@ def calculate_debug_metrics(data: DataProto, partial_mask: Optional[torch.Tensor
     )
     logprobs_mismatch = rollout_logprobs_diff != 0
     return {
-        **calculate_train_infer_discrepancy(
-            actor_old_log_probs, rollout_old_log_probs, response_mask, partial_mask
-        ),
+        **calculate_train_infer_discrepancy(actor_old_log_probs, rollout_old_log_probs, response_mask, partial_mask),
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).detach().item(),

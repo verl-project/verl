@@ -2191,7 +2191,7 @@ class PPOTrainer(ABC):
             }
         )
         if kv_recomputed_num is not None:
-            metrics["training/off_policy/kv_recomputed_num"] = kv_recomputed_num
+            metrics["training/off_policy/kv_recomputed_samples_sum"] = kv_recomputed_num
 
 
 TRAINER_REGISTRY: dict[str, type[PPOTrainer]] = {}
