@@ -65,28 +65,28 @@ from dataclasses import dataclass
 import torch
 import zmq
 
-from verl.utils.device import get_device_name, get_torch_device, is_torch_npu_available
+from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.net_utils import get_free_port
-
-if is_torch_npu_available(check_device=False):
-    # Ascend has neither cupy nor ray's NCCL collective. The module must still
-    # import there: HCCLDeltaShardedCheckpointEngine (delta_checkpoint_engine_npu)
-    # subclasses this engine and registers the "delta_sharded" backend on NPU.
-    cp = None
-    collective = None
-else:
-    from unittest.mock import patch
-
-    import ray.util.collective as collective
-
-    with patch("importlib.metadata.distributions", return_value=[]):
-        import cupy as cp
 
 from .base import CheckpointEngineRegistry
 from .delta_sync.encode import DeltaFlush, DeltaParam
 from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import gather_slot_entries_to_rank0
 from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine, WorkerMetadata
+
+try:
+    from unittest.mock import patch
+
+    import ray.util.collective as collective
+
+    with patch("importlib.metadata.distributions", return_value=[]):
+        import cupy as cp
+except ImportError:
+    # Ascend has neither cupy nor ray's NCCL collective. The module must still
+    # import there: HCCLDeltaShardedCheckpointEngine (delta_checkpoint_engine_npu)
+    # subclasses this engine and registers the "delta_sharded" backend on NPU.
+    cp = None
+    collective = None
 
 logger = logging.getLogger(__name__)
 

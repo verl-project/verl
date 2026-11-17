@@ -28,21 +28,6 @@ import ray
 import torch
 import zmq
 
-from verl.utils.device import is_torch_npu_available
-
-if is_torch_npu_available(check_device=False):
-    # Ascend has neither cupy nor ray's NCCL collective; HCCLCheckpointEngine
-    # registers the "nccl" backend name there instead. Keep this module
-    # importable on NPU so DeltaShardedCheckpointEngine can subclass
-    # NCCLCheckpointEngine for its zmq/topology machinery.
-    cp = None
-    collective = None
-else:
-    with patch("importlib.metadata.distributions", return_value=[]):
-        import cupy as cp
-
-    import ray.util.collective as collective
-
 from verl.checkpoint_engine.base import (
     CheckpointEngine,
     CheckpointEngineRegistry,
@@ -51,6 +36,20 @@ from verl.checkpoint_engine.base import (
     split_weight_chunks,
 )
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+
+try:
+    from unittest.mock import patch
+
+    import ray.util.collective as collective
+
+    with patch("importlib.metadata.distributions", return_value=[]):
+        import cupy as cp
+except ImportError:
+    # Ascend has neither cupy nor ray's NCCL collective. The module must still
+    # import there: HCCLDeltaShardedCheckpointEngine (delta_checkpoint_engine_npu)
+    # subclasses this engine and registers the "delta_sharded" backend on NPU.
+    cp = None
+    collective = None
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
