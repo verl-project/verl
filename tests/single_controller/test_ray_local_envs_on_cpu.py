@@ -15,6 +15,7 @@
 e2e test verl.single_controller.ray
 """
 
+import asyncio
 import errno
 import os
 import socket
@@ -219,31 +220,89 @@ def test_master_port_range(port_count):
     """Skip occupied ports in order and report exhaustion without waiting forever."""
     ray.init(num_cpus=4)
     try:
-        with socket.socket() as listener:
-            listener.bind(("", 0))
-            listener.listen()
-            port = listener.getsockname()[1]
-            if port_count == 2:
-                with socket.socket() as successor:
-                    successor.bind(("", port + 1))
+        for _ in range(100):
+            with socket.socket() as listener, socket.socket() as successor:
+                listener.bind(("", 0))
+                listener.listen()
+                port = listener.getsockname()[1]
+                if port_count == 2:
+                    try:
+                        successor.bind(("", port + 1))
+                    except (OSError, OverflowError):
+                        continue
 
-            @ray.remote(num_cpus=0)
-            def create_group():
-                """Start a group whose first allowed master port is occupied."""
-                group = RayWorkerGroup(
-                    resource_pool=RayResourcePool([2], use_gpu=False, max_colocate_count=1),
-                    ray_cls_with_init=RayClassWithInitArgs(TestActor),
-                    master_port_range=[port, port + port_count],
+                @ray.remote(num_cpus=0)
+                def create_group(port):
+                    """Start a group whose first allowed master port is occupied."""
+                    group = RayWorkerGroup(
+                        resource_pool=RayResourcePool([2], use_gpu=False, max_colocate_count=1),
+                        ray_cls_with_init=RayClassWithInitArgs(TestActor),
+                        master_port_range=[port, port + port_count],
+                    )
+                    return group.master_port, group.execute_all_sync("getenv", key="MASTER_PORT")
+
+                successor.close()
+                if port_count == 1:
+                    with pytest.raises(ray.exceptions.RayTaskError, match=rf"\b{port}\b"):
+                        ray.get(create_group.remote(port), timeout=60)
+                else:
+                    master_port, worker_ports = ray.get(create_group.remote(port), timeout=60)
+                    assert master_port == str(port + 1)
+                    assert worker_ports == [master_port, master_port]
+                return
+        pytest.fail("Could not find a usable master port range after 100 attempts")
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.parametrize("worker_rpc_ready", [False, True], ids=["both-pending", "worker-ready-endpoint-pending"])
+def test_endpoint_discovery_timeout(worker_rpc_ready):
+    """Bound endpoint discovery even when the worker RPC completes before publication."""
+    ray.init(num_cpus=4)
+    try:
+
+        @ray.remote(num_cpus=0)
+        class PendingEndpointMetadata:
+            """Keep endpoint publication pending until the test shuts Ray down."""
+
+            async def set_master_endpoint(self, addr, port):
+                """Delay publication independently of the worker constructor."""
+                await asyncio.Event().wait()
+
+            async def get_master_endpoint(self):
+                """Leave the metadata endpoint unavailable."""
+                await asyncio.Event().wait()
+
+        @ray.remote
+        class TimeoutWorker(Worker):
+            """Control RPC readiness without delaying endpoint allocation."""
+
+            async def get_master_addr_port(self):
+                """Either stay pending or return the worker's actual endpoint."""
+                if not worker_rpc_ready:
+                    await asyncio.Event().wait()
+                return super().get_master_addr_port()
+
+        @ray.remote(num_cpus=0)
+        def create_group():
+            """Exercise the configured discovery timeout through real group startup."""
+            with pytest.MonkeyPatch.context() as monkeypatch:
+                monkeypatch.setattr("verl.single_controller.ray.base.MasterEndpointMetadata", PendingEndpointMetadata)
+                RayWorkerGroup(
+                    resource_pool=RayResourcePool([1], use_gpu=False, max_colocate_count=1),
+                    ray_cls_with_init=RayClassWithInitArgs(TimeoutWorker),
+                    ray_wait_register_center_timeout=15,
                 )
-                return group.master_port, group.execute_all_sync("getenv", key="MASTER_PORT")
 
-            if port_count == 1:
-                with pytest.raises(ray.exceptions.RayTaskError, match=rf"\b{port}\b"):
-                    ray.get(create_group.remote(), timeout=60)
-            else:
-                master_port, worker_ports = ray.get(create_group.remote(), timeout=60)
-                assert master_port == str(port + 1)
-                assert worker_ports == [master_port, master_port]
+        with pytest.raises(ray.exceptions.RayTaskError) as error:
+            ray.get(create_group.remote(), timeout=90)
+        timeout_error = error.value.cause
+        assert isinstance(timeout_error, ray.exceptions.GetTimeoutError)
+        if worker_rpc_ready:
+            # A slow worker startup must not masquerade as coverage of the second wait.
+            assert str(timeout_error) != "Timed out waiting for the master endpoint."
+        else:
+            assert str(timeout_error) == "Timed out waiting for the master endpoint."
     finally:
         ray.shutdown()
 

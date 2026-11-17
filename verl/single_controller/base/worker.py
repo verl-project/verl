@@ -37,39 +37,6 @@ from verl.utils.net_utils import is_valid_ipv6_address
 from .decorator import Dispatch, Execute, register
 
 
-def _bind_master_tcp_store(addr: str, port_range: Optional[list[int]]):
-    """Bind a master TCPStore using this worker's env:// rendezvous backend."""
-    init_method = urlparse(os.environ.get("DIST_INIT_METHOD", "env://"))
-    query = parse_qs(init_method.query, keep_blank_values=True) if init_method.scheme == "env" else {}
-    use_libuv = query.get("use_libuv", [os.environ.get("USE_LIBUV", "1")])[-1] == "1"
-
-    family = socket.AF_INET6 if is_valid_ipv6_address(addr) else socket.AF_INET
-    os_assigned_port = port_range is None
-    ports = (0,) if os_assigned_port else range(*port_range)
-    for port in ports:
-        # Without SO_REUSEADDR, other groups cannot bind this port before TCPStore starts listening.
-        with socket.socket(family=family, type=socket.SOCK_STREAM) as listen_socket:
-            try:
-                listen_socket.bind((addr, port))
-            except OSError:
-                if os_assigned_port:
-                    raise
-                logging.info("Port %d is already in use, trying port %d", port, port + 1)
-                continue
-
-            # create_tcp_store detaches the socket, so leaving this context keeps the port bound.
-            return create_tcp_store(
-                host=addr,
-                port=listen_socket.getsockname()[1],
-                listen_socket=listen_socket,
-                world_size=None,
-                is_master=True,
-                multi_tenant=True,
-                use_libuv=use_libuv,
-            )
-    raise RuntimeError(f"Could not find a free port in range {port_range}")
-
-
 @dataclass
 class DistRankInfo:
     tp_rank: int
@@ -268,6 +235,39 @@ class Worker(WorkerHelper):
         """
         return self.fused_worker_dict.get(worker_name, None)
 
+    @staticmethod
+    def _bind_master_tcp_store(addr: str, port_range: Optional[list[int]]):
+        """Bind a master TCPStore using this worker's env:// rendezvous backend."""
+        init_method = urlparse(os.environ.get("DIST_INIT_METHOD", "env://"))
+        query = parse_qs(init_method.query, keep_blank_values=True) if init_method.scheme == "env" else {}
+        use_libuv = query.get("use_libuv", [os.environ.get("USE_LIBUV", "1")])[-1] == "1"
+
+        family = socket.AF_INET6 if is_valid_ipv6_address(addr) else socket.AF_INET
+        os_assigned_port = port_range is None
+        ports = (0,) if os_assigned_port else range(*port_range)
+        for port in ports:
+            # Without SO_REUSEADDR, other groups cannot bind this port before TCPStore starts listening.
+            with socket.socket(family=family, type=socket.SOCK_STREAM) as listen_socket:
+                try:
+                    listen_socket.bind((addr, port))
+                except OSError:
+                    if os_assigned_port:
+                        raise
+                    logging.info("Port %d is already in use, trying port %d", port, port + 1)
+                    continue
+
+                # create_tcp_store detaches the socket, so leaving this context keeps the port bound.
+                return create_tcp_store(
+                    host=addr,
+                    port=listen_socket.getsockname()[1],
+                    listen_socket=listen_socket,
+                    world_size=None,
+                    is_master=True,
+                    multi_tenant=True,
+                    use_libuv=use_libuv,
+                )
+        raise RuntimeError(f"Could not find a free port in range {port_range}")
+
     def _setup_master_endpoint(self):
         """Bind rank zero's retained store and publish its endpoint once per actor."""
         # Consume the startup configuration once: nested workers reuse the outer worker's store.
@@ -275,7 +275,7 @@ class Worker(WorkerHelper):
         if master_endpoint_config:
             metadata_name, metadata_namespace, master_port_range = json.loads(master_endpoint_config)
             addr = self._get_node_ip().strip("[]")
-            self.master_tcp_store = _bind_master_tcp_store(addr, master_port_range)
+            self.master_tcp_store = self._bind_master_tcp_store(addr, master_port_range)
             os.environ["MASTER_ADDR"] = addr
             os.environ["MASTER_PORT"] = str(self.master_tcp_store.port)
             master_endpoint_metadata = ray.get_actor(metadata_name, namespace=metadata_namespace)

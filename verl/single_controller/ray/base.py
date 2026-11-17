@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import socket
+import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -453,7 +454,7 @@ class RayWorkerGroup(WorkerGroup):
             name_prefix: Prefix for worker names
             detached: Whether workers should be detached
             worker_names: Names of existing workers to attach to
-            ray_wait_register_center_timeout: Timeout for waiting on register center
+            ray_wait_register_center_timeout: Timeout for endpoint discovery and constructor checks
             **kwargs: Additional keyword arguments
         """
         master_addr = kwargs.pop("master_addr", None)
@@ -705,13 +706,40 @@ class RayWorkerGroup(WorkerGroup):
             "device_name": self.device_name,
         }
         if allocate_master_endpoint:
-            worker, self._master_addr, self._master_port = _create_master_store_worker(
-                ray_cls_with_init, worker_kwargs, self._ray_master_port_range, env_vars
-            )
+            worker, self._master_addr, self._master_port = self._create_master_store_worker(worker_kwargs, env_vars)
         else:
             worker = ray_cls_with_init(**worker_kwargs)
         self._workers.append(worker)
         self._worker_names.append(name)
+
+    def _create_master_store_worker(self, worker_kwargs, env_vars):
+        """Start the master store worker and return it with its published endpoint."""
+        metadata_name = f"master_endpoint_{get_random_string(length=6)}"
+        master_endpoint_metadata = MasterEndpointMetadata.options(
+            name=metadata_name,
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=worker_kwargs["placement_group"],
+                placement_group_bundle_index=worker_kwargs["placement_group_bundle_idx"],
+            ),
+        ).remote()
+        # This is the same env_vars object installed in the rank-zero actor's runtime_env.
+        env_vars["WG_MASTER_ENDPOINT_CONFIG"] = json.dumps(
+            (metadata_name, ray.get_runtime_context().namespace, self._ray_master_port_range)
+        )
+        worker = self.ray_cls_with_init(**worker_kwargs)
+        master_addr_port_ref = master_endpoint_metadata.get_master_endpoint.remote()
+        timeout = self._ray_wait_register_center_timeout
+        # Both waits share one endpoint-discovery timeout, even if the worker RPC completes first.
+        deadline = time.monotonic() + timeout
+        completed, _ = ray.wait(
+            [master_addr_port_ref, worker.get_master_addr_port.remote()], num_returns=1, timeout=timeout
+        )
+        if not completed:
+            raise ray.exceptions.GetTimeoutError("Timed out waiting for the master endpoint.")
+        # Watch for constructor failures while waiting for the master endpoint.
+        ray.get(completed[0])
+        master_addr, master_port = ray.get(master_addr_port_ref, timeout=max(0, deadline - time.monotonic()))
+        return worker, master_addr, master_port
 
     @property
     def worker_names(self):
@@ -1175,26 +1203,3 @@ class MasterEndpointMetadata:
         """Wait for the master endpoint to become ready."""
         await self.endpoint_ready.wait()
         return self.master_endpoint
-
-
-def _create_master_store_worker(worker_factory, worker_kwargs, master_port_range, env_vars):
-    """Start the master store worker and return it with its published endpoint."""
-    metadata_name = f"master_endpoint_{get_random_string(length=6)}"
-    master_endpoint_metadata = MasterEndpointMetadata.options(
-        name=metadata_name,
-        scheduling_strategy=PlacementGroupSchedulingStrategy(
-            placement_group=worker_kwargs["placement_group"],
-            placement_group_bundle_index=worker_kwargs["placement_group_bundle_idx"],
-        ),
-    ).remote()
-    # This is the same env_vars object installed in the rank-zero actor's runtime_env.
-    env_vars["WG_MASTER_ENDPOINT_CONFIG"] = json.dumps(
-        (metadata_name, ray.get_runtime_context().namespace, master_port_range)
-    )
-    worker = worker_factory(**worker_kwargs)
-    master_addr_port_ref = master_endpoint_metadata.get_master_endpoint.remote()
-    completed, _ = ray.wait([master_addr_port_ref, worker.get_master_addr_port.remote()], num_returns=1)
-    # Watch for constructor failures while waiting for the master endpoint.
-    ray.get(completed[0])
-    master_addr, master_port = ray.get(master_addr_port_ref)
-    return worker, master_addr, master_port
