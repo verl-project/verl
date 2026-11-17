@@ -135,7 +135,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     # summed across microbatches; it is scaled by dp_size so the worker's DP mean yields the global count.
     old_logprobs_mismatch = (log_prob.float() != old_log_prob.float())[response_mask].sum()
     metrics["actor/old_logprobs_mismatch_count"] = Metric(
-        value=(old_logprobs_mismatch * config.global_batch_info["dp_size"]).item(), aggregation=AggregationType.SUM
+        value=old_logprobs_mismatch * config.global_batch_info["dp_size"], aggregation=AggregationType.SUM
     )
     if sc_outputs:
         for key in (
