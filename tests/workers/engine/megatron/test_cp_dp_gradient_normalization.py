@@ -22,9 +22,10 @@ Run on four GPUs with the matching Megatron-Core and Transformer Engine:
 The reference uses the same tiny GPT weights without context partitioning and
 computes the global supervised-token mean directly. The distributed side calls
 the production engine, pipeline schedule, DDP, and gradient finalizer. There are
-two microbatches per replica, unequal even sequence lengths and supervision counts,
-and a case where one DP replica has no supervised tokens. No model download is
-needed. Ordinary single-process pytest runs skip this GPU integration test.
+two microbatches per replica, unequal sequence lengths with a mix of even and odd
+lengths, varying supervision counts, and a case where one DP replica has no
+supervised tokens. No model download is needed. Ordinary single-process pytest
+runs skip this GPU integration test.
 """
 
 import argparse
@@ -42,7 +43,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-_LENGTHS = (8, 12, 6, 10)
+_LENGTHS = (8, 11, 7, 10)
 _VOCAB_SIZE = 64
 
 
