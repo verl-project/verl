@@ -13,6 +13,8 @@
 # limitations under the License.
 
 
+from functools import partial
+
 import numpy as np
 import ray
 import torch
@@ -21,7 +23,7 @@ from tensordict import TensorDict
 import verl.utils.tensordict_utils as tu
 from verl import DataProto
 from verl.single_controller.base import Worker
-from verl.single_controller.base.decorator import make_nd_compute_dataproto_dispatch_fn, register
+from verl.single_controller.base.decorator import call_class_method, make_nd_compute_dataproto_dispatch_fn, register
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 
 
@@ -227,6 +229,20 @@ class TestActor(Worker):
     def generate_nested_tensor_mp_src_postprocess(self, data: TensorDict):
         return self.generate_nested_tensor(data)
 
+    def preprocess_infer(self, *args, **kwargs):
+        return _broadcast_preprocess("infer")(self, *args, **kwargs)
+
+    def postprocess_infer(self, output):
+        return _double_postprocess("infer")(self, output)
+
+    @register(
+        dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="infer", dispatch_mp_src_only=True),
+        worker_preprocess_fn=partial(call_class_method, "preprocess_infer"),
+        worker_postprocess_fn=partial(call_class_method, "postprocess_infer"),
+    )
+    def generate_data_proto_mp_src_class_methods(self, data: DataProto):
+        return self.generate_data_proto(data)
+
 
 def test_dist_global_info_wg():
     # create a worker group with size 8
@@ -256,6 +272,9 @@ def test_dist_global_info_wg():
     # Doubling after compute yields [2, 6]. Doubling first would yield [2, 5].
     infer_output_data_proto_post = wg.generate_data_proto_mp_src_postprocess(infer_input_data_proto)
     assert torch.all(torch.eq(infer_output_data_proto_post.batch["a"], torch.tensor([2, 6])))
+    # Hooks call TestActor.preprocess_infer and TestActor.postprocess_infer.
+    infer_output_class_methods = wg.generate_data_proto_mp_src_class_methods(infer_input_data_proto)
+    assert torch.all(torch.eq(infer_output_class_methods.batch["a"], torch.tensor([2, 6])))
 
     infer_input_tensordict = infer_input_data_proto.to_tensordict()
     infer_output_tensordict = wg.generate_tensordict(infer_input_tensordict)

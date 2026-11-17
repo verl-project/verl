@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+from functools import partial
 
 import pytest
 
@@ -21,6 +22,7 @@ from verl.single_controller.base.decorator import (
     DISPATCH_MODE_FN_REGISTRY,
     Dispatch,
     _check_dispatch_mode,
+    call_class_method,
     get_predefined_dispatch_fn,
     register,
     register_dispatch_mode,
@@ -95,6 +97,25 @@ def test_async_callable_instance_preprocess_is_awaited():
 class _AsyncPostprocess:
     async def __call__(self, worker, output):
         return output + 1
+
+
+class _ClassMethodHookWorker:
+    def preprocess(self, *args, **kwargs):
+        return (args[0] + 1,), kwargs
+
+    def postprocess(self, output):
+        return output * 10
+
+    @register(
+        worker_preprocess_fn=partial(call_class_method, "preprocess"),
+        worker_postprocess_fn=partial(call_class_method, "postprocess"),
+    )
+    def identity(self, value):
+        return value
+
+
+def test_partial_call_class_method_hooks():
+    assert _ClassMethodHookWorker().identity(1) == 20
 
 
 def test_worker_postprocess_fn_transforms_output():

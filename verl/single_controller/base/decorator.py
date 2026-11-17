@@ -393,6 +393,16 @@ def _check_execute_mode(execute_mode):
     assert isinstance(execute_mode, Execute), f"execute_mode must be a Execute. Got {execute_mode}"
 
 
+def call_class_method(method_name: str, worker, *args, **kwargs):
+    """Call a method on ``worker``.
+
+    Bind the method name with ``functools.partial`` to use this as a worker hook:
+
+    ``worker_preprocess_fn=partial(call_class_method, "preprocess_infer")``
+    """
+    return getattr(worker, method_name)(*args, **kwargs)
+
+
 def _is_async_worker_hook(hook) -> bool:
     if hook is None:
         return False
