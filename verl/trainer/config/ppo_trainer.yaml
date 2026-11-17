@@ -234,7 +234,7 @@ trainer:
   # V1 trainer mode configs
   v1:
 
-    # Trainer mode: "sync", "colocate_async", "separate_async"
+    # Trainer mode: "sync", "colocate_async", "separate_async", "decoupled_async"
     trainer_mode: sync
 
     # Synchronous PPO trainer
@@ -248,6 +248,34 @@ trainer:
       # one full batch (64 prompts) plus half a batch (32 prompts); the fractional
       # part is rounded down to a whole number of gen_batch_size chunks.
       num_warmup_batches: 1
+
+    # Asynchronous PPO trainer whose rollout pulls weights and claims prompts on its own
+    decoupled_async:
+
+      # Rollout replicas load published weight versions and claim prompts on their own; the
+      # trainer only publishes weights and enqueues prompts. Requires
+      # actor_rollout_ref.rollout.checkpoint_engine.backend=transport_pull and vLLM rollout.
+
+      # Number of warmup batches to enqueue before the training loop starts.
+      num_warmup_batches: 1
+
+      # Number of local updates per published weight version.
+      parameter_sync_step: 4
+
+      # A replica loads a newer version once it is at least this many versions ahead.
+      min_version_lag: 1
+
+      # Seconds between weight registry polls on each replica.
+      poll_interval: 0.5
+
+      # Seconds the trainer waits at startup for every replica to load the initial weights.
+      init_timeout: 600
+
+      # Maximum prompt groups generating at once across all replicas; null for no limit.
+      max_inflight_prompts: null
+
+      # Seconds between TransferQueue polls of the prompt dispatcher.
+      dispatch_poll_interval: 0.2
 
     # Asynchronous PPO trainer with separate trainer and rollout
     separate_async:

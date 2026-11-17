@@ -15,23 +15,19 @@ import logging
 import os
 import time
 from collections import deque
-from copy import deepcopy
 from dataclasses import replace
 from enum import Enum
 
 import ray
 from omegaconf import DictConfig
-from transfer_queue import KVBatchMeta
 
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.separation.engine_workers import DetachActorWorker
 from verl.trainer.config import HybridRolloutSwitchConfig
-from verl.trainer.ppo.utils import Role, need_reward_model
+from verl.trainer.ppo.utils import need_reward_model
+from verl.trainer.ppo.v1.standalone_rollout import StandaloneRolloutMixin
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
-from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerManager
-from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -43,7 +39,7 @@ class HybridEngineMode(Enum):
 
 
 @register_trainer("separate_async")
-class PPOTrainerSeparateAsync(PPOTrainer):
+class PPOTrainerSeparateAsync(StandaloneRolloutMixin, PPOTrainer):
     """Asynchronous PPO trainer
     1. Trainer and rollout are separate, trainer may switch to rollout if idle.
     2. Partial rollout is enabled.
@@ -117,20 +113,6 @@ class PPOTrainerSeparateAsync(PPOTrainer):
                 )
             self._init_hybrid_rollout_state()
 
-    def _init_resource_pool_mgr(self):
-        super()._init_resource_pool_mgr()
-        # Replace ActorRolloutRefWorker with DetachActorWorker to get CPU save/restore
-        # capability needed for Decoupled PPO when parameter_sync_step > 1.
-        # The base class uses a pure Actor role when hybrid replicas are disabled.
-        if Role.Actor in self.role_worker_mapping:
-            self.role_worker_mapping[Role.Actor] = ray.remote(DetachActorWorker)
-            if Role.RefPolicy in self.role_worker_mapping:
-                self.role_worker_mapping[Role.RefPolicy] = ray.remote(DetachActorWorker)
-        elif Role.ActorRolloutRef in self.role_worker_mapping:
-            self.role_worker_mapping[Role.ActorRolloutRef] = ray.remote(DetachActorWorker)
-        elif Role.ActorRollout in self.role_worker_mapping:
-            self.role_worker_mapping[Role.ActorRollout] = ray.remote(DetachActorWorker)
-
     def _init_hybrid_rollout_state(self) -> None:
         config = self.hybrid_rollout_config
         self._switch_threshold_ratio = config.switch_threshold_ratio
@@ -153,26 +135,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
     def _setup(self):
         super()._setup()
-
-        # initialize standalone rollout
-        # TODO: make initialization parallel with super().init()
-        hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
-        # Standalone replicas have dedicated GPUs; keep their memory budget
-        # separate from the hybrid replicas that share GPUs with training.
-        standalone_config = deepcopy(self.config)
-        standalone_rollout_config = standalone_config.actor_rollout_ref.rollout
-        standalone_memory = standalone_rollout_config.get("standalone_gpu_memory_utilization")
-        if standalone_memory is not None:
-            standalone_rollout_config.gpu_memory_utilization = standalone_memory
-        self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
-            config=standalone_config, start_rank=hybrid_num_replicas
-        )
-        rollout_config = self.config.actor_rollout_ref.rollout
-        if rollout_config.prometheus.enable:
-            server_addresses = (
-                self.llm_server_manager.server_addresses + self.standalone_server_manager.server_addresses
-            )
-            update_prometheus_config(rollout_config.prometheus, server_addresses, rollout_config.name)
+        self._setup_standalone_rollout()
 
         # create checkpoint engine manager for trainer and standalone rollout
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
@@ -197,43 +160,6 @@ class PPOTrainerSeparateAsync(PPOTrainer):
                 "(trainer.v1.separate_async.hybrid_rollout.enable_switch=False): "
                 f"rollout served by {len(self.standalone_server_manager.get_replicas())} standalone replicas only"
             )
-
-    def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
-        """Version-aware old_log_probs computation for Decoupled PPO.
-
-        In bypass mode, delegates to the base class (copies rollout_log_probs directly).
-        In Decoupled mode, uses save_model_to_cpu / restore_model_from_cpu to ensure
-        all mini-batches within a parameter_sync_step cycle use the same stable π_old.
-
-        - local_trigger_step == 0: Current weights are π_old → save to CPU, compute directly.
-        - local_trigger_step >= 1: Save current weights → restore π_old → compute → restore current.
-        """
-        rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
-        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
-        if bypass_recomputing_logprobs:
-            return super()._compute_old_log_prob(batch, metrics)
-
-        if self.local_trigger_step == 0:
-            self.actor_rollout_wg.save_model_to_cpu(0)
-            return super()._compute_old_log_prob(batch, metrics)
-        else:
-            self.actor_rollout_wg.save_model_to_cpu(self.local_trigger_step)
-            self.actor_rollout_wg.restore_model_from_cpu(0)
-            result = super()._compute_old_log_prob(batch, metrics)
-            self.actor_rollout_wg.restore_model_from_cpu(self.local_trigger_step)
-            self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
-            return result
-
-    def get_llm_client(self):
-        # get server client from standalone rollout
-        return self.standalone_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)
-
-    def _rollout_server_managers(self) -> list:
-        managers = super()._rollout_server_managers()
-        standalone = getattr(self, "standalone_server_manager", None)
-        if standalone is not None:
-            managers.append(standalone)
-        return managers
 
     def on_init_end(self):
         # update weights after loading checkpoint
@@ -409,14 +335,6 @@ class PPOTrainerSeparateAsync(PPOTrainer):
                     logger.info("Switching hybrid engine to rollout mode for the next step")
                     self.switch_to_rollout(already_registered=True)
                 self._to_rollout_costs.append(prepare_seconds + time.perf_counter() - switch_start)
-
-    def _get_n_gpus_for_throughput(self) -> int:
-        """Include standalone rollout GPUs in the throughput denominator."""
-        trainer_gpus = self.resource_pool_manager.get_n_gpus()
-        rollout_gpus = (
-            self.config.actor_rollout_ref.rollout.n_gpus_per_node * self.config.actor_rollout_ref.rollout.nnodes
-        )
-        return trainer_gpus + rollout_gpus
 
     def switch_to_rollout(self, *, already_registered: bool = False):
         """Install committed weights and make Hybrid replicas available for generation."""
