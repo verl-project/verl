@@ -26,6 +26,7 @@ from functools import partial, wraps
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
+from urllib.parse import quote, urlparse
 
 import orjson
 from packaging.version import Version
@@ -235,7 +236,8 @@ class RLInsightLogger:
     _warned_unsupported_features: set[str] = set()
 
     def __init__(self, project_name, experiment_name, config=None):
-        self.init(project_name=project_name, experiment_name=experiment_name, config=config)
+        if self.init(project_name, experiment_name, config) and config is not None:
+            self.register_transfer_queue_metrics(config)
 
     @classmethod
     def _get_rl_insight(cls):
@@ -249,6 +251,38 @@ class RLInsightLogger:
     def enabled(cls) -> bool:
         """Return whether rl-insight is globally enabled in this process."""
         return os.getenv(cls.ENABLE_ENV) == "1"
+
+    @classmethod
+    def discover_otlp_traces_endpoint(cls) -> str | None:
+        """Discover the RL-Insight Tempo OTLP/HTTP traces endpoint from the server.
+
+        Returns ``None`` when RL-Insight is disabled, the server is unreachable,
+        or the installed RL-Insight version lacks the service-discovery helpers.
+        """
+        if not cls.enabled():
+            return None
+
+        try:
+            from rl_insight.server.http_api import get_server_services, server_url
+            from rl_insight.server.network import service_url_from_server_url
+        except ImportError as exc:
+            logger.warning(
+                "RL-Insight OTLP endpoint discovery is unavailable; engine tracing stays disabled: %s",
+                exc,
+            )
+            return None
+
+        try:
+            otlp_port = get_server_services().get("otlp_port")
+            if not otlp_port:
+                return None
+            return service_url_from_server_url(server_url(), otlp_port, "/v1/traces") or None
+        except Exception as exc:
+            logger.warning(
+                "RL-Insight OTLP endpoint discovery failed; engine tracing stays disabled: %s",
+                exc,
+            )
+            return None
 
     @classmethod
     def _warn_unsupported_rl_insight(cls, feature: str) -> None:
@@ -268,20 +302,102 @@ class RLInsightLogger:
         return Version(getattr(module, "__version__", "0"))
 
     @classmethod
-    def init(cls, project_name=None, experiment_name=None, config=None):
-        if not cls.enabled() or cls._init_done:
+    def init(cls, project_name=None, experiment_name=None, config=None) -> bool:
+        """Initialize RL-Insight with the given Run identity.
+
+        Omitting project/experiment names lets RL-Insight apply its default Run
+        names, as required by direct-emit backends such as ``push`` that have no
+        Run context. Returns whether this process has initialized the client.
+        """
+        if not cls.enabled():
+            return False
+
+        if not cls._init_done:
+            rl_insight_config = config.get("trainer", {}).get("rl_insight", {}) if config else {}
+            cls._get_rl_insight().init(
+                project=project_name,
+                experiment_name=experiment_name,
+                config=rl_insight_config,
+            )
+            cls._init_done = True
+        return True
+
+    @classmethod
+    def resolve_trace_identity(
+        cls, project_name: str | None, experiment_name: str | None
+    ) -> tuple[str | None, str | None]:
+        """Return the active Run identity, falling back to the configured names."""
+        context = None
+        if cls.enabled():
+            try:
+                module = cls._get_rl_insight()
+            except ImportError:
+                module = None
+            if module is not None:
+                get_context = getattr(module, "get_context", None)
+                if callable(get_context):
+                    try:
+                        context = get_context()
+                    except Exception as exc:
+                        logger.warning("RL-Insight Run context discovery failed: %s", exc)
+        if context is None:
+            return project_name, experiment_name
+        return context.project, context.experiment_name
+
+    @classmethod
+    def configure_vllm_tracing(cls, args: dict[str, Any], replica_rank: int, trace_config: Any) -> None:
+        """Configure vLLM request tracing from ``rollout.trace``.
+
+        Mutates ``args`` and the process OTel env; no-op unless ``trace_config.enable_otel``.
+        """
+        if not trace_config.enable_otel:
             return
 
-        rl_insight_config = {}
-        if config is not None:
-            try:
-                rl_insight_config = config.get("trainer", {}).get("rl_insight", {}) or {}
-            except (AttributeError, KeyError, TypeError):
-                pass
-        cls._get_rl_insight().init(project=project_name, experiment_name=experiment_name, config=rl_insight_config)
-        cls._init_done = True
-        if config is not None:
-            cls.register_transfer_queue_metrics(config)
+        endpoint = args.get("otlp_traces_endpoint") or args.get("otlp-traces-endpoint")
+        if endpoint:
+            # An explicit engine_kwargs endpoint wins over RL-Insight discovery.
+            logger.info(
+                "rollout.trace.enable_otel=True with an explicit engine tracing endpoint; "
+                "keeping the user-provided endpoint"
+            )
+            # vLLM defaults to gRPC. Infer OTLP/HTTP only from a standard traces path.
+            endpoint_path = urlparse(endpoint).path.rstrip("/")
+            if endpoint_path.endswith("/v1/traces"):
+                os.environ.setdefault("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
+        else:
+            endpoint = cls.discover_otlp_traces_endpoint()
+            if not endpoint:
+                logger.warning(
+                    "rollout.trace.enable_otel=True but the RL-Insight OTLP endpoint is unavailable; "
+                    "engine request traces are disabled. Check that `rl_insight` is in trainer.logger, "
+                    "that RL_INSIGHT_SERVER_URL points to the RL-Insight server, and that Tempo is enabled."
+                )
+                return
+            # vLLM defaults to gRPC. RL-Insight's Tempo receiver speaks HTTP.
+            os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "http/protobuf"
+            args["otlp_traces_endpoint"] = endpoint
+
+        cls._set_otel_resource_attributes(replica_rank, trace_config)
+
+    @classmethod
+    def _set_otel_resource_attributes(cls, replica_rank: int, trace_config: Any) -> None:
+        """Add Run identity and replica metadata to ``OTEL_RESOURCE_ATTRIBUTES``.
+
+        Appended attributes take precedence over launcher-provided values with the same key.
+        """
+        project, experiment_name = cls.resolve_trace_identity(trace_config.project_name, trace_config.experiment_name)
+        resource_attributes = {
+            "project": project,
+            "experiment_name": experiment_name,
+            "replica": str(replica_rank),
+        }
+        attributes = ",".join(
+            f"{key}={quote(str(value), safe='')}" for key, value in resource_attributes.items() if value
+        )
+        existing_attributes = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "").strip()
+        os.environ["OTEL_RESOURCE_ATTRIBUTES"] = (
+            f"{existing_attributes},{attributes}" if existing_attributes else attributes
+        )
 
     @classmethod
     def log(cls, data, step):
@@ -428,8 +544,7 @@ class RLInsightLogger:
         if cls.enabled() and cls._rl_insight_version() < cls.MINIMUM_RL_INSIGHT_VERSION:
             cls._warn_unsupported_rl_insight("agent_loop_session")
             return fallback_session()
-        if cls.enabled() and not cls._init_done:
-            cls.init(project_name=project_name, experiment_name=experiment_name)
+        cls.init(project_name=project_name, experiment_name=experiment_name)
 
         try:
             from rl_insight.agent_loop import agent_loop_session
