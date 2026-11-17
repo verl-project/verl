@@ -17,6 +17,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
+import pytest
 from omegaconf import OmegaConf
 
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
@@ -176,8 +177,8 @@ def test_separate_async_closes_hybrid_and_standalone_rollout_once():
     _prepare_separate_step_end(trainer)
 
     trainer._start_profiling()
-    trainer._stop_profiling()
     trainer.on_step_end()
+    trainer._stop_profiling()
 
     for manager in (hybrid, standalone):
         manager.start_profile.assert_called_once()
@@ -232,3 +233,130 @@ def test_rollout_stops_before_the_first_training_stage():
 
     trainer._stop_profiling()
     manager.stop_profile.assert_called_once()
+
+
+@pytest.mark.parametrize("cls", [PPOTrainerSync, PPOTrainerColocateAsync])
+@pytest.mark.parametrize("continuous", [False, True])
+@pytest.mark.parametrize("steps", [None, [2], [2, 3], [2, 4], [4]])
+def test_fit_profiles_weight_sync_in_the_selected_step(monkeypatch, cls, continuous, steps):
+    trainer, events = _fit_trainer(monkeypatch, cls, steps, continuous)
+
+    trainer._fit(None)
+
+    updates = [event for event in events if event[0] == "weights"]
+    assert updates == [("weights", step, step in (steps or [])) for step in range(1, 5)]
+    assert not trainer._test_profile_active
+    for step in steps or []:
+        assert events.index(("weights", step, True)) < next(
+            i for i, event in enumerate(events) if i > events.index(("weights", step, True)) and event[0] == "stop"
+        )
+
+
+def _fit_trainer(monkeypatch, cls=PPOTrainerSync, steps=None, continuous=False):
+    import verl.trainer.ppo.v1.trainer_base as module
+
+    for name in ("SkipManager", "Tracking", "ValidationGenerationsLogger", "DapoFilteredRewardTableLogger", "tq"):
+        monkeypatch.setattr(module, name, MagicMock())
+    trainer = _trainer(cls, llm_server_manager=MagicMock())
+    trainer.config.global_profiler.steps = steps
+    trainer.config.global_profiler.profile_continuous_steps = continuous
+    trainer.config.trainer = OmegaConf.create(
+        dict(
+            total_epochs=1,
+            project_name="test",
+            experiment_name="test",
+            logger=["console"],
+            val_before_train=False,
+            save_freq=-1,
+            test_freq=-1,
+            rollout_data_dir=None,
+        )
+    )
+    trainer.global_steps = 0
+    trainer.steps_per_epoch = 10
+    trainer.total_training_steps = 4
+    trainer._test_profile_active = False
+    events = []
+
+    def start(**kwargs):
+        assert not trainer._test_profile_active
+        trainer._test_profile_active = True
+        events.append(("start", trainer.global_steps))
+
+    def stop(**kwargs):
+        assert trainer._test_profile_active
+        events.append(("stop", trainer.global_steps))
+        trainer._test_profile_active = False
+
+    trainer.actor_rollout_wg.start_profile.side_effect = start
+    trainer.actor_rollout_wg.stop_profile.side_effect = stop
+    trainer.checkpoint_manager.update_weights.side_effect = lambda *a, **kw: events.append(
+        ("weights", trainer.global_steps, trainer._test_profile_active)
+    )
+    trainer.step = MagicMock(return_value=SimpleNamespace(keys=[], partition_id="test"))
+    for name in (
+        "on_train_begin",
+        "on_train_end",
+        "_reissue_inflight_prompts",
+        "_compute_metrics",
+        "_shutdown_dump_executor",
+        "_shutdown_train_dataloader",
+        "_save_checkpoint",
+    ):
+        setattr(trainer, name, MagicMock())
+    return trainer, events
+
+
+@pytest.mark.parametrize("stage", ["step", "checkpoint", "weights"])
+def test_fit_closes_profile_when_a_stage_fails(monkeypatch, stage):
+    trainer, events = _fit_trainer(monkeypatch, steps=[1])
+    if stage == "step":
+        trainer.step.side_effect = RuntimeError("stage failed")
+    elif stage == "checkpoint":
+        trainer.config.trainer.save_freq = 1
+        trainer._save_checkpoint.side_effect = RuntimeError("stage failed")
+    else:
+        trainer.checkpoint_manager.update_weights.side_effect = RuntimeError("stage failed")
+
+    with pytest.raises(RuntimeError, match="stage failed"):
+        trainer._fit(None)
+
+    assert events == [("start", 1), ("stop", 1)]
+    assert not trainer._test_profile_active
+
+
+def test_fit_closes_profile_at_source_exhaustion(monkeypatch):
+    from verl.trainer.ppo.v1.trainer_base import DataLoaderExhausted
+
+    trainer, events = _fit_trainer(monkeypatch, steps=[1])
+    trainer.step.side_effect = DataLoaderExhausted()
+
+    trainer._fit(None)
+
+    assert events == [("start", 1), ("stop", 1)]
+    trainer.checkpoint_manager.update_weights.assert_not_called()
+
+
+@pytest.mark.parametrize("current,previous", [(True, False), (False, True)])
+def test_separate_async_uses_current_profile_selection(current, previous):
+    manager = MagicMock()
+    trainer = _trainer(PPOTrainerSeparateAsync, llm_server_manager=manager)
+    _prepare_separate_step_end(trainer)
+    trainer.curr_step_profile = current
+    trainer.prev_step_profile = previous
+
+    trainer.on_step_end()
+
+    assert manager.stop_profile.call_count == int(current)
+
+
+def test_checkpoint_precedes_sync_and_final_profile_stop(monkeypatch):
+    trainer, events = _fit_trainer(monkeypatch, steps=[1])
+    trainer.total_training_steps = 1
+    trainer.config.trainer.save_freq = 1
+    trainer._save_checkpoint.side_effect = lambda: events.append(("checkpoint", trainer._test_profile_active))
+
+    trainer._fit(None)
+
+    assert events == [("start", 1), ("checkpoint", True), ("weights", 1, True), ("stop", 1)]
+    trainer.actor_rollout_wg.stop_profile.assert_called_once_with(run_command=True)

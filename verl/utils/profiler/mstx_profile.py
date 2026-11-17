@@ -13,7 +13,6 @@
 # limitations under the License.
 
 # Inspired from https://gitee.com/ascend/MindSpeed-RL/blob/master/mindspeed_rl/utils/utils.py
-import functools
 import logging
 import os
 from contextlib import contextmanager
@@ -24,7 +23,7 @@ from packaging import version
 from torch_npu.npu import mstx
 
 from .config import NPUToolConfig
-from .profile import DistProfiler, ProfilerConfig
+from .profile import DistProfiler, ProfilerConfig, _wrap_with_profile_context
 
 
 def mark_start_range(message: Optional[str] = None) -> None:
@@ -233,8 +232,8 @@ class NPUProfiler(DistProfiler):
         """
 
         def decorator(func):
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs_inner):
+            @contextmanager
+            def profile_context(*args, **kwargs_inner):
                 # Prefer the stage label (`role`, e.g. "actor_compute_log_prob"): it names both the
                 # role and the function, which the method name alone cannot do for a colocated
                 # worker. Fall back to the method name for stages that declare no role.
@@ -254,17 +253,16 @@ class NPUProfiler(DistProfiler):
                     profile_npu.start()
                     mark_range = mark_start_range(message=profile_name)
 
-                result = func(*args, **kwargs_inner)
-
-                if not discrete_mode:
+                try:
+                    yield func
+                finally:
                     mark_end_range(mark_range)
-                else:
-                    mark_end_range(mark_range)
-                    profile_npu.step()
-                    profile_npu.stop()
+                    if discrete_mode:
+                        try:
+                            profile_npu.step()
+                        finally:
+                            profile_npu.stop()
 
-                return result
-
-            return wrapper
+            return _wrap_with_profile_context(func, profile_context)
 
         return decorator

@@ -783,6 +783,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    @DistProfiler.annotate(color="orange", role="update_weights")
     @RLInsightLogger.trace_state_decorator(
         "update_weight",
         state_lane_id=lambda self: f"rank_{self.rank}",

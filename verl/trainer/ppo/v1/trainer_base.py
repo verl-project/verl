@@ -500,24 +500,27 @@ class PPOTrainer(ABC):
 
                 self._start_profiling()
                 try:
-                    batch = self.step(metrics, self.timing_raw)
-                except DataLoaderExhausted:
-                    logger.info("Custom training source exhausted at step %s; ending training.", self.global_steps)
-                    source_exhausted = True
-                    break
+                    try:
+                        batch = self.step(metrics, self.timing_raw)
+                    except DataLoaderExhausted:
+                        logger.info("Custom training source exhausted at step %s; ending training.", self.global_steps)
+                        source_exhausted = True
+                        break
+                    last_completed_step = self.global_steps
+
+                    # 2. save checkpoint
+                    if self.config.trainer.save_freq > 0 and (
+                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                    ):
+                        with marked_timer("save_checkpoint", self.timing_raw, color="green"):
+                            self._save_checkpoint()
+
+                    # Weight synchronization runs in this hook. Keep this step's profiler
+                    # and rank/step selection active until the update has completed.
+                    self.on_step_end()
+                    metrics.update(self._consume_sync_metrics())
                 finally:
                     self._stop_profiling()
-                last_completed_step = self.global_steps
-
-                # 2. save checkpoint
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
-                ):
-                    with marked_timer("save_checkpoint", self.timing_raw, color="green"):
-                        self._save_checkpoint()
-
-                self.on_step_end()
-                metrics.update(self._consume_sync_metrics())
 
             # 4. validate
             if self.config.trainer.test_freq > 0 and (
