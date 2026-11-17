@@ -87,9 +87,10 @@ tokens are bitwise equal (`rollout_probs_diff_max` = 0).
 - Megatron-LM: `megatron.core` from NVIDIA/Megatron-LM, and mLite (`experimental/lite`) with its vLLM-aligned
   Kimi-K3.1 implementation (`impl=vllm`) ported to ROCm, from [a fork of zero-mismatch-rl](https://github.com/indianspeedster/zero-mismatch-rl/tree/megatron/kimi-k3.1-rocm)
   (branch `megatron/kimi-k3.1-rocm`).
-- vLLM general plugins from [kimi-k31-rocm-vllm-plugins](https://github.com/indianspeedster/kimi-k31-rocm-vllm-plugins):
-  `k31lora` (LoRA for the ROCm Kimi-K3.1 model, both arms), `k31kdabi` and `k31dsabi` (batch-invariant KDA and DSA),
-  and `k31xlora` (W4A16 expert LoRA for the batch-variant arm). Each plugin picks its arm from `VLLM_BATCH_INVARIANT`.
+- vLLM general plugins from [vllm-rl-plugins](https://github.com/indianspeedster/vllm-rl-plugins), Kimi-K3.1 on
+  ROCm (`models/kimi_k31/rocm`): LoRA for the ROCm Kimi-K3.1 model (both arms), batch-invariant KDA, DSA and MoE
+  (`VLLM_BATCH_INVARIANT=1`) and W4A16 expert LoRA (`VLLM_BATCH_INVARIANT=0`). They are active only when vLLM loads a
+  Kimi-K3 model; the arm comes from `VLLM_BATCH_INVARIANT`.
 - Every fork is fetched at a full commit SHA (`*_REPO` / `*_REVISION` build args) and the build fails if the checkout
   does not resolve to it.
 

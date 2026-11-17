@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Kimi-K3.1 true-on-policy LoRA RL on AMD MI355X (gfx950): examples/grpo_trainer/run_kimi_k3_1_megatron_lite.sh.
 # Adds to a ROCm vLLM build with Kimi-K3.1 support (vLLM f5926fb, AITER): Megatron-LM with mLite's Kimi-K3.1 ROCm
-# port and the Kimi-K3.1 ROCm vLLM plugins, both from forks pinned by commit; rdma-core for AMD ionic NICs (as #8505)
+# port and the vLLM RL plugins (Kimi-K3.1 on ROCm), both from forks pinned by commit; rdma-core for AMD ionic NICs (as #8505)
 # and verl. See docker/rocm/README.md.
 #
 #   DOCKER_BUILDKIT=1 docker build -f docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy \
@@ -53,14 +53,14 @@ printf '%s\n' /opt/Megatron-LM/experimental/lite /opt/Megatron-LM/experimental/l
   > "${site}/megatron_lite_verl_mlite.pth"
 EOF
 
-# --- vLLM general plugins: k31lora, k31kdabi, k31dsabi (VLLM_BATCH_INVARIANT=1) and k31xlora (=0) --------------------
-ARG K31_PLUGINS_REPO="https://github.com/indianspeedster/kimi-k31-rocm-vllm-plugins.git"
-ARG K31_PLUGINS_REVISION=2ddbf60ac017cebf33a700ace4fff1b2fa7dc62a
+# --- vLLM RL plugins: Kimi-K3.1 ROCm LoRA, BI KDA / DSA / MoE (VLLM_BATCH_INVARIANT=1) and W4A16 expert LoRA (=0) -----
+ARG VLLM_RL_PLUGINS_REPO="https://github.com/indianspeedster/vllm-rl-plugins.git"
+ARG VLLM_RL_PLUGINS_REVISION=6b435edcfd0476bd1cd9e81fcad74c4154bd39d5
 RUN <<'EOF'
 set -eux
-clone_exact /tmp/k31-plugins "${K31_PLUGINS_REPO}" "${K31_PLUGINS_REVISION}"
-pip install --no-deps /tmp/k31-plugins
-rm -rf /tmp/k31-plugins
+clone_exact /tmp/vllm-rl-plugins "${VLLM_RL_PLUGINS_REPO}" "${VLLM_RL_PLUGINS_REVISION}"
+pip install --no-deps /tmp/vllm-rl-plugins
+rm -rf /tmp/vllm-rl-plugins
 EOF
 
 # --- RDMA userspace for AMD ionic (Pollara / AINIC) NICs (as #8505) -------------------------------------------------
@@ -118,7 +118,8 @@ assert paths["verl"].startswith("/opt/verl/"), paths
 from importlib.metadata import entry_points
 
 plugins = {e.name for e in entry_points(group="vllm.general_plugins")}
-assert {"k31lora", "k31kdabi", "k31dsabi", "k31xlora"} <= plugins, plugins
+assert "vllm_rl_plugins" in plugins, plugins
+assert all(importlib.util.find_spec(m) for m in ("k31lora.bi_moe", "k31kdabi", "k31dsabi")), "trainer imports"
 print(paths, sorted(plugins))
 PY
 EOF
