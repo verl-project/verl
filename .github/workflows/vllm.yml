@@ -58,7 +58,6 @@ on:
       # Entrypoints
       - ".github/workflows/vllm.yml"
       - "tests/special_e2e/generation"
-      - "tests/experimental/reward_loop/run_determinism_e2e_with_rm.py"
       - "tests/workers/rollout"
       - "verl/trainer/main_generation.py"
       - "verl/trainer/config/generation.yaml"

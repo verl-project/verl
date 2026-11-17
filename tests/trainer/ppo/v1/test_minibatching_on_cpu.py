@@ -18,6 +18,7 @@ import pytest
 from omegaconf import OmegaConf
 from transfer_queue import KVBatchMeta
 
+from verl.single_controller.base.worker import DispatchInfo
 from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY
 from verl.trainer.ppo.utils import (
     get_minibatch_padding_multiple,
@@ -94,6 +95,10 @@ def _minibatching_config(*, mode="fixed_sample", dynamic=True, shuffle=False, ep
     )
 
 
+def _dispatch_infos(dp_size: int) -> list[DispatchInfo]:
+    return [DispatchInfo(dp_rank=rank, is_mp_src=True) for rank in range(dp_size)]
+
+
 def _trainer(config, *, use_critic=True):
     trainer = _StubTrainer.__new__(_StubTrainer)
     trainer.config = config
@@ -102,8 +107,8 @@ def _trainer(config, *, use_critic=True):
     trainer.global_steps = 1
     trainer.local_trigger_step = 0
     trainer.tokenizer = SimpleNamespace(eos_token_id=0)
-    trainer.actor_rollout_wg = SimpleNamespace(_dispatch_info={"actor": [0, 1]})
-    trainer.critic_wg = SimpleNamespace(_dispatch_info={"train": [0, 1]})
+    trainer.actor_rollout_wg = SimpleNamespace(_dispatch_info={"actor": _dispatch_infos(2)})
+    trainer.critic_wg = SimpleNamespace(_dispatch_info={"train": _dispatch_infos(2)})
     return trainer
 
 
@@ -173,7 +178,7 @@ def test_invalid_mini_batch_mode_is_rejected():
 
 def test_actor_and_critic_dp_sizes_must_match():
     trainer = _trainer(_minibatching_config())
-    trainer.critic_wg._dispatch_info["train"] = [0]
+    trainer.critic_wg._dispatch_info["train"] = _dispatch_infos(1)
 
     with pytest.raises(NotImplementedError, match="actor_dp_size=2 and critic_dp_size=1"):
         trainer._balance_batch(_batch(["p0_0_0"]), metrics={})

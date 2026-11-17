@@ -58,7 +58,6 @@ from verl.utils.rollout_trace import (
     RolloutTraceConfig,
     rollout_trace_attr,
 )
-from verl.utils.skip import SkipManager
 from verl.utils.tokenizer import (
     build_multimodal_processor_inputs,
     get_processor_token_id,
@@ -1223,7 +1222,7 @@ class AgentLoopWorker:
         non_tensor_batch.update(extra_fields)
 
         # Only include reward_extra_keys in meta_info if rm_scores is in batch
-        # This avoids conflicts when reward_tensor is merged later in ray_trainer.py
+        # This avoids conflicts when reward_tensor is merged later in trainer_base.py
         if "rm_scores" in batch.keys():
             meta_info = {"metrics": metrics, "reward_extra_keys": reward_extra_keys}
         else:
@@ -1316,7 +1315,6 @@ class AgentLoopManager:
             )
 
     @auto_await
-    @SkipManager.annotate(role="rollout")
     async def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
 

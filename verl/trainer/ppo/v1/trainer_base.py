@@ -61,8 +61,8 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY, append_padding_samples
-from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
+from verl.trainer.ppo.trainer_utils import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.utils import (
     MINI_BATCH_MODE_FIXED_TRAJECTORY,
     Role,
@@ -1814,7 +1814,8 @@ class PPOTrainer(ABC):
         """Return the data-parallel size registered for a worker mesh."""
         if mesh_name not in worker_group._dispatch_info:
             worker_group._dispatch_info[mesh_name] = worker_group._query_dispatch_info(mesh_name)
-        return max(worker_group._dispatch_info[mesh_name]) + 1
+        dispatch_infos = worker_group._dispatch_info[mesh_name]
+        return max(info.dp_rank for info in dispatch_infos) + 1
 
     @staticmethod
     def _get_global_mini_batch_layout(batch: KVBatchMeta, mini_batch_size: int) -> dict[str, list[int]]:
@@ -2175,9 +2176,10 @@ class PPOTrainer(ABC):
             "advantages",
             "returns",
             "rm_scores",
-            "token_level_rewards",
             "num_turns",
         ]
+        if self.config.algorithm.use_kl_in_reward:
+            fields.append("token_level_rewards")
         if self.use_critic:
             fields.append("values")
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
@@ -2263,7 +2265,7 @@ class PPOTrainer(ABC):
         )
 
         # 4. per-request speculative-decoding aggregation (same metrics async PPO logs;
-        # see compute_spec_decode_metrics in verl/trainer/ppo/ray_trainer.py).
+        # see compute_spec_decode_metrics in verl/trainer/ppo/trainer_utils.py).
         metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
 
         # 5. off-policy staleness metrics
