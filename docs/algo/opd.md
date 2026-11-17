@@ -281,9 +281,10 @@ Two registered families:
     teacher's top-k support.
   - `forward_kl_topk_tail`: a coarse-grained forward KL that additionally
     collapses every non-top-k token into one aggregate tail bucket.
-- **Single-token losses** (`kl`, `k1`, `abs`, `mse`, `k2`,
-  `low_var_kl`, `k3`): computed from the student and teacher log
-  probabilities at the sampled token.
+- **Single-sample KL estimators** (`kl`, `k1`, `abs`, `mse`, `k2`,
+  `low_var_kl`, `k3`): per-token Monte Carlo estimators of reverse KL
+  computed from the student's `log_probs` and the teacher's single
+  `log_prob` at the sampled token.
 
 ### `distillation.distillation_loss.topk` (int, optional)
 
