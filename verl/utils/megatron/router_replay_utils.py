@@ -344,6 +344,8 @@ def merge_router_topk_indices(
 
         if input_ids.is_nested:
             batch_size = input_ids.shape[0]
+            # Replay only consumes the packed row layout; position ids belong to the
+            # model forward and would be discarded here.
             _, packed_seq_params, _ = preprocess_thd_engine(
                 input_ids,
                 pre_process=True,
@@ -480,6 +482,7 @@ def set_router_replay_data(
 
         replay_mask_rmpad = None
         if layers_topk_idx.is_nested:
+            # Routes are indexed by packed token row; replay never reads position ids.
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
                 layers_topk_idx,
                 pre_process=True,
@@ -490,6 +493,7 @@ def set_router_replay_data(
                 need_position_ids=False,
             )
             if replay_mask is not None:
+                # Keep the mask on exactly the same packed rows as the routes.
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
                     replay_mask,
                     pre_process=True,

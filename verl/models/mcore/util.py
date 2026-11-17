@@ -279,6 +279,8 @@ def preprocess_thd_engine(
 
     Set ``need_position_ids=False`` when the caller only needs the packed rows
     (e.g. router replay packing) to skip building a full position-id tensor.
+    ``need_roll=True`` requires position ids because the roll path restores
+    boundary rows through the position tensor.
     """
     if cp_layout not in ("zigzag", "contiguous"):
         raise ValueError(f"Unsupported context parallel layout: {cp_layout}")
