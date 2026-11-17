@@ -503,15 +503,16 @@ def compute_distillation_loss_reverse_kl_estimator(
         scored_ids = no_padding_2_padding(data["teacher_ids"], data).squeeze(-1)
         eos_ids = torch.tensor(loss_config.semantic_eos_token_ids, device=scored_ids.device, dtype=scored_ids.dtype)
         eos_mask = response_mask_bool & torch.isin(scored_ids, eos_ids)
-        if eos_mask.any():
-            # Average over stop positions only. E.g. bsz=2, resp_len=3, response 0 stops at position 2,
-            # response 1 stops at position 1 (position 2 is padding):
-            #   eos_mask                      = [[F,   F,   T   ], [F,   T,     F]]
-            #   distillation_losses           = [[0.3, 0.1, 0.01], [0.2, -0.02, 0]]
-            #   distillation_losses[eos_mask] = [0.01, -0.02]          -> eos_loss = -0.005
-            #   student_log_probs[eos_mask]   = [log 0.99, log 0.95]   -> exp, mean -> eos_student_prob = 0.97
-            metrics["distillation/eos_loss"] = Metric(AggregationType.MEAN, distillation_losses[eos_mask].mean())
-            metrics["distillation/eos_student_prob"] = Metric(
-                AggregationType.MEAN, student_log_probs[eos_mask].detach().exp().mean()
-            )
+        # Emitted on every micro-batch (zeros when no response stops in it): Metric.aggregate_dp needs the
+        # same number of values on every dp rank. Mean stop loss = eos_loss_sum / eos_count.
+        # E.g. bsz=2, resp_len=3, response 0 stops at position 2, response 1 stops at position 1:
+        #   eos_mask                      = [[F,   F,   T   ], [F,   T,     F]]
+        #   distillation_losses           = [[0.3, 0.1, 0.01], [0.2, -0.02, 0]]
+        #   distillation_losses[eos_mask] = [0.01, -0.02]          -> eos_loss_sum = -0.01, eos_count = 2
+        #   student_log_probs[eos_mask]   = [log 0.99, log 0.95]   -> exp, sum -> eos_student_prob_sum = 1.94
+        metrics["distillation/eos_count"] = Metric(AggregationType.SUM, eos_mask.sum())
+        metrics["distillation/eos_loss_sum"] = Metric(AggregationType.SUM, distillation_losses[eos_mask].sum())
+        metrics["distillation/eos_student_prob_sum"] = Metric(
+            AggregationType.SUM, student_log_probs[eos_mask].detach().exp().sum()
+        )
     return distillation_losses, metrics

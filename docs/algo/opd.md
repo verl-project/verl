@@ -363,6 +363,7 @@ Without the option the teacher scores only `<|endoftext|>`, giving
 
 ```bash
 distillation.distillation_loss.loss_mode=k1 \
+distillation.distillation_loss.use_policy_gradient=True \
 "distillation.distillation_loss.semantic_eos_token_ids=[151643,151645]"
 ```
 

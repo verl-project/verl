@@ -167,3 +167,43 @@ def test_v1_rollout_stops_on_every_terminal_token(monkeypatch):
 
     asyncio.run(run())
     assert captured and captured[0]["stop_token_ids"] == EOS
+
+
+def _eos_metrics(response_ids: list[list[int]]) -> dict:
+    from tensordict import TensorDict
+
+    from verl.trainer.distillation.losses import compute_distillation_loss_reverse_kl_estimator
+
+    responses = torch.tensor(response_ids)
+    prompts = torch.ones(responses.shape[0], 2, dtype=torch.long)
+    input_ids = torch.cat([prompts, responses], dim=1)
+    next_ids = torch.cat([input_ids[:, 1:], torch.zeros_like(input_ids[:, :1])], dim=1)
+    data = TensorDict(
+        {
+            "prompts": prompts,
+            "responses": responses,
+            "attention_mask": torch.ones_like(input_ids),
+            "response_mask": torch.ones_like(responses),
+            "teacher_ids": next_ids.reshape(-1, 1),
+            "teacher_logprobs": torch.full((input_ids.numel(), 1), -1.0),
+        }
+    )
+    loss_config = DistillationLossConfig(loss_mode="k1", use_policy_gradient=True, semantic_eos_token_ids=EOS)
+    model_output = {"log_probs": torch.full((input_ids.numel(),), -0.5)}
+    _, metrics = compute_distillation_loss_reverse_kl_estimator(
+        None, SimpleNamespace(distillation_loss=loss_config), model_output, data
+    )
+    return metrics
+
+
+def test_eos_metrics_aggregate_across_dp_ranks_without_stops():
+    """A micro-batch where every response is truncated must still emit the EOS metrics, or dp aggregation fails."""
+    from verl.utils.metric.utils import Metric
+
+    stopped = _eos_metrics([[3, 4, 5], [3, 7, 0]])
+    truncated = _eos_metrics([[3, 4, 2], [1, 2, 3]])
+
+    assert stopped.keys() == truncated.keys()
+    count = Metric.aggregate_dp([stopped["distillation/eos_count"], truncated["distillation/eos_count"]])
+    loss_sum = Metric.aggregate_dp([stopped["distillation/eos_loss_sum"], truncated["distillation/eos_loss_sum"]])
+    assert loss_sum / count == pytest.approx(0.5)  # k1 at each stop: -0.5 - (-1.0)
