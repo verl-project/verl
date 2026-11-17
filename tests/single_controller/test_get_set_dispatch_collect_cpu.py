@@ -35,10 +35,10 @@ def test_get_set_dispatch_collect_cpu():
     actor_rollout_ref.set_dispatch_collect(mesh_name="ref", **ref.get_dispatch_collect())
     actor_rollout_ref.set_dispatch_collect(mesh_name="actor", **actor.get_dispatch_collect())
 
-    assert actor_rollout_ref._query_dispatch_info("ref") == 0
-    assert actor_rollout_ref._query_collect_info("ref")
-    assert actor_rollout_ref._query_dispatch_info("actor") == 1
-    assert not actor_rollout_ref._query_collect_info("actor")
+    assert actor_rollout_ref._query_dispatch_info("ref").dp_rank == 0
+    assert actor_rollout_ref._query_collect_info("ref").is_collect
+    assert actor_rollout_ref._query_dispatch_info("actor").dp_rank == 1
+    assert not actor_rollout_ref._query_collect_info("actor").is_collect
 
     # test conflict mesh_name
     actor2 = Worker()
