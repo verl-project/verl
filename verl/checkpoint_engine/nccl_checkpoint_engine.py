@@ -11,6 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Postpone annotation evaluation: on Ascend `cp` is None (no cupy), and the eager
+# class-body annotation `cp.ndarray | torch.Tensor` in BroadcastOperation would
+# otherwise fail at import time.
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -19,13 +24,24 @@ from dataclasses import dataclass
 from typing import AsyncGenerator, Generator
 from unittest.mock import patch
 
-with patch("importlib.metadata.distributions", return_value=[]):
-    import cupy as cp
-
 import ray
-import ray.util.collective as collective
 import torch
 import zmq
+
+from verl.utils.device import is_torch_npu_available
+
+if is_torch_npu_available(check_device=False):
+    # Ascend has neither cupy nor ray's NCCL collective; HCCLCheckpointEngine
+    # registers the "nccl" backend name there instead. Keep this module
+    # importable on NPU so DeltaShardedCheckpointEngine can subclass
+    # NCCLCheckpointEngine for its zmq/topology machinery.
+    cp = None
+    collective = None
+else:
+    with patch("importlib.metadata.distributions", return_value=[]):
+        import cupy as cp
+
+    import ray.util.collective as collective
 
 from verl.checkpoint_engine.base import (
     CheckpointEngine,
