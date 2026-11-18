@@ -25,7 +25,7 @@ import pytest
 
 pytest.importorskip("ray")
 
-from verl.trainer.ppo.ray_trainer import compute_spec_decode_metrics
+from verl.trainer.ppo.trainer_utils import compute_spec_decode_metrics
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -148,7 +148,10 @@ def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeyp
     monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
 
     server = object.__new__(vllm_async_server.vLLMHttpServer)
-    server.config = SimpleNamespace(mtp=SimpleNamespace(enable=True, enable_rollout=True))
+    server.config = SimpleNamespace(
+        mtp=SimpleNamespace(enable=True, enable_rollout=True),
+        external_kv_cache_invalidation="reset",
+    )
     server.model_config = SimpleNamespace(lora_rank=0, lora={})
     server.engine = _FakeMtpEngine()
 
@@ -184,6 +187,7 @@ def test_separate_draft_model_hybrid_sleep_selects_level_1(monkeypatch, speculat
     server.config = SimpleNamespace(
         mtp=SimpleNamespace(enable=False, enable_rollout=False),
         engine_kwargs={"vllm": {"speculative_config": speculative_config}},
+        external_kv_cache_invalidation="reset",
     )
     server.model_config = SimpleNamespace(lora_rank=0, lora={})
     server.engine = _FakeMtpEngine()
