@@ -132,6 +132,30 @@ def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
         return prompt_ids
 
 
+def gemma4_dedup_image_tokens(prompt_ids: list[int], processor):
+    """Collapse each image block in prompt_ids to one <|image|> for Gemma4, since vLLM will expand every
+    <|image|> into a full block by image_data.
+    For example,
+    ```
+    <|image><|image|><|image|>...<|image|><image|>
+    =>
+    <|image|>
+    ```
+    """
+    if processor.__class__.__name__ == "Gemma4Processor":
+        prompt_ids = np.array(prompt_ids)
+        is_image = prompt_ids == get_processor_token_id(processor, "image")
+        is_boi = prompt_ids == get_processor_token_id(processor, "boi")
+        is_eoi = prompt_ids == get_processor_token_id(processor, "eoi")
+        mask = np.ones(len(prompt_ids), dtype=bool)
+        mask[1:] &= ~(is_image[1:] & is_image[:-1])
+        mask[:-1] &= ~(is_boi[:-1] & is_image[1:])
+        mask[1:] &= ~(is_eoi[1:] & is_image[:-1])
+        return prompt_ids[mask].tolist()
+    else:
+        return prompt_ids
+
+
 def get_vision_placeholder_token_ids(processor) -> list[int]:
     """Vision placeholder token ids the policy must never sample.
 

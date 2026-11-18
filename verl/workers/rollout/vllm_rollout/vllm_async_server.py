@@ -58,6 +58,7 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, prefix_cache_salt
 from verl.workers.rollout.utils import (
     extract_response_topk_logprobs_with_coverage,
+    gemma4_dedup_image_tokens,
     get_max_position_embeddings,
     get_node_visible_devices,
     get_vision_placeholder_token_ids,
@@ -690,6 +691,7 @@ class vLLMHttpServer:
         warn_topk_logprob_budget(sampling_params, budget_warnings)
         self._topk_budget_warnings = budget_warnings
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        prompt_ids = gemma4_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
