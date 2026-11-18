@@ -45,6 +45,13 @@ Data ladder (sender side, steady) -- the names in this file anchor to these::
 Wire encodings: ``indices`` (int32 positions + values; every steady sync) and
 ``values`` (values only; the seed). The values meta tag is ``"dense"`` for
 protocol continuity with the receiver's delta_loader.
+
+Ascend (NPU): the delta protocol itself is platform-agnostic; only the flush
+transport is not. :class:`HCCLDeltaShardedCheckpointEngine`
+(:mod:`verl.checkpoint_engine.delta_checkpoint_engine_npu`) subclasses this
+engine and overrides the transport seam (``_bcast_send`` / ``_bcast_recv``,
+``init_process_group``) with HCCL over a vLLM ``StatelessProcessGroup`` -- the
+same scheme :class:`HCCLCheckpointEngine` uses.
 """
 
 from __future__ import annotations
@@ -54,20 +61,32 @@ import logging
 import time
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
-from unittest.mock import patch
 
-import ray.util.collective as collective
 import torch
 import zmq
 
-with patch("importlib.metadata.distributions", return_value=[]):
-    import cupy as cp
+from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.net_utils import get_free_port
 
 from .base import CheckpointEngineRegistry
 from .delta_sync.encode import DeltaFlush, DeltaParam
 from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import gather_slot_entries_to_rank0
 from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine, WorkerMetadata
+
+try:
+    from unittest.mock import patch
+
+    import ray.util.collective as collective
+
+    with patch("importlib.metadata.distributions", return_value=[]):
+        import cupy as cp
+except ImportError:
+    # Ascend has neither cupy nor ray's NCCL collective. The module must still
+    # import there: HCCLDeltaShardedCheckpointEngine (delta_checkpoint_engine_npu)
+    # subclasses this engine and registers the "delta_sharded" backend on NPU.
+    cp = None
+    collective = None
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +286,23 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     # Stream each flush as soon as it is produced so trainer peak memory stays near two buckets,
     # including during the full seed. Each ZMQ manifest + NCCL broadcast carries ``is_last``;
     # rollout adapters then forward that flush over same-GPU IPC to their backend-specific consumer.
+    #
+    # Transport seam: _bcast_send / _bcast_recv are the ONLY methods that touch the
+    # broadcast backend. HCCLDeltaShardedCheckpointEngine (Ascend) overrides just these
+    # two; everything else -- encode, sparse gather, bucketing, receive protocol -- is shared.
+    def _bcast_send(self, t: torch.Tensor) -> None:
+        """Rank 0 -> rollout broadcast of one wire buffer (sender side)."""
+        # Stage into cupy-owned buffers: ray's NCCL broadcast is enqueued on a separate
+        # stream with no recordStream on its inputs, so broadcasting a zero-copy view of
+        # these torch tensors (freed right after this call) would race with allocator reuse.
+        arr = cp.empty(t.numel(), dtype=cp.uint8)
+        arr[:] = cp.asarray(t)
+        collective.broadcast(arr, src_rank=0, group_name=self.group_name)
+
+    def _bcast_recv(self, t: torch.Tensor) -> None:
+        """Rollout-side receive of one wire buffer."""
+        collective.broadcast(t, src_rank=0, group_name=self.group_name)
+
     def _publish_flush(self, flush: DeltaFlush, first: bool, is_last: bool) -> None:
         meta = {
             "is_full": first,
@@ -284,17 +320,10 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         }
         self.socket.send_string(self.topic, flags=zmq.SNDMORE)
         self.socket.send_pyobj(meta)
-        pos_u8 = flush.positions_cpu.to("cuda", non_blocking=True).contiguous().view(torch.uint8)
+        pos_u8 = flush.positions_cpu.to(get_device_name(), non_blocking=True).contiguous().view(torch.uint8)
         val_u8 = flush.values_gpu.contiguous().view(torch.uint8)
-        # Stage into cupy-owned buffers: ray's NCCL broadcast is enqueued on a separate
-        # stream with no recordStream on its inputs, so broadcasting a zero-copy view of
-        # these torch tensors (freed right after this call) would race with allocator reuse.
-        pos_cp = cp.empty(pos_u8.numel(), dtype=cp.uint8)
-        val_cp = cp.empty(val_u8.numel(), dtype=cp.uint8)
-        pos_cp[:] = cp.asarray(pos_u8)
-        val_cp[:] = cp.asarray(val_u8)
-        collective.broadcast(pos_cp, src_rank=0, group_name=self.group_name)
-        collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
+        self._bcast_send(pos_u8)
+        self._bcast_send(val_u8)
 
     def _publish_values_flush(
         self, params: list[DeltaParam], values: torch.Tensor, is_last: bool, verify: bool = False
@@ -323,16 +352,17 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         self.socket.send_string(self.topic, flags=zmq.SNDMORE)
         self.socket.send_pyobj(meta)
         val_u8 = values.view(torch.uint8)
-        # cupy-owned staging: same lifetime rationale as _publish_flush.
-        val_cp = cp.empty(val_u8.numel(), dtype=cp.uint8)
-        val_cp[:] = cp.asarray(val_u8)
-        collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
+        self._bcast_send(val_u8)
 
     def _release_staging_pool(self, phase: str) -> None:
         """Return the cupy staging pool's blocks to CUDA and log the evidence:
         ``held`` is what the pool would have kept from the device without this
         release, and the device-free delta shows the memory actually coming
         back (warning level so the default worker log level records it)."""
+        if cp is None:
+            # No cupy on this platform (Ascend): the HCCL subclass stages plain
+            # torch tensors, so there is no staging pool to release.
+            return
         from verl.utils.device import get_torch_device
 
         pool = cp.get_default_memory_pool()
@@ -373,17 +403,17 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             dense = meta.get("encoding") == "dense"
             val_dtype = getattr(torch, meta["val_dtype"])
             elem = torch.empty(0, dtype=val_dtype).element_size()
-            val_u8 = torch.empty(meta["val_numel"] * elem, dtype=torch.uint8, device="cuda")
+            val_u8 = torch.empty(meta["val_numel"] * elem, dtype=torch.uint8, device=get_device_name())
             if dense:
                 pos = None
-                collective.broadcast(val_u8, src_rank=0, group_name=self.group_name)
+                self._bcast_recv(val_u8)
             else:
-                pos = torch.empty(meta["pos_numel"], dtype=torch.uint8, device="cuda")
-                collective.broadcast(pos, src_rank=0, group_name=self.group_name)
-                collective.broadcast(val_u8, src_rank=0, group_name=self.group_name)
+                pos = torch.empty(meta["pos_numel"], dtype=torch.uint8, device=get_device_name())
+                self._bcast_recv(pos)
+                self._bcast_recv(val_u8)
             val = val_u8.view(val_dtype)
             spec_bytes = json.dumps(meta["spec"]).encode()
-            spec_t = torch.frombuffer(bytearray(spec_bytes), dtype=torch.uint8).to("cuda")
+            spec_t = torch.frombuffer(bytearray(spec_bytes), dtype=torch.uint8).to(get_device_name())
             named = [("__delta_spec__", spec_t), ("__values__", val)]
             if pos is not None:
                 named.insert(1, ("__positions__", pos))
@@ -456,7 +486,9 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             pos_off += nnz * 4
             val_off += nnz
 
-        values_gpu = torch.cat(val_pieces) if val_pieces else torch.empty(0, dtype=self.rollout_dtype, device="cuda")
+        values_gpu = (
+            torch.cat(val_pieces) if val_pieces else torch.empty(0, dtype=self.rollout_dtype, device=get_device_name())
+        )
         positions_u8 = (
             torch.cat(idx_pieces).contiguous().view(torch.uint8)
             if idx_pieces
@@ -663,3 +695,86 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             "checkpoint_engine/payload_mbytes": wire_bytes / (1 << 20),
             "checkpoint_engine/flushes": float(n_flushes),
         }
+
+
+@dataclass
+class HCCLDeltaMasterMetadata(MasterMetadata):
+    """The master additionally advertises the HCCL rendezvous endpoint
+    (``dist_ip`` / ``dist_port``), exactly like HCCLCheckpointEngine's metadata."""
+
+    dist_ip: str = ""
+    dist_port: int = 0
+
+
+@CheckpointEngineRegistry.register("delta_sharded")
+class HCCLDeltaShardedCheckpointEngine(DeltaShardedCheckpointEngine):
+    """``delta_sharded`` backend on Ascend: HCCL transport, inherited delta protocol."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # HCCL transport handle, created lazily in init_process_group.
+        self.pyhccl = None
+
+        if self.is_master:
+            # HCCL rendezvous endpoint, advertised through HCCLDeltaMasterMetadata.
+            self.dist_port, _ = get_free_port(self.ip)
+
+    def prepare(self) -> WorkerMetadata:
+        # Same single-sender topology as the base engine; the master metadata
+        # additionally carries the HCCL rendezvous endpoint.
+        master = None
+        if self.is_master:
+            master = HCCLDeltaMasterMetadata(
+                zmq_ip=self.ip,
+                zmq_port=self.listen_port,
+                multi_sender=False,
+                dist_ip=self.ip,
+                dist_port=self.dist_port,
+            )
+        return WorkerMetadata(node_id=self.get_node_id(), master=master)
+
+    def init_process_group(self, rank: int, world_size: int, master_metadata: MasterMetadata, num_senders: int):
+        """Stand up the HCCL group (a vLLM StatelessProcessGroup, the same scheme
+        HCCLCheckpointEngine uses) instead of the parent's ray NCCL group."""
+        from verl.utils.distributed import stateless_init_process_group
+
+        self.num_senders = num_senders
+        # Actor workers left out of the group are given rank -1.
+        if rank < 0:
+            self.rank = rank
+            self.world_size = world_size
+            return
+        if self.rebuild_group or self.pyhccl is None:
+            self.pyhccl = stateless_init_process_group(
+                master_metadata.dist_ip, master_metadata.dist_port, rank, world_size, torch.npu.current_device()
+            )
+        self.rank = rank
+        self.world_size = world_size
+        # Only consumers read the flush metadata stream; the sender never does.
+        if self.rank >= num_senders:
+            self._connect_zmq_client(master_metadata)
+        # barrier (the same all_reduce handshake HCCLCheckpointEngine uses)
+        signal = torch.tensor([1], dtype=torch.int8, device=get_device_name())
+        self.pyhccl.all_reduce(signal)
+        logger.info(f"init_process_group (hccl) rank: {self.rank}, world_size: {self.world_size}")
+
+    def finalize(self):
+        if self.rebuild_group and getattr(self, "rank", None) is not None and self.rank >= 0:
+            if self.pyhccl is not None:
+                self.pyhccl.close()
+                self.pyhccl = None
+            self.rank = None
+            self.world_size = None
+        get_torch_device().empty_cache()
+
+    # ---- transport overrides (HCCL) ----
+
+    def _bcast_send(self, t: torch.Tensor) -> None:
+        # c10d tracks the stream for torch tensors, so no cupy-style staging is
+        # needed; synchronize so the buffer freed on return is not reused under
+        # an in-flight broadcast (mirrors HCCLCheckpointEngine).
+        self.pyhccl.broadcast(t, src=0)
+        torch.npu.synchronize()
+
+    def _bcast_recv(self, t: torch.Tensor) -> None:
+        self.pyhccl.broadcast(t, src=0)
