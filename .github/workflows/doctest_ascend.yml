@@ -73,6 +73,8 @@ jobs:
         shell: bash -el {0}
     env:
       INSTALL_CASE: ${{ matrix.case }}
+      # Inherited by the documented installers and pip's isolated build environments.
+      PIP_INDEX_URL: https://mirrors.huaweicloud.com/repository/pypi/simple
       HF_ENDPOINT: https://hf-mirror.com
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       # The runner's shared cache can be read-only; Datasets needs to write locks and Arrow files.
@@ -103,6 +105,10 @@ jobs:
       - uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: '26.9.4-1'
+          channel-alias: https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud
+          channels: conda-forge
+          conda-remove-defaults: true
+          show-channel-urls: true
           activate-environment: ""
           auto-activate: false
       - name: Install documented environment and run Quick Start

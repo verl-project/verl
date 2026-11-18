@@ -104,6 +104,22 @@ inside the disposable container for Datasets lock files and Arrow processing
 cache. It checks the model config, dataset directory, and cache write access
 before installing packages. A2 and openEuler are not included in this workflow.
 
+The installation jobs configure download sources for the A3 runner:
+
+- Conda uses the [TUNA conda-forge mirror](https://mirrors.tuna.tsinghua.edu.cn/help/anaconda/)
+  through setup-miniconda's `channel-alias` and `channels` inputs, with `defaults`
+  removed. This applies to subsequent documented `conda create` commands.
+- pip uses the [Huawei Cloud PyPI mirror](https://support.huaweicloud.com/mirrors_faq/mirrors_faq_0010.html)
+  through `PIP_INDEX_URL`, including isolated build dependency installation.
+  The installers retain their explicit Triton-Ascend extra index.
+- CANN container images already use Huawei Cloud SWR in China, as specified in
+  the public container guide. A Docker Hub mirror does not replace this registry.
+
+These settings only change package download sources in the installation jobs.
+Miniforge remains pinned to `26.9.4-1` and downloads from GitHub Releases; Git
+clones still use the URLs in the documented installers. Package mirrors do not
+resolve failures in those GitHub downloads or native operator builds.
+
 ```bash
 python3 -m pytest -q tests/special_sanity/test_doctest_helper.py
 ```
