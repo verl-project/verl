@@ -212,6 +212,116 @@ def test_source_dry_run(run_worker, backend):
 
 
 @pytest.fixture
+def run_git_retry(tmp_path):
+    """Inject clone failures without network access, using the real timeout command."""
+    bash = os.environ.get("DOCTEST_TEST_BASH") or shutil.which("bash")
+    if not bash:
+        pytest.skip("Bash is required for Git retry tests")
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    trace = tmp_path / "git-trace"
+    fake_git = binary_dir / "git"
+    fake_git.write_text(
+        "#!/bin/bash\n"
+        'printf "%s|%s|%s\\n" "$*" "$GIT_HTTP_LOW_SPEED_LIMIT" "$GIT_HTTP_LOW_SPEED_TIME" >> "$GIT_TEST_TRACE"\n'
+        '[[ "$1" == clone || "$1 $2" == "submodule update" ]] || exit 0\n'
+        'count=$(wc -l < "$GIT_TEST_TRACE")\n'
+        'if [[ "$1" == clone ]]; then\n'
+        '  destination="${@: -1}"\n'
+        '  [[ ! -e "$destination" ]] || exit 99\n'
+        '  mkdir -p "$destination"\n'
+        '  printf partial > "$destination/partial"\n'
+        "fi\n"
+        'if [[ "$count" -le "$GIT_TEST_FAILURES" ]]; then\n'
+        '  if [[ "$GIT_TEST_MODE" == hang ]]; then sleep 10; fi\n'
+        '  exit "$GIT_TEST_EXIT"\n'
+        "fi\n"
+        'if [[ "$1" == clone ]]; then printf complete > "$destination/complete"; fi\n',
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+
+    def run(command, **overrides):
+        env = os.environ.copy()
+        env.update(
+            PATH=str(binary_dir) + os.pathsep + env["PATH"],
+            GIT_TEST_TRACE=trace.as_posix(),
+            GIT_TEST_FAILURES="1",
+            GIT_TEST_EXIT="128",
+            GIT_TEST_MODE="fail",
+            DOCTEST_GIT_RETRY_DELAY="0",
+            DOCTEST_GIT_TIMEOUT="1",
+            DOCTEST_GIT_ATTEMPTS="3",
+            GIT_HTTP_LOW_SPEED_LIMIT="10240",
+            GIT_HTTP_LOW_SPEED_TIME="120",
+        )
+        env.update(overrides)
+        helper = REPO_ROOT / DOCTEST_PATH / "scripts/git_retry.sh"
+        # A child Bash process matches the original backend installer's execution.
+        script = (
+            f'export PATH="$(cd {shlex.quote(binary_dir.as_posix())} && pwd):$PATH"\n'
+            f"source {shlex.quote(helper.as_posix())}\nbash -ec {shlex.quote(command)}"
+        )
+        return subprocess.run([bash, "-ec", script], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=20)
+
+    return run, trace
+
+
+@pytest.mark.parametrize("mode", ["fail", "hang"])
+def test_git_clone_retries_failure_or_timeout(run_git_retry, tmp_path, mode):
+    """An interrupted clone must retry cleanly and publish only a successful checkout."""
+    run, trace = run_git_retry
+    result = run("git clone --depth 1 --branch example https://example.invalid/repo.git", GIT_TEST_MODE=mode)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(trace.read_text().splitlines()) == 2
+    assert "|10240|120" in trace.read_text()
+    assert (tmp_path / "repo/complete").read_text() == "complete"
+    assert not list(tmp_path.glob(".doctest-clone.*"))
+    if mode == "hang":
+        assert "exit 124" in result.stderr
+
+
+@pytest.mark.parametrize("exit_code, attempts", [(128, 3), (130, 1), (143, 1)])
+def test_git_retry_exhaustion_and_cancellation(run_git_retry, tmp_path, exit_code, attempts):
+    """Exhausted retries fail installation; interrupt/termination must not restart it."""
+    run, trace = run_git_retry
+    result = run(
+        "git clone https://example.invalid/repo.git 'custom checkout'",
+        GIT_TEST_FAILURES="10",
+        GIT_TEST_EXIT=str(exit_code),
+    )
+    assert result.returncode == exit_code, result.stdout + result.stderr
+    assert len(trace.read_text().splitlines()) == attempts
+    assert not (tmp_path / "custom checkout").exists()
+    assert not list(tmp_path.glob(".doctest-clone.*"))
+
+
+def test_git_retry_preserves_existing_destination(run_git_retry, tmp_path):
+    """A retry must never delete an existing checkout or its local changes."""
+    run, trace = run_git_retry
+    destination = tmp_path / "repo"
+    destination.mkdir()
+    sentinel = destination / "local-change"
+    sentinel.write_text("keep")
+    result = run("git clone https://example.invalid/repo.git")
+    assert result.returncode == 128
+    assert sentinel.read_text() == "keep"
+    assert not trace.exists()
+
+
+def test_git_submodule_retry_and_other_commands(run_git_retry):
+    """Submodule downloads retry without replacing their parent checkout."""
+    run, trace = run_git_retry
+    result = run("git submodule update --init --recursive\ngit -C repo rev-parse HEAD")
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = trace.read_text().splitlines()
+    assert len(commands) == 3
+    assert commands[0].startswith("submodule update --init --recursive|")
+    assert commands[1].startswith("submodule update --init --recursive|")
+    assert commands[2].startswith("-C repo rev-parse HEAD|")
+
+
+@pytest.fixture
 def isolated_repo(tmp_path):
     """Copy only doctest inputs so failure injection cannot modify the user's checkout."""
     repo = tmp_path / "checkout"

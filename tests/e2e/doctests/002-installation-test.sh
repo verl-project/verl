@@ -73,24 +73,6 @@ function install_system_tools() {
   esac
 }
 
-# Keep the documented clone command, but install the checkout/revision under test.
-# This function is not exported to the backend installer subprocesses.
-function git() {
-  local argument
-  for argument in "$@"; do
-    if [[ "$1" == clone && "${argument}" == https://github.com/verl-project/verl.git ]]; then
-      log_info "Redirecting the documented verl clone to the test repository."
-      command git -c "url.${VERL_REPOSITORY}.insteadOf=https://github.com/verl-project/verl.git" "$@"
-      if [[ -n "${VERL_REVISION:-}" ]]; then
-        command git -C verl checkout --detach "${VERL_REVISION}"
-        command git -C verl submodule update --init --recursive
-      fi
-      command git -C verl rev-parse HEAD
-      return
-    fi
-  done
-  command git "$@"
-}
 function run_installation_source() {
   local backend="${INSTALL_BACKEND:-vllm}"
   local os_name
@@ -110,6 +92,7 @@ function run_installation_source() {
     return 0
   fi
   require_command git
+  require_command timeout
   require_command conda
   os_name="$(detect_os)"
   conda_base="$(conda info --base)"
@@ -134,6 +117,8 @@ function run_installation_source() {
     export VERL_REVISION="${VERL_REVISION:-$(git -C "${REPO_ROOT}" rev-parse HEAD)}"
   fi
   install_system_tools "${os_name}"
+  # Retry individual clones in this shell and the original Bash installers.
+  source "${DOCTEST_DIR}/scripts/git_retry.sh"
   if [[ -r /usr/local/Ascend/ascend-toolkit/latest/version.cfg ]]; then
     log_info "CANN version information:"
     cat /usr/local/Ascend/ascend-toolkit/latest/version.cfg

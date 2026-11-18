@@ -113,6 +113,20 @@ validates the command without requiring Docker. CI retains the build log as an
 artifact and allows up to six hours for the full image build.
 
 Source installation has a six-hour job limit to allow for Megatron native builds.
+Within source installation, documented Bash `git clone` commands and
+`git submodule update` use at most three attempts. An HTTP transfer below
+10 KiB/s for 120 seconds aborts through Git's low-speed settings; each attempt
+also has a 20-minute limit, followed by a 30-second termination grace period.
+Retries wait 30 and 60 seconds. Failed clones are discarded from a private
+temporary directory, and existing destination directories are never removed.
+After the final failure the installation fails. Override `DOCTEST_GIT_TIMEOUT`
+(seconds), `DOCTEST_GIT_ATTEMPTS`, `DOCTEST_GIT_RETRY_DELAY` (seconds),
+`GIT_HTTP_LOW_SPEED_LIMIT` (bytes/second), and `GIT_HTTP_LOW_SPEED_TIME` (seconds)
+for local diagnosis. This policy applies to the source-install worker, not
+checkout actions, pip, or Dockerfile builds. Other Git commands pass through;
+clone options beyond those used by the documented installers also pass through
+without retries. HTTP low-speed detection does not measure local checkout or
+server-side packing progress; the total timeout still bounds those phases.
 Published-image tests run before source installation, with one NPU job at a time.
 One failed case does not cancel the remaining cases. Fork pull requests follow the repository's workflow
 approval policy; a maintainer must approve runs when GitHub requires it.
