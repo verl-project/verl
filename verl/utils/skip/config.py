@@ -35,7 +35,28 @@ class RolloutTqSkipConfig(BaseConfig):
 
 
 @dataclass
+class TrainingSkipConfig(BaseConfig):
+    """Shared configuration for the updates and train_compute skip roles."""
+
+    enable: bool = False
+    steps: list[int] | None = None
+    action: str = "empty"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enable, bool):
+            raise ValueError("Training skip enable must be bool")
+        if self.action != "empty":
+            raise ValueError("Training skip action must be empty; training results cannot be cached")
+        if self.steps is not None and (
+            not isinstance(self.steps, list) or any(type(step) is not int or step < 1 for step in self.steps)
+        ):
+            raise ValueError("Training skip steps must be null or a list of positive trainer steps")
+
+
+@dataclass
 class SkipManagerConfig(BaseConfig):
     """Top-level config for skip modules."""
 
     rollout_tq: RolloutTqSkipConfig = field(default_factory=RolloutTqSkipConfig)
+    updates: TrainingSkipConfig = field(default_factory=TrainingSkipConfig)
+    train_compute: TrainingSkipConfig = field(default_factory=TrainingSkipConfig)

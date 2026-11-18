@@ -349,6 +349,22 @@ class TestComputeDataMetrics(unittest.TestCase):
         self.assertIn("critic/rewards/mean", metrics)
         self.assertIn("response_length/mean", metrics)
 
+    def test_compute_data_metrics_without_training_fields(self):
+        """Keep rollout statistics when training skip leaves no training inputs."""
+        for field in ("token_level_rewards", "advantages", "returns", "values"):
+            del self.batch.batch[field]
+
+        metrics = compute_data_metrics(self.batch, use_critic=True, include_training=False)
+
+        self.assertAlmostEqual(metrics["critic/score/mean"], 5.0)
+        self.assertAlmostEqual(metrics["response_length/mean"], 2.0)
+        self.assertAlmostEqual(metrics["prompt_length/mean"], 2.0)
+        self.assertEqual(metrics["response/aborted_ratio"], 0.0)
+        self.assertEqual(
+            {key for key in metrics if key.startswith("critic/")},
+            {"critic/score/mean", "critic/score/max", "critic/score/min"},
+        )
+
 
 class TestComputeTimingMetrics(unittest.TestCase):
     """Tests for the compute_timing_metrics function."""

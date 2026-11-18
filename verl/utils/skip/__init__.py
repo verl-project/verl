@@ -18,10 +18,12 @@ from .config import SkipManagerConfig
 # register skip
 from .rollout_skip import RolloutTqSkip
 from .skip_manager import SkipManager
+from .training_skip import TrainingSkip
 
 __all__ = [
     "BaseSkip",
     "SkipManager",
     "SkipManagerConfig",
     "RolloutTqSkip",
+    "TrainingSkip",
 ]

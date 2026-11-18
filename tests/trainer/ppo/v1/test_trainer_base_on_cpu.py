@@ -20,6 +20,8 @@ from omegaconf import OmegaConf
 
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
+from verl.utils.skip import SkipManager, TrainingSkip
+from verl.utils.skip.config import TrainingSkipConfig
 
 
 def test_greedy_reward_baseline_does_not_request_score_centering_heads():
@@ -34,6 +36,42 @@ class _StubTrainer(PPOTrainer):
 
     def on_sample_end(self):
         pass
+
+
+@pytest.mark.parametrize(
+    "step, compute_calls, actor_calls, critic_calls",
+    [(1, 1, 0, 1), (2, 1, 0, 0), (3, 0, 0, 0), (4, 1, 1, 1)],
+    ids=["critic-warmup", "skip-updates", "skip-compute", "normal"],
+)
+def test_training_skip_stages(monkeypatch, step, compute_calls, actor_calls, critic_calls):
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.global_steps = step
+    trainer.use_critic = trainer.use_reference_policy = True
+    trainer.config = OmegaConf.create({"trainer": {"critic_warmup": 2}})
+    selections = {"updates": [2], "train_compute": [3]}
+    roles = {
+        role: TrainingSkip(TrainingSkipConfig(enable=True, steps=steps), None) for role, steps in selections.items()
+    }
+    monkeypatch.setattr(SkipManager, "skip_instances", roles)
+    monkeypatch.setattr(SkipManager, "step", step)
+
+    batch = SimpleNamespace(partition_id="train")
+    compute = [
+        "_balance_batch",
+        "_compute_old_log_prob",
+        "_compute_ref_log_prob",
+        "_compute_values",
+        "_compute_advantage",
+    ]
+    updates = ["_update_actor", "_update_critic"]
+    for name in compute + updates:
+        setattr(trainer, name, MagicMock(return_value=batch))
+
+    assert trainer._train_batch(batch, {}, {}) is batch
+    for name in compute:
+        assert getattr(trainer, name).call_count == compute_calls, name
+    assert trainer._update_actor.call_count == actor_calls
+    assert trainer._update_critic.call_count == critic_calls
 
 
 class _CustomSampler:

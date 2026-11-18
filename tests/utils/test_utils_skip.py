@@ -25,7 +25,8 @@ from tensordict import TensorDict
 
 from verl.utils.skip import RolloutTqSkip, SkipManager, SkipManagerConfig
 from verl.utils.skip.base_skip import SKIP_REGISTRY
-from verl.utils.skip.config import RolloutTqSkipConfig
+from verl.utils.skip.config import RolloutTqSkipConfig, TrainingSkipConfig
+from verl.utils.skip.training_skip import get_training_skip_metrics
 
 
 @pytest.fixture(autouse=True)
@@ -75,14 +76,15 @@ def save_batch(cache, tq, step, uid):
     return batch
 
 
-def test_only_tq_role_registered(config):
-    assert set(SKIP_REGISTRY) == {"rollout_tq"}
+def test_skip_roles_registered(config):
+    assert set(SKIP_REGISTRY) == {"rollout_tq", "updates", "train_compute"}
     assert set(SkipManagerConfig.__dataclass_fields__) >= {"rollout_tq"}
     assert "rollout" not in SkipManagerConfig.__dataclass_fields__
     assert "async_rollout" not in SkipManagerConfig.__dataclass_fields__
     SkipManager.init(config)
-    assert set(SkipManager.skip_instances) == {"rollout_tq"}
+    assert set(SkipManager.skip_instances) == {"rollout_tq", "updates", "train_compute"}
     assert SkipManager.skip_instances["rollout_tq"].gbs == 2
+    assert get_training_skip_metrics(SkipManager.config, 1) == {}
 
 
 @pytest.mark.parametrize("kwargs", [{"action": "random"}, {"steps": ["bad"]}, {"enable": 1}])
@@ -183,3 +185,26 @@ def test_decorator_before_initialization():
             return "normal"
 
     assert Trainer().submit() == "normal"
+
+
+@pytest.mark.parametrize("steps, step, selected", [(None, 0, False), (None, 1, True), ([], 1, False), ([2], 1, False)])
+def test_training_skip_selection(config, steps, step, selected):
+    config.skip.train_compute = {"enable": True, "steps": steps}
+    SkipManager.init(config)
+    role = SkipManager.skip_instances["train_compute"]
+    train_batch = SimpleNamespace(partition_id="train")
+    assert role.should_skip(step, train_batch) == selected
+    assert not role.should_skip(step, SimpleNamespace(partition_id="val"))
+    assert not SkipManager.skip_instances["updates"].should_skip(step, train_batch)
+
+    SkipManager.set_step(99)  # Delayed metrics use the requested step.
+    assert get_training_skip_metrics(SkipManager.config, step) == {
+        "training/skip_updates": int(selected),
+        "training/skip_train_compute": int(selected),
+    }
+
+
+@pytest.mark.parametrize("options", [{"enable": 1}, {"action": "cache"}, {"steps": [0]}, {"steps": [True]}])
+def test_invalid_training_skip_config(options):
+    with pytest.raises(ValueError):
+        TrainingSkipConfig(**options)

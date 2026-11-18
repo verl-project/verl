@@ -51,6 +51,22 @@ class SkipManager:
         cls.step = step
 
     @classmethod
+    def annotate_training(cls, role: str):
+        """Return the original queue batch when the training stage is skipped."""
+
+        def decorator(func: Callable) -> Callable:
+            @functools.wraps(func)
+            def wrapper(trainer, batch, *args, **kwargs):
+                instance = cls.skip_instances.get(role)
+                if instance is not None and instance.should_skip(cls.step, batch):
+                    return batch
+                return func(trainer, batch, *args, **kwargs)
+
+            return wrapper
+
+        return decorator
+
+    @classmethod
     def annotate_tq(cls, role: str, phase: str):
         """V1 TransferQueue-based skip decorator, unified across both phases.
 

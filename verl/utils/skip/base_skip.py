@@ -21,6 +21,7 @@ class SkipAction(Enum):
     # Replace the result with cached data
     # ensuring that the output of each step is consistent with the non-skip version from the previous run,
     # while relying on cached result in every steps.
+    EMPTY = "empty"
     REPEAT = "repeat"  # repeat the result
     # Replace with the latest cached results
     # while relying on one cached result at least
@@ -42,7 +43,7 @@ class BaseSkip:
     def __init__(self, local_config, global_config):
         self.action = SkipAction(local_config.action)
         self.enable = local_config.enable
-        self.dump_dir = local_config.dump_dir
+        self.dump_dir = getattr(local_config, "dump_dir", None)
         self.steps = local_config.steps
         if self.action not in self.support_actions:
             raise ValueError(f"Unsupported action: {self.action}. Supported actions are: {self.support_actions}")

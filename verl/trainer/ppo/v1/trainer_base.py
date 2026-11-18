@@ -91,6 +91,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
+from verl.utils.skip.training_skip import get_training_skip_metrics
 from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
@@ -635,6 +636,24 @@ class PPOTrainer(ABC):
             with marked_timer("reward", timing_raw, color="yellow"):
                 batch = self._compute_reward_colocate(batch, metrics=metrics)
 
+        metrics.update(get_training_skip_metrics(self.config.get("skip"), self.global_steps))
+        batch = self._train_batch(batch, metrics, timing_raw)
+        return batch
+
+    @SkipManager.annotate_training(role="train_compute")
+    def _train_batch(self, batch: KVBatchMeta, metrics: dict, timing_raw: dict) -> KVBatchMeta:
+        """Compute training inputs (steps 3-7), then update models via ``_update_train_batch``.
+
+        When ``skip.train_compute`` selects the current step (enabled, step listed, train
+        partition), the decorator above short-circuits this method and returns ``batch``
+        unchanged, skipping all of: batch balancing, old/ref log-prob computation, critic
+        values, advantage/return, and — since updates are nested below — the critic/actor
+        weight updates too, regardless of the ``updates`` role's own step selection. The
+        step then trains nothing: rollout and reward scoring already happened in
+        ``_step_once``, the skip indicators were recorded before this call, and
+        ``_compute_metrics`` falls back to rollout-only fields (no advantages/returns/
+        values are produced to report).
+        """
         # 3. balance batch across data parallel groups
         batch = self._balance_batch(batch, metrics=metrics)
 
@@ -656,6 +675,16 @@ class PPOTrainer(ABC):
         with marked_timer("adv", timing_raw, color="brown"):
             batch = self._compute_advantage(batch, metrics=metrics)
 
+        return self._update_train_batch(batch, metrics, timing_raw)
+
+    @SkipManager.annotate_training(role="updates")
+    def _update_train_batch(self, batch: KVBatchMeta, metrics: dict, timing_raw: dict) -> KVBatchMeta:
+        """Update critic and actor weights (steps 8-9), with actor gated by ``critic_warmup``.
+
+        When ``skip.updates`` selects the current step, the decorator returns ``batch``
+        unchanged: the training inputs computed by ``_train_batch`` above still exist and
+        are reported in metrics, but no model weights are touched this step.
+        """
         # 8. [OPTIONAL] update critic
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
@@ -2014,19 +2043,15 @@ class PPOTrainer(ABC):
     def _compute_metrics(self, batch: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
         # 1. collect necessary fields from TransferQueue for computing metrics
         non_padding_mask = np.array([not tag.get("is_padding", False) for tag in batch.tags], dtype=bool)
-        fields = [
-            "prompts",
-            "responses",
-            "response_mask",
-            "advantages",
-            "returns",
-            "rm_scores",
-            "num_turns",
-        ]
-        if self.config.algorithm.use_kl_in_reward:
-            fields.append("token_level_rewards")
-        if self.use_critic:
-            fields.append("values")
+        skip_metrics = get_training_skip_metrics(self.config.get("skip"), global_steps)
+        include_training = not skip_metrics.get("training/skip_train_compute", False)
+        fields = ["prompts", "responses", "response_mask", "rm_scores", "num_turns"]
+        if include_training:
+            fields.extend(["advantages", "returns"])
+            if self.config.algorithm.use_kl_in_reward:
+                fields.append("token_level_rewards")
+            if self.use_critic:
+                fields.append("values")
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
         data = get_metric_data_with_optional_routed_experts(
             keys=batch.keys,
@@ -2066,7 +2091,7 @@ class PPOTrainer(ABC):
 
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]
-        if "token_level_rewards" not in data:
+        if include_training and "token_level_rewards" not in data:
             data["token_level_rewards"] = data["rm_scores"]
         data["prompt_length"] = prompt_length.float()
         data["response_length"] = response_length.float()
@@ -2091,7 +2116,9 @@ class PPOTrainer(ABC):
                 accumulator=self._rollout_moe_lb_metrics_accumulator,
             )
         )
-        metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
+        metrics.update(
+            compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic, include_training=include_training)
+        )
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
         n_gpus = self._get_n_gpus_for_throughput()
         metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
