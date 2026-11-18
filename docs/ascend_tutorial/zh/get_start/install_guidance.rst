@@ -1,7 +1,7 @@
 昇腾安装指南
 =================
 
-Last updated: 11/11/2026.
+Last updated: 11/13/2026.
 
 .. contents:: 目录
    :local:
@@ -152,6 +152,11 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    避免导入 Megatron-Bridge 时出现 ``qwen3_asr`` 重复注册错误。
    运行安装脚本时，请保留克隆的 verl 仓库中的该补丁文件。
 
+   安装脚本还会安装 vLLM-Ascend 所需的 FLA NPU 后端（版本 ``26.9.1``）。
+   运行脚本前须设置 ``FLA_NPU_DEVICE``：A2 使用 ``a2``，A3 使用 ``a3``，
+   分别安装 ``flash-linear-attention-npu-a2`` 或 ``flash-linear-attention-npu-a3``。
+   FSDP 和 Megatron 安装方式均会安装该依赖。
+
 .. code:: bash
 
    # 注意：在 x86 平台安装时，pip 需要配置额外的源，指令如下：
@@ -162,6 +167,8 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    conda create -n verl-vllm-npu python=3.12 -y
    conda activate verl-vllm-npu
    git clone --recursive https://github.com/verl-project/verl.git
+   # 根据实际硬件选择 a2 或 a3，以下以 A3 为例
+   export FLA_NPU_DEVICE=a3
    bash verl/scripts/install_vllm_mcore_npu.sh
    # 如果您仅需要使用FSDP后端
    # USE_MEGATRON=0 bash verl/scripts/install_vllm_mcore_npu.sh

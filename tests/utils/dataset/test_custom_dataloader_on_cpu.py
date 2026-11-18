@@ -205,7 +205,7 @@ def test_unknown_user_argument_is_not_silently_discarded():
 
 
 @pytest.mark.parametrize("mode", ["sync", "colocate_async", "separate_async"])
-def test_config_validation_accepts_all_v1_modes_but_not_legacy(mode, monkeypatch):
+def test_config_validation_accepts_all_v1_modes_with_compatibility_flag(mode, monkeypatch):
     module_spec = importlib.util.spec_from_file_location("config_validation", ROOT / "verl/utils/config.py")
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
@@ -218,8 +218,7 @@ def test_config_validation_accepts_all_v1_modes_but_not_legacy(mode, monkeypatch
     module.validate_config(cfg, use_reference_policy=False, use_critic=False)
 
     cfg.trainer.use_v1 = False
-    with pytest.raises(ValueError, match="requires the V1"):
-        module.validate_config(cfg, use_reference_policy=False, use_critic=False)
+    module.validate_config(cfg, use_reference_policy=False, use_critic=False)
 
 
 def test_training_and_validation_accept_iteration_without_checkpoint_methods():

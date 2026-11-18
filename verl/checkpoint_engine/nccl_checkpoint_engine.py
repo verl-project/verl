@@ -11,19 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Postpone annotation evaluation: on Ascend `cp` is None (no cupy), and the eager
+# class-body annotation `cp.ndarray | torch.Tensor` in BroadcastOperation would
+# otherwise fail at import time.
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
 import time
 from dataclasses import dataclass
 from typing import AsyncGenerator, Generator
-from unittest.mock import patch
-
-with patch("importlib.metadata.distributions", return_value=[]):
-    import cupy as cp
 
 import ray
-import ray.util.collective as collective
 import torch
 import zmq
 
@@ -35,6 +35,20 @@ from verl.checkpoint_engine.base import (
     split_weight_chunks,
 )
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+
+try:
+    from unittest.mock import patch
+
+    import ray.util.collective as collective
+
+    with patch("importlib.metadata.distributions", return_value=[]):
+        import cupy as cp
+except ImportError:
+    # Ascend has neither cupy nor ray's NCCL collective. The module must still
+    # import there: HCCLDeltaShardedCheckpointEngine (delta_checkpoint_engine_npu)
+    # subclasses this engine and registers the "delta_sharded" backend on NPU.
+    cp = None
+    collective = None
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
