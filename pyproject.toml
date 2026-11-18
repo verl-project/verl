@@ -237,7 +237,7 @@ veomni-sft = ["veomni==0.1.12", "tilelang"]
 # actually imports are listed here instead.
 torchtitan = [
     "torchtitan==0.3.0",
-    "spmd_types==0.2.3",
+    "spmd_types==0.3.2",
     "torch_checkpointing>=0.1.0",
     "tyro",
     "einops",
