@@ -208,14 +208,10 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta, spec: TQGetSpec
         return empty_td
 
     tq_client = tq.get_client()
-    if spec is not None and spec.data_parser is not None:
-        tensordict = await tq_client.async_get_data(meta, data_parser=spec.data_parser)
-    else:
-        tensordict = await tq_client.async_get_data(meta)
-
-    if spec is not None:
-        for key, val in spec.non_tensor.items():
-            tu.assign_non_tensor_data(tensor_dict=tensordict, key=key, val=val)
+    parser = {"data_parser": spec.data_parser} if spec is not None and spec.data_parser is not None else {}
+    tensordict = await tq_client.async_get_data(meta, **parser)
+    for key, val in spec.non_tensor.items() if spec is not None else ():
+        tu.assign_non_tensor_data(tensor_dict=tensordict, key=key, val=val)
 
     for key, val in meta_info.items():
         if isinstance(val, (NonTensorData | NonTensorStack)):

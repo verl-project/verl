@@ -141,7 +141,7 @@ def _check_dcp_unsupported_features(engine_config, model_config, tf_config=None,
             raise NotImplementedError("Dynamic CP does not support score centering")
 
 
-# Absolute layer index of each layer kept in ``routed_experts`` when a rank fetched only its own layers.
+# What a get parser kept of ``routed_experts``: which layers, and whether the rows are one CP rank's.
 ROUTE_LAYERS_KEY = "routed_experts_layers"
 CP_PRESHARDED_KEY = "routed_experts_cp_presharded"
 
@@ -782,8 +782,7 @@ class MegatronEngine(BaseEngine):
     def get_tq_get_spec(self) -> TQGetSpec | None:
         """The part of each sample this rank reads from TransferQueue.
 
-        Under R3 a rank replays the routes of its own MoE layers, and of its own rows when the
-        sequence is split across context-parallel ranks.
+        Under R3 that is the routes of its own MoE layers, and of its own rows under context parallelism.
         """
         route_layers, cp_rows = None, None
         if self.engine_config.router_replay.mode == "R3":
@@ -1413,8 +1412,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
             replay_mask = None
             cp_presharded = bool(tu.get_non_tensor_data(batch, key=CP_PRESHARDED_KEY, default=False))
             if self.engine_config.router_replay.mode == "R3":
-                if not cp_presharded:
-                    # Pre-sharded routes were already aligned to the input length on the storage unit.
+                if not cp_presharded:  # Pre-sharded routes were aligned on the storage unit.
                     layers_topk_idx = align_r3_router_replay_data(layers_topk_idx, input_ids)
                 replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
             set_router_replay_data(
