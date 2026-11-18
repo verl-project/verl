@@ -192,6 +192,8 @@ def test_update_actor_passes_score_centering_flag(score_centering):
             }
         }
     )
+    trainer.parameter_sync_step = 1
+    trainer.local_trigger_step = 0
     trainer.actor_rollout_wg = MagicMock()
     trainer.actor_rollout_wg.update_actor.return_value = {"metrics": {"mfu": 0.0}}
     batch = SimpleNamespace(extra_info={})
@@ -199,3 +201,85 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+
+
+def test_update_actor_and_critic_step_lr_scheduler_only_on_last_trigger():
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "actor": {
+                    "ppo_mini_batch_size": 2,
+                    "calculate_entropy": False,
+                    "entropy_coeff": 0.0,
+                    "ppo_epochs": 1,
+                    "data_loader_seed": 1,
+                    "shuffle": False,
+                    "policy_loss": {},
+                },
+                "rollout": {"n": 4, "temperature": 1.0},
+            },
+            "critic": {
+                "ppo_mini_batch_size": 2,
+                "ppo_epochs": 1,
+                "data_loader_seed": 1,
+                "shuffle": False,
+            },
+        }
+    )
+    trainer.actor_rollout_wg = MagicMock()
+    trainer.actor_rollout_wg.update_actor.return_value = {"metrics": {"mfu": 0.0}}
+    critic_future = MagicMock()
+    critic_future.get.return_value = {"metrics": {"mfu": 0.0}}
+    trainer.critic_wg = MagicMock()
+    trainer.critic_wg.train_mini_batch.return_value = critic_future
+
+    trainer.parameter_sync_step = 4
+    actor_flags = []
+    critic_flags = []
+    for trigger_idx in range(trainer.parameter_sync_step):
+        trainer.local_trigger_step = trigger_idx
+        actor_batch = SimpleNamespace(extra_info={})
+        trainer._update_actor(actor_batch, {})
+        actor_flags.append(actor_batch.extra_info["update_lr_scheduler"])
+
+        critic_batch = SimpleNamespace(extra_info={})
+        trainer._update_critic(critic_batch, {})
+        critic_flags.append(critic_batch.extra_info["update_lr_scheduler"])
+
+    assert actor_flags == [False, False, False, True]
+    assert critic_flags == [False, False, False, True]
+
+
+def test_init_dataloader_uses_global_steps_for_optimizer_horizon():
+    trainer = _trainer_with_filter_groups({"enable": False}, trainer_mode="separate_async")
+    trainer.config.data.update(
+        {
+            "train_files": [],
+            "val_files": [],
+            "train_max_samples": -1,
+            "val_max_samples": -1,
+            "dataloader_num_workers": 0,
+            "val_batch_size": 1,
+            "validation_shuffle": False,
+        }
+    )
+    trainer.config.actor_rollout_ref = {"actor": {"optim": {"total_training_steps": -1}}}
+    trainer.config.critic = {"optim": {"total_training_steps": -1}}
+    trainer.config.trainer.total_epochs = 2
+    trainer.config.trainer.total_training_steps = None
+    trainer.parameter_sync_step = 4
+    trainer.tokenizer = None
+    trainer.processor = None
+
+    with (
+        patch("verl.trainer.ppo.v1.trainer_base.create_rl_dataset", side_effect=[[{}] * 128, [{}]]),
+        patch("verl.trainer.ppo.v1.trainer_base.create_rl_sampler", return_value=None),
+        patch("verl.trainer.ppo.v1.trainer_base.StatefulDataLoader"),
+    ):
+        trainer._init_dataloader()
+
+    # 128 samples / 64 train_batch_size * 2 epochs = 4 global PPO steps (not 4 * parameter_sync_step).
+    assert trainer.total_training_steps == 4
+    assert trainer.config.actor_rollout_ref.actor.optim.total_training_steps == 4
+    assert trainer.config.critic.optim.total_training_steps == 4
