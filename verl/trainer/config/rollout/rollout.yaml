@@ -63,6 +63,11 @@ cudagraph_capture_sizes: null
 # Whether to free engine KVCache after generation.
 free_cache_engine: True
 
+# Experimental V1 colocate_async: preserve full native KV/runtime pools on CPU
+# during training and reuse historical KV after refit. Disabled by default.
+partial_rollout_kv_offload: False
+partial_rollout_kv_offload_headroom_gb: 64.0
+
 # TP size for rollout. Not effective for hf
 tensor_model_parallel_size: 2
 

@@ -267,6 +267,25 @@ class TestEngineKwargsManagedArgs:
         self._preprocess(engine_kwargs)
         assert engine_kwargs["max_num_seqs"] == 8
 
+    @pytest.mark.parametrize(
+        "key,value",
+        [
+            ("kv_transfer_config", {"kv_connector": "MooncakeStoreConnector"}),
+            ("kv-transfer-config", {"kv_connector": "MooncakeStoreConnector"}),
+            ("decode_context_parallel_size", 2),
+            ("prefill-context-parallel-size", 2),
+            ("enable_cumem_allocator", False),
+            ("sleep_mode_backend", "custom"),
+            ("speculative_config", {"num_speculative_tokens": 1}),
+        ],
+    )
+    def test_partial_kv_offload_rejects_incompatible_engine_overrides(self, key, value):
+        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+
+        server = SimpleNamespace(config=SimpleNamespace(partial_rollout_kv_offload=True))
+        with pytest.raises(ValueError, match="Partial KV"):
+            vLLMHttpServer._preprocess_engine_kwargs(server, {key: value})
+
 
 class TestVllmColocateZmqHandle:
     def test_dp_local_rank_offsets_tensor_parallel_rank(self):

@@ -12,14 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
+import sys
+from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
+import torch
 from omegaconf import OmegaConf
 
+import verl.trainer.ppo.v1.trainer_base as trainer_base_module
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
+from verl.trainer.ppo.v1.trainer_colocate_async import PPOTrainerColocateAsync
+from verl.utils.dataset.dataloader import DataLoaderExhausted
 
 
 def test_greedy_reward_baseline_does_not_request_score_centering_heads():
@@ -34,6 +43,198 @@ class _StubTrainer(PPOTrainer):
 
     def on_sample_end(self):
         pass
+
+
+def _multistep_trainer(monkeypatch, parameter_sync_step, strategy):
+    """Use the real trainer and sampler: late completions require an awake generator."""
+    name = "verl.workers.rollout.vllm_rollout.partial_kv"
+    path = Path(__file__).resolve().parents[4] / "verl/workers/rollout/vllm_rollout/partial_kv.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    lifecycle_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lifecycle_module)
+    monkeypatch.setitem(sys.modules, name, lifecycle_module)
+    trainer = PPOTrainerColocateAsync.__new__(PPOTrainerColocateAsync)
+    trainer.config = OmegaConf.create(
+        {
+            "data": {"train_batch_size": 4},
+            "actor_rollout_ref": {"rollout": {"partial_rollout_kv_offload": True, "temperature": 1.0}},
+            "trainer": {"critic_warmup": 0, "save_freq": -1, "test_freq": -1},
+        }
+    )
+    trainer.trainer_mode = "colocate_async"
+    trainer.parameter_sync_step = parameter_sync_step
+    trainer.global_steps = 5
+    trainer.total_training_steps = 10
+    trainer.curr_step_profile = False
+    trainer.timing_raw = {}
+    trainer.use_critic = trainer.use_reference_policy = False
+    trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=[])
+    state = {"awake": True, "updates": 0}
+    queue = {f"p{i}": dict(is_prompt=True, status="finished" if i < 2 else "running", global_steps=5) for i in range(4)}
+    for i in range(2):
+        queue[f"p{i}_0_0"] = dict(seq_len=2)
+
+    monkeypatch.setattr(trainer_base_module.tq, "kv_list", lambda: {"train": deepcopy(queue)})
+
+    def clear(*, keys, **kwargs):
+        for key in keys:
+            queue.pop(key, None)
+
+    monkeypatch.setattr(trainer_base_module.tq, "kv_clear", clear)
+    trainer._add_batch_to_generate = MagicMock()
+    trainer.replay_buffer = ReplayBufferAsync(
+        trainer_mode="colocate_async",
+        trainer_config={},
+        max_off_policy_threshold=8,
+        max_off_policy_strategy=strategy,
+        sampler_kwargs={},
+    )
+
+    def complete_late_requests(partition_id, last_debug_time):
+        assert state["awake"], "sampling waited for completions after KV was offloaded"
+        assert state["updates"] == 0, "the cycle started training before all required samples were ready"
+        for i in range(2, 4):
+            queue[f"p{i}"]["status"] = "finished"
+            queue[f"p{i}_0_0"] = dict(seq_len=2)
+        return last_debug_time
+
+    trainer.replay_buffer._wait_for_next_poll = complete_late_requests
+
+    def sleep():
+        state["awake"] = False
+
+    trainer.checkpoint_manager = SimpleNamespace(
+        prepare_partial_rollout=MagicMock(),
+        sleep_replicas=MagicMock(side_effect=sleep),
+        update_weights=MagicMock(),
+        resume_generation_replicas=MagicMock(side_effect=lambda: state.update(awake=True)),
+    )
+    for method in ("_balance_batch", "_compute_old_log_prob", "_compute_advantage"):
+        setattr(trainer, method, lambda batch, **kwargs: batch)
+
+    def train(batch, **kwargs):
+        assert not state["awake"]
+        state["updates"] += 1
+        return batch
+
+    trainer._update_actor = train
+    return trainer, state, queue
+
+
+@pytest.mark.parametrize("parameter_sync_step", [2, 4])
+@pytest.mark.parametrize("strategy", ["drop", "wait"])
+def test_partial_kv_multistep_waits_for_all_samples_before_sleep(monkeypatch, parameter_sync_step, strategy):
+    trainer, state, _ = _multistep_trainer(monkeypatch, parameter_sync_step, strategy)
+    combined = trainer.step({}, trainer.timing_raw)
+    assert set(combined.keys) == {f"p{i}_0_0" for i in range(4)}
+    assert state["updates"] == parameter_sync_step
+    trainer.checkpoint_manager.update_weights.assert_not_called()
+    trainer.checkpoint_manager.resume_generation_replicas.assert_not_called()
+    trainer.on_step_end()
+    trainer.checkpoint_manager.update_weights.assert_called_once_with(5)
+    trainer.checkpoint_manager.resume_generation_replicas.assert_called_once_with()
+    assert state["awake"]
+
+
+def test_partial_kv_incomplete_cycle_exits_before_any_weight_update(monkeypatch):
+    trainer, state, queue = _multistep_trainer(monkeypatch, 2, "drop")
+    del queue["p2"], queue["p3"]
+    trainer.replay_buffer.input_exhausted = True
+    with pytest.raises(DataLoaderExhausted):
+        trainer.step({}, trainer.timing_raw)
+    assert state == {"awake": True, "updates": 0}
+    trainer.checkpoint_manager.sleep_replicas.assert_not_called()
+
+
+def _validation_trainer(monkeypatch, partial_kv, *, fail_restore=False):
+    """Exercise the real validation loop with CPU queue data and a guarded replica."""
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create(
+        {
+            "data": {},
+            "actor_rollout_ref": {"rollout": {"partial_rollout_kv_offload": partial_kv, "val_kwargs": {"n": 1}}},
+            "trainer": {},
+        }
+    )
+    trainer.global_steps = 7
+    trainer.val_dataloader = [{"raw_prompt": ["question"]} for _ in range(2)]
+    trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=None)
+    events = []
+    state = {"admitting": True, "restored": True}
+
+    def generate(batch):
+        assert state["admitting"], "generation admission remained closed after validation"
+        events.append("generate")
+
+    def sleep():
+        state.update(admitting=not partial_kv, restored=False)
+        events.append("sleep")
+
+    def reward(batch):
+        assert not state["restored"]
+        events.append("reward")
+        return batch
+
+    def update(global_steps=None):
+        if partial_kv:
+            assert global_steps == trainer.global_steps, "KV restoration requires the committed policy version"
+        events.append(("update", global_steps))
+        if fail_restore:
+            raise RuntimeError("weight restore failed")
+        state["restored"] = True
+
+    def resume():
+        assert state["restored"], "generation resumed before successful restoration"
+        state["admitting"] = True
+        events.append("resume")
+
+    trainer.agent_loop_manager = SimpleNamespace(generate_sequences=generate)
+    trainer.checkpoint_manager = SimpleNamespace(
+        sleep_replicas=MagicMock(side_effect=sleep),
+        update_weights=MagicMock(side_effect=update),
+        resume_generation_replicas=MagicMock(side_effect=resume),
+    )
+    trainer._compute_reward_colocate = reward
+    trainer.replay_buffer = SimpleNamespace(
+        sample=lambda **kwargs: (SimpleNamespace(keys=["uid_0_0"], partition_id="val"), None)
+    )
+    trainer.tokenizer = SimpleNamespace(pad_token_id=0, decode=lambda ids, **kwargs: "text")
+    trainer._maybe_log_val_generations = MagicMock()
+    trainer._val_metrics_update = MagicMock(return_value={"score": 1.0})
+
+    def batch_get(*, select_fields, **kwargs):
+        if "prompts" in select_fields:
+            return {
+                key: SimpleNamespace(to_padded_tensor=lambda **kwargs: torch.tensor([[1]])) for key in select_fields
+            }
+        return {"uid": np.array(["uid"]), "rm_scores": torch.tensor([[1.0]]), "num_turns": np.array([1])}
+
+    monkeypatch.setattr(trainer_base_module.tq, "kv_batch_put", MagicMock())
+    monkeypatch.setattr(trainer_base_module.tq, "kv_batch_get", batch_get)
+    monkeypatch.setattr(trainer_base_module.tq, "kv_clear", MagicMock())
+    return trainer, events, state
+
+
+@pytest.mark.parametrize("partial_kv", [False, True])
+def test_validation_restores_version_and_admission_between_batches(monkeypatch, partial_kv):
+    trainer, events, state = _validation_trainer(monkeypatch, partial_kv)
+    assert trainer._validate() == {"score": 1.0}
+    expected = ["generate", "sleep", "reward", ("update", trainer.global_steps)]
+    if partial_kv:
+        expected.append("resume")
+    assert events == expected * 2
+    assert state["restored"] and state["admitting"]
+    # Training immediately after initial validation must also be able to submit.
+    trainer.agent_loop_manager.generate_sequences(None)
+    assert events[-1] == "generate"
+
+
+def test_failed_validation_restore_keeps_partial_kv_admission_closed(monkeypatch):
+    trainer, _, state = _validation_trainer(monkeypatch, True, fail_restore=True)
+    with pytest.raises(RuntimeError, match="weight restore failed"):
+        trainer._validate()
+    trainer.checkpoint_manager.resume_generation_replicas.assert_not_called()
+    assert not state["admitting"]
 
 
 class _CustomSampler:

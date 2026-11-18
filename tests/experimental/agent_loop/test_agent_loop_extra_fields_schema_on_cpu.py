@@ -282,7 +282,11 @@ def test_agent_loop_output_as_dict_rejects_misaligned_rollout_topk():
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeypatch):
+@pytest.mark.parametrize(
+    "partial_kv,agent_name",
+    [(False, "scalar_model_type_test"), (True, "single_turn_agent"), (False, "tool_agent")],
+)
+async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeypatch, partial_kv, agent_name):
     captured_kwargs: dict[str, Any] = {}
     expected_output = object()
 
@@ -298,10 +302,11 @@ async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeyp
 
     monkeypatch.setattr(agent_loop_module.hydra.utils, "instantiate", fake_instantiate)
     monkeypatch.setattr(agent_loop_module, "rollout_trace_attr", lambda **kwargs: nullcontext())
-    monkeypatch.setitem(agent_loop_module._agent_loop_registry, "scalar_model_type_test", {"_target_": "unused"})
+    monkeypatch.setitem(agent_loop_module._agent_loop_registry, agent_name, {"_target_": "unused"})
 
     worker = object.__new__(AgentLoopWorker)
     worker.config = OmegaConf.create({"data": {}})
+    worker.rollout_config = OmegaConf.create({"partial_rollout_kv_offload": partial_kv})
     worker.llm_client = object()
     worker.tokenizer = _FakeTokenizer()
     worker.processor = None
@@ -317,13 +322,32 @@ async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeyp
     result = await worker._run_agent_loop(
         {},
         {"step": 0, "sample_index": 0, "rollout_n": 0, "validate": False},
-        agent_name="scalar_model_type_test",
+        agent_name=agent_name,
     )
 
     assert result is expected_output
     assert captured_kwargs["hf_model_type"] == "qwen2_5_vl"
     assert isinstance(captured_kwargs["hf_model_type"], str)
     assert "hf_config" not in captured_kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_name", ["tool_agent", "custom_agent", None])
+async def test_partial_kv_rejects_dataset_selected_agents_before_dispatch(monkeypatch, agent_name):
+    """A row's effective agent must be checked even when the configured default is single-turn."""
+    worker = object.__new__(AgentLoopWorker)
+    worker.rollout_config = OmegaConf.create(
+        {"partial_rollout_kv_offload": True, "agent": {"default_agent_loop": "single_turn_agent"}}
+    )
+
+    def unexpected_dispatch(**kwargs):
+        pytest.fail("unsupported dataset-selected agent reached dispatch")
+
+    monkeypatch.setattr(agent_loop_module, "rollout_trace_attr", unexpected_dispatch)
+    with pytest.raises(ValueError, match="single_turn_agent"):
+        await worker._run_agent_loop(
+            {}, {"step": 0, "sample_index": 0, "rollout_n": 0, "validate": False}, agent_name=agent_name
+        )
 
 
 def _pad_1d(ids: list[int], *, length: int, pad_id: int = 0) -> list[int]:
