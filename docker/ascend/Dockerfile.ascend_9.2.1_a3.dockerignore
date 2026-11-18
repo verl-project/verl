@@ -1,0 +1,12 @@
+# This Dockerfile installs the local checkout without needing Git metadata.
+# Keep these exclusions local: other Dockerfiles use .git for version discovery.
+**/.git
+**/.venv/
+**/.venvs/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.ipynb_checkpoints/

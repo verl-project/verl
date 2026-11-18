@@ -158,8 +158,9 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 镜像构建命令示例
 --------------------
 
-A3 vLLM 镜像从 verl 仓库根目录构建，以便读取所需补丁。
-``VERL_REF`` 可指定要安装的 verl 分支、标签或提交，默认使用 ``main``；
+A3 vLLM 镜像从 verl 仓库根目录构建，直接复制当前 checkout 的源码及补丁，
+包含本地未提交的修改。请先用 ``git submodule update --init --recursive`` 准备子模块。
+如需其他版本，请先在本地切换到对应分支、标签或提交，再更新子模块并构建。
 ``PIP_INDEX_URL`` 可指定 Python 包下载源，``IMAGE`` 可指定构建后的镜像名。
 
 .. code-block:: bash
@@ -167,7 +168,6 @@ A3 vLLM 镜像从 verl 仓库根目录构建，以便读取所需补丁。
 
    docker build \
        -f docker/ascend/Dockerfile.ascend_9.2.1_a3 \
-       --build-arg VERL_REF="${VERL_REF:-main}" \
        --build-arg PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}" \
        -t "${IMAGE:-verl-ascend:9.2.1-a3}" .
 

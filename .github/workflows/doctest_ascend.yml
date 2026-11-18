@@ -9,7 +9,7 @@ on:
       - docs/ascend_tutorial/zh/get_start/**
       - scripts/install_*_mcore_npu.sh
       - requirements-npu.txt
-      - docker/ascend/Dockerfile.ascend_9.2.1_a3
+      - docker/ascend/Dockerfile.ascend_9.2.1_a3*
       - docker/ascend/patches/**
       - .dockerignore
       - tests/special_npu/quick_start/**
@@ -72,6 +72,9 @@ jobs:
       BUILDKIT_PROGRESS: plain
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
       # Match the existing Ascend image-build workflow's hosted-runner disk setup.
       - uses: jlumbroso/free-disk-space@v1.3.1
         with:

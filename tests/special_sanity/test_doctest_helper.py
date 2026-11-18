@@ -129,7 +129,6 @@ def run_worker(tmp_path):
             "TEST_FILE",
             "VERL_REPOSITORY",
             "VERL_REVISION",
-            "VERL_REF",
             "IMAGE",
         ):
             env.pop(key, None)
@@ -288,25 +287,7 @@ def test_docker_requires_opt_in_and_supports_dry_run(run_worker):
 def test_docker_build_uses_checkout_and_propagates_failures(
     run_worker, isolated_repo, tmp_path, failed_step, exit_code
 ):
-    """Run the documented build with a fake daemon; test revision, context and exit handling."""
-    subprocess.run(["git", "init", "-q", str(isolated_repo)], check=True)
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(isolated_repo),
-            "-c",
-            "user.name=Doctest",
-            "-c",
-            "user.email=doctest@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "fixture",
-        ],
-        check=True,
-    )
-    revision = subprocess.check_output(["git", "-C", str(isolated_repo), "rev-parse", "HEAD"], text=True).strip()
+    """Run the documented build with a fake daemon; test local context and exit handling."""
     binary_dir = tmp_path / "docker-bin"
     binary_dir.mkdir()
     trace = tmp_path / "docker-trace"
@@ -325,17 +306,13 @@ def test_docker_build_uses_checkout_and_propagates_failures(
         PATH=str(binary_dir) + os.pathsep + os.environ["PATH"],
         DOCTEST_TRACE=trace.as_posix(),
         IMAGE="verl-doctest:test",
-        VERL_REF="must-not-install-main",
         PIP_INDEX_URL="https://mirror.example/simple",
     )
     assert result.returncode == exit_code, result.stdout + result.stderr
     commands = trace.read_text(encoding="utf-8")
     assert "checkout:build -f docker/ascend/Dockerfile.ascend_9.2.1_a3" in commands
-    assert f"--build-arg VERL_REF={revision}" in commands
     assert "--build-arg PIP_INDEX_URL=https://mirror.example/simple -t verl-doctest:test ." in commands
     assert ("checkout:run --rm --network none" in commands) is (failed_step != "build")
-    if failed_step != "build":
-        assert commands.rstrip().endswith(f"-- {revision}")
 
 
 def test_missing_documented_script_fails(run_worker, isolated_repo):

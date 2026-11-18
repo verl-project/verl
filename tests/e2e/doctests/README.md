@@ -77,7 +77,7 @@ three installation routes in the upstream repository:
 
 | Route | Runner | Validation |
 | --- | --- | --- |
-| Build the documented A3 vLLM Dockerfile | GitHub ARM64 CPU runner | Build the image with the PR merge commit, start it without NPU devices, check its verl commit and installed package metadata |
+| Build the documented A3 vLLM Dockerfile | GitHub ARM64 CPU runner | Copy the PR checkout into the image, start it without NPU devices, and check installed package metadata |
 | Use the published A3 vLLM image | A3 eight-device runner | Keep image dependencies, install the PR's verl source with `--no-deps --no-build-isolation`, then run one GRPO step for FSDP2 and Megatron |
 | Install from source in a CANN container | A3 eight-device runner | Create the documented Conda environment, install dependencies and run one GRPO step for each of the four combinations |
 
@@ -97,8 +97,12 @@ ALLOW_INSTALL=1 PIP_INDEX_URL=https://mirrors.huaweicloud.com/repository/pypi/si
   bash tests/e2e/doctests/scripts/run_doctests.sh installation docker
 ```
 
-This uses the current checkout's HEAD commit, runs the documented build command
-from the repository root, and retains the image locally. `ALLOW_INSTALL=1 DRY_RUN=1`
+First initialize submodules with `git submodule update --init --recursive`.
+Like [vLLM-Ascend's Dockerfile](https://github.com/vllm-project/vllm-ascend/blob/ce61785f0b2f551e6068e9bb9259ce73395e0c77/Dockerfile), the A3 Dockerfile copies the current source checkout,
+including uncommitted edits. It does not clone verl again during the build. Its
+Dockerfile-specific ignore file excludes Git metadata and local Python caches.
+The worker runs the documented build command from the repository root and retains
+the image locally. `ALLOW_INSTALL=1 DRY_RUN=1`
 validates the command without requiring Docker. CI retains the build log as an
 artifact and allows up to six hours for the full image build.
 

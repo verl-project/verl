@@ -50,18 +50,14 @@ function run_installation_docker() {
     return 0
   fi
   require_command docker
-  require_command git
-  VERL_REF="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
-  export VERL_REF
-  export IMAGE="${IMAGE:-verl-doctest:${VERL_REF}}"
+  export IMAGE="${IMAGE:-verl-doctest:a3-vllm}"
   docker info >/dev/null
   pushd "${REPO_ROOT}" >/dev/null
   run_shell_block docker-build-vllm-a3
   # Check the built image on CPU; importing NPU extensions needs host drivers.
   docker run --rm --network none --entrypoint /bin/bash "${IMAGE}" -ec '
-    test "$(git -C /verl rev-parse HEAD)" = "$1"
     python3 -c "from importlib.metadata import version; print({p: version(p) for p in (\"verl\", \"torch\", \"torch-npu\", \"vllm\", \"vllm-ascend\", \"triton-ascend\")})"
-  ' -- "${VERL_REF}"
+  '
   popd >/dev/null
 }
 
