@@ -74,6 +74,7 @@ def backend(request, monkeypatch, tmp_path):
         profile_level="level0",
         profile_save_path=str(tmp_path),
         analysis=False,
+        _schedule_kwargs=None,
     ).items():
         setattr(profiler, key, value)
     return profiler, events, collector, request.param
@@ -128,7 +129,10 @@ def test_async_stage_keeps_collector_open_across_await(backend, discrete, outcom
         collector.start.assert_called_once()
         collector.stop.assert_called_once()
         if tool == "npu":
-            assert events[-3:] == ["range_end", "step", "stop"]
+            assert events[-2:] == ["range_end", "stop"]
+            collector.step.assert_not_called()
+            assert impl.profile_npu is None
+            assert type(impl)._active_prof is None
     else:
         collector.start.assert_not_called()
         collector.stop.assert_not_called()
@@ -220,3 +224,53 @@ def test_sync_stage_preserves_results_and_closes_on_error(backend, outcome):
     assert events.count("body") == 1
     assert events[-1] == "stop"
     collector.stop.assert_called_once()
+
+
+@pytest.mark.parametrize("scheduled", [False, True])
+@pytest.mark.parametrize("outcome", ["return", "error", "cancel"])
+def test_npu_schedule_and_async_stage_cleanup(monkeypatch, outcome, scheduled):
+    """Mini-batch schedules survive awaits; unscheduled weight transfers collect in full."""
+    pytest.importorskip("torch_npu")
+    from verl.utils.profiler import mstx_profile as module
+    from verl.utils.profiler.config import NPUToolConfig, ProfilerConfig, TorchProfilerScheduleConfig
+
+    collector = MagicMock()
+    factory = MagicMock(return_value=collector)
+    monkeypatch.setattr(module, "get_npu_profiler", factory)
+    monkeypatch.setattr(module, "mark_start_range", lambda **kw: 1)
+    monkeypatch.setattr(module, "mark_end_range", lambda token: None)
+    monkeypatch.setattr(module.NPUProfiler, "_active_prof", None)
+    config = ProfilerConfig(enable=True, all_ranks=True, tool="npu")
+    tool_config = NPUToolConfig(discrete=True, schedule=TorchProfilerScheduleConfig(wait=0, warmup=0, active=2))
+    outer = DistProfiler(rank=0, config=config, tool_config=tool_config)
+    inner = DistProfiler(rank=0, config=config, tool_config=tool_config)
+    outer.start()
+    worker = SimpleNamespace(profiler=outer)
+
+    @DistProfiler.annotate(role="actor_update" if scheduled else "update_weights", scheduled=scheduled)
+    async def stage(self):
+        assert module.NPUProfiler._active_prof is collector
+        if scheduled:
+            inner.step()
+        await asyncio.sleep(0)
+        collector.stop.assert_not_called()
+        assert module.NPUProfiler._active_prof is collector
+        if scheduled:
+            inner.step()
+        if outcome == "error":
+            raise RuntimeError("stage failed")
+        if outcome == "cancel":
+            raise asyncio.CancelledError
+        return 42
+
+    if outcome == "return":
+        assert asyncio.run(stage(worker)) == 42
+    else:
+        with pytest.raises(RuntimeError if outcome == "error" else asyncio.CancelledError):
+            asyncio.run(stage(worker))
+    assert factory.call_args.kwargs["schedule"] == (outer._impl._schedule_kwargs if scheduled else None)
+    assert collector.step.call_count == (2 if scheduled else 0)
+    collector.stop.assert_called_once()
+    assert outer._impl.profile_npu is None
+    assert module.NPUProfiler._active_prof is None
+    outer.stop()
