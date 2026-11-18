@@ -23,8 +23,11 @@ They also pin abort_all_requests(reject_request=True), which fails late arrivals
 instead of parking them when the server is leaving the load balancer and no
 resume_generation() is coming soon.
 
-Finally, they pin where generate() runs the request hooks relative to the gate:
+They pin where generate() runs the request hooks relative to the gate:
 _preprocess_sampling_params before admission, _postprocess_output after release.
+
+Finally, they pin rollout.partial_rollout_recompute=False, where a weight sync keeps
+requests and their KV cache behind the same gate instead of aborting them.
 """
 
 import asyncio
@@ -54,12 +57,16 @@ class _FakeEngine:
         self.abort_calls = []
         self.drain_calls = 0
         self.reset_prefix_calls = 0
+        self.reset_mm_calls = 0
+        self.reset_encoder_calls = 0
         self.outputs = []
+        self.prompts = []
         self.sampling_params = []
         self.closed = 0
 
     async def add_request(self, request_id, prompt, params, lora_request=None, priority=0, data_parallel_rank=None):
         """Like AsyncLLM.add_request(): returns a collector that yields ``outputs``, the last one finished."""
+        self.prompts.append(prompt)
         self.sampling_params.append(params)
         pending = list(self.outputs)
         for i, output in enumerate(pending):
@@ -96,6 +103,12 @@ class _FakeEngine:
     async def reset_prefix_cache(self, reset_connector=True):
         self.reset_prefix_calls += 1
 
+    async def reset_mm_cache(self):
+        self.reset_mm_calls += 1
+
+    async def reset_encoder_cache(self):
+        self.reset_encoder_calls += 1
+
 
 def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
     server = object.__new__(cls)
@@ -109,6 +122,9 @@ def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
     server._resume_event.set()
     server._rejecting = False
     server._disaggregation_role = "null"
+    server.rollout_mode = vllm_async_server.RolloutMode.STANDALONE
+    server._kv_slots = None
+    server._weight_epoch = 0
     return server
 
 
@@ -542,5 +558,181 @@ def test_cancelled_request_releases_barrier_and_aborts_in_engine():
         assert server.engine.engine_aborts == [("r1-internal", True)], "cancellation must drop the request"
         assert server.engine.closed == 1
         assert server._admitting == 0
+
+    asyncio.run(main())
+
+
+def _make_keeping_server(monkeypatch, outputs=()):
+    server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, list(outputs))
+    server.config = RolloutConfig(
+        name="vllm", max_model_len=64, prompt_length=32, response_length=16, partial_rollout_recompute=False
+    )
+    return server
+
+
+def test_keep_requests_pauses_without_clearing_kv_cache(monkeypatch):
+    # Kept requests still hold their blocks, so the post-sync clear_kv_cache() must not reset them.
+    async def main():
+        server = _make_keeping_server(monkeypatch)
+
+        await server.abort_all_requests(reset_prefix_cache=False, keep_requests=True)
+        assert server.engine.pause_kwargs == [{"mode": "keep", "clear_cache": False}]
+        assert server._submission_paused is True
+
+        await server.clear_kv_cache()
+        assert server.engine.reset_prefix_calls == 0
+        # cache_salt does not version the encoder cache, which is keyed by the multimodal
+        # hash, so stale embeddings must still be dropped.
+        assert server.engine.reset_encoder_calls == 1
+
+        await server.resume_generation()
+        assert server.engine.resume_calls == 1
+        assert server._submission_paused is False
+
+    asyncio.run(main())
+
+
+def test_keeping_kv_cache_salts_prefix_cache_per_weight_version(monkeypatch):
+    # New requests must not hit blocks of older weights; the start version bounds staleness.
+    async def main():
+        server = _make_keeping_server(monkeypatch, [_request_output([5])])
+
+        output = await server.generate([1, 2, 3], {}, "r")
+
+        assert server.engine.prompts[0]["cache_salt"] == "verl-weights-v0"
+        assert output.extra_fields["start_global_steps"] == 7
+
+    asyncio.run(main())
+
+
+def test_cache_salt_advances_on_weight_installs_that_carry_no_global_step(monkeypatch):
+    # update_weights(global_steps=None) installs weights without calling set_global_steps, so a
+    # salt keyed on the step would keep pointing new requests at the previous weights' blocks.
+    async def main():
+        server = _make_keeping_server(monkeypatch, [_request_output([5]), _request_output([6])])
+
+        await server.generate([1, 2, 3], {}, "a")
+        await server.clear_kv_cache()
+        await server.generate([1, 2, 3], {}, "b")
+
+        assert server.global_steps == 7
+        assert server.engine.prompts[0]["cache_salt"] != server.engine.prompts[1]["cache_salt"]
+
+    asyncio.run(main())
+
+
+def test_kv_slots_cap_in_flight_requests_per_engine():
+    # Admission past the cap could let vLLM preempt a kept request and recompute its KV with new weights.
+    async def main():
+        slots = vllm_async_server._KVSlots(slots_per_engine=1, num_engines=2)
+        assert {await slots.acquire(), await slots.acquire()} == {0, 1}
+
+        waiter = asyncio.create_task(slots.acquire(0))
+        await asyncio.sleep(0)
+        assert not waiter.done()
+
+        slots.release(1)
+        await asyncio.sleep(0)
+        assert not waiter.done(), "a pinned request must wait for its own engine"
+
+        slots.release(0)
+        assert await waiter == 0
+
+    asyncio.run(main())
+
+
+def test_keeping_kv_cache_holds_a_slot_only_while_the_request_is_in_the_engine(monkeypatch):
+    async def main():
+        server = _make_keeping_server(monkeypatch, [_request_output([5])])
+        server._kv_slots = vllm_async_server._KVSlots(slots_per_engine=1, num_engines=1)
+
+        await server.generate([1, 2, 3], {}, "r")
+
+        assert server._kv_slots.free == [1]
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("on_completion", [True, False])
+@pytest.mark.parametrize("weights_updated", [True, False])
+def test_keeping_kv_cache_flags_preemption_across_weight_sync(monkeypatch, on_completion, weights_updated):
+    # A preempted request is re-prefilled with the current weights, breaking R3 routing consistency.
+    async def main():
+        output = _request_output([5])
+        if not on_completion:
+            # vLLM releases without CompletionOutput.num_preempted report it in the request stats.
+            del output.outputs[0].num_preempted
+            output.metrics = SimpleNamespace(num_preemptions=1)
+        else:
+            output.outputs[0].num_preempted = 1
+        server = _make_keeping_server(monkeypatch, [output])
+        add_request = server.engine.add_request
+
+        async def add_request_across_sync(*args, **kwargs):
+            if weights_updated:
+                server.global_steps += 1
+            return await add_request(*args, **kwargs)
+
+        server.engine.add_request = add_request_across_sync
+
+        result = await server.generate([1, 2, 3], {}, "r")
+
+        assert result.num_preempted == 1
+        assert result.extra_fields["kv_recomputed_after_sync"] is weights_updated
+
+    asyncio.run(main())
+
+
+class _RemoteMethod:
+    def __init__(self, name, calls):
+        self._name, self._calls = name, calls
+
+    async def remote(self, *args, **kwargs):
+        self._calls.append(self._name + ("(keep)" if kwargs.get("keep_requests") else ""))
+        return {}
+
+
+class _FakeServerHandle:
+    def __init__(self, calls):
+        self._calls = calls
+
+    def __getattr__(self, name):
+        return _RemoteMethod(name, self._calls)
+
+
+@pytest.mark.parametrize(
+    ("recompute", "rollout_mode", "expected_pause", "expected_resume"),
+    [
+        (
+            False,
+            vllm_async_server.RolloutMode.STANDALONE,
+            ["abort_all_requests(keep)"],
+            ["resume_engine_generation", "open_submission_gate"],
+        ),
+        # Hybrid replicas return their GPU memory to training, so they always recompute.
+        (
+            False,
+            vllm_async_server.RolloutMode.HYBRID,
+            ["abort_all_requests", "wait_for_requests_to_drain", "release_kv_cache"],
+            ["resume_kv_cache", "resume_engine_generation", "open_submission_gate"],
+        ),
+    ],
+)
+def test_replica_weight_sync_keeps_kv_cache_only_on_standalone_replicas(
+    recompute, rollout_mode, expected_pause, expected_resume
+):
+    async def main():
+        calls = []
+        replica = object.__new__(vllm_async_server.vLLMReplica)
+        replica.config = RolloutConfig(name="vllm", partial_rollout_recompute=recompute)
+        replica.rollout_mode = rollout_mode
+        replica.servers = [_FakeServerHandle(calls)]
+
+        await replica.pause_for_weight_sync()
+        assert calls == expected_pause
+
+        calls.clear()
+        await replica.resume_after_weight_sync()
+        assert calls == expected_resume
 
     asyncio.run(main())

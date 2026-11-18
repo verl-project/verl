@@ -286,6 +286,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         # must carry it forward explicitly or the consumer sees 0. Take the first
         # (initial-prompt) prefill's hit count, matching single-prefill semantics.
         num_cached_tokens = None
+        kv_recomputed_after_sync = False
 
         while True:
             # 1. generate tokens
@@ -304,17 +305,12 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             final_output.token_ids.extend(output.token_ids)
             if output.log_probs is not None:
                 final_output.log_probs.extend(output.log_probs)
-            # On partial rollout resume the model version may differ, so keep
-            # existing routing and only append routing for newly generated tokens.
+            # A resume re-prefills the whole sequence, so its routing replaces the earlier attempt's.
             if output.routed_experts is not None and len(output.token_ids) > 0:
-                if final_output.routed_experts is None:
-                    final_output.routed_experts = output.routed_experts
-                else:
-                    final_output.routed_experts = np.concatenate(
-                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]]
-                    )
+                final_output.routed_experts = output.routed_experts
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
+            kv_recomputed_after_sync |= bool(output.extra_fields.get("kv_recomputed_after_sync"))
             # sampler top-k heads for score centering, one row per newly generated token
             for key in ("response_topk_ids", "response_topk_log_probs"):
                 if key in output.extra_fields:
@@ -341,7 +337,8 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             # update model weights version
             global_steps = output.extra_fields.get("global_steps", None)
             if min_global_steps is None:
-                min_global_steps = global_steps
+                # A request kept across a weight sync only reports its final version.
+                min_global_steps = output.extra_fields.get("start_global_steps", global_steps)
             max_global_steps = global_steps
 
             # 3. update max_new_tokens
@@ -366,6 +363,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         final_output.extra_fields["min_global_steps"] = min_global_steps
         final_output.extra_fields["max_global_steps"] = max_global_steps
         final_output.extra_fields["num_cached_tokens"] = num_cached_tokens
+        final_output.extra_fields["kv_recomputed_after_sync"] = kv_recomputed_after_sync
         return final_output
 
 

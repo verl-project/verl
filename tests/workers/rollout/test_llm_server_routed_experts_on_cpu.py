@@ -97,9 +97,9 @@ def _client() -> FullyAsyncLLMServerClient:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", BACKENDS)
-async def test_resume_appends_only_newly_generated_routing(monkeypatch, backend):
-    """Two resumes: each attempt re-sends the accumulated prompt and returns routing for
-    prompt + response, so only the tail matching the fresh tokens may be appended."""
+async def test_resume_replaces_routing_with_the_resumed_attempt(monkeypatch, backend):
+    """Two resumes: each attempt re-prefills the accumulated prompt and returns routing for
+    prompt + response, which replaces the routing of earlier attempts."""
     segments = [
         TokenOutput(
             token_ids=[101, 102],
@@ -127,15 +127,14 @@ async def test_resume_appends_only_newly_generated_routing(monkeypatch, backend)
 
     assert prompts_seen == [[1, 2, 3], [1, 2, 3, 101, 102], [1, 2, 3, 101, 102, 103]]
     assert output.token_ids == [101, 102, 103, 104, 105]
-    # First attempt contributes all 5 of its rows; later attempts only their generated tail.
-    assert _markers(output.routed_experts) == [10, 11, 12, 13, 14, 25, 36, 37]
+    assert _markers(output.routed_experts) == [30, 31, 32, 33, 34, 35, 36, 37]
     assert output.routed_experts.shape == (8, LAYERS, TOPK)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_merge_yields_numpy_and_preserves_dtype(monkeypatch, backend):
-    """Backends agree on numpy, which is what lets the merge be a plain concatenate. Dtype
+    """Backends agree on numpy, which is what lets the merge pass arrays through. Dtype
     still varies, and ``AgentLoopWorker._postprocess`` keys its padded buffer off it."""
     original = _routing([10, 11], backend)
     segments = [
@@ -179,9 +178,32 @@ async def test_merged_routing_converts_for_downstream(monkeypatch, backend):
 
     as_dict_sink = torch.tensor(merged, dtype=torch.int64)
     assert as_dict_sink.shape == (3, LAYERS, TOPK)
-    assert _markers(as_dict_sink) == [10, 11, 22]
+    assert _markers(as_dict_sink) == [20, 21, 22]
 
-    # _postprocess only copies when the array is read-only; concatenation already produced
-    # a fresh writable buffer, so from_numpy is safe without one.
-    assert merged.flags.writeable
-    assert _markers(torch.from_numpy(merged)) == [10, 11, 22]
+    # _postprocess copies read-only arrays (SGLang's) before from_numpy.
+    assert _markers(torch.from_numpy(merged if merged.flags.writeable else merged.copy())) == [20, 21, 22]
+
+
+@pytest.mark.asyncio
+async def test_request_kept_across_weight_sync_reports_its_start_version(monkeypatch):
+    """A request kept across a weight sync is never resumed, so only its start version is the minimum."""
+    extra_fields = {"global_steps": 5, "start_global_steps": 4}
+    _install_segments(monkeypatch, [TokenOutput(token_ids=[1], stop_reason="completed", extra_fields=extra_fields)])
+
+    output = await _client().generate(request_id="req-0", prompt_ids=[], sampling_params={})
+
+    assert output.extra_fields["min_global_steps"] == 4
+
+
+@pytest.mark.asyncio
+async def test_inconsistent_routing_flag_survives_later_attempts(monkeypatch):
+    """Any attempt that re-prefilled a kept request with newer weights taints the whole trajectory."""
+    segments = [
+        TokenOutput(token_ids=[1], stop_reason="aborted", extra_fields={"kv_recomputed_after_sync": True}),
+        TokenOutput(token_ids=[2], stop_reason="completed", extra_fields={"kv_recomputed_after_sync": False}),
+    ]
+    _install_segments(monkeypatch, segments)
+
+    output = await _client().generate(request_id="req-0", prompt_ids=[], sampling_params={})
+
+    assert output.extra_fields["kv_recomputed_after_sync"] is True

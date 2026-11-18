@@ -299,6 +299,16 @@ class RolloutReplica(ABC):
         """Restore the kv_cache GPU memory after a weight sync."""
         await asyncio.gather(*[server.resume_kv_cache.remote() for server in self.servers])
 
+    async def pause_for_weight_sync(self):
+        """Quiesce generation before a weight sync. Counterpart to resume_after_weight_sync()."""
+        await self.abort_all_requests()
+        await self.release_kv_cache()
+
+    async def resume_after_weight_sync(self):
+        """Resume generation after a weight sync. Counterpart to pause_for_weight_sync()."""
+        await self.resume_kv_cache()
+        await self.resume_generation()
+
     async def start_profile(self, **kwargs):
         """Start profiling on the replica."""
         await asyncio.gather(*[server.start_profile.remote(**kwargs) for server in self.servers])

@@ -93,6 +93,78 @@ _VERL_MANAGED_VLLM_ARGS = {
 # Max wait for admissions already past the submission gate to reach the engine.
 _GATE_BARRIER_TIMEOUT_S = 60.0
 
+
+def _keeps_kv_cache(config, rollout_mode) -> bool:
+    # Hybrid/colocated replicas hand GPU memory back to training, so they always recompute.
+    return not getattr(config, "partial_rollout_recompute", True) and rollout_mode == RolloutMode.STANDALONE
+
+
+class _KVSlots:
+    """Per-DP-engine cap on in-flight requests, sized so all of them fit in KV cache at max_model_len.
+
+    vLLM preempts a running request when the KV cache runs out and recomputes its blocks with the
+    current weights, which would leave a request kept across a weight sync decoding on KV, and
+    routing, it was not generated with. Under the cap no request can be preempted.
+    """
+
+    def __init__(self, slots_per_engine: int, num_engines: int):
+        self.free = [slots_per_engine] * num_engines
+        self._released = asyncio.Event()
+
+    async def acquire(self, engine: Optional[int] = None) -> int:
+        """Take a slot on ``engine``, or on the least loaded engine if None, and return its index."""
+        while True:
+            target = engine if engine is not None else max(range(len(self.free)), key=self.free.__getitem__)
+            if self.free[target] > 0:
+                self.free[target] -= 1
+                return target
+            self._released.clear()
+            await self._released.wait()
+
+    def release(self, engine: int) -> None:
+        self.free[engine] += 1
+        self._released.set()
+
+
+class _CacheSaltMiddleware:
+    """Stamp the current weight version on OpenAI requests that carry no salt of their own."""
+
+    PATHS = ("/v1/completions", "/v1/chat/completions")
+
+    def __init__(self, app, salt: Callable[[], str]):
+        self.app = app
+        self.salt = salt
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("method") != "POST" or scope.get("path") not in self.PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        body, more_body = b"", True
+        while more_body:
+            message = await receive()
+            body += message.get("body", b"")
+            more_body = message.get("more_body", False)
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and not payload.get("cache_salt"):
+            payload["cache_salt"] = self.salt()
+            body = json.dumps(payload).encode()
+
+        replayed = False
+
+        async def replay():
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.disconnect"}
+            replayed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        await self.app(scope, replay, send)
+
+
 if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
     get_encoding()
 
@@ -143,6 +215,8 @@ class vLLMHttpServer:
             )
         self._disaggregation_role = disaggregation_role
         self._disaggregation_kv_transfer_config = disaggregation_kv_transfer_config
+        # Set in init_engine() when in-flight requests keep their KV cache across weight syncs.
+        self._kv_slots: Optional[_KVSlots] = None
         # Filled by vLLMPDReplica.set_pd_peer for prefill-side routing.
         self._pd_decode_peers: list[ActorHandle] = []
         self._pd_prefill_side_channel_port: Optional[int] = None
@@ -181,6 +255,10 @@ class vLLMHttpServer:
         self.nnodes = nnodes
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+        # Counts weight installations. global_steps is optional (ServerAdapter skips
+        # set_global_steps when the trainer passes global_steps=None), so it cannot be
+        # used to version the prefix cache; this advances on every install.
+        self._weight_epoch = 0
         self._warned_missing_spec_decode_stats = False
 
         # vLLM's pause stops requests being scheduled but still accepts them, and a request
@@ -363,7 +441,8 @@ class vLLMHttpServer:
             "logprobs_mode": self.config.logprobs_mode,
             "enforce_eager": self.config.enforce_eager,
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
-            "disable_log_stats": self.config.disable_log_stats,
+            # Per-request preemption counts are only tracked with stats on.
+            "disable_log_stats": self.config.disable_log_stats and not _keeps_kv_cache(self.config, self.rollout_mode),
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
             "seed": self.replica_rank + self.config.seed,
             "override_generation_config": json.dumps(override_generation_config),
@@ -565,6 +644,18 @@ class vLLMHttpServer:
         if self.replica_rank == 0 and self.node_rank == 0:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
+        if _keeps_kv_cache(self.config, self.rollout_mode):
+            # vLLM's own OpenAI routes call engine_client.generate() directly, bypassing the
+            # salting in generate(); without it they would reuse old weights' prefix blocks,
+            # which this mode never resets.
+            app.add_middleware(_CacheSaltMiddleware, salt=self._cache_salt)
+            # Reaches one DP engine's workers; DP engines are assumed to have identical KV caches.
+            slots = min(await engine_client.collective_rpc("get_max_kv_concurrency"))
+            if slots < 1:
+                raise ValueError(f"KV cache cannot hold one request of max_model_len={self.config.max_model_len}.")
+            self._kv_slots = _KVSlots(slots, self.config.data_parallel_size)
+            logger.info(f"partial_rollout_recompute=False: capping in-flight requests at {slots} per DP engine")
+
         self.engine = engine_client
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
@@ -716,25 +807,49 @@ class vLLMHttpServer:
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        rejected = await self._park_until_admitted(request_id)
-        if rejected is not None:
-            return rejected
-
-        with RLInsightLogger.trace_state(
-            "vllm_generate",
-            state_lane_id=ray.get_runtime_context().get_actor_name(),
-        ):
-            final_res = await self._generate_admitted(
-                prompt=prompt,
-                sampling_params=sampling_params,
-                request_id=request_id,
-                lora_request=lora_request,
-                priority=priority,
-                data_parallel_rank=self._dp_rank_for_session(session_id),
+        dp_rank = self._dp_rank_for_session(session_id)
+        keeps_kv_cache = _keeps_kv_cache(self.config, self.rollout_mode)
+        if keeps_kv_cache and sampling_params.n != 1:
+            # vLLM expands n into n scheduler requests, so one slot would under-count the
+            # KV this call consumes and a kept request could be preempted after all.
+            raise ValueError(
+                f"partial_rollout_recompute=False admits one sequence per request, got n={sampling_params.n}."
             )
-            assert final_res is not None
+        if self._kv_slots is not None:
+            slot_engine = await self._kv_slots.acquire(dp_rank)
+            if self.config.data_parallel_size > 1:
+                dp_rank = slot_engine
+        try:
+            rejected = await self._park_until_admitted(request_id)
+            if rejected is not None:
+                return rejected
+
+            # Read after parking: a weight sync may have landed while this request waited.
+            start_global_steps = self.global_steps
+            if keeps_kv_cache:
+                # The prefix cache is never reset in this mode; salt it so new requests skip old weights' blocks.
+                prompt["cache_salt"] = self._cache_salt()
+
+            with RLInsightLogger.trace_state(
+                "vllm_generate",
+                state_lane_id=ray.get_runtime_context().get_actor_name(),
+            ):
+                final_res = await self._generate_admitted(
+                    prompt=prompt,
+                    sampling_params=sampling_params,
+                    request_id=request_id,
+                    lora_request=lora_request,
+                    priority=priority,
+                    data_parallel_rank=dp_rank,
+                )
+                assert final_res is not None
+        finally:
+            if self._kv_slots is not None:
+                self._kv_slots.release(slot_engine)
 
         extra_fields = {"global_steps": self.global_steps}
+        if keeps_kv_cache:
+            extra_fields["start_global_steps"] = start_global_steps
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".
@@ -811,6 +926,20 @@ class vLLMHttpServer:
 
         if hasattr(final_res.outputs[0], "num_preempted"):
             num_preempted = final_res.outputs[0].num_preempted
+        elif getattr(final_res, "metrics", None) is not None:
+            num_preempted = getattr(final_res.metrics, "num_preemptions", None)
+        if keeps_kv_cache:
+            # A preemption recomputes the KV cache with the current weights, so a preempted request that
+            # also spans a sync lost the KV its routing was recorded with. The preemption may predate the
+            # sync, so this over-reports rather than miss a violation.
+            extra_fields["kv_recomputed_after_sync"] = bool(num_preempted) and start_global_steps != self.global_steps
+            if extra_fields["kv_recomputed_after_sync"]:
+                logger.warning(
+                    "request %s was preempted while spanning weight versions %s..%s; its R3 routing is inconsistent",
+                    request_id,
+                    start_global_steps,
+                    self.global_steps,
+                )
 
         response_kv_transfer_params = getattr(final_res, "kv_transfer_params", None)
         if response_kv_transfer_params is not None:
@@ -960,19 +1089,28 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
+    def _cache_salt(self) -> str:
+        return f"verl-weights-v{self._weight_epoch}"
+
     @RLInsightLogger.trace_state_decorator(
         "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
     )
     async def clear_kv_cache(self):
-        if self.node_rank == 0:
+        if self.node_rank != 0:
+            return
+        self._weight_epoch += 1
+        if not _keeps_kv_cache(self.config, self.rollout_mode):
             # reset_connector=True drops any attached external KV store
             # (e.g. MooncakeStoreConnector) whose entries were computed
             # against the previous model weights. With no connector it
             # is a no-op success, so we can pass it unconditionally.
             await self.engine.reset_prefix_cache(reset_connector=True)
 
-            await self.engine.reset_mm_cache()
-            await self.engine.reset_encoder_cache()
+        # The encoder cache is keyed by the multimodal hash, which cache_salt does not
+        # version, so stale embeddings would survive a vision-encoder update. Resetting
+        # it only costs a re-encode for any request still waiting on its prefill.
+        await self.engine.reset_mm_cache()
+        await self.engine.reset_encoder_cache()
 
     @RLInsightLogger.trace_state_decorator(
         "release_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
@@ -1117,6 +1255,7 @@ class vLLMHttpServer:
         reset_prefix_cache: bool = True,
         reject_request: bool = False,
         abort_only: bool = False,
+        keep_requests: bool = False,
     ) -> dict[str, Any]:
         """Abort in-flight requests, optionally pausing the replica.
 
@@ -1140,6 +1279,8 @@ class vLLMHttpServer:
                 plain pause (e.g. the one inside a weight sync) restores parking.
             abort_only: Cancel in-flight requests and leave admission open.
                 reset_prefix_cache and reject_request are ignored.
+            keep_requests: Freeze in-flight requests with their KV cache instead of
+                aborting them; resume_generation() continues them.
 
         Returns:
             dict[str, Any]: Dictionary containing:
@@ -1199,7 +1340,9 @@ class vLLMHttpServer:
             #    MooncakeStoreConnector) is invalidated along with the
             #    local prefix cache — RL-correct hard-reset at every
             #    weight update boundary, no extra kwargs needed.
-            if _VLLM_VERSION >= version.parse("0.32.0"):
+            if keep_requests:
+                await self.engine.pause_generation(mode="keep", clear_cache=False)
+            elif _VLLM_VERSION >= version.parse("0.32.0"):
                 await self.engine.pause_generation(mode="abort", clear_cache=reset_prefix_cache)
             else:
                 await self.engine.pause_generation(
@@ -1686,6 +1829,7 @@ class vLLMReplica(RolloutReplica):
         reject_request: bool = False,
         reset_prefix_cache: bool = True,
         abort_only: bool = False,
+        keep_requests: bool = False,
     ) -> dict[str, Any]:
         """Abort in-flight requests on every server.
 
@@ -1699,6 +1843,7 @@ class vLLMReplica(RolloutReplica):
                     reject_request=reject_request,
                     reset_prefix_cache=reset_prefix_cache,
                     abort_only=abort_only,
+                    keep_requests=keep_requests,
                 )
                 for server in self.servers
             ]
@@ -1757,6 +1902,17 @@ class vLLMReplica(RolloutReplica):
         # before we touch engine.release_kv_cache()
         await self.servers[0].wait_for_requests_to_drain.remote()
         await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
+
+    async def pause_for_weight_sync(self):
+        if not _keeps_kv_cache(self.config, self.rollout_mode):
+            return await super().pause_for_weight_sync()
+        # Skip release_kv_cache(): its engine.sleep() would abort the kept requests.
+        await self.abort_all_requests(reset_prefix_cache=False, keep_requests=True)
+
+    async def resume_after_weight_sync(self):
+        if not _keeps_kv_cache(self.config, self.rollout_mode):
+            return await super().resume_after_weight_sync()
+        await self.resume_generation()
 
     # -----------------------------------------------------------------------
     # Hook methods for subclass overrides

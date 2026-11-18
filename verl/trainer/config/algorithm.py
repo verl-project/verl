@@ -750,3 +750,6 @@ class AlgoConfig(BaseConfig):
     # gdpo_reward_weights: per-dimension weights for aggregation (default: equal weights).
     gdpo_reward_keys: Optional[list[str]] = None
     gdpo_reward_weights: Optional[list[float]] = None
+    # Log the training-inference discrepancy (R3 arXiv:2510.11370, Eq. 3 and 4), split by whether a
+    # trajectory spans a weight sync. Costs one extra forward pass under rollout_correction bypass mode.
+    log_train_infer_discrepancy: bool = False

@@ -12,6 +12,9 @@
 # limitations under the License.
 
 import logging
+import math
+from collections.abc import Mapping, Sequence
+from typing import Any, Optional
 
 import torch
 
@@ -60,7 +63,94 @@ def calculate_log_prob_diff(log_probs1: torch.Tensor, log_probs2: torch.Tensor, 
     return torch.masked_select(full_diff, mask)
 
 
-def calculate_debug_metrics(data: DataProto) -> dict:
+def calculate_train_infer_discrepancy(
+    actor_log_probs: torch.Tensor,
+    rollout_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    partial_mask: torch.Tensor | None = None,
+    tau: float = 2.0,
+) -> dict:
+    """Quantify how far the training engine's distribution is from the rollout engine's.
+
+    Both quantities come from R3 (arXiv:2510.11370): the k3 estimate of the
+    training-inference KL divergence (Eq. 3) and the extreme token fraction
+    F(tau) (Eq. 4), the share of tokens whose probability ratio between the two
+    engines exceeds ``tau`` in either direction.
+
+    Args:
+        actor_log_probs: Training engine log probs of the rollout tokens.
+        rollout_log_probs: Rollout engine log probs of the same tokens.
+        response_mask: 1 for tokens that contribute to the loss.
+        partial_mask: Per-sequence flag marking trajectories that span a weight sync.
+            When given, the metrics are also reported for partial and non-partial
+            trajectories separately, which is what isolates the cost of resuming a
+            trajectory under weights (and, with R3, routing) it was not generated with.
+        tau: Threshold of F(tau).
+
+    Returns:
+        dict: metrics under the ``training/`` prefix, suffixed ``_partial`` /
+        ``_nonpartial`` for the per-group values. The ``_sum`` metrics keep the
+        token-weighted averages exact once a caller adds up several steps, whose
+        token counts differ. Groups with no tokens are omitted, not reported as nan.
+    """
+    actor_log_probs = actor_log_probs.float()
+    rollout_log_probs = rollout_log_probs.float()
+    log_ratio = actor_log_probs - rollout_log_probs
+    k3 = torch.exp(log_ratio) - 1 - log_ratio
+    extreme = log_ratio.abs() > math.log(tau)
+    # An engine reporting -inf for a token it considers impossible leaves k3 at inf - inf, so one
+    # such token would make the whole average nan. Count them instead; being told that a token that
+    # was actually sampled is impossible is itself a discrepancy worth watching.
+    finite = torch.isfinite(k3)
+    causes = {
+        "impossible_under_rollout": torch.isneginf(rollout_log_probs),
+        "impossible_under_actor": torch.isneginf(actor_log_probs),
+        "nan_input": torch.isnan(actor_log_probs) | torch.isnan(rollout_log_probs),
+    }
+
+    groups = {"": response_mask.bool()}
+    if partial_mask is not None:
+        partial_mask = partial_mask.to(response_mask.device).bool().unsqueeze(-1)
+        groups["_partial"] = response_mask.bool() & partial_mask
+        groups["_nonpartial"] = response_mask.bool() & ~partial_mask
+
+    metrics = {}
+    for suffix, mask in groups.items():
+        num_tokens = int(mask.sum().item())
+        if not num_tokens:
+            # A step with no partial trajectories is normal, and a nan here would be averaged
+            # into the whole sync cycle, discarding the steps that did have them.
+            continue
+        scored = mask & finite
+        num_scored = int(scored.sum().item())
+        num_extreme = int(torch.masked_select(extreme, mask).sum().item())
+        k3_sum = torch.masked_select(k3, scored).sum().item() if num_scored else 0.0
+        metrics[f"training/train_infer_tokens_sum{suffix}"] = num_tokens
+        metrics[f"training/train_infer_scored_tokens_sum{suffix}"] = num_scored
+        metrics[f"training/train_infer_extreme_tokens_sum{suffix}"] = num_extreme
+        metrics[f"training/train_infer_kl_k3_sum{suffix}"] = k3_sum
+        metrics[f"training/train_infer_extreme_token_frac{suffix}"] = num_extreme / num_tokens
+        metrics[f"training/train_infer_nonfinite_token_frac{suffix}"] = (num_tokens - num_scored) / num_tokens
+        if num_scored:
+            metrics[f"training/train_infer_kl_k3{suffix}"] = k3_sum / num_scored
+        if num_scored < num_tokens:
+            for cause, hit in causes.items():
+                metrics[f"training/train_infer_{cause}_tokens_sum{suffix}"] = int(
+                    torch.masked_select(hit, mask).sum().item()
+                )
+    return metrics
+
+
+def partial_rollout_mask(tags: Sequence[Mapping[str, Any]]) -> torch.Tensor | None:
+    """Flag trajectories generated across more than one weight version, or None if unknown."""
+    starts = [tag.get("min_global_steps") for tag in tags]
+    ends = [tag.get("max_global_steps") for tag in tags]
+    if not starts or any(v is None for v in starts) or any(v is None for v in ends):
+        return None
+    return torch.tensor([int(a) != int(b) for a, b in zip(starts, ends, strict=True)], dtype=torch.bool)
+
+
+def calculate_debug_metrics(data: DataProto, partial_mask: Optional[torch.Tensor] = None) -> dict:
     """
     calculate rollout vs actor logprobs diff, for debugging purpose
 
@@ -124,6 +214,7 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     )
     logprobs_mismatch = rollout_logprobs_diff != 0
     return {
+        **calculate_train_infer_discrepancy(actor_old_log_probs, rollout_old_log_probs, response_mask, partial_mask),
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).detach().item(),

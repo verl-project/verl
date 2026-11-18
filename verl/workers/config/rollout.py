@@ -309,6 +309,9 @@ class RolloutConfig(BaseConfig):
     enable_rollout_routing_replay: bool = False
     moe_load_balance_metrics_interval: int = 0
 
+    # True: abort requests and re-prefill on weight sync. False: keep their KV cache (vLLM only).
+    partial_rollout_recompute: bool = True
+
     enable_sleep_mode: bool = True
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
@@ -384,6 +387,9 @@ class RolloutConfig(BaseConfig):
             raise ValueError(
                 f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
             )
+
+        if not self.partial_rollout_recompute and (self.name != "vllm" or self.disaggregation.enabled):
+            raise ValueError("rollout.partial_rollout_recompute=False requires vLLM without PD disaggregation.")
 
         if self.topk_log_probs:
             if self.name != "vllm":

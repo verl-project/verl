@@ -12,7 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+
 from verl.workers.config.rollout import RolloutConfig
+
+
+@pytest.mark.parametrize("name", ["sglang", "trtllm"])
+def test_keeping_kv_cache_across_weight_sync_requires_vllm(name):
+    # Only the vLLM server can keep requests across a sync; other backends would silently abort.
+    with pytest.raises(ValueError, match="partial_rollout_recompute=False requires vLLM"):
+        RolloutConfig(name=name, partial_rollout_recompute=False)
 
 
 def test_max_num_batched_tokens_raised_when_chunked_prefill_disabled():

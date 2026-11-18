@@ -137,6 +137,22 @@ class MetricsAggregator:
         if {"global_seqlen/minmax_diff", "global_seqlen/max", "global_seqlen/min"}.issubset(aggregated):
             aggregated["global_seqlen/minmax_diff"] = aggregated["global_seqlen/max"] - aggregated["global_seqlen/min"]
 
+        # training/train_infer_*: averaging the per-step ratios would weight a step with
+        # three tokens like a step with thirty thousand, so rebuild each one from its
+        # summed numerator and denominator.
+        for suffix in ("", "_partial", "_nonpartial"):
+            prefix = "training/train_infer_"
+            num_tokens = aggregated.get(f"{prefix}tokens_sum{suffix}", 0.0)
+            if not num_tokens:
+                continue
+            num_scored = aggregated.get(f"{prefix}scored_tokens_sum{suffix}", 0.0)
+            aggregated[f"{prefix}extreme_token_frac{suffix}"] = (
+                aggregated.get(f"{prefix}extreme_tokens_sum{suffix}", 0.0) / num_tokens
+            )
+            aggregated[f"{prefix}nonfinite_token_frac{suffix}"] = (num_tokens - num_scored) / num_tokens
+            if num_scored:
+                aggregated[f"{prefix}kl_k3{suffix}"] = aggregated.get(f"{prefix}kl_k3_sum{suffix}", 0.0) / num_scored
+
         return aggregated
 
     def reset(self):

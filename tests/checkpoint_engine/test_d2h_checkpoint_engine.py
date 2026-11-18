@@ -99,14 +99,13 @@ async def test_strong_sync_quiesces_rollout_before_build_and_publish(monkeypatch
     manager.backend = "nccl"
     manager.backend_cls = _StrongSyncBackend
     manager.actor_wg = FakeActorWorkerGroup()
-    manager.replicas = [type("Replica", (), {"workers": ["worker"]})()]
+
+    async def pause_for_weight_sync(self):
+        calls.append("pause_for_weight_sync")
+
+    replica_cls = type("Replica", (), {"workers": ["worker"], "pause_for_weight_sync": pause_for_weight_sync})
+    manager.replicas = [replica_cls()]
     manager._background_loop = object()
-
-    async def abort_replicas():
-        calls.append("abort")
-
-    async def release_kv_cache_replicas():
-        calls.append("release_kv_cache")
 
     def build_process_group(rollout):
         calls.append("build_process_group")
@@ -116,8 +115,6 @@ async def test_strong_sync_quiesces_rollout_before_build_and_publish(monkeypatch
         coro.close()
         return concurrent.futures.Future()
 
-    manager.abort_replicas = abort_replicas
-    manager.release_kv_cache_replicas = release_kv_cache_replicas
     manager.build_process_group = build_process_group
     monkeypatch.setattr(checkpoint_engine_base, "RayWorkerGroup", FakeRayWorkerGroup)
     monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", run_coroutine_threadsafe)
@@ -127,8 +124,7 @@ async def test_strong_sync_quiesces_rollout_before_build_and_publish(monkeypatch
     assert ticket.trainer_published == ["published"]
     assert calls == [
         "create_rollout_group",
-        "abort",
-        "release_kv_cache",
+        "pause_for_weight_sync",
         "build_process_group",
         "publish",
         "schedule_commit",
