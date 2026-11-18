@@ -23,8 +23,6 @@ once per storage unit process; nothing here can avoid it short of living outside
 
 from typing import Any
 
-PIXEL_KEYS = ("pixel_values", "pixel_values_videos")
-
 
 def zigzag_cp_rows(seq_len: int, cp_rank: int, cp_size: int, align_size: int) -> tuple[int, range, range]:
     """The rows of one sequence a CP rank holds under the zigzag THD layout.
@@ -54,21 +52,14 @@ def slice_for_rank(
     data: dict[str, list],
     args: Any,
     *,
-    drop_multi_modal_keys: tuple[str, ...] = (),
     route_layers: list[int] | None = None,
     cp_rows: tuple[int, int, int] | None = None,
 ) -> dict[str, list]:
     """Keep only the part of each sample one model-parallel rank reads.
 
-    ``drop_multi_modal_keys`` are removed from every ``multi_modal_inputs`` dict, and
-    ``routed_experts`` of shape ``(seq_len, num_layers, topk)`` keeps only ``route_layers``
-    and, given ``cp_rows`` of ``(cp_rank, cp_size, align_size)``, only the rows of that CP rank.
+    ``routed_experts`` of shape ``(seq_len, num_layers, topk)`` keeps only ``route_layers``, and,
+    given ``cp_rows`` of ``(cp_rank, cp_size, align_size)``, only the rows of that CP rank.
     """
-    if drop_multi_modal_keys and "multi_modal_inputs" in data:
-        data["multi_modal_inputs"] = [
-            {k: v for k, v in inputs.items() if k not in drop_multi_modal_keys} if isinstance(inputs, dict) else inputs
-            for inputs in data["multi_modal_inputs"]
-        ]
     if (route_layers is not None or cp_rows is not None) and "routed_experts" in data:
         # A pipeline stage owns consecutive layers, which a basic slice copies ~20x faster than
         # the fancy indexing the general case needs.
@@ -110,16 +101,4 @@ def slice_for_rank(
             local[chunk // 2 : chunk // 2 + len(tail)] = part[tail.start : tail.stop]
             sliced.append(local)
         data["routed_experts"] = sliced
-    return data
-
-
-def select_multi_modal_rows(data: dict[str, list], args: list | None) -> dict[str, list]:
-    """Return, for each sample, rows ``[start, end)`` of the ``multi_modal_inputs`` keys it asks for.
-
-    Each ``args`` entry is a list of ``[key, start, end]`` triples; the result holds only those keys.
-    """
-    data["multi_modal_inputs"] = [
-        {key: inputs[key][start:end] for key, start, end in ranges}
-        for inputs, ranges in zip(data["multi_modal_inputs"], args, strict=True)
-    ]
     return data
