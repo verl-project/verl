@@ -6,6 +6,7 @@
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -73,6 +74,21 @@ def test_repository_documents(helper):
         script = f"tests/special_npu/quick_start/run_qwen3_0_6b_{case}_ascend.sh"
         assert script in helper.require_doctest_block(f"quickstart-{case}")
         assert (REPO_ROOT / script).is_file()
+
+
+def test_sglang_python_matches_kernel_archive(helper):
+    """Reject a documented Python version that cannot install the script's kernel wheels."""
+    installer = (REPO_ROOT / "scripts/install_sglang_mcore_npu.sh").read_text(encoding="utf-8")
+    archive_versions = set(re.findall(r"sgl-kernel-npu-[^\s/]*-py(\d)(\d+)-[^\s/]*\.zip", installer))
+    assert len(archive_versions) == 1, "Expected one Python ABI in the SGLang kernel archive name"
+    expected = ".".join(archive_versions.pop())
+    block = helper.require_doctest_block("installation-sglang")
+    conda_versions = re.findall(r"^conda create\b[^\n]*\bpython=(\d+\.\d+)\b", block, re.MULTILINE)
+    assert conda_versions == [expected], f"SGLang kernel wheels require Python {expected}; found {conda_versions}"
+    document = (REPO_ROOT / helper.INSTALL_DOC).read_text(encoding="utf-8")
+    sglang_section = document.partition("3. 自定义安装-SGLang + FSDP/Megatron")[2]
+    table_python = re.search(r"^Python\s+``([^`]+)``", sglang_section, re.MULTILINE)
+    assert table_python and table_python[1] == expected, f"SGLang's version table must specify Python {expected}"
 
 
 @pytest.mark.parametrize("name", ["installation-vllm", "quickstart-fsdp2_vllm"])

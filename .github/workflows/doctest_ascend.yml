@@ -135,7 +135,8 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
-    timeout-minutes: 180
+    # Megatron source builds can exceed three hours on the A3 runner.
+    timeout-minutes: 360
     container:
       image: ${{ matrix.image }}
       options: --shm-size 16g

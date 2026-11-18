@@ -41,6 +41,8 @@ build tools, initializes Conda, creates a new environment, runs the documented
 installer, logs Python/package versions, checks imports, and executes the chosen
 Quick Start case. Version logging helps diagnose mismatches; it is not a strict
 comparison against the documentation's compatibility table.
+The CPU suite separately checks that SGLang's documented Conda Python version
+and Python table entry match the `py311` ABI in the installer's kernel archive.
 
 For the A3 Ubuntu environment used by CI, follow the public
 [CANN container source-install guide](../../../docs/ascend_tutorial/zh/get_start/container_source_install.rst).
@@ -110,6 +112,7 @@ the image locally. `ALLOW_INSTALL=1 DRY_RUN=1`
 validates the command without requiring Docker. CI retains the build log as an
 artifact and allows up to six hours for the full image build.
 
+Source installation has a six-hour job limit to allow for Megatron native builds.
 Published-image tests run before source installation, with one NPU job at a time.
 One failed case does not cancel the remaining cases. Fork pull requests follow the repository's workflow
 approval policy; a maintainer must approve runs when GitHub requires it.
