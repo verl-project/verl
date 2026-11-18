@@ -88,6 +88,28 @@ def put_public_prompts(batch: TensorDict) -> list[str]:
     return fields
 
 
+def put_missing_public_prompts(batch: TensorDict) -> list[str]:
+    """Put the shared fields of the prompts that have no public key yet; return the fields.
+
+    Recovering an async checkpoint re-dispatches prompts that were already submitted, so their public
+    keys normally exist and TransferQueue refuses to write a key twice. They are missing when the run
+    that submitted them had prompt sharing off.
+    """
+    fields = shared_prompt_fields(batch)
+    if not fields:
+        return fields
+    uids = list(batch["uid"])
+    present = tq.kv_exists(keys=uids, partition_id=PUBLIC_PARTITION)
+    missing = [i for i, uid in enumerate(uids) if uid not in present]
+    if missing:
+        tq.kv_batch_put(
+            keys=[uids[i] for i in missing],
+            partition_id=PUBLIC_PARTITION,
+            fields=batch.select(*fields)[missing],
+        )
+    return fields
+
+
 def release_public_prompts(uids: Iterable[str] = ()) -> None:
     """Free the public prompts no key links to any more.
 

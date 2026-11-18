@@ -71,7 +71,12 @@ from verl.trainer.ppo.utils import (
     need_reference_policy,
     need_teacher_policy,
 )
-from verl.trainer.ppo.v1.prompt_sharing import prompt_sharing_enabled, put_public_prompts, release_public_prompts
+from verl.trainer.ppo.v1.prompt_sharing import (
+    prompt_sharing_enabled,
+    put_missing_public_prompts,
+    put_public_prompts,
+    release_public_prompts,
+)
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
 from verl.utils import tensordict_utils as tu
@@ -1031,6 +1036,9 @@ class PPOTrainer(ABC):
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in inflight_uids]
         tq.kv_batch_put(keys=inflight_uids, partition_id=partition_id, tags=tags)
+        if self.share_prompt_fields:
+            # The sessions link the public prompt, which the run that submitted it may not have written.
+            put_missing_public_prompts(batch)
         self.agent_loop_manager.generate_sequences(batch)
 
         logger.info(
