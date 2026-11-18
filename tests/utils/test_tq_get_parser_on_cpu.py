@@ -112,6 +112,16 @@ def test_slice_for_rank_keeps_stored_values():
         slice_for_rank(dict(data), None, route_layers=[4])
 
 
+def test_slice_for_rank_copies_the_layers_of_a_pipeline_stage():
+    """Consecutive layers take the fast path, which must copy rather than return a view of all layers."""
+    routes = torch.arange(2 * 4 * 2).reshape(2, 4, 2)
+    layers = [1, 2]
+
+    parsed = slice_for_rank({"routed_experts": [routes]}, None, route_layers=layers)["routed_experts"][0]
+    torch.testing.assert_close(parsed, routes[:, layers])
+    assert parsed.untyped_storage().nbytes() == parsed.numel() * parsed.element_size()
+
+
 def test_select_multi_modal_rows():
     pixels = torch.arange(6 * HIDDEN, dtype=torch.float32).reshape(6, HIDDEN)
     data = {"multi_modal_inputs": [{"pixel_values": pixels}, {"pixel_values": pixels}]}
