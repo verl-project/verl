@@ -72,33 +72,6 @@ def test_save_rejects_tokenizer_only_output(monkeypatch, tmp_path):
 
 
 def test_save_accepts_actual_hf_model_output(monkeypatch, tmp_path):
-    model_config = Qwen2Config(
-        vocab_size=32,
-        hidden_size=16,
-        intermediate_size=32,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-    )
-    source_model = AutoModelForCausalLM.from_config(model_config)
-
-    merger = _TestModelMerger.__new__(_TestModelMerger)
-    merger.config = SimpleNamespace(target_dir=tmp_path, trust_remote_code=False, local_dir=None)
-    merger.hf_model_config_path = tmp_path
-    merger.model_config = model_config
-
-    monkeypatch.setattr(merger, "get_transformers_auto_model_class", lambda: AutoModelForCausalLM)
-    monkeypatch.setattr(merger, "patch_model_generation_config", lambda model: model)
-    monkeypatch.setattr(base_model_merger, "hf_processor", lambda *args, **kwargs: None)
-    monkeypatch.setattr(base_model_merger, "hf_tokenizer", lambda *args, **kwargs: None)
-
-    merger.save_hf_model_and_tokenizer(source_model.state_dict())
-
-    assert (tmp_path / "config.json").is_file()
-    assert (tmp_path / "model.safetensors").is_file()
-
-
-def test_save_keeps_a_generation_config_that_transformers_refuses(monkeypatch, tmp_path):
     # zai-org/GLM-5.3-Flash's published generation_config.json sets top_p without do_sample, so
     # GenerationConfig.save_pretrained refuses it, and model.save_pretrained raises for it before writing the weights.
     generation_config = {
@@ -134,6 +107,7 @@ def test_save_keeps_a_generation_config_that_transformers_refuses(monkeypatch, t
 
     merger.save_hf_model_and_tokenizer(source_model.state_dict())
 
+    assert (target_dir / "config.json").is_file()
     assert (target_dir / "model.safetensors").is_file()
     saved = json.loads((target_dir / "generation_config.json").read_text(encoding="utf-8"))
     del saved["transformers_version"]
