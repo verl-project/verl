@@ -28,7 +28,11 @@ import torch.distributed
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental._context_parallel._load_balancer import _HeadTailLoadBalancer
-from torchtitan.components.checkpoint import CheckpointManager
+
+try:
+    from torchtitan.components.checkpoint import CheckpointManager
+except ModuleNotFoundError:  # torchtitan >= checkpointer refactor (e.g. google-pytorch/torchtitan#201)
+    from torchtitan.components.checkpointer.dcp import CheckpointManager
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer, ParamGroupConfig
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig

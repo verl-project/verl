@@ -25,7 +25,11 @@ import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks
-from torchtitan.components.dataloader import BaseDataLoader
+
+try:
+    from torchtitan.components.dataloader import BaseDataLoader
+except ModuleNotFoundError:  # torchtitan >= data refactor (e.g. google-pytorch/torchtitan#201)
+    from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     VarlenMetadata,
