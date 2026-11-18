@@ -28,6 +28,7 @@ from verl.trainer.ppo.v1.prompt_sharing import (
     prompt_sharing_enabled,
     prompt_sharing_requested,
     public_multi_modal_key,
+    put_missing_public_prompts,
     put_public_prompts,
     release_public_prompts,
 )
@@ -218,6 +219,22 @@ async def test_sessions_with_same_media_compute_multi_modal_inputs_once(tq_init,
 
     tq.kv_clear(keys=keys, partition_id="train")
     release_public_prompts([uid])
+
+
+def test_recovery_publishes_only_the_prompts_a_run_without_sharing_left_private(tq_init):
+    """Resuming re-dispatches prompts whose public keys exist, and TransferQueue refuses to rewrite them."""
+    shared, private = _uid(), _uid()
+    put_public_prompts(_prompt_batch([shared]))
+    assert _public_keys([shared, private]) == {shared}
+
+    batch = _prompt_batch([shared, private])
+    try:
+        assert set(put_missing_public_prompts(batch)) == {"uid", "raw_prompt", "index"}
+        assert _public_keys([shared, private]) == {shared, private}
+        data = tq.kv_batch_get(keys=[private], partition_id=PUBLIC_PARTITION, select_fields=["raw_prompt"])
+        assert data.get("raw_prompt").tolist() == [[{"role": "user", "content": f"question {private}"}]]
+    finally:
+        tq.kv_clear(keys=[shared, private], partition_id=PUBLIC_PARTITION)
 
 
 def test_never_linked_public_prompt_is_freed_only_when_given_up(tq_init):
