@@ -61,4 +61,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=False \
     trainer.max_actor_ckpt_to_keep=1 \
     trainer.max_critic_ckpt_to_keep=1 \
-    trainer.total_training_steps=15 2>&1 | tee $LOG_DIR/$SCRIPT_NAME.log
+    trainer.total_training_steps=${TOTAL_TRAINING_STEPS:-15} 2>&1 | tee $LOG_DIR/$SCRIPT_NAME.log

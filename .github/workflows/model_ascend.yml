@@ -61,7 +61,7 @@ env:
 jobs:
   model_rmpad_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-800i-8
+    runs-on: linux-aarch64-a3-800i-verl-fed-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -124,7 +124,7 @@ jobs:
   # NOTE: List as an independent job to make rerun easier.
   model_rmpad_fsdp2_unstable_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-800i-8
+    runs-on: linux-aarch64-a3-800i-verl-fed-8
     timeout-minutes: 60
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu

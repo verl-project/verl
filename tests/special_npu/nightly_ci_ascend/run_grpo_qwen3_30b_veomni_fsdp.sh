@@ -111,7 +111,7 @@ TRAINER=(
     trainer.save_freq=-1
     trainer.default_local_dir=$CKPT_DIR
     trainer.test_freq=-1
-    trainer.total_training_steps=15
+    trainer.total_training_steps=${TOTAL_TRAINING_STEPS:-15}
     actor_rollout_ref.model.trust_remote_code=True
 )
 

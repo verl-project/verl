@@ -32,6 +32,7 @@
 name: nightly_ci_ascend
 
 on:
+  pull_request:
   schedule:
     - cron: "0 17 * * *"
     - cron: "0 18 * * *"
@@ -42,6 +43,8 @@ permissions:
   contents: read
 
 env:
+  TOTAL_TRAINING_STEPS: "1"
+  # Performance baselines use metrics from steps 5 through 14.
   # Disposable caches and locks must stay off the read-only dataset/model mounts.
   HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
   MEGATRON_CONFIG_LOCK_DIR: /root/.cache/temp/megatron-config-locks
@@ -50,8 +53,8 @@ env:
 jobs:
   # Test ppo qwen3-8b fsdp vllm
   nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
-    runs-on: linux-aarch64-a3-800i-16
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 17 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -94,8 +97,9 @@ jobs:
       - name: Running nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend
         run: |
           ray stop --force
-          bash tests/special_npu/nightly_ci_ascend/run_ppo_qwen3-8b_fsdp_npu.sh
+          bash -o pipefail tests/special_npu/nightly_ci_ascend/run_ppo_qwen3-8b_fsdp_npu.sh
       - name: Running nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend checking script
+        if: fromJSON(env.TOTAL_TRAINING_STEPS) >= 5
         run: |
           cd /root/.cache/nightly_log/
           curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
@@ -104,8 +108,8 @@ jobs:
 
   # Test grpo qwen3_vl_8b_Instruct fsdp2 vllm
   nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
-    runs-on: linux-aarch64-a3-800i-16
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 17 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -153,6 +157,7 @@ jobs:
           NDEVICES_PER_NODE=16 TRAIN_BATCH_SIZE=32 PPO_MINI_BATCH_SIZE=16 \
             bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
       - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend checking script
+        if: fromJSON(env.TOTAL_TRAINING_STEPS) >= 5
         run: |
           cd /root/.cache/nightly_log/
           LOG=run_qwen3_vl_8b_Instruct_fsdp2_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.log
@@ -178,7 +183,7 @@ jobs:
   # Temporarily disabled due to flaky performance metrics; re-enable after analysis.
   # nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend:
   #   if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
-  #   runs-on: linux-aarch64-a3-800i-8
+  #   runs-on: linux-aarch64-a3-800i-verl-fed-8
   #   timeout-minutes: 180 # Increase this timeout value as needed
   #   container:
   #     image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -232,8 +237,8 @@ jobs:
 
   # Test gspo qwen3-30b megatron vllm
   nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
-    runs-on: linux-aarch64-a3-800i-16
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 18 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -281,8 +286,9 @@ jobs:
           MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B-Instruct-2507
         run: |
           ray stop --force
-          bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_30b_megatron_npu.sh
+          bash -o pipefail tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_30b_megatron_npu.sh
       - name: Running nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend checking script
+        if: fromJSON(env.TOTAL_TRAINING_STEPS) >= 5
         run: |
           cd /root/.cache/nightly_log/
           curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
@@ -291,8 +297,8 @@ jobs:
 
   # Test grpo qwen3-30b megatron sglang
   nightlyCI_grpo-qwen3-30b-megatron-sglang_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
-    runs-on: linux-aarch64-a3-800i-16
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 17 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
@@ -337,8 +343,9 @@ jobs:
           MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B-Instruct-2507
         run: |
           ray stop --force
-          bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_megatron_sglang_npu.sh
+          bash -o pipefail tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_megatron_sglang_npu.sh
       - name: Running nightlyCI_grpo-qwen3-30b-megatron-sglang_ascend checking script
+        if: fromJSON(env.TOTAL_TRAINING_STEPS) >= 5
         run: |
           cd /root/.cache/nightly_log/
           curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
@@ -347,8 +354,8 @@ jobs:
   
     # Test grpo qwen3_5_2b fsdp2 vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
-    runs-on: linux-aarch64-a3-800i-16
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 18 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -395,8 +402,8 @@ jobs:
 
   # Test grpo qwen3_5_2b fsdp_turbo vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
-    runs-on: linux-aarch64-a3-800i-16
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 19 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -447,8 +454,8 @@ jobs:
 
 # Test quick start vllm fsdp2
   quick_start_qwen3_0_6b_fsdp2_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
-    runs-on: linux-aarch64-a3-800i-16
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 18 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -493,12 +500,12 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_fsdp2_vllm_ascend
         run: |
           ray stop --force
-          NDEVICES_PER_NODE=16 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+          NDEVICES_PER_NODE=16 SAVE_FREQ=-1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
 
   # Test quick start vllm megatron
   quick_start_qwen3_0_6b_megatron_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
-    runs-on: linux-aarch64-a3-800i-8
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 18 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -535,12 +542,12 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_megatron_vllm_ascend
         run: |
           ray stop --force
-          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_vllm_ascend.sh
+          SAVE_FREQ=-1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_vllm_ascend.sh
 
   # Test quick start sglang megatron
   quick_start_qwen3_0_6b_megatron_sglang_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
-    runs-on: linux-aarch64-a3-800i-8
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 18 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
@@ -577,12 +584,12 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_megatron_sglang_ascend
         run: |
           ray stop --force
-          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
+          SAVE_FREQ=-1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
   # Test quick start sglang fsdp2
   quick_start_qwen3_0_6b_fsdp2_sglang_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
-    runs-on: linux-aarch64-a3-800i-8
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 18 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
@@ -619,12 +626,12 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_fsdp2_sglang_ascend
         run: |
           ray stop --force
-          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_sglang_ascend.sh
+          SAVE_FREQ=-1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_sglang_ascend.sh
   
   # Test grpo qwen3-30b veomni fsdp
   nightlyCI_grpo-qwen3-30b-veomni-fsdp_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
-    runs-on: linux-aarch64-a3-800i-16
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 19 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -677,12 +684,12 @@ jobs:
       - name: Running nightlyCI_grpo-qwen3-30b-veomni-fsdp_ascend
         run: |
           ray stop --force
-          bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_veomni_fsdp.sh
+          bash -o pipefail tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_veomni_fsdp.sh
 
   # Test gspo qwen3-8b fsdp vllm
   nightlyCI_gspo-qwen3-8b-fsdp2-vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
-    runs-on: linux-aarch64-a3-800i-16
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.pull_request.number == 8733 || github.event.schedule == '0 19 * * *') }}
+    runs-on: linux-aarch64-a3-800i-verl-fed-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -724,6 +731,7 @@ jobs:
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_8b_fsdp2_npu.sh
       - name: Running nightlyCI_gspo-qwen3-8b-fsdp2-vllm_ascend checking script
+        if: fromJSON(env.TOTAL_TRAINING_STEPS) >= 5
         run: |
           cd /root/.cache/nightly_log/
           curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
@@ -733,7 +741,7 @@ jobs:
   # Test grpo qwen33.5-35b megatron vllm
   # nightlyCI_grpo-qwen3_5-35b-megatron-vllm_ascend:
   #   if: ${{ github.repository_owner == 'verl-project'}}
-  #   runs-on: linux-aarch64-a3-800i-16
+  #   runs-on: linux-aarch64-a3-800i-verl-fed-16
   #   timeout-minutes: 180 # Increase this timeout value as needed
   #   container:
   #     image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
