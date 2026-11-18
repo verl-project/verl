@@ -54,6 +54,7 @@ from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     align_r3_router_replay_data,
     build_r3_replay_mask,
+    cp_preshard_params,
     iter_model_routers,
     merge_nested_router_maps,
     merge_router_topk_indices,
@@ -146,6 +147,7 @@ def _check_dcp_unsupported_features(engine_config, model_config, tf_config=None,
 
 # Absolute layer index of each layer kept in ``routed_experts`` when a rank fetched only its own layers.
 ROUTE_LAYERS_KEY = "routed_experts_layers"
+CP_PRESHARDED_KEY = "routed_experts_cp_presharded"
 
 
 def _attach_dcp_recorded_routes(losses_reduced: list[dict], layers_topk_idx: torch.Tensor) -> None:
@@ -786,17 +788,31 @@ class MegatronEngine(BaseEngine):
             elif self._cp_local_vision_enabled():
                 drop_keys, attach_keys = PIXEL_KEYS, True
 
-        route_layers = None
+        route_layers, cp_rows = None, None
         if self.engine_config.router_replay.mode == "R3":
             layers = sorted({n - 1 for n, _ in iter_model_routers([unwrap_model(m) for m in self.module])})
             if len(layers) < self.tf_config.num_layers:
                 route_layers = layers
+            if not self.engine_config.dynamic_context_parallel:
+                cp_rows = cp_preshard_params(
+                    self.tf_config,
+                    mpu.get_tensor_model_parallel_world_size(),
+                    mpu.get_context_parallel_world_size(),
+                    mpu.get_context_parallel_rank(),
+                )
 
-        if not drop_keys and route_layers is None:
+        if not drop_keys and route_layers is None and cp_rows is None:
             return None
+        non_tensor = {}
+        if route_layers is not None:
+            non_tensor[ROUTE_LAYERS_KEY] = route_layers
+        if cp_rows is not None:
+            non_tensor[CP_PRESHARDED_KEY] = True
         return TQGetSpec(
-            data_parser=partial(slice_for_rank, drop_multi_modal_keys=drop_keys, route_layers=route_layers),
-            non_tensor={} if route_layers is None else {ROUTE_LAYERS_KEY: route_layers},
+            data_parser=partial(
+                slice_for_rank, drop_multi_modal_keys=drop_keys, route_layers=route_layers, cp_rows=cp_rows
+            ),
+            non_tensor=non_tensor,
             attach_keys=attach_keys,
         )
 
@@ -1397,8 +1413,11 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     "R2 compute_log_prob must record and preserve routes before actor update."
                 )
             replay_mask = None
+            cp_presharded = bool(tu.get_non_tensor_data(batch, key=CP_PRESHARDED_KEY, default=False))
             if self.engine_config.router_replay.mode == "R3":
-                layers_topk_idx = align_r3_router_replay_data(layers_topk_idx, input_ids)
+                if not cp_presharded:
+                    # Pre-sharded routes were already aligned to the input length on the storage unit.
+                    layers_topk_idx = align_r3_router_replay_data(layers_topk_idx, input_ids)
                 replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
             set_router_replay_data(
                 layers_topk_idx,
@@ -1409,6 +1428,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 local_cp_size=local_cp_size,
                 model=unwrapped_model,
                 route_layer_ids=tu.get_non_tensor_data(batch, key=ROUTE_LAYERS_KEY, default=None),
+                cp_presharded=cp_presharded,
             )
 
         if pad_mode == DatasetPadMode.NO_PADDING:

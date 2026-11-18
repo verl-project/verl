@@ -122,6 +122,42 @@ def test_slice_for_rank_copies_the_layers_of_a_pipeline_stage():
     assert parsed.untyped_storage().nbytes() == parsed.numel() * parsed.element_size()
 
 
+@pytest.mark.parametrize("cp_size", [2, 4])
+def test_cp_rows_match_the_thd_packing(cp_size, monkeypatch):
+    """Concatenating the per-sample slices must rebuild exactly what the packing gives this rank."""
+    util = pytest.importorskip("verl.models.mcore.util")
+    if getattr(util.mpu, "__name__", "") != "megatron.core.parallel_state":
+        pytest.skip("another test stubbed megatron out, so the real packing is unavailable")
+    monkeypatch.setattr(util.mpu, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(util.mpu, "get_context_parallel_world_size", lambda: cp_size)
+
+    lengths = [7, 16, 33]
+    routes = [torch.arange(n * 3 * 2, dtype=torch.int16).reshape(n, 3, 2) for n in lengths]
+    # The rollout of the last sample missed the route of its final token, as R3 alignment allows.
+    stored = routes[:-1] + [routes[-1][:-1]]
+    aligned = torch.nested.as_nested_tensor(
+        routes[:-1] + [torch.cat([stored[-1], torch.zeros_like(routes[-1][:1])])], layout=torch.jagged
+    )
+    data = {"routed_experts": stored, "input_ids": [torch.zeros(n) for n in lengths]}
+
+    for cp_rank in range(cp_size):
+        monkeypatch.setattr(util.mpu, "get_context_parallel_rank", lambda rank=cp_rank: rank)
+        packed, _, _ = util.preprocess_thd_engine(aligned, pre_process=True)
+        parsed = slice_for_rank(dict(data), None, cp_rows=(cp_rank, cp_size, cp_size * 2))
+        torch.testing.assert_close(torch.cat(parsed["routed_experts"]), packed.squeeze(0))
+
+
+def test_cp_rows_cover_every_row_exactly_once():
+    routes = torch.arange(7 * 1 * 1, dtype=torch.int16).reshape(7, 1, 1)
+    data = {"routed_experts": [routes], "input_ids": [torch.zeros(7)]}
+    seen = [
+        row
+        for cp_rank in range(4)
+        for row in slice_for_rank(dict(data), None, cp_rows=(cp_rank, 4, 8))["routed_experts"][0]
+    ]
+    assert sorted(int(row) for row in seen) == [0, 0, 1, 2, 3, 4, 5, 6]  # the 7 rows plus one of padding
+
+
 def test_select_multi_modal_rows():
     pixels = torch.arange(6 * HIDDEN, dtype=torch.float32).reshape(6, HIDDEN)
     data = {"multi_modal_inputs": [{"pixel_values": pixels}, {"pixel_values": pixels}]}

@@ -234,6 +234,22 @@ def _context_parallel_layout(tf_config) -> str:
     return "zigzag"
 
 
+def cp_preshard_params(tf_config, tp_size: int, cp_size: int, cp_rank: int) -> tuple[int, int, int] | None:
+    """``(cp_rank, cp_size, align_size)`` for slicing routes per CP rank where the packing allows it.
+
+    ``None`` when the row a rank owns cannot be derived from the sequence alone: either the layout
+    is not zigzag, or quantisation/attention-variant padding grows the *last* sequence of a
+    micro-batch, which a storage unit holding one sample at a time cannot know about.
+    """
+    if cp_size <= 1 or _context_parallel_layout(tf_config) != "zigzag":
+        return None
+    if get_thd_quant_align_size(tf_config) is not None:
+        return None
+    if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid":
+        return None
+    return cp_rank, cp_size, tp_size * cp_size * 2
+
+
 def merge_router_topk_indices(
     attention_mask,
     input_ids,
@@ -441,6 +457,7 @@ def set_router_replay_data(
     local_cp_size=None,
     model=None,
     route_layer_ids=None,
+    cp_presharded=False,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -462,6 +479,8 @@ def set_router_replay_data(
             routers instead of a positional slice of the global RouterReplay.router_instances list.
         route_layer_ids (Optional[list[int]]): Absolute layer index of each ``layer_num`` entry when the
             routes hold only some layers, e.g. the ones on this pipeline rank.
+        cp_presharded (bool): The routes already hold only this CP rank's rows of each sequence, in the
+            zigzag layout the packing uses, so they are concatenated rather than split again.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -482,14 +501,18 @@ def set_router_replay_data(
 
         replay_mask_rmpad = None
         if layers_topk_idx.is_nested:
-            layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
-                layers_topk_idx,
-                pre_process=True,
-                quant_align_size=quant_align_size,
-                min_local_rows=min_local_rows,
-                local_cp_size=local_cp_size,
-                cp_layout=cp_layout,
-            )
+            if cp_presharded:
+                # Each sequence already contributes its rank-local chunk, in packing order.
+                layers_topk_idx_rmpad = torch.cat(list(layers_topk_idx.unbind())).unsqueeze(0)
+            else:
+                layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
+                    layers_topk_idx,
+                    pre_process=True,
+                    quant_align_size=quant_align_size,
+                    min_local_rows=min_local_rows,
+                    local_cp_size=local_cp_size,
+                    cp_layout=cp_layout,
+                )
             if replay_mask is not None:
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
                     replay_mask,
