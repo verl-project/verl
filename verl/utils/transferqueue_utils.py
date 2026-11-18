@@ -89,18 +89,41 @@ class TQGetSpec:
 def tq_get_parser_supported() -> bool:
     """Whether the connected TransferQueue runs ``data_parser`` on get (SimpleStorage, TransferQueue>=0.1.12)."""
     global _GET_PARSER_SUPPORTED
-    if _GET_PARSER_SUPPORTED is None:
-        try:
-            from transfer_queue.storage.managers.simple_storage_manager import AsyncSimpleStorageManager
+    if _GET_PARSER_SUPPORTED is not None:
+        return _GET_PARSER_SUPPORTED
+    try:
+        from transfer_queue.storage.managers.simple_storage_manager import AsyncSimpleStorageManager
 
-            tq_client = tq.get_client()
-            _GET_PARSER_SUPPORTED = "data_parser" in inspect.signature(
-                tq_client.async_get_data
-            ).parameters and isinstance(tq_client.storage_manager, AsyncSimpleStorageManager)
-        except Exception as e:
-            logger.warning(f"TransferQueue get parser is unavailable, every rank fetches whole samples: {e}")
-            _GET_PARSER_SUPPORTED = False
+        tq_client = tq.get_client()
+    except Exception as e:
+        # Answer for this call only: a client that is not up yet says nothing about the backend.
+        logger.warning(f"TransferQueue get parser is unavailable, every rank fetches whole samples: {e}")
+        return False
+    _GET_PARSER_SUPPORTED = "data_parser" in inspect.signature(tq_client.async_get_data).parameters and isinstance(
+        tq_client.storage_manager, AsyncSimpleStorageManager
+    )
     return _GET_PARSER_SUPPORTED
+
+
+async def _get_data_with_parser(tq_client, meta: BatchMeta, data_parser: Callable) -> TensorDict:
+    """``async_get_data`` with a parser, retrying a timed-out storage unit itself.
+
+    TransferQueue never replays a parser-backed request, because it cannot know the parser has no
+    side effects; the ones here only select stored rows, so a read is safe to repeat.
+    """
+    try:
+        from transfer_queue.storage.managers.simple_storage_manager import StorageUnitTimeout
+    except ImportError:
+        return await tq_client.async_get_data(meta, data_parser=data_parser)
+
+    attempts = max(1, int(os.environ.get("TQ_SIMPLE_STORAGE_MAX_ATTEMPTS", 3)))
+    for attempt in range(1, attempts + 1):
+        try:
+            return await tq_client.async_get_data(meta, data_parser=data_parser)
+        except StorageUnitTimeout as e:
+            if attempt == attempts:
+                raise
+            logger.warning(f"parsed get retry {attempt + 1}/{attempts} for {meta.size} samples: {e}")
 
 
 def _get_tq_get_spec(args, func_name: str) -> TQGetSpec | None:
@@ -208,8 +231,10 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta, spec: TQGetSpec
         return empty_td
 
     tq_client = tq.get_client()
-    parser = {"data_parser": spec.data_parser} if spec is not None and spec.data_parser is not None else {}
-    tensordict = await tq_client.async_get_data(meta, **parser)
+    if spec is not None and spec.data_parser is not None:
+        tensordict = await _get_data_with_parser(tq_client, meta, spec.data_parser)
+    else:
+        tensordict = await tq_client.async_get_data(meta)
     for key, val in spec.non_tensor.items() if spec is not None else ():
         tu.assign_non_tensor_data(tensor_dict=tensordict, key=key, val=val)
 

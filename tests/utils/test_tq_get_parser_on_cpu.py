@@ -92,17 +92,18 @@ def test_cp_rows_need_the_aligned_length():
         slice_for_rank({"routed_experts": [routes], "input_ids": [torch.zeros(9)]}, None, cp_rows=(0, 4, 8))
 
 
-tq = pytest.importorskip("transfer_queue")
-
-
 @pytest.fixture(scope="module")
 def tq_init():
+    """The running TransferQueue; only the integration test below needs one."""
+    tq = pytest.importorskip("transfer_queue")
     tq.init()
-    yield
+    yield tq
     tq.close()
 
 
 def test_tqbridge_fetches_the_rank_share(tq_init):
+    tq = tq_init
+
     from verl.utils import transferqueue_utils as tqu
 
     if not tqu.tq_get_parser_supported():
@@ -116,8 +117,6 @@ def test_tqbridge_fetches_the_rank_share(tq_init):
             "routed_experts": torch.nested.as_nested_tensor(routes, layout=torch.jagged),
         }
     )
-    meta = tq.kv_batch_put(keys=keys, partition_id="train", fields=fields)
-
     spec = tqu.TQGetSpec(
         data_parser=partial(slice_for_rank, route_layers=[0, 2]),
         non_tensor={"routed_experts_layers": [0, 2]},
@@ -132,10 +131,11 @@ def test_tqbridge_fetches_the_rank_share(tq_init):
         def infer(self, data: TensorDict):
             self.data = data
 
-    worker = _Worker()
-    worker.infer(meta)
-    data = worker.data
     try:
+        meta = tq.kv_batch_put(keys=keys, partition_id="train", fields=fields)
+        worker = _Worker()
+        worker.infer(meta)
+        data = worker.data
         for got, ref in zip(data["routed_experts"].unbind(), routes, strict=True):
             torch.testing.assert_close(got, ref[:, [0, 2]])
         assert tu.get_non_tensor_data(data, "routed_experts_layers", None) == [0, 2]
