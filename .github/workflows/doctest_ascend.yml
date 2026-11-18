@@ -109,6 +109,8 @@ jobs:
         shell: bash -el {0}
     env:
       QUICKSTART_CASE: ${{ matrix.case }}
+      # The guide places the installed source in /verl in published vLLM images.
+      DOCTEST_REPO_ROOT: /verl
       NDEVICES_PER_NODE: "8"
       HF_ENDPOINT: https://hf-mirror.com
       HF_HUB_ENABLE_HF_TRANSFER: "0"
@@ -118,8 +120,6 @@ jobs:
       GSM8K_DATASET_PATH: /root/.cache/modelscope/dataset/openai/gsm8k
     steps:
       - uses: actions/checkout@v4
-      - name: Use PR source with the published image's installed dependencies
-        run: python3 -m pip install --no-deps --no-build-isolation -e .
       - name: Run documented Quick Start in the published image
         run: |
           npu-smi info

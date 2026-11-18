@@ -72,13 +72,13 @@ Set `KEEP_INSTALL_WORKDIR=1` to retain it, or provide an empty
 `INSTALL_WORKDIR` (which is always retained). Source installation also supports
 `ALLOW_INSTALL=1 DRY_RUN=1` to validate the plan without installing packages.
 
-The GitHub workflow runs CPU tool tests on relevant pull requests and covers
-three installation routes in the upstream repository:
+The GitHub workflow runs CPU tool tests on relevant pull requests, then covers
+two documentation runtime routes and a separate Dockerfile build check:
 
-| Route | Runner | Validation |
+| Check | Runner | Validation |
 | --- | --- | --- |
 | Build the documented A3 vLLM Dockerfile | GitHub ARM64 CPU runner | Copy the PR checkout into the image, start it without NPU devices, and check installed package metadata |
-| Use the published A3 vLLM image | A3 eight-device runner | Keep image dependencies, install the PR's verl source with `--no-deps --no-build-isolation`, then run one GRPO step for FSDP2 and Megatron |
+| Use the published A3 vLLM image | A3 eight-device runner | Use the image's installed source at `/verl` and dependencies, then run one GRPO step for FSDP2 and Megatron |
 | Install from source in a CANN container | A3 eight-device runner | Create the documented Conda environment, install dependencies and run one GRPO step for each of the four combinations |
 
 The first two routes read commands/images from the public
@@ -89,6 +89,10 @@ job does not push to a registry or require registry credentials. Its image stays
 on the build runner: **published-image Quick Start does not validate that newly
 built image on NPU**. Such validation needs a supported image transfer or publishing
 path between the build runner and the NPU runner.
+The published-image worker reads the PR's documentation, but executes the
+preprocessing and training scripts under `/verl` in the image. It does not
+reinstall verl or backend dependencies. Missing image scripts fail the job;
+the worker does not substitute scripts from the PR checkout.
 
 Build locally on a disposable ARM64 Docker host:
 
@@ -116,6 +120,10 @@ Manual runs can select one combination or `all`; selecting a vLLM case also runs
 the Dockerfile build and that case's published-image test. SGLang selections only
 run source installation. Configured coverage does not
 mean that every combination has already passed; inspect each job's result.
+The Quick Start prose describes 16 logical devices on a full eight-card A3 host;
+these jobs pass `NDEVICES_PER_NODE=8` and `TOTAL_TRAINING_STEPS=1` to the existing
+parameterized scripts. They do not establish coverage of that full 16-device
+configuration or the scripts' default 15 training steps.
 Preview the exact image/case matrix without installing anything:
 
 ```bash

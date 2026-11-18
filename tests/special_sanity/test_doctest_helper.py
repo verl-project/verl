@@ -449,6 +449,22 @@ def test_cached_data_and_training_exit_code(run_worker, isolated_repo, fake_trai
     assert "preprocess" not in trace.read_text(encoding="utf-8")
 
 
+def test_published_image_uses_installed_source(run_worker, isolated_repo, fake_training_runtime, tmp_path):
+    """Image tests must execute the installed image script instead of the PR checkout's copy."""
+    trace, env = fake_training_runtime
+    image_repo = tmp_path / "image-verl"
+    script = image_repo / "tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text('#!/bin/bash\nprintf "image-source\\n" >> "$DOCTEST_TRACE"\n', encoding="utf-8")
+    result = run_worker("quickstart", "fsdp2_vllm", repo=isolated_repo, DOCTEST_REPO_ROOT=image_repo.as_posix(), **env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert trace.read_text(encoding="utf-8").splitlines()[-1] == "image-source"
+    script.unlink()
+    result = run_worker("quickstart", "fsdp2_vllm", repo=isolated_repo, DOCTEST_REPO_ROOT=image_repo.as_posix(), **env)
+    assert result.returncode != 0
+    assert "Quick Start script not found" in result.stderr
+
+
 def test_environment_failure_stops_remaining_blocks(run_worker, isolated_repo, fake_training_runtime):
     """Sourcing a block must preserve fail-fast behavior even inside a shared function."""
     trace, env = fake_training_runtime
