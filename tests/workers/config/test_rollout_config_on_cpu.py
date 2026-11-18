@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+
 from verl.workers.config.rollout import RolloutConfig
 
 
@@ -22,3 +24,22 @@ def test_max_num_batched_tokens_raised_when_chunked_prefill_disabled():
     config.max_model_len = 32768
     config.max_num_batched_tokens = config.max_model_len
     assert config.max_num_batched_tokens == 32768
+
+
+def test_weight_sync_switches_default_off():
+    config = RolloutConfig(name="vllm")
+    assert config.sleep_level is None
+    assert not config.reload_base_on_wake
+    assert not config.export_adapter_before_wake
+    assert not config.lora_expert_slice
+
+
+@pytest.mark.parametrize("level", [None, 1, 2])
+def test_sleep_level_accepts_auto_1_2(level):
+    assert RolloutConfig(name="vllm", sleep_level=level).sleep_level == level
+
+
+@pytest.mark.parametrize("level", [0, 3])
+def test_sleep_level_rejects_other_levels(level):
+    with pytest.raises(ValueError, match="sleep_level"):
+        RolloutConfig(name="vllm", sleep_level=level)

@@ -110,6 +110,18 @@ load_format: dummy
 # for huge model, layered summon can save memory (prevent OOM) but make it slower
 layered_summon: False
 
+# Force the vLLM sleep level (1 or 2); null picks it automatically.
+sleep_level: null
+
+# Reload the base weights from the checkpoint at every weight sync (after a level-2 sleep).
+reload_base_on_wake: False
+
+# LoRA sync with param offload: free trainer grads and export the adapter before the rollout wakes.
+export_adapter_before_wake: False
+
+# Send each colocated rollout worker only its slice of the expert LoRA factors.
+lora_expert_slice: False
+
 # [Will be deprecated, use log_prob_micro_batch_size_per_gpu] The batch size for one forward pass in the computation of log_prob. Global batch size.
 log_prob_micro_batch_size: null
 

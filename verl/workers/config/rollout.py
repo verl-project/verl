@@ -311,6 +311,18 @@ class RolloutConfig(BaseConfig):
 
     enable_sleep_mode: bool = True
 
+    # Force the vLLM sleep level (1 or 2); None picks it automatically.
+    sleep_level: Optional[int] = None
+
+    # Reload the base weights from the checkpoint at every weight sync (after a level-2 sleep).
+    reload_base_on_wake: bool = False
+
+    # LoRA sync with param offload: free trainer grads and export the adapter before the rollout wakes.
+    export_adapter_before_wake: bool = False
+
+    # Send each colocated rollout worker only its slice of the expert LoRA factors.
+    lora_expert_slice: bool = False
+
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
@@ -332,6 +344,9 @@ class RolloutConfig(BaseConfig):
                 DeprecationWarning,
                 stacklevel=2,
             )
+
+        if self.sleep_level not in (None, 1, 2):
+            raise ValueError(f"rollout.sleep_level must be null, 1 or 2, got {self.sleep_level!r}")
 
         if self.name != "trtllm" and self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (

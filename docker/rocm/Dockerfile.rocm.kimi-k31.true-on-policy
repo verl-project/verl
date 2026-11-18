@@ -1,0 +1,126 @@
+# syntax=docker/dockerfile:1.7
+# Kimi-K3.1 true-on-policy LoRA RL on AMD MI355X (gfx950): examples/grpo_trainer/run_kimi_k3_1_megatron_lite.sh.
+# Adds to a ROCm vLLM build with Kimi-K3.1 support (vLLM f5926fb, AITER): Megatron-LM with mLite's Kimi-K3.1 ROCm
+# port and the Kimi-K3.1 ROCm vLLM plugins, both from forks pinned by commit; rdma-core for AMD ionic NICs (as #8505)
+# and verl. See docker/rocm/README.md.
+#
+#   DOCKER_BUILDKIT=1 docker build -f docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy \
+#     --build-arg BASE_IMAGE=<image>@sha256:<digest> -t verl-rocm:kimi-k31-true-on-policy .
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+SHELL ["/bin/bash", "-ceuxo", "pipefail"]
+ENTRYPOINT []
+
+# Keep the base image's ROCm torch/Triton: later pip steps must not replace them.
+RUN python3 -c "import importlib.metadata as m; [print(f'{p}=={m.version(p)}') for p in ('torch','triton','torchvision','torchaudio') if any(d.metadata['Name'].lower()==p for d in m.distributions())]" > /opt/base-constraints.txt && cat /opt/base-constraints.txt
+ENV PIP_CONSTRAINT=/opt/base-constraints.txt
+
+# --- Python dependencies (verl's install_requires that are not in the base; verl itself is installed --no-deps) -----
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install flash-linear-attention==0.5.2 mathruler==0.1.0 codetiming==1.4.0 pylatexenc==2.11 \
+      torchdata==0.11.0 tensorboard wandb hydra-core omegaconf dill "ray[default]>=2.41.0" tensordict==0.10.0 \
+      peft accelerate pyarrow pandas "datasets>=4.0" && \
+    pip install --no-deps TransferQueue==0.1.11
+
+# --- Sources pinned by commit: every clone must resolve to its exact revision ----------------------------------------
+COPY --chmod=755 <<'EOF' /usr/local/bin/clone_exact
+#!/bin/bash
+# clone_exact DIR REPO REVISION
+set -euo pipefail
+git init -q "$1"
+git -C "$1" fetch -q --depth 1 "$2" "$3"
+git -C "$1" -c advice.detachedHead=false checkout -q FETCH_HEAD
+test "$(git -C "$1" rev-parse HEAD)" = "$3"
+EOF
+
+# --- Megatron-LM: megatron.core (NVIDIA) + mLite with its Kimi-K3.1 ROCm port (fork of zero-mismatch-rl) ------------
+ARG MEGATRON_LM_REPO="https://github.com/NVIDIA/Megatron-LM.git"
+ARG MEGATRON_LM_REVISION=f78809f6d9c88f8638ea7822966f35057a63fd5c
+ARG MLITE_K31_REPO="https://github.com/indianspeedster/zero-mismatch-rl.git"
+ARG MLITE_K31_REVISION=14e4cf020564ade4d2cfb2add301696aa643ef55
+RUN <<'EOF'
+set -eux
+clone_exact /opt/Megatron-LM "${MEGATRON_LM_REPO}" "${MEGATRON_LM_REVISION}"
+clone_exact /tmp/mlite-k31 "${MLITE_K31_REPO}" "${MLITE_K31_REVISION}"
+rm -rf /opt/Megatron-LM/experimental/lite
+cp -a /tmp/mlite-k31/experimental/lite /opt/Megatron-LM/experimental/lite
+rm -rf /tmp/mlite-k31
+pip install --no-deps -e /opt/Megatron-LM
+# mLite (megatron.lite) and its verl integration (verl_mlite) are not packaged: register their source roots.
+site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+printf '%s\n' /opt/Megatron-LM/experimental/lite /opt/Megatron-LM/experimental/lite/examples/verl \
+  > "${site}/megatron_lite_verl_mlite.pth"
+EOF
+
+# --- vLLM general plugins: k31lora, k31kdabi, k31dsabi (VLLM_BATCH_INVARIANT=1) and k31xlora (=0) --------------------
+ARG K31_PLUGINS_REPO="https://github.com/indianspeedster/kimi-k31-rocm-vllm-plugins.git"
+ARG K31_PLUGINS_REVISION=2ddbf60ac017cebf33a700ace4fff1b2fa7dc62a
+RUN <<'EOF'
+set -eux
+clone_exact /tmp/k31-plugins "${K31_PLUGINS_REPO}" "${K31_PLUGINS_REVISION}"
+pip install --no-deps /tmp/k31-plugins
+rm -rf /tmp/k31-plugins
+EOF
+
+# --- RDMA userspace for AMD ionic (Pollara / AINIC) NICs (as #8505) -------------------------------------------------
+ARG RDMA_CORE_VERSION=65.0
+ARG RDMA_CORE_SHA256=8eb93c14740146e04c28ac25874e106b61c7d3ab66a36d07099e938985ef0680
+RUN <<'EOF'
+set -eux
+apt-get update
+apt-get install -y --no-install-recommends cmake ninja-build pkg-config wget \
+  libnl-3-dev libnl-route-3-dev libudev-dev
+cd /tmp
+wget -q "https://github.com/linux-rdma/rdma-core/releases/download/v${RDMA_CORE_VERSION}/rdma-core-${RDMA_CORE_VERSION}.tar.gz"
+echo "${RDMA_CORE_SHA256}  rdma-core-${RDMA_CORE_VERSION}.tar.gz" | sha256sum -c -
+tar xzf "rdma-core-${RDMA_CORE_VERSION}.tar.gz"
+cmake -S "rdma-core-${RDMA_CORE_VERSION}" -B rdma-build -GNinja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/opt/rdma-core -DCMAKE_INSTALL_LIBDIR=lib -DNO_MAN_PAGES=1 -DNO_PYVERBS=1 -DENABLE_STATIC=0
+ninja -C rdma-build install
+rm -rf /tmp/rdma-build "/tmp/rdma-core-${RDMA_CORE_VERSION}"* /var/lib/apt/lists/*
+test -e /opt/rdma-core/lib/libibverbs/libionic-rdmav*.so
+EOF
+COPY --chmod=755 docker/rocm/ionic-rdma-env.sh /usr/local/bin/ionic-rdma-env.sh
+
+# --- verl (this checkout) -----------------------------------------------------------------------------------------
+COPY . /opt/verl
+RUN pip install --no-deps -e /opt/verl
+
+ENV VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE_SITUV2=0 VLLM_USE_BREAKABLE_CUDAGRAPH=1 \
+    VLLM_ENGINE_READY_TIMEOUT_S=7200 HSA_NO_SCRATCH_RECLAIM=1 VLLM_BATCH_INVARIANT=0 \
+    VERL_ROOT=/opt/verl MEGATRON_ROOT=/opt/Megatron-LM
+
+# --- Closure checks (no GPU at build time: nothing that imports aiter at module scope) ------------------------------
+WORKDIR /opt/verl
+RUN <<'EOF'
+set -eux
+python3 - <<'PY'
+import importlib.util
+import os
+
+import torch
+
+assert torch.version.hip, torch.__version__
+
+
+def origin(mod):
+    spec = importlib.util.find_spec(mod)
+    assert spec is not None, mod
+    return os.path.realpath(spec.origin or next(iter(spec.submodule_search_locations)))
+
+
+paths = {m: origin(m) for m in ("vllm", "megatron.core", "megatron.lite", "verl_mlite", "verl", "fla.ops.kda")}
+assert paths["megatron.core"].startswith("/opt/Megatron-LM/"), paths
+assert paths["megatron.lite"].startswith("/opt/Megatron-LM/experimental/lite/"), paths
+assert paths["verl_mlite"].startswith("/opt/Megatron-LM/experimental/lite/examples/verl/"), paths
+assert paths["verl"].startswith("/opt/verl/"), paths
+from importlib.metadata import entry_points
+
+plugins = {e.name for e in entry_points(group="vllm.general_plugins")}
+assert {"k31lora", "k31kdabi", "k31dsabi", "k31xlora"} <= plugins, plugins
+print(paths, sorted(plugins))
+PY
+EOF
+
+CMD ["/bin/bash"]

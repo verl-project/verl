@@ -109,6 +109,35 @@ def _with_routing_replay_flag(enabled: bool):
     return decorator
 
 
+def _lora_expert_slice_kwargs(rollout, engine, enabled: bool) -> dict:
+    """Export kwargs for the colocated worker's expert LoRA slice: its EP block, else its TP shard.
+
+    Empty when disabled or when the engine (``supports_<key>``) or rollout layout does not support it.
+    """
+    if not enabled:
+        return {}
+    for key in ("lora_expert_slice", "lora_expert_tp_slice"):
+        placement = getattr(rollout, key, None)
+        if callable(placement) and getattr(engine, f"supports_{key}", False):
+            value = placement()
+            if value is not None:
+                return {key: value}
+    return {}
+
+
+def _release_trainer_grads(engine) -> None:
+    """Drop the gradients left over from the last optimizer step (the next update zeroes them anyway)."""
+    opt = getattr(getattr(engine, "handle", None), "_optimizer", None)
+    if opt is None:
+        return
+    for group in opt.param_groups:
+        for p in group["params"]:
+            if p.grad is not None:
+                p.grad = None
+            if getattr(p, "main_grad", None) is not None:
+                p.main_grad = None
+
+
 class TrainingWorker(Worker, DistProfilerExtension):
     """
     TrainingWorker provides a Tinker-like API (https://thinkingmachines.ai/tinker/) as a RayWorkerGroup
@@ -833,6 +862,34 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         get_torch_device().empty_cache()
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
+        export_kwargs = _lora_expert_slice_kwargs(
+            self.rollout, self.actor.engine, self.config.rollout.get("lora_expert_slice", False)
+        )
+
+        # 0b. rollout.export_adapter_before_wake: export the adapter while the rollout still sleeps.
+        early_export = None
+        if self.config.rollout.get("export_adapter_before_wake", False):
+            _release_trainer_grads(self.actor.engine)
+            aggressive_empty_cache(force_sync=True)
+            if self.actor.engine.is_param_offload_enabled and not self.peft_merge and self.base_sync_done:
+                lora_cfg = self.config.model.get("lora", None) or {}
+                if not (self.config.model.get("lora_rank", 0) or lora_cfg.get("rank", 0)):
+                    raise RuntimeError("rollout.export_adapter_before_wake needs a LoRA adapter (model.lora.rank > 0)")
+                per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
+                    layered_summon=self.layered_summon, base_sync_done=True, **export_kwargs
+                )
+                if peft_config is None:
+                    raise RuntimeError("rollout.export_adapter_before_wake needs an adapter-only (peft) export")
+                # clone: an exporter may reuse its staging buffer between yields
+                early_export = ([(name, t.clone()) for name, t in per_tensor_param], peft_config)
+                self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+                aggressive_empty_cache(force_sync=True)
+                # the replica head resumes every rollout engine as soon as its own trainer rank gets there:
+                # wait until every trainer rank has released its GPU copy of the model
+                if torch.distributed.is_initialized():
+                    torch.distributed.barrier()
+                log_gpu_memory_usage("After adapter export before resume", logger=logger)
+
         # 1. resume rollout memory (weights were released during sleep)
         # sleep_level=1 (adapter mode) in SGLang never released weights, so do not resume them.
         # vLLM is different: its level-1 sleep goes through CuMemAllocator.sleep(offload_tags=("weights",))
@@ -847,9 +904,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After resume weights", logger=logger)
 
         # 2. determine if we need a base weight sync (adapter path only)
-        per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=True
-        )
+        if early_export is not None:
+            per_tensor_param, peft_config = iter(early_export[0]), early_export[1]
+            early_export = None
+        else:
+            per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
+                layered_summon=self.layered_summon, base_sync_done=True, **export_kwargs
+            )
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:
@@ -868,6 +929,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         await self.rollout.update_weights(
             per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
         )
+        del per_tensor_param
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 

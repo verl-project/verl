@@ -267,7 +267,9 @@ class vLLMColocateWorkerExtension:
             attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
             clear_kv_cache(model)
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+    def update_weights_from_ipc(
+        self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False, reload_base: bool = False
+    ):
         """Update the weights of the rollout model."""
         if self.device is None:
             # vLLM workers may leave self.device unset on non-CUDA platforms (e.g. NPU);
@@ -277,6 +279,14 @@ class vLLMColocateWorkerExtension:
         # =========================== step 1: prepare for weight loading ===========================
         quant_reload_states = None
         staged_moe_layers = []
+
+        if reload_base:
+            # Rebuild the base weights discarded by a level-2 sleep from the checkpoint (vLLM layerwise reload).
+            import time as _time
+
+            _t = _time.time()
+            self.reload_weights()
+            logger.info(f"base weight reload from the checkpoint took {_time.time() - _t:.1f}s")
 
         # The engine came up on dummy weights, whose init zeroes integer buffers on
         # ROCm -- including the expert-parallel routing maps, which no weight stream

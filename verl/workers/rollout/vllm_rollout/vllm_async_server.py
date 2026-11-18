@@ -78,6 +78,9 @@ from verl.workers.rollout.vllm_rollout.utils import (
 )
 
 _VLLM_VERSION = version.parse(vllm.__version__)
+# A source build without version metadata reports release 0.0.0: treat it as current main.
+if _VLLM_VERSION.release == (0, 0, 0):
+    _VLLM_VERSION = version.parse("99.0.0")
 
 # vLLM args that verl sets from its own config, and the config that controls each one.
 # rollout.engine_kwargs.vllm passes everything else through but may not set these.
@@ -1534,6 +1537,9 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
+        forced = getattr(self.config, "sleep_level", None)
+        if forced is not None:
+            return int(forced)
         if mtp_rollout_enabled or self.lora_as_adapter:
             return 1
         if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
