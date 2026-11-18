@@ -72,10 +72,6 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 TQ_INITIALIZED = False
 _GET_PARSER_SUPPORTED: bool | None = None
 
-# Per-sample TransferQueue key and its partition, attached when a rank fetches more fields later.
-TQ_KEY_FIELD = "__tq_key__"
-TQ_PARTITION_KEY = "__tq_partition_id__"
-
 
 @dataclass
 class TQGetSpec:
@@ -84,12 +80,10 @@ class TQGetSpec:
     Attributes:
         data_parser: ``data_parser(data, args)`` the storage units apply before replying.
         non_tensor: Non-tensor data assigned to the fetched batch, e.g. what ``data_parser`` kept.
-        attach_keys: Whether to attach each sample's key and partition for a later fetch.
     """
 
     data_parser: Callable | None = None
     non_tensor: dict[str, Any] = field(default_factory=dict)
-    attach_keys: bool = False
 
 
 def tq_get_parser_supported() -> bool:
@@ -220,12 +214,6 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta, spec: TQGetSpec
         tensordict = await tq_client.async_get_data(meta)
 
     if spec is not None:
-        if spec.attach_keys:
-            partition_id = meta.partition_ids[0]
-            assert all(pid == partition_id for pid in meta.partition_ids)
-            keys = await tq_client.async_kv_retrieve_keys(global_indexes=meta.global_indexes, partition_id=partition_id)
-            tu.assign_non_tensor_stack(tensor_dict=tensordict, key=TQ_KEY_FIELD, val=keys)
-            tu.assign_non_tensor_data(tensor_dict=tensordict, key=TQ_PARTITION_KEY, val=partition_id)
         for key, val in spec.non_tensor.items():
             tu.assign_non_tensor_data(tensor_dict=tensordict, key=key, val=val)
 
@@ -239,20 +227,6 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta, spec: TQGetSpec
 
 def _meta_to_realdata(meta: BatchMeta, spec: TQGetSpec | None = None) -> TensorDict:
     return _run_async_in_temp_loop(_async_meta_to_realdata, meta, spec)
-
-
-def kv_batch_get_parsed(
-    keys: list[str], partition_id: str, select_fields: list[str] | str, data_parser: Callable, parser_args: list
-) -> TensorDict:
-    """``tq.kv_batch_get`` with a get parser, run on the shared bridge loop like the other TQ calls here."""
-    return _run_async_in_temp_loop(
-        tq.async_kv_batch_get,
-        keys=keys,
-        partition_id=partition_id,
-        select_fields=select_fields,
-        data_parser=data_parser,
-        parser_args=parser_args,
-    )
 
 
 async def _async_update_meta_with_output(output: TensorDict, meta: BatchMeta, func_name=None) -> BatchMeta:
