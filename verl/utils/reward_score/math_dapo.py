@@ -69,6 +69,10 @@ SUBSTITUTIONS = [
     (".$", "$"),
     ("\\$", ""),
     (r"\ ", ""),
+    (", and ", ", "),
+    (", and", ","),
+    (",and", ","),
+    (" and ", ","),
     (" ", ""),
     ("mbox", "text"),
     (",\\text{and}", ","),
@@ -130,7 +134,23 @@ def normalize_final_answer(final_answer: str) -> str:
     Returns:
         Normalized answer string
     """
-    final_answer = final_answer.split("=")[-1]
+    # Strip trailing explanatory clauses (e.g. "(since $2+2=4$)", "(using $2+2=4$)", "since n is positive")
+    final_answer = re.sub(
+        r"\s*\((?:since|because|as|where|note|for|using|by|from|via|with|given|see|per|assuming|recall|recalled)\b[^)]*\)",
+        "",
+        final_answer,
+        flags=re.I,
+    )
+    final_answer = re.sub(
+        r"\s*,?\s*\b(?:since|because|using|assuming|given that)\b.*", "", final_answer, flags=re.I
+    )
+
+    # Delimit adjacent math spans (e.g. "$x=1$ $y=3$" -> "$x=1$,$y=3$")
+    final_answer = re.sub(r"\$\s*\$", "$,$", final_answer)
+
+    # Remove LaTeX spacing commands like \; before converting semicolons
+    final_answer = final_answer.replace(r"\;", "")
+    final_answer = re.sub(r"(?<!\\);", ",", final_answer)
 
     # Apply substitutions and removals
     for before, after in SUBSTITUTIONS:
@@ -138,8 +158,25 @@ def normalize_final_answer(final_answer: str) -> str:
     for expr in REMOVED_EXPRESSIONS:
         final_answer = final_answer.replace(expr, "")
 
-    # Extract and normalize LaTeX math
-    final_answer = re.sub(r"(.*?)(\$)(.*?)(\$)(.*)", "$\\3$", final_answer)
+    # For single variable assignments or equality chains (e.g. "x = 3" or
+    # "x = 1 + 2 = 3" -> "3"), strip the LHS to match scalar or tuple ground truth.
+    # Multi-variable assignments (e.g. "x=1, y=3") have multiple comma-separated
+    # equations and must keep all assignments intact.
+    parts = [p.strip() for p in final_answer.split(",") if p.strip()]
+    if sum("=" in p for p in parts) < 2 and "=" in final_answer:
+        rhs = final_answer.split("=")[-1]
+        if rhs.strip():
+            final_answer = rhs
+
+    # Extract and normalize LaTeX math while preserving assignments outside math spans
+    math_spans = re.findall(r"\$(.*?)\$", final_answer)
+    outside = re.sub(r"\$([^\$]+)\$", "", final_answer)
+    if math_spans and "=" not in outside:
+        assignment_spans = [s for s in math_spans if "=" in s]
+        if len(assignment_spans) > 1:
+            final_answer = f"${','.join(assignment_spans)}$"
+        else:
+            final_answer = f"${math_spans[0]}$"
     final_answer = re.sub(r"(\\text\{)(.*?)(\})", "\\2", final_answer)
     final_answer = re.sub(r"(\\textbf\{)(.*?)(\})", "\\2", final_answer)
     final_answer = re.sub(r"(\\overline\{)(.*?)(\})", "\\2", final_answer)
@@ -158,6 +195,13 @@ def normalize_final_answer(final_answer: str) -> str:
     # Normalize numbers
     if final_answer.replace(",", "").isdigit():
         final_answer = final_answer.replace(",", "")
+
+    # Normalize multi-variable assignments so order is commutative (e.g. "y=3,x=1" -> "x=1,y=3")
+    if "," in final_answer:
+        sub_answers = final_answer.split(",")
+        if len(sub_answers) > 1 and all("=" in sub and len(sub.split("=")) == 2 for sub in sub_answers):
+            sub_answers.sort()
+            final_answer = ",".join(sub_answers)
 
     return final_answer.strip()
 
