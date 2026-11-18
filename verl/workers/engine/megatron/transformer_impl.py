@@ -116,7 +116,7 @@ def _resolve_cp_seq_chunks(engine_config) -> int:
 
 
 def _check_cp_seq_chunk_config(engine_config, tf_config=None) -> None:
-    """Resolve veRL settings before checking the Core schedule's requirements."""
+    """Resolve verl settings before checking the Core schedule's requirements."""
     if _resolve_cp_seq_chunks(engine_config) == 1:
         return
 
