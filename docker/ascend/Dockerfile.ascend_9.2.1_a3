@@ -2,6 +2,7 @@
 FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.2.1-a3-ubuntu22.04-py3.12
 
 ARG SOC_VERSION="ascend910_9392"
+ARG PIP_INDEX_URL=https://pypi.org/simple
 
 
 # Prepare required system dependencies
@@ -79,8 +80,11 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     pip cache purge
 
 # Prepare and install verl (update frequently)
-RUN git clone --recursive https://github.com/verl-project/verl.git && \
+ARG VERL_REF=main
+RUN git clone https://github.com/verl-project/verl.git && \
     cd verl && \
+    git fetch origin "$VERL_REF" && git checkout --detach FETCH_HEAD && \
+    git submodule update --init --recursive && \
     pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn && \
     pip install -v -e . --no-deps && cd .. && \
     # Restore the vLLM Triton version after requirements-npu.txt installs its shared pin

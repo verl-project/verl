@@ -34,10 +34,35 @@ function run_installation_check() {
   "${DOCTEST_PYTHON}" "${DOCTEST_HELPER_PATH}" validate
   check_shell_block installation-vllm
   check_shell_block installation-sglang
+  check_shell_block docker-image-vllm-a3
+  check_shell_block docker-build-vllm-a3
   for block in container-image-vllm container-image-sglang container-prerequisites-ubuntu container-conda; do
     check_shell_block "${block}"
   done
   log_info "Installation documentation check passed."
+}
+
+function run_installation_docker() {
+  [[ "${ALLOW_INSTALL:-0}" == "1" ]] || die "Docker builds require ALLOW_INSTALL=1 on a disposable build runner."
+  check_shell_block docker-build-vllm-a3
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    log_info "DRY_RUN=1: validated Docker build commands without building an image."
+    return 0
+  fi
+  require_command docker
+  require_command git
+  VERL_REF="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+  export VERL_REF
+  export IMAGE="${IMAGE:-verl-doctest:${VERL_REF}}"
+  docker info >/dev/null
+  pushd "${REPO_ROOT}" >/dev/null
+  run_shell_block docker-build-vllm-a3
+  # Check the built image on CPU; importing NPU extensions needs host drivers.
+  docker run --rm --network none --entrypoint /bin/bash "${IMAGE}" -ec '
+    test "$(git -C /verl rev-parse HEAD)" = "$1"
+    python3 -c "from importlib.metadata import version; print({p: version(p) for p in (\"verl\", \"torch\", \"torch-npu\", \"vllm\", \"vllm-ascend\", \"triton-ascend\")})"
+  ' -- "${VERL_REF}"
+  popd >/dev/null
 }
 
 # These build tools prepare the disposable test container, not the host driver.
@@ -133,9 +158,10 @@ function cleanup_installation() {
   fi
   return "${exit_code}"
 }
-[[ $# -eq 1 && "${1:-}" =~ ^(check|source)$ ]] ||
-  die "Usage: $0 {check|source}"
+[[ $# -eq 1 && "${1:-}" =~ ^(check|source|docker)$ ]] ||
+  die "Usage: $0 {check|source|docker}"
 case "$1" in
   check) run_installation_check ;;
   source) run_installation_source ;;
+  docker) run_installation_docker ;;
 esac

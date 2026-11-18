@@ -129,6 +129,8 @@ def run_worker(tmp_path):
             "TEST_FILE",
             "VERL_REPOSITORY",
             "VERL_REVISION",
+            "VERL_REF",
+            "IMAGE",
         ):
             env.pop(key, None)
         env.update(DOCTEST_PYTHON=Path(sys.executable).as_posix(), **overrides)
@@ -164,7 +166,7 @@ def test_installation_check_entrypoint(run_worker):
     """The workflow's installation/check command must reach the RST helper."""
     result = run_worker("installation", "check")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Validated 12 documentation blocks" in result.stdout
+    assert "Validated 14 documentation blocks" in result.stdout
 
 
 @pytest.mark.parametrize("args", [(), ("quickstart", "a2"), ("installation", "pip"), ("quickstart", "typo")])
@@ -220,6 +222,25 @@ def test_matrix_follows_public_image_changes(helper, isolated_repo):
         assert entry["image"].endswith(":" + expected)
 
 
+def test_prebuilt_matrix_follows_document_and_case_selection(helper, monkeypatch):
+    """Image tests must track the guide and must not schedule SGLang source cases."""
+    monkeypatch.setattr(helper, "require_doctest_block", lambda name: "export IMAGE=registry.example/verl:test\n")
+    entries = helper.installation_matrix(method="prebuilt")["include"]
+    assert entries == [
+        {"case": case, "image": "registry.example/verl:test"} for case in ("fsdp2_vllm", "megatron_vllm")
+    ]
+    assert helper.installation_matrix("megatron_vllm", "prebuilt")["include"] == [entries[1]]
+    assert helper.installation_matrix("fsdp2_sglang", "prebuilt") == {"include": []}
+
+
+@pytest.mark.parametrize("block", ["export IMAGE=$(false)\n", "export IMAGE='unterminated\n", "docker pull image\n"])
+def test_prebuilt_matrix_rejects_invalid_image(helper, monkeypatch, block):
+    """Invalid image declarations must fail before allocating an NPU runner."""
+    monkeypatch.setattr(helper, "require_doctest_block", lambda name: block)
+    with pytest.raises(helper.DoctestError):
+        helper.installation_matrix(method="prebuilt")
+
+
 @pytest.mark.parametrize("case", CASES)
 def test_manual_matrix_selects_one_case(helper, case):
     """A manual selection must not allocate runners for unrelated combinations."""
@@ -245,12 +266,76 @@ def test_matrix_rejects_unusable_image(helper, monkeypatch, block):
         helper.installation_matrix()
 
 
-def test_named_container_block_rejects_duplicates(helper):
+@pytest.mark.parametrize("name", ["container-image-vllm", "docker-image-vllm-a3", "docker-build-vllm-a3"])
+def test_named_container_block_rejects_duplicates(helper, name):
     """A duplicate RST block name must not silently select one installation path."""
-    name = "container-image-vllm"
     block = f".. code-block:: bash\n   :name: {name}\n\n   export IMAGE=cann:example\n"
     with pytest.raises(helper.DoctestError, match="Ambiguous"):
         helper.extract_doctest_block(block + "\n" + block, name)
+
+
+def test_docker_requires_opt_in_and_supports_dry_run(run_worker):
+    """Read-only Docker checks must work without a daemon, and builds require opt-in."""
+    result = run_worker("installation", "docker")
+    assert result.returncode != 0
+    assert "ALLOW_INSTALL=1" in result.stderr
+    result = run_worker("installation", "docker", ALLOW_INSTALL="1", DRY_RUN="1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "without building an image" in result.stdout
+
+
+@pytest.mark.parametrize("failed_step, exit_code", [("none", 0), ("build", 17), ("run", 19)])
+def test_docker_build_uses_checkout_and_propagates_failures(
+    run_worker, isolated_repo, tmp_path, failed_step, exit_code
+):
+    """Run the documented build with a fake daemon; test revision, context and exit handling."""
+    subprocess.run(["git", "init", "-q", str(isolated_repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(isolated_repo),
+            "-c",
+            "user.name=Doctest",
+            "-c",
+            "user.email=doctest@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    revision = subprocess.check_output(["git", "-C", str(isolated_repo), "rev-parse", "HEAD"], text=True).strip()
+    binary_dir = tmp_path / "docker-bin"
+    binary_dir.mkdir()
+    trace = tmp_path / "docker-trace"
+    docker = binary_dir / "docker"
+    docker.write_text(
+        '#!/bin/bash\nprintf "%s:%s\\n" "${PWD##*/}" "$*" >> "$DOCTEST_TRACE"\n'
+        f'if [[ "$1" == "{failed_step}" ]]; then exit {exit_code}; fi\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    result = run_worker(
+        "installation",
+        "docker",
+        repo=isolated_repo,
+        ALLOW_INSTALL="1",
+        PATH=str(binary_dir) + os.pathsep + os.environ["PATH"],
+        DOCTEST_TRACE=trace.as_posix(),
+        IMAGE="verl-doctest:test",
+        VERL_REF="must-not-install-main",
+        PIP_INDEX_URL="https://mirror.example/simple",
+    )
+    assert result.returncode == exit_code, result.stdout + result.stderr
+    commands = trace.read_text(encoding="utf-8")
+    assert "checkout:build -f docker/ascend/Dockerfile.ascend_9.2.1_a3" in commands
+    assert f"--build-arg VERL_REF={revision}" in commands
+    assert "--build-arg PIP_INDEX_URL=https://mirror.example/simple -t verl-doctest:test ." in commands
+    assert ("checkout:run --rm --network none" in commands) is (failed_step != "build")
+    if failed_step != "build":
+        assert commands.rstrip().endswith(f"-- {revision}")
 
 
 def test_missing_documented_script_fails(run_worker, isolated_repo):

@@ -1,7 +1,7 @@
 昇腾镜像说明
 ===================================
 
-Last updated: 11/11/2026.
+Last updated: 11/18/2026.
 
 
 镜像获取与公开镜像地址
@@ -10,6 +10,15 @@ Last updated: 11/11/2026.
 昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3/950 镜像，基于 `Dockerfile <https://github.com/verl-project/verl/tree/main/docker/ascend>`_ 构建。
 
 最新构建镜像名格式：latest-{推理后端}-{适用产品信息}-{操作系统}-{其他字段}
+
+A3 vLLM 用户也可从国内 SWR 仓库拉取以下镜像。该标签会随发布更新，
+实际软件版本请在容器内通过 ``python3 -m pip list`` 查看。
+
+.. code-block:: bash
+   :name: docker-image-vllm-a3
+
+   export IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+   docker pull "$IMAGE"
 
 verl release版本镜像名格式：{verl release版本号}-{CANN版本}-{TorchNPU版本}[-{适用产品信息}-{操作系统}]-{Python版本}[-{推理后端}-{其他字段}]
 
@@ -148,6 +157,23 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 
 镜像构建命令示例
 --------------------
+
+A3 vLLM 镜像从 verl 仓库根目录构建，以便读取所需补丁。
+``VERL_REF`` 可指定要安装的 verl 分支、标签或提交，默认使用 ``main``；
+``PIP_INDEX_URL`` 可指定 Python 包下载源，``IMAGE`` 可指定构建后的镜像名。
+
+.. code-block:: bash
+   :name: docker-build-vllm-a3
+
+   docker build \
+       -f docker/ascend/Dockerfile.ascend_9.2.1_a3 \
+       --build-arg VERL_REF="${VERL_REF:-main}" \
+       --build-arg PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}" \
+       -t "${IMAGE:-verl-ascend:9.2.1-a3}" .
+
+无卡构建时使用 Dockerfile 中的 ``SOC_VERSION`` 指定 A3 编译目标。
+运行 Quick Start 时需要使用兼容的 NPU 主机并挂载设备及驱动。
+其他镜像的构建示例如下：
 
 .. code:: bash
 

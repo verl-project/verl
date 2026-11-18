@@ -4,8 +4,8 @@ These scripts extract existing commands from
 `docs/ascend_tutorial/zh/get_start/` and exercise verl's installation and GRPO
 Quick Start. Test-side selectors identify the installation code blocks and
 Quick Start table entries. The existing installation and Quick Start pages keep
-their layout; the new container guide uses standard RST code-block names for
-image selection and prerequisites. Missing or ambiguous commands fail the check.
+their layout; the container and Docker guides use standard RST code-block names
+for image selection, prerequisites and builds. Missing or ambiguous commands fail the check.
 
 Read-only checks require Bash and Python 3.10 or newer, without an NPU:
 
@@ -72,21 +72,52 @@ Set `KEEP_INSTALL_WORKDIR=1` to retain it, or provide an empty
 `INSTALL_WORKDIR` (which is always retained). Source installation also supports
 `ALLOW_INSTALL=1 DRY_RUN=1` to validate the plan without installing packages.
 
-The GitHub workflow runs CPU tool tests on relevant pull requests, followed by
-source installation and one GRPO step for **each of the four combinations** on
-the upstream project's A3 eight-device runner. Matrix jobs run one at a time;
-one failed case does not cancel the remaining cases. Fork pull requests follow the repository's workflow
+The GitHub workflow runs CPU tool tests on relevant pull requests and covers
+three installation routes in the upstream repository:
+
+| Route | Runner | Validation |
+| --- | --- | --- |
+| Build the documented A3 vLLM Dockerfile | GitHub ARM64 CPU runner | Build the image with the PR merge commit, start it without NPU devices, check its verl commit and installed package metadata |
+| Use the published A3 vLLM image | A3 eight-device runner | Keep image dependencies, install the PR's verl source with `--no-deps --no-build-isolation`, then run one GRPO step for FSDP2 and Megatron |
+| Install from source in a CANN container | A3 eight-device runner | Create the documented Conda environment, install dependencies and run one GRPO step for each of the four combinations |
+
+The first two routes read commands/images from the public
+[Docker guide](../../../docs/ascend_tutorial/zh/get_start/dockerfile_build_guidance.rst).
+Like vLLM-Ascend's documentation tests, published-image jobs use the workflow's
+`container.image`; they do not invoke Docker inside the NPU container. The build
+job does not push to a registry or require registry credentials. Its image stays
+on the build runner: **published-image Quick Start does not validate that newly
+built image on NPU**. Such validation needs a supported image transfer or publishing
+path between the build runner and the NPU runner.
+
+Build locally on a disposable ARM64 Docker host:
+
+```bash
+ALLOW_INSTALL=1 PIP_INDEX_URL=https://mirrors.huaweicloud.com/repository/pypi/simple \
+  bash tests/e2e/doctests/scripts/run_doctests.sh installation docker
+```
+
+This uses the current checkout's HEAD commit, runs the documented build command
+from the repository root, and retains the image locally. `ALLOW_INSTALL=1 DRY_RUN=1`
+validates the command without requiring Docker. CI retains the build log as an
+artifact and allows up to six hours for the full image build.
+
+Published-image tests run before source installation, with one NPU job at a time.
+One failed case does not cancel the remaining cases. Fork pull requests follow the repository's workflow
 approval policy; a maintainer must approve runs when GitHub requires it.
 New runs on the same ref cancel older runs. Workflows running in forks execute
 only the CPU checks.
 
-Manual runs can select one combination or `all`. Configured coverage does not
+Manual runs can select one combination or `all`; selecting a vLLM case also runs
+the Dockerfile build and that case's published-image test. SGLang selections only
+run source installation. Configured coverage does not
 mean that every combination has already passed; inspect each job's result.
 Preview the exact image/case matrix without installing anything:
 
 ```bash
 python3 tests/e2e/doctests/scripts/doctest_helper.py matrix
 python3 tests/e2e/doctests/scripts/doctest_helper.py matrix --case fsdp2_sglang
+python3 tests/e2e/doctests/scripts/doctest_helper.py matrix --method prebuilt
 ```
 
 GitHub requires
@@ -115,7 +146,8 @@ The installation jobs configure download sources for the A3 runner:
 - CANN container images already use Huawei Cloud SWR in China, as specified in
   the public container guide. A Docker Hub mirror does not replace this registry.
 
-These settings only change package download sources in the installation jobs.
+The Docker build also receives `PIP_INDEX_URL` as a build argument; it does not use
+Conda. Published-image Quick Start reuses dependencies and does not install them.
 Miniforge remains pinned to `26.9.4-1` and downloads from GitHub Releases; Git
 clones still use the URLs in the documented installers. Package mirrors do not
 resolve failures in those GitHub downloads or native operator builds.

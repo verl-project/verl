@@ -15,14 +15,14 @@ DOCTEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 function usage() {
   echo "Usage:"
   echo "  $0 quickstart {fsdp2_vllm|megatron_vllm|fsdp2_sglang|megatron_sglang}"
-  echo "  $0 installation {check|source}"
+  echo "  $0 installation {check|source|docker}"
 }
 [[ $# -eq 2 ]] || { usage; exit 1; }
 case "$1:$2" in
   quickstart:fsdp2_vllm|quickstart:megatron_vllm|quickstart:fsdp2_sglang|quickstart:megatron_sglang)
     worker=001-quickstart-test.sh
     ;;
-  installation:check|installation:source)
+  installation:check|installation:source|installation:docker)
     worker=002-installation-test.sh
     ;;
   *)
