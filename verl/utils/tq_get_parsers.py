@@ -15,6 +15,10 @@
 
 They run on the SimpleStorage units, which unpickle them by reference, so they must stay
 importable without heavy dependencies and must not modify the stored values they receive.
+
+Importing this module on a storage unit nonetheless runs ``verl/__init__.py``, which costs
+~30 s because it reaches ``transformers``. That lands on the first get that carries a parser,
+once per storage unit process; nothing here can avoid it short of living outside the package.
 """
 
 from typing import Any
