@@ -15,37 +15,27 @@
 
 They run on the SimpleStorage units, which unpickle them by reference, so they must stay
 importable without heavy dependencies and must not modify the stored values they receive.
-
-Importing this module on a storage unit nonetheless runs ``verl/__init__.py``, which costs
-~30 s because it reaches ``transformers``. That lands on the first get that carries a parser,
-once per storage unit process; nothing here can avoid it short of living outside the package.
+Importing one still runs ``verl/__init__.py`` and through it ``transformers``, ~30 s that a
+storage unit pays once, on the first get that carries a parser.
 """
 
 from typing import Any
 
 
 def zigzag_cp_rows(seq_len: int, cp_rank: int, cp_size: int, align_size: int) -> tuple[int, range, range]:
-    """The rows of one sequence a CP rank holds under the zigzag THD layout.
+    """Rows of one sequence a CP rank holds under the zigzag THD layout: its row count and two ranges.
 
-    Returns the rank's row count and the two source row ranges it takes, clipped to the real
-    tokens: ``preprocess_thd_engine`` pads every sequence to ``align_size`` and hands rank ``r``
-    one chunk from each end, so the rows past ``seq_len`` are padding and stay zero.
+    ``preprocess_thd_engine`` pads the sequence to ``align_size`` and hands rank ``r`` one chunk
+    from each end, so the returned ranges may reach past ``seq_len`` into padding.
     """
     padded = -(-seq_len // align_size) * align_size
     chunk = padded // cp_size
     half = chunk // 2
-    head = range(half * cp_rank, min(half * (cp_rank + 1), seq_len))
-    tail = range(padded - half * (cp_rank + 1), min(padded - half * cp_rank, seq_len))
-    return chunk, head, tail
-
-
-def _zeros_like_rows(tensor, rows: int):
-    """``rows`` zeroed rows shaped like ``tensor`` past its first dimension."""
-    if hasattr(tensor, "new_zeros"):
-        return tensor.new_zeros((rows, *tensor.shape[1:]))
-    import numpy as np
-
-    return np.zeros((rows, *tensor.shape[1:]), dtype=tensor.dtype)
+    return (
+        chunk,
+        range(half * cp_rank, half * (cp_rank + 1)),
+        range(padded - half * (cp_rank + 1), padded - half * cp_rank),
+    )
 
 
 def slice_for_rank(
@@ -60,45 +50,45 @@ def slice_for_rank(
     ``routed_experts`` of shape ``(seq_len, num_layers, topk)`` keeps only ``route_layers``, and,
     given ``cp_rows`` of ``(cp_rank, cp_size, align_size)``, only the rows of that CP rank.
     """
-    if (route_layers is not None or cp_rows is not None) and "routed_experts" in data:
-        # A pipeline stage owns consecutive layers, which a basic slice copies ~20x faster than
-        # the fancy indexing the general case needs.
-        span = (
-            (route_layers[0], route_layers[-1] + 1)
-            if route_layers and route_layers == list(range(route_layers[0], route_layers[-1] + 1))
-            else None
-        )
-        # R3 rollout can miss the route of a final generated token, which ``align_r3_router_replay_data``
-        # pads back on the worker; the CP split runs on that aligned length, so take it from the inputs.
-        if cp_rows is not None and "input_ids" not in data:
-            raise ValueError("slicing routed_experts per CP rank needs input_ids to give the aligned length")
-        lengths = [len(ids) for ids in data["input_ids"]] if cp_rows is not None else [0] * len(data["routed_experts"])
-        sliced = []
-        for routes, seq_len in zip(data["routed_experts"], lengths, strict=True):
-            if routes is None:
-                sliced.append(routes)
-                continue
-            if route_layers and max(route_layers) >= routes.shape[1]:
-                raise ValueError(f"route layers {route_layers} exceed routed_experts layers {routes.shape[1]}")
-            if route_layers is None:
-                part = routes
-            elif span is None:
-                part = routes[:, route_layers]
-            else:
-                # A basic slice is a view, which would ship the whole tensor, so copy it.
-                part = routes[:, span[0] : span[1]]
-            if cp_rows is None:
-                sliced.append(part.contiguous() if hasattr(part, "contiguous") else part.copy())
-                continue
-            if not 0 <= seq_len - routes.shape[0] <= 1:
-                raise ValueError(f"sample has {routes.shape[0]} route rows for {seq_len} tokens")
-            chunk, head, tail = zigzag_cp_rows(seq_len, *cp_rows)
-            # The rank's own rows, padded like the packing does so they concatenate into its buffer.
-            local = _zeros_like_rows(part, chunk)
-            head = range(head.start, min(head.stop, routes.shape[0]))
-            tail = range(tail.start, min(tail.stop, routes.shape[0]))
-            local[: len(head)] = part[head.start : head.stop]
-            local[chunk // 2 : chunk // 2 + len(tail)] = part[tail.start : tail.stop]
-            sliced.append(local)
-        data["routed_experts"] = sliced
+    if route_layers is None and cp_rows is None or "routed_experts" not in data:
+        return data
+
+    # A pipeline stage owns consecutive layers, which a basic slice copies ~20x faster than fancy indexing.
+    span = (
+        (route_layers[0], route_layers[-1] + 1)
+        if route_layers and route_layers == list(range(route_layers[0], route_layers[-1] + 1))
+        else None
+    )
+    # R3 rollout can miss the last token's route, so the padded length comes from input_ids instead.
+    if cp_rows is not None and "input_ids" not in data:
+        raise ValueError("slicing routed_experts per CP rank needs input_ids to give the aligned length")
+    lengths = [len(ids) for ids in data["input_ids"]] if cp_rows is not None else [0] * len(data["routed_experts"])
+
+    sliced = []
+    for routes, seq_len in zip(data["routed_experts"], lengths, strict=True):
+        if routes is None:
+            sliced.append(routes)
+            continue
+        if route_layers and max(route_layers) >= routes.shape[1]:
+            raise ValueError(f"route layers {route_layers} exceed routed_experts layers {routes.shape[1]}")
+        if route_layers is None:
+            part = routes
+        elif span is None:
+            part = routes[:, route_layers]
+        else:
+            part = routes[:, span[0] : span[1]]
+        if cp_rows is None:
+            # A basic slice is a view, which would ship the whole tensor.
+            sliced.append(part.contiguous())
+            continue
+        if not 0 <= seq_len - routes.shape[0] <= 1:
+            raise ValueError(f"sample has {routes.shape[0]} route rows for {seq_len} tokens")
+        chunk, head, tail = zigzag_cp_rows(seq_len, *cp_rows)
+        # The rank's own rows, zero-padded like the packing so they concatenate into its buffer.
+        local = part.new_zeros((chunk, *part.shape[1:]))
+        for offset, rows in ((0, head), (chunk // 2, tail)):
+            stop = min(rows.stop, routes.shape[0])
+            local[offset : offset + max(stop - rows.start, 0)] = part[rows.start : stop]
+        sliced.append(local)
+    data["routed_experts"] = sliced
     return data
