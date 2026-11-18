@@ -51,8 +51,6 @@ on:
   #     - "!recipe/**"
   #     # Entrypoints
   #     - .github/workflows/npu_unit_tests.yml
-  #     - scripts/ci/npu_pytest_suites.json
-  #     - scripts/ci/collect_npu_coverage.py
   #     - "tests/**test_*.py"
   #     # Ignore CPU tests
   #     - "!tests/*_on_cpu.py"

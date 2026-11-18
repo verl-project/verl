@@ -100,7 +100,6 @@ Each executed job retains a GitHub Actions artifact for 14 days, named
     manifest.json
     packages.txt
     source-workflow.yml
-    npu_pytest_suites.json
     coveragerc
     coverage/step-NN/coverage.<host>.<pid>.<suffix>
 

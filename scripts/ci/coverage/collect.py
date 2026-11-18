@@ -91,7 +91,6 @@ def initialize():
     }
     write_json(output / "manifest.json", manifest)
     shutil.copyfile(source_workflow, output / "source-workflow.yml")
-    shutil.copyfile(ROOT / "scripts/ci/npu_pytest_suites.json", output / "npu_pytest_suites.json")
     with (output / "packages.txt").open("w", encoding="utf-8") as stream:
         subprocess.run([sys.executable, "-m", "pip", "freeze"], stdout=stream, check=True)
     (output / "coveragerc").write_text(
