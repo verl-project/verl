@@ -102,7 +102,7 @@ jobs:
           }' /proc/meminfo
       - name: Running rmpad model tests on 8 NPUs
         run: |
-          pytest -s tests/models/test_transformer.py
+          PYTHONFAULTHANDLER=1 pytest -s tests/models/test_transformer.py
       - name: Running FSDP rmpad model tests on 8 NPUs
         run: |
           STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
@@ -170,4 +170,4 @@ jobs:
           PYTEST_DEBUG_TEMPROOT: /root/.cache/temp
         run: |
           ray stop --force
-          pytest tests/models/test_engine.py --override-ini tmp_path_retention_policy=none
+          PYTHONFAULTHANDLER=1 pytest tests/models/test_engine.py --override-ini tmp_path_retention_policy=none
