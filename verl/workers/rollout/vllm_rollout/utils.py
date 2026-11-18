@@ -576,9 +576,9 @@ def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional
     if num_prompt_logprobs is None:
         return
 
-    prompt_logprobs_ls, prompt_ids_ls = [], []
+    prompt_logprobs_ls, prompt_ids_ls, token_logprobs_ls = [], [], []
     # NOTE: logprob of first prompt token is None.
-    for logprobs_dict in output.prompt_logprobs[1:]:
+    for position, logprobs_dict in enumerate(output.prompt_logprobs[1:], start=1):
         if num_prompt_logprobs == 0:
             token_id_str = list(logprobs_dict.keys())[0]
             logprob = logprobs_dict[token_id_str].logprob
@@ -598,6 +598,7 @@ def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional
                 prompt_logprobs[rank - 1] = logprob
             prompt_logprobs_ls.append(prompt_logprobs)
             prompt_ids_ls.append(prompt_ids)
+            token_logprobs_ls.append(logprobs_dict[output.prompt_token_ids[position]].logprob)
 
     # NOTE: pad a dummy prompt logprob for last prompt token.
     prompt_logprobs_ls.append([0.0] * max(num_prompt_logprobs, 1))
@@ -605,3 +606,7 @@ def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional
 
     result_dict["prompt_ids"] = prompt_ids_ls
     result_dict["prompt_logprobs"] = prompt_logprobs_ls
+    if num_prompt_logprobs > 0:
+        # Log-prob of the actual next token
+        token_logprobs_ls.append(0.0)
+        result_dict["prompt_token_logprobs"] = token_logprobs_ls

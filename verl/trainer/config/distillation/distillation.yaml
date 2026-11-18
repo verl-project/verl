@@ -44,6 +44,14 @@ distillation_loss:
   # rounds to one in finite precision.
   tail_mass_eps: 1.0e-6
 
+  # Token ids that all mean "end of turn" (e.g. [151643, 151645] for a Qwen3 base student and a
+  # Qwen3 post-trained teacher). Rollouts stop on any of them and a sampled stop is scored as one
+  # action by both models. Requires an estimator loss mode (k1, k3, ...). null disables.
+  semantic_eos_token_ids: null
+
+  # Teacher prompt log-probs requested per position to find the other terminal tokens.
+  semantic_eos_teacher_topk: 20
+
   # Whether to incorporate distillation loss as a reward.
   use_policy_gradient: false
 

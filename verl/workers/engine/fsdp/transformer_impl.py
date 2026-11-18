@@ -62,7 +62,7 @@ from verl.utils.fsdp_utils import (
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.seqlen_balancing import ceildiv
-from verl.utils.torch_functional import logprobs_from_logits
+from verl.utils.torch_functional import logprobs_from_logits, semantic_eos_log_probs
 from verl.utils.ulysses import (
     gather_outputs_and_unpad,
     get_ulysses_sequence_parallel_group,
@@ -1298,7 +1298,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
         distillation_only = tu.get_non_tensor_data(data=micro_batch, key="distillation_only", default=False)
         score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
         use_fused_topk = use_fused_kernels and (distillation_use_topk or score_centering)
+        semantic_eos_token_ids = tu.get_non_tensor_data(data=micro_batch, key="semantic_eos_token_ids", default=None)
 
+        if semantic_eos_token_ids and (use_fused_kernels or not use_remove_padding):
+            raise NotImplementedError("semantic_eos_token_ids requires use_remove_padding=True without fused kernels.")
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
                 "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
@@ -1396,6 +1399,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         batch_invariant=batch_invariant,
                         temperature=None if temperature_is_one else temperature_rmpad,
                     )
+                    if semantic_eos_token_ids:
+                        log_probs = semantic_eos_log_probs(
+                            logits_rmpad, input_ids_rmpad_rolled, log_probs, semantic_eos_token_ids
+                        )
 
             # gather across the ulysses sp group and drop the packed-sequence padding
             pad_size = output_args["pad_size"]

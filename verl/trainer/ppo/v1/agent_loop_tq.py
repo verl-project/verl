@@ -70,6 +70,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
         )
+        self._add_semantic_eos_stop_token_ids(sampling_params)
         # the trainer never consumes the sampler head on validation rollouts
         if config.topk_log_probs and not validate:
             sampling_params["topk_log_probs"] = config.topk_log_probs

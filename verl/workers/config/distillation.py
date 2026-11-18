@@ -48,6 +48,16 @@ class DistillationLossConfig(BaseConfig):
     tail_mass_eps (float):
         Minimum student probability mass assigned to the aggregate tail bucket for
         ``forward_kl_topk_tail`` numerical stability.
+    semantic_eos_token_ids (list[int], optional):
+        Token ids that all mean "end of turn", e.g. ``[151643, 151645]`` for a Qwen3 base student
+        distilled from a Qwen3 post-trained teacher. When set, rollouts stop on any of them and a
+        sampled stop is scored as one action by both models (log-sum-exp over the set), so the
+        teacher's preference for a different terminal token no longer penalizes stopping
+        (https://arxiv.org/abs/2609.20511). Requires a single-sample estimator loss mode.
+    semantic_eos_teacher_topk (int):
+        Number of teacher prompt log-probs requested per position to find the other terminal
+        tokens; we need this because teacher's terminal token is not in student's respones
+        terminal tokens outside the teacher top-k are treated as zero mass.
     use_policy_gradient (bool):
         Whether to incorporate distillation loss as a reward, as done
         by https://thinkingmachines.ai/blog/on-policy-distillation/. Recommended to use loss_mode=k1.
@@ -72,6 +82,8 @@ class DistillationLossConfig(BaseConfig):
     loss_max_clamp: Optional[float] = 10.0
     log_prob_min_clamp: Optional[float] = -10.0
     tail_mass_eps: float = 1e-6
+    semantic_eos_token_ids: Optional[list[int]] = None
+    semantic_eos_teacher_topk: int = 20
 
     # Chunked top-K log-probs (opt-in, avoids [B, T, V] log_softmax buffer
     # at long context). Consumed by teacher-top-k forward KL loss modes.
@@ -135,6 +147,26 @@ class DistillationLossConfig(BaseConfig):
                 )
             if not 0.0 < self.tail_mass_eps < 1.0:
                 raise ValueError(f"tail_mass_eps must be in (0, 1), but got {self.tail_mass_eps}.")
+
+        if self.semantic_eos_token_ids is not None:
+            ids = [int(i) for i in self.semantic_eos_token_ids]
+            if len(ids) < 2 or len(set(ids)) != len(ids):
+                raise ValueError(f"semantic_eos_token_ids needs >= 2 distinct ids, got {self.semantic_eos_token_ids}.")
+            if not self.loss_settings.use_estimator:
+                raise ValueError(
+                    f"semantic_eos_token_ids requires a single-sample estimator loss mode, got {self.loss_mode}."
+                )
+            if self.semantic_eos_teacher_topk < 1:
+                raise ValueError(f"semantic_eos_teacher_topk must be >= 1, got {self.semantic_eos_teacher_topk}.")
+
+    @property
+    def teacher_prompt_logprobs(self) -> int:
+        """Number of top-k prompt log-probs the teacher returns per position (0: sampled token only)."""
+        if self.loss_settings.use_topk:
+            return self.topk
+        if self.semantic_eos_token_ids:
+            return self.semantic_eos_teacher_topk
+        return 0
 
 
 @dataclass
@@ -286,9 +318,10 @@ class DistillationConfig(BaseConfig):
         self.teacher_models = self._resolve_teacher_models()
         teacher_world_size_sum = 0
         for teacher_model in self.teacher_models.values():
+            distillation_loss = self.distillation_loss
             teacher_model.validate_and_prepare_for_distillation(
-                use_topk=self.distillation_loss.loss_settings.use_topk,
-                topk=self.distillation_loss.topk,
+                use_topk=distillation_loss.loss_settings.use_topk or bool(distillation_loss.semantic_eos_token_ids),
+                topk=distillation_loss.teacher_prompt_logprobs,
             )
             teacher_world_size_sum += teacher_model.world_size
         total_pool_size = self.n_gpus_per_node * self.nnodes

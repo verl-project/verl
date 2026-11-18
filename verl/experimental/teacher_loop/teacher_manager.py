@@ -48,13 +48,45 @@ def _get_teacher_sampling_params(
             "on prompt_logprobs (forward pass only). Using temperature=1.0.",
             teacher_model_config.inference.temperature,
         )
-    num_logprobs = distillation_loss_config.topk if distillation_loss_config.loss_settings.use_topk else 0
     return {
         "max_tokens": 1,
         "temperature": 1.0,
-        "prompt_logprobs": num_logprobs,
+        "prompt_logprobs": distillation_loss_config.teacher_prompt_logprobs,
         "detokenize": False,
     }
+
+
+def merge_semantic_eos_logprobs(
+    next_token_ids: torch.Tensor,
+    token_logprobs: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_logprobs: torch.Tensor,
+    semantic_eos_token_ids: list[int],
+) -> torch.Tensor:
+    """Score a sampled terminal token as the teacher's whole terminal class.
+
+    At a position where the student sampled ``<|endoftext|>``, the teacher's 0.00001 on it
+    and 0.99 on ``<|im_end|>`` merge to ``log(0.00001 + 0.99) ≈ log 0.99``.
+
+    Args:
+        next_token_ids: (S,) token scored at each position (the sequence shifted by one).
+        token_logprobs: (S,) teacher log-prob of ``next_token_ids``.
+        topk_ids: (S, K) teacher top-k token ids for each position.
+        topk_logprobs: (S, K) teacher top-k log-probs for each position.
+        semantic_eos_token_ids: Token ids that all mean "end of turn".
+
+    Returns:
+        (S,) log-probs; where the scored token is terminal, the log-sum-exp over the
+        terminal tokens, counting the sampled one exactly and the others when they are
+        in the top-k.
+    """
+
+    eos_ids = torch.tensor(semantic_eos_token_ids, dtype=topk_ids.dtype)
+    is_eos = torch.isin(next_token_ids, eos_ids)
+    other_eos = torch.isin(topk_ids, eos_ids) & (topk_ids != next_token_ids.unsqueeze(-1))
+    other_logprobs = topk_logprobs.masked_fill(~other_eos, float("-inf"))
+    merged = torch.logsumexp(torch.cat([token_logprobs.unsqueeze(-1), other_logprobs], dim=-1), dim=-1)
+    return torch.where(is_eos, merged, token_logprobs)
 
 
 def _pad_teacher_outputs(
@@ -141,4 +173,16 @@ class AsyncTeacherLLMServerManager:
         teacher_ids = torch.tensor(teacher_output.extra_fields["prompt_ids"], dtype=torch.int32)
         teacher_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
         assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(sequence_ids)
+        if self.distillation_loss_config.semantic_eos_token_ids:
+            # (S, K) top-k -> (S, 1) sampled-token scores with terminal tokens merged.
+            next_token_ids = torch.tensor(sequence_ids[1:] + [0], dtype=torch.int32)
+            token_logprobs = torch.tensor(teacher_output.extra_fields["prompt_token_logprobs"])
+            teacher_logprobs = merge_semantic_eos_logprobs(
+                next_token_ids,
+                token_logprobs,
+                teacher_ids,
+                teacher_logprobs,
+                self.distillation_loss_config.semantic_eos_token_ids,
+            ).unsqueeze(-1)
+            teacher_ids = next_token_ids.unsqueeze(-1)
         return teacher_ids, teacher_logprobs

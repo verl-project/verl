@@ -544,6 +544,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             rr_mode = "disabled"
         self.enable_routing_replay = rr_mode != "disabled"
 
+        self.semantic_eos_token_ids = None
+        if self.distillation_enabled:
+            semantic_eos_token_ids = self.distillation_config.distillation_loss.get("semantic_eos_token_ids")
+            if semantic_eos_token_ids:
+                if actor_strategy not in ("fsdp", "fsdp2"):
+                    raise NotImplementedError(
+                        f"distillation_loss.semantic_eos_token_ids is only implemented for the FSDP engine, "
+                        f"got actor strategy {actor_strategy!r}."
+                    )
+                self.semantic_eos_token_ids = [int(i) for i in semantic_eos_token_ids]
+
         # Keep the raw (un-dataclassed) role profiler config so the inner actor
         # TrainingWorker can build a matching DistProfiler in init_model. Its stages then
         # annotate themselves in the (process-global) torch profiler even though start/stop
@@ -752,6 +763,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
+        self._assign_semantic_eos_token_ids(data)
         output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
@@ -759,6 +771,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
+        self._assign_semantic_eos_token_ids(data)
         output = self.actor.infer_batch(data)
 
         return output.cpu() if output is not None else None
@@ -769,8 +782,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="actor_update", scheduled=True)
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
+        self._assign_semantic_eos_token_ids(data)
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
+
+    def _assign_semantic_eos_token_ids(self, data: TensorDict) -> None:
+        if self.semantic_eos_token_ids:
+            tu.assign_non_tensor(data, semantic_eos_token_ids=NonTensorData(self.semantic_eos_token_ids))
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):

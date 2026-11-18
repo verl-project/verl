@@ -199,6 +199,7 @@ class TinkerActorRolloutRefWorker(ActorRolloutRefWorker):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"), blocking=False)
     def forward_backward(self, data: TensorDict) -> TensorDict:
         assert "actor" in self.role, "forward_backward only support actor role"
+        self._assign_semantic_eos_token_ids(data)
         output = self.actor.forward_backward(data=data)
         return output.cpu() if output is not None else None
 

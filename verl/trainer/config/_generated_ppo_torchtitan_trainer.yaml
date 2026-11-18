@@ -847,6 +847,8 @@ distillation:
     loss_max_clamp: null
     log_prob_min_clamp: null
     tail_mass_eps: 1.0e-06
+    semantic_eos_token_ids: null
+    semantic_eos_teacher_topk: 20
     use_policy_gradient: false
     policy_loss_mode: vanilla
     clip_ratio: 0.2

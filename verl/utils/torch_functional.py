@@ -127,6 +127,30 @@ def logprobs_from_logits(logits, labels, inplace_backward=True, batch_invariant=
     return output
 
 
+def semantic_eos_log_probs(logits, labels, log_probs, eos_token_ids):
+    """Replace the log-prob of each terminal label with that of the whole terminal class.
+
+    Treats functionally equivalent end-of-turn tokens as one stop action
+    (https://arxiv.org/abs/2609.20511). Only rows whose label is terminal are re-normalized.
+
+    Args:
+        logits (Tensor): (N, vocab_size) logits.
+        labels (LongTensor): (N,) labels.
+        log_probs (Tensor): (N,) log-probs of ``labels``.
+        eos_token_ids (list[int]): Token ids that all mean "end of turn".
+
+    Returns:
+        Tensor: (N,) log-probs, ``logsumexp(logits[eos]) - logsumexp(logits)`` at terminal labels.
+    """
+    eos_ids = torch.tensor(eos_token_ids, device=labels.device, dtype=labels.dtype)
+    rows = torch.isin(labels, eos_ids).nonzero(as_tuple=True)[0]
+    if rows.numel() == 0:
+        return log_probs
+    eos_logits = logits[rows].float()
+    eos_log_probs = torch.logsumexp(eos_logits[:, eos_ids], dim=-1) - torch.logsumexp(eos_logits, dim=-1)
+    return log_probs.index_put((rows,), eos_log_probs.to(log_probs.dtype))
+
+
 def logprobs_from_logits_flash_attn(
     logits: torch.Tensor, labels: torch.Tensor, inplace_backward: bool = True
 ) -> torch.Tensor:
