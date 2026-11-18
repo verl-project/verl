@@ -1134,20 +1134,28 @@ def fsdp1_sharded_load_from_cpu(model: torch.nn.Module, cpu_sharded_state: dict[
     dist.barrier()
 
 
+def _reshard_fsdp2_for_snapshot(model: torch.nn.Module) -> None:
+    """Expose local shards after inference with ``reshard_after_forward=False``."""
+    for module in model.modules():
+        if fsdp_version(module) == 2:
+            module.reshard()
+
+
 def fsdp2_sharded_save_to_cpu(
     model: torch.nn.Module,
 ) -> tuple[dict[str, tuple[torch.Tensor, DTensorSpec]], DTensorSpec]:
     """
-    Sharded Save: Each process only saves the local DTensor shard from its own GPU to CPU memory.
+    Reshard the model and copy each process's local DTensor shards to CPU memory.
 
     Args:
-        model: FSDP2-wrapped model whose parameters are of DTensor type.
+        model: FSDP2-wrapped model, including modules retaining full parameters after inference.
 
     Returns:
         cpu_sharded_state: Dictionary of CPU shards for the current process.
                           Key = parameter name, Value = (CPU shard tensor, original DTensorSpec)
         global_spec: DTensorSpec of the first parameter (used to verify global rules during loading)
     """
+    _reshard_fsdp2_for_snapshot(model)
     cpu_sharded_state = {}
     global_spec = None  # Record global sharding rules (all parameters follow the same spec)
 
@@ -1182,8 +1190,7 @@ def fsdp2_sharded_load_from_cpu(
     target_spec: DTensorSpec,
 ) -> None:
     """
-    Sharded Load: Each process only loads the CPU shard it is responsible for to the GPU,
-                  keeping sharding rules unchanged.
+    Reshard the model and restore each process's CPU shards, keeping sharding rules unchanged.
 
     Args:
         model: FSDP2 model to be restored (must have the same structure as when saved)
@@ -1191,6 +1198,7 @@ def fsdp2_sharded_load_from_cpu(
                           (from fsdp2_sharded_save_to_cpu)
         target_spec: Global DTensorSpec from saving (used to verify sharding rule consistency)
     """
+    _reshard_fsdp2_for_snapshot(model)
     # Verify device_mesh consistency (core: ensure loaded shards map to original GPUs)
     current_device_mesh = None
     for param in model.parameters():
