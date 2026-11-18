@@ -17,6 +17,7 @@ from .agent_loop import (
     AgentLoopManager,
     AgentLoopOutput,
     AgentLoopWorker,
+    RolloutContext,
     get_trajectory_info,
 )
 from .single_turn_agent_loop import SingleTurnAgentLoop
@@ -29,5 +30,6 @@ __all__ = [
     "AgentLoopManager",
     "AgentLoopWorker",
     "AgentLoopOutput",
+    "RolloutContext",
     "get_trajectory_info",
 ]
