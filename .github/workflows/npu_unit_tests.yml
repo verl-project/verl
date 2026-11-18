@@ -86,6 +86,11 @@ jobs:
       UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      VERL_HCCL_DIAGNOSTICS: "1"
+      HYDRA_FULL_ERROR: "1"
+      RAY_DEDUP_LOGS: "0"
+      PYTHONUNBUFFERED: "1"
+      ASCEND_PROCESS_LOG_PATH: ${{ github.workspace }}/ci-ascend-diagnostics/ascend
     steps:
       - name: Check npu and CANN info
         run: |
@@ -101,8 +106,14 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
+      - name: Capture Ascend baseline
+        continue-on-error: true
+        env:
+          RUNNER_NAME: ${{ runner.name }}
+        run: bash .github/scripts/collect_ascend_diagnostics.sh before
       - name: Install the current repository
         run: |
+          uv pip install --no-deps -e .
           # Match the GPU CI ModelOpt version and keep the shared quantization tests unchanged.
           uv pip install mlflow pytest-asyncio "nvidia-modelopt==0.44.0"
           # Match GPU CI's PEFT for GPT-OSS target_parameters LoRA coverage.
@@ -122,7 +133,7 @@ jobs:
         env:
           VERL_TEST_N_GPUS_PER_NODE: "16"
         run: |
-          pytest -s -x \
+          bash .github/scripts/collect_ascend_diagnostics.sh run pytest -s -x \
             --ignore-glob="*test_special_*.py" \
             --ignore-glob="*on_cpu.py" \
             --ignore-glob="*test_vllm*" \
@@ -161,3 +172,8 @@ jobs:
             tests/checkpoint_engine/test_global_steps_on_cpu.py \
             tests/checkpoint_engine/test_block_placement.py \
             tests/checkpoint_engine/test_sharded_delta.py
+      - name: Capture Ascend final diagnostics
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 10
+        run: bash .github/scripts/collect_ascend_diagnostics.sh after
