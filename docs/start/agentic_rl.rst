@@ -82,6 +82,16 @@ The Tool Agent Loop has an additional requirement: adding an "agent_name" field 
 Usage Example
 ~~~~~~~~~~~~~
 
+.. note::
+
+   The GSM8K tool used by this example (``verl.tools.gsm8k_tool``), its tool
+   config and the training script below were removed in
+   `#6126 <https://github.com/verl-project/verl/pull/6126>`__ and
+   `#6302 <https://github.com/verl-project/verl/pull/6302>`__, so the training
+   command does not run on the current ``main`` branch. To run it, check out
+   commit ``9cd3542084900ab8aa07b84469ce919f9588361c``, the last commit that
+   still contains these files.
+
 .. code-block:: bash
 
     # install mlflow to view toolcall and llm trace
@@ -91,7 +101,7 @@ Usage Example
     python examples/data_preprocess/gsm8k_tool_agent_loop.py
 
     # Start training with tool calls and enabled mlflow based trace helping to debug the rollout details
-    bash examples/sglang_multiturn/run_qwen2_5_3b_gsm8k_tool_agent_mlflow_fsdp.sh
+    bash examples/sglang_multiturn/run_qwen2.5-3b_gsm8k_tool_agent_mlflow.sh
 
     # When training is done, start a mlflow server to view trace
     mlflow ui -h 0.0.0.0 -p 5000 --backend-store-uri sqlite:////tmp/mlruns.db
