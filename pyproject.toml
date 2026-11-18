@@ -228,7 +228,7 @@ ci = [
 # requires-dist in [[tool.uv.dependency-metadata]] below): its real metadata pins
 # datasets<=2.21.0, which would downgrade the shared datasets dependency.
 # This pinned VeOmni revision uses the project-wide transformers==5.16.1.
-veomni-sft = ["veomni==0.1.12"]
+veomni-sft = ["veomni==0.1.12", "tilelang"]
 
 # TorchTitan engine add-on, layered on a cu130 backend (fsdp / megatron) like
 # veomni-sft. torchtitan is installed deps-free (empty requires-dist in

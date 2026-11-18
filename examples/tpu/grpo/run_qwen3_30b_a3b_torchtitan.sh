@@ -166,7 +166,6 @@ case "${VERIFY_PARITY}" in
 esac
 
 python3 -m verl.trainer.main_ppo \
-    trainer.use_v1=True \
     trainer.v1.trainer_mode=separate_async \
     trainer.v1.separate_async.num_warmup_batches="${NUM_WARMUP_BATCHES}" \
     trainer.v1.separate_async.parameter_sync_step=1 \

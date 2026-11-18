@@ -796,6 +796,17 @@ class SGLangReplica(RolloutReplica):
         )
         self.server_class = ray.remote(SGLangHttpServer)
 
+    def _get_server_env_vars(self, node_ids: list[str]) -> dict[str, str]:
+        """Environment variables of this replica's server actors (one per node, ``node_ids`` in node-rank order).
+
+        Platforms whose engine needs per-replica settings (e.g. the device topology of the replica's hosts) can
+        override this instead of ``launch_servers``.
+        """
+        return {
+            **{var: "1" for var in get_platform().ray_noset_envvars()},
+            **get_platform().rollout_env_vars(),
+        }
+
     async def launch_servers(self):
         """Launch http server in each node."""
         assert len(self.workers) == self.world_size, (
@@ -806,7 +817,9 @@ class SGLangReplica(RolloutReplica):
         worker_infos = await asyncio.gather(
             *[
                 worker.__ray_call__.remote(
-                    lambda self: (ray.get_runtime_context().get_node_id(), os.environ[visible_devices_keyword])
+                    # A worker that holds no accelerator (e.g. on TPU, where the engine opens the devices itself)
+                    # has no visible-devices variable; it contributes no devices.
+                    lambda self: (ray.get_runtime_context().get_node_id(), os.environ.get(visible_devices_keyword, ""))
                 )
                 for worker in self.workers
             ]
@@ -820,6 +833,7 @@ class SGLangReplica(RolloutReplica):
             logger.warning(f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword} is set True!")
             base_gpu_id = (0 + self.replica_rank * replica_world_size) % self.gpus_per_node
         # create server actor in each node with node affinity and cuda visible devices
+        env_vars = self._get_server_env_vars(worker_node_ids[:: self.gpus_per_replica_node])
         for node_rank in range(self.nnodes):
             workers = self.workers[
                 node_rank * self.gpus_per_replica_node : (node_rank + 1) * self.gpus_per_replica_node
@@ -853,12 +867,7 @@ class SGLangReplica(RolloutReplica):
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={
-                    "env_vars": {
-                        **{var: "1" for var in get_platform().ray_noset_envvars()},
-                        **get_platform().rollout_env_vars(),
-                    }
-                },
+                runtime_env={"env_vars": env_vars},
                 name=name,
                 max_concurrency=self.config.ray_actor_max_concurrency,
             ).remote(
