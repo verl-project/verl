@@ -147,6 +147,59 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     return output
 
 
+def compute_response_logprob_index(data: TensorDict) -> torch.Tensor | None:
+    """Build flat packed indices of response positions ``[seq_offset - resp_len - 1, seq_offset - 1)``.
+
+    Matches the exact per-sample slice consumed by :func:`no_padding_2_padding` and :func:`response_from_nested`.
+    Returns ``None`` when ``data`` lacks the required sequence metadata or when any prompt has zero length.
+    """
+    if "input_ids" not in data or "prompts" not in data or "responses" not in data:
+        return None
+
+    input_ids = data["input_ids"]
+    if not input_ids.is_nested:
+        return None
+
+    values = input_ids.values()
+    device = values.device
+    prompt_ids = data["prompts"]
+    response_ids = data["responses"]
+
+    if prompt_ids.is_nested and response_ids.is_nested:
+        prompt_lens = prompt_ids.offsets().diff().to(device=device, dtype=torch.long)
+        response_lens = response_ids.offsets().diff().to(device=device, dtype=torch.long)
+    elif not prompt_ids.is_nested and not response_ids.is_nested:
+        if "attention_mask" not in data or data["attention_mask"].is_nested:
+            return None
+        attention_mask = data["attention_mask"]
+        prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1).to(device=device, dtype=torch.long)
+        response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1).to(device=device, dtype=torch.long)
+    else:
+        return None
+
+    if prompt_lens.numel() == 0:
+        return None
+
+    sequence_offsets = (prompt_lens + response_lens).cumsum(dim=0)
+    resp_offsets = F.pad(response_lens.cumsum(dim=0), (1, 0))
+    min_prompt_len, min_resp_len, total_seq, total_resp = torch.stack(
+        [prompt_lens.min(), response_lens.min(), sequence_offsets[-1], resp_offsets[-1]]
+    ).tolist()
+    if min_prompt_len <= 0 or min_resp_len < 0 or total_seq != values.shape[0]:
+        return None
+    if total_resp == 0:
+        return torch.empty(0, device=device, dtype=torch.long)
+
+    starts = sequence_offsets - response_lens - 1
+    group_ids = torch.repeat_interleave(
+        torch.arange(response_lens.numel(), device=device, dtype=torch.long),
+        response_lens,
+        output_size=total_resp,
+    )
+    intra_offsets = torch.arange(total_resp, device=device, dtype=torch.long) - resp_offsets[group_ids]
+    return starts[group_ids] + intra_offsets
+
+
 def build_attention_mask_from_nested(input_ids: torch.Tensor, max_seq_len: int | None = None) -> torch.Tensor:
     """Build a padded full-sequence attention mask from nested input ids."""
     assert input_ids.is_nested, "input_ids must be a nested tensor"

@@ -589,8 +589,10 @@ def forward_with_torch_backend(
     topk_labels: Optional[torch.LongTensor] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     cu_seqlens_cpu: Optional[torch.LongTensor] = None,
+    logprob_index: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3_5CausalLMOutputForPPO":
+    from verl.models.transformers.dense_common import _forward_fused_ppo_torch
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
     if cu_seqlens is not None:
@@ -644,11 +646,13 @@ def forward_with_torch_backend(
             hidden_states=outputs.hidden_states,
         )
 
-    log_probs, entropy = fused_linear_for_ppo.forward(
+    log_probs, entropy = _forward_fused_ppo_torch(
+        fused_linear_for_ppo,
         hidden_states=hidden_states,
         vocab_weights=vocab_weights,
-        input_ids=rolled_labels,
+        rolled_labels=rolled_labels,
         temperature=temperature,
+        logprob_index=logprob_index,
     )
     return Qwen3_5CausalLMOutputForPPO(
         log_probs=log_probs,
@@ -666,8 +670,10 @@ def forward_with_triton_backend(
     topk_labels: Optional[torch.LongTensor] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     cu_seqlens_cpu: Optional[torch.LongTensor] = None,
+    logprob_index: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3_5CausalLMOutputForPPO":
+    from verl.models.transformers.dense_common import _forward_fused_ppo_triton
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
     if cu_seqlens is not None:
@@ -698,21 +704,32 @@ def forward_with_triton_backend(
     if isinstance(vocab_weights, DTensor):
         vocab_weights = vocab_weights.full_tensor()
 
-    kernel_labels = rolled_labels
+    impl_backend = getattr(self, "_verl_fused_kernels_backend", "triton")
     if topk_labels is not None:
         if topk_labels.shape[:-1] != rolled_labels.shape:
             raise ValueError("topk_labels must have rolled_labels.shape as its leading dimensions")
         kernel_labels = torch.cat((rolled_labels.unsqueeze(-1), topk_labels), dim=-1)
-    all_log_probs, entropy = linear_cross_entropy(
-        hidden_states,
-        vocab_weights,
-        kernel_labels,
-        temperature,
-        "none",
-        impl_backend=getattr(self, "_verl_fused_kernels_backend", "triton"),
-    )
-    log_probs = all_log_probs[..., 0] if topk_labels is not None else all_log_probs
-    topk_log_probs = all_log_probs[..., 1:] if topk_labels is not None else None
+        all_log_probs, entropy = linear_cross_entropy(
+            hidden_states,
+            vocab_weights,
+            kernel_labels,
+            temperature,
+            "none",
+            impl_backend=impl_backend,
+        )
+        log_probs = all_log_probs[..., 0]
+        topk_log_probs = all_log_probs[..., 1:]
+    else:
+        log_probs, entropy = _forward_fused_ppo_triton(
+            linear_cross_entropy,
+            hidden_states,
+            vocab_weights,
+            rolled_labels,
+            temperature,
+            impl_backend,
+            logprob_index=logprob_index,
+        )
+        topk_log_probs = None
     return Qwen3_5CausalLMOutputForPPO(
         log_probs=log_probs,
         topk_log_probs=topk_log_probs,
