@@ -72,6 +72,15 @@ def test_save_rejects_tokenizer_only_output(monkeypatch, tmp_path):
 
 
 def test_save_accepts_actual_hf_model_output(monkeypatch, tmp_path):
+    # zai-org/GLM-5.3-Flash's published generation_config.json sets top_p without do_sample, so
+    # GenerationConfig.save_pretrained refuses it, and model.save_pretrained raises for it before writing the weights.
+    generation_config = {
+        "_from_model_config": True,
+        "eos_token_id": [154820, 154827, 154829],
+        "pad_token_id": 154820,
+        "temperature": 1.0,
+        "top_p": 0.95,
+    }
     model_config = Qwen2Config(
         vocab_size=32,
         hidden_size=16,
@@ -81,21 +90,28 @@ def test_save_accepts_actual_hf_model_output(monkeypatch, tmp_path):
         num_key_value_heads=2,
     )
     source_model = AutoModelForCausalLM.from_config(model_config)
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    source_dir.mkdir()
+    target_dir.mkdir()
+    (source_dir / "generation_config.json").write_text(json.dumps(generation_config), encoding="utf-8")
 
     merger = _TestModelMerger.__new__(_TestModelMerger)
-    merger.config = SimpleNamespace(target_dir=tmp_path, trust_remote_code=False, local_dir=None)
-    merger.hf_model_config_path = tmp_path
+    merger.config = SimpleNamespace(target_dir=target_dir, trust_remote_code=False, local_dir=None)
+    merger.hf_model_config_path = source_dir
     merger.model_config = model_config
 
     monkeypatch.setattr(merger, "get_transformers_auto_model_class", lambda: AutoModelForCausalLM)
-    monkeypatch.setattr(merger, "patch_model_generation_config", lambda model: model)
     monkeypatch.setattr(base_model_merger, "hf_processor", lambda *args, **kwargs: None)
     monkeypatch.setattr(base_model_merger, "hf_tokenizer", lambda *args, **kwargs: None)
 
     merger.save_hf_model_and_tokenizer(source_model.state_dict())
 
-    assert (tmp_path / "config.json").is_file()
-    assert (tmp_path / "model.safetensors").is_file()
+    assert (target_dir / "config.json").is_file()
+    assert (target_dir / "model.safetensors").is_file()
+    saved = json.loads((target_dir / "generation_config.json").read_text(encoding="utf-8"))
+    del saved["transformers_version"]
+    assert saved == generation_config
 
 
 def test_save_generation_config_preserves_pretrained_values(tmp_path):
