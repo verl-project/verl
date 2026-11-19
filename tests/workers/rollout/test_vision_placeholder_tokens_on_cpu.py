@@ -29,8 +29,8 @@ import torch
 # cpu_unit_tests skips this module; vllm.yml runs it in the vllm venv.
 pytest.importorskip("vllm")
 
-from verl.workers.rollout.utils import get_vision_placeholder_token_ids
-from verl.workers.rollout.vllm_rollout.utils import monkey_patch_compute_logits
+from verl.workers.rollout.utils import apply_vision_placeholder_logit_bias, get_vision_placeholder_token_ids
+from verl.workers.rollout.vllm_rollout.utils import monkey_patch_compute_logits, monkey_patch_sampler_banned_tokens
 
 TOKENS = {151655: "<|image_pad|>", 151656: "<|video_pad|>"}
 
@@ -107,3 +107,43 @@ class TestMonkeyPatchComputeLogits:
         logits = model.compute_logits()
 
         assert torch.equal(logits[:, :VOCAB_SIZE], UNMASKED)
+
+    def test_skips_modules_without_compute_logits(self):
+        assert monkey_patch_compute_logits(SimpleNamespace(), VOCAB_SIZE, banned_token_ids=[2]) is False
+
+
+class FakeSampler:
+    def forward(self, logits, *args, **kwargs):
+        return logits
+
+
+class TestMonkeyPatchSamplerBannedTokens:
+    def test_sampler_masks_banned_ids_and_oov_tail(self):
+        sampler = FakeSampler()
+        worker = SimpleNamespace(model_runner=SimpleNamespace(sampler=sampler))
+
+        assert monkey_patch_sampler_banned_tokens(worker, VOCAB_SIZE, banned_token_ids=[2, 4])
+        logits = torch.arange(PADDED_WIDTH, dtype=torch.float32).repeat(2, 1)
+        out = sampler.forward(logits)
+
+        assert (out[:, [2, 4]] == float("-inf")).all()
+        assert (out[:, VOCAB_SIZE:] == float("-inf")).all()
+
+    def test_missing_sampler_is_a_no_op(self):
+        worker = SimpleNamespace(model_runner=SimpleNamespace())
+        assert monkey_patch_sampler_banned_tokens(worker, VOCAB_SIZE, banned_token_ids=[2]) is False
+
+
+class TestApplyVisionPlaceholderLogitBias:
+    def test_writes_clamped_bias_for_image_and_video_pads(self):
+        processor = make_processor(image_token_id=151655, video_token_id=151656)
+        sampling_params = {"temperature": 1.0}
+
+        apply_vision_placeholder_logit_bias(sampling_params, processor)
+
+        assert sampling_params["logit_bias"] == {151655: -100.0, 151656: -100.0}
+
+    def test_text_only_processor_leaves_params_untouched(self):
+        sampling_params = {"temperature": 1.0}
+        apply_vision_placeholder_logit_bias(sampling_params, None)
+        assert "logit_bias" not in sampling_params
