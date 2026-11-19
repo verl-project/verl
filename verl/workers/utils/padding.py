@@ -100,6 +100,21 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     return data
 
 
+def get_prompt_lens(data: TensorDict) -> torch.Tensor:
+    """Per-sample prompt length of a no-padding batch.
+
+    Args:
+        data: TensorDict with ``prompts`` (nested, or padded together with ``attention_mask``).
+
+    Returns:
+        ``(batch,)`` prompt lengths.
+    """
+    prompt_ids = data["prompts"]
+    if prompt_ids.is_nested:
+        return prompt_ids.offsets().diff()
+    return data["attention_mask"][:, : prompt_ids.shape[1]].sum(dim=1)
+
+
 def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
     """Slice response from unpad model output.
 
@@ -118,15 +133,14 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
 
     max_response_len = tu.get_non_tensor_data(data=data, key="max_response_len", default=-1)
 
+    prompt_lens = get_prompt_lens(data)
     if prompt_ids.is_nested:
-        prompt_lens = prompt_ids.offsets().diff()
         response_lens = response_ids.offsets().diff()
         if max_response_len < 0:
             max_response_len = response_lens.max().item()
     else:
         attention_mask = data["attention_mask"]
         assert not attention_mask.is_nested
-        prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
         response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
         max_response_len = response_ids.shape[1]
 
