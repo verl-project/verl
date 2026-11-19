@@ -24,18 +24,23 @@ from verl.workers.rollout.replica import TokenOutput
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "flags,cap,expected",
+    "flags,cap,final_tool_call,expected",
     [
-        ([False, False], 8, False),
-        ([False, True], 8, True),
-        ([True, False], 8, True),
-        ([False, None], 8, None),
-        ([None, True], 8, True),
-        ([None, False], 8, None),
-        ([False, False], 2, True),
+        ([False, False], 8, False, False),
+        ([False, True], 8, False, True),
+        ([True, False], 8, False, True),
+        ([False, None], 8, False, None),
+        ([None, True], 8, False, True),
+        ([None, False], 8, False, None),
+        ([False, False], 2, False, False),
+        ([False, False], 2, True, True),
+        ([False, True], 2, False, True),
+        ([False, None], 2, False, True),
+        ([True, False], 2, False, True),
+        ([None, False], 2, False, None),
     ],
 )
-async def test_tool_turn_truncation_is_preserved(flags, cap, expected):
+async def test_tool_turn_truncation_is_preserved(flags, cap, final_tool_call, expected):
     loop = ToolAgentLoop.__new__(ToolAgentLoop)
     loop.rollout_config = SimpleNamespace(full_determinism=False)
     loop.response_length = cap
@@ -57,7 +62,7 @@ async def test_tool_turn_truncation_is_preserved(flags, cap, expected):
         extract_tool_calls=AsyncMock(
             side_effect=[
                 ("tool call", [object()]),
-                ("done", []),
+                ("done", [object()] if final_tool_call else []),
             ]
         ),
     )
