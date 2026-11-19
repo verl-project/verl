@@ -27,6 +27,7 @@ from ray.actor import ActorHandle
 from verl.utils.device import is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.workers.config import RolloutConfig
+from verl.workers.rollout.replica import wait_rollout_servers_scheduled
 from verl.workers.rollout.sglang_rollout.async_sglang_server import (
     SGLangReplica,
     visible_devices_keyword,
@@ -225,5 +226,7 @@ class SGLangPDReplica(SGLangReplica):
             disaggregation_role=role,
             disaggregation_bootstrap_port=bootstrap_port,
         )
+        # Fail fast if the server actor cannot be placed, instead of blocking on launch_server.
+        await wait_rollout_servers_scheduled([server], [node_id])
         await server.launch_server.remote(master_address=None, master_port=None)
         return [server]

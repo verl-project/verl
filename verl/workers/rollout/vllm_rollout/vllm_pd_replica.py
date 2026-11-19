@@ -27,6 +27,7 @@ from ray.actor import ActorHandle
 from verl.utils.device import get_device_name, get_resource_name, is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.rollout.replica import wait_rollout_servers_scheduled
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
 logger = logging.getLogger(__file__)
@@ -155,6 +156,7 @@ class vLLMPDReplica(vLLMReplica):
                     zmq_base_trainer_rank=0,
                 )
             ]
+            server_node_ids = [prefill_node_id]
 
             for i in range(self._n_decode):
                 start = self._prefill_tp + i * self._decode_tp
@@ -186,6 +188,10 @@ class vLLMPDReplica(vLLMReplica):
                         zmq_base_trainer_rank=start,
                     )
                 )
+                server_node_ids.append(node_id_i)
+
+            # Fail fast if a server actor cannot be placed, instead of blocking on launch_server.
+            await wait_rollout_servers_scheduled(self._prefill_servers + self._decode_servers, server_node_ids)
 
             await asyncio.gather(
                 *[
