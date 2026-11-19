@@ -188,5 +188,278 @@ class TestCallToolErrorHandling(unittest.IsolatedAsyncioTestCase):
         assert "Final answer: Paris" not in response.text
 
 
+class _SequencedBaseTool(FakeTool):
+    """Stateful tool stub recording create/execute/release lifecycle order."""
+
+    def __init__(self, name: str, outcomes: list[Any], release_errors: dict[str, Exception] | None = None):
+        super().__init__(name)
+        self.outcomes = list(outcomes)
+        self.release_errors = release_errors or {}
+        self.events: list[str] = []
+        self.create_kwargs_seen: list[dict[str, Any]] = []
+        self._counter = 0
+
+    async def create(self, create_kwargs=None):
+        self._counter += 1
+        instance_id = f"inst_{self._counter}"
+        self.create_kwargs_seen.append(dict(create_kwargs or {}))
+        self.events.append(f"create:{instance_id}")
+        return instance_id, ToolResponse()
+
+    async def execute(self, instance_id, parameters, **kwargs):
+        self.events.append(f"execute:{instance_id}")
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return ToolResponse(text=str(outcome)), 1.0, {}
+
+    async def release(self, instance_id):
+        self.events.append(f"release:{instance_id}")
+        if instance_id in self.release_errors:
+            raise self.release_errors[instance_id]
+
+
+class TestCallToolRetryPolicy(unittest.IsolatedAsyncioTestCase):
+    """Test opt-in bounded retry policy for recoverable BaseTool failures."""
+
+    async def test_retry_disabled_by_default(self):
+        from verl.tools.base_tool import ToolTimeoutError
+        from verl.workers.config.rollout import ToolRetryConfig
+
+        tool = _SequencedBaseTool("sandbox", [ToolTimeoutError("sandbox timeout"), "recovered"])
+        loop = _make_tool_agent_loop({"sandbox": tool})
+        loop.tool_retry = ToolRetryConfig()
+        agent_data = FakeAgentData()
+        agent_data.extra_fields = {}
+
+        response, reward, _ = await loop._call_tool(FakeFunctionCall("sandbox", "{}"), {}, agent_data)
+        assert reward == 0.0
+        assert "sandbox timeout" in response.text
+        assert tool.events == ["create:inst_1", "execute:inst_1", "release:inst_1"]
+        assert "tool_retry_metrics" not in agent_data.extra_fields
+
+    async def test_recoverable_errors_recreate_instance_and_succeed(self):
+        from verl.tools.base_tool import ToolConnectionError, ToolSandboxCrashError, ToolTimeoutError
+        from verl.workers.config.rollout import ToolRetryConfig
+
+        recoverable_cases = [
+            ToolTimeoutError("rpc timed out"),
+            ToolConnectionError("endpoint reset"),
+            ToolSandboxCrashError("container exited"),
+            TimeoutError("socket timeout"),
+            ConnectionResetError("connection reset by peer"),
+        ]
+        for err in recoverable_cases:
+            with self.subTest(error_type=type(err).__name__):
+                tool = _SequencedBaseTool("sandbox", [err, "ok"])
+                loop = _make_tool_agent_loop({"sandbox": tool})
+                loop.tool_retry = ToolRetryConfig(enable=True, max_retries=1, retry_delay=0.0)
+                agent_data = FakeAgentData()
+                agent_data.extra_fields = {}
+                tools_kwargs = {"sandbox": {"create_kwargs": {"image": "py312"}}}
+
+                response, reward, _ = await loop._call_tool(FakeFunctionCall("sandbox", "{}"), tools_kwargs, agent_data)
+                assert reward == 1.0
+                assert response.text == "ok"
+                assert tool.events == [
+                    "create:inst_1",
+                    "execute:inst_1",
+                    "release:inst_1",
+                    "create:inst_2",
+                    "execute:inst_2",
+                    "release:inst_2",
+                ]
+                assert tool.create_kwargs_seen == [{"image": "py312"}, {"image": "py312"}]
+                assert agent_data.extra_fields["tool_retry_metrics"] == {
+                    "total_calls": 1,
+                    "retried_calls": 1,
+                    "retry_attempts": 1,
+                    "recovered_calls": 1,
+                    "exhausted_calls": 0,
+                    "non_recoverable_failures": 0,
+                    "release_failures": 0,
+                }
+
+    async def test_retry_exhaustion_releases_all_instances_and_returns_error(self):
+        from verl.tools.base_tool import ToolSandboxCrashError
+        from verl.workers.config.rollout import ToolRetryConfig
+
+        tool = _SequencedBaseTool(
+            "sandbox",
+            [
+                ToolSandboxCrashError("crash 1"),
+                ToolSandboxCrashError("crash 2"),
+                ToolSandboxCrashError("crash 3"),
+            ],
+        )
+        loop = _make_tool_agent_loop({"sandbox": tool})
+        loop.tool_retry = ToolRetryConfig(enable=True, max_retries=2, retry_delay=0.0)
+        agent_data = FakeAgentData()
+        agent_data.extra_fields = {}
+
+        response, reward, _ = await loop._call_tool(FakeFunctionCall("sandbox", "{}"), {}, agent_data)
+        assert reward == 0.0
+        assert "Error executing tool 'sandbox': crash 3" in response.text
+        assert tool.events == [
+            "create:inst_1",
+            "execute:inst_1",
+            "release:inst_1",
+            "create:inst_2",
+            "execute:inst_2",
+            "release:inst_2",
+            "create:inst_3",
+            "execute:inst_3",
+            "release:inst_3",
+        ]
+        assert agent_data.extra_fields["tool_retry_metrics"] == {
+            "total_calls": 1,
+            "retried_calls": 1,
+            "retry_attempts": 2,
+            "recovered_calls": 0,
+            "exhausted_calls": 1,
+            "non_recoverable_failures": 0,
+            "release_failures": 0,
+        }
+
+    async def test_non_recoverable_basetool_error_not_retried(self):
+        from verl.workers.config.rollout import ToolRetryConfig
+
+        tool = _SequencedBaseTool("sandbox", [ValueError("invalid expression"), "unreachable"])
+        loop = _make_tool_agent_loop({"sandbox": tool})
+        loop.tool_retry = ToolRetryConfig(enable=True, max_retries=3, retry_delay=0.0)
+        agent_data = FakeAgentData()
+        agent_data.extra_fields = {}
+
+        response, reward, _ = await loop._call_tool(FakeFunctionCall("sandbox", "{}"), {}, agent_data)
+        assert reward == 0.0
+        assert "invalid expression" in response.text
+        assert tool.events == ["create:inst_1", "execute:inst_1", "release:inst_1"]
+        assert agent_data.extra_fields["tool_retry_metrics"]["non_recoverable_failures"] == 1
+        assert agent_data.extra_fields["tool_retry_metrics"]["retry_attempts"] == 0
+
+    async def test_function_tool_not_retried(self):
+        from verl.tools.function_tool import FunctionTool
+        from verl.tools.schemas import OpenAIFunctionSchema, OpenAIFunctionToolSchema
+        from verl.workers.config.rollout import ToolRetryConfig
+
+        calls = 0
+
+        async def flaky_fn(query: str) -> str:
+            nonlocal calls
+            calls += 1
+            raise TimeoutError("stateless timeout")
+
+        schema = OpenAIFunctionToolSchema(
+            type="function",
+            function=OpenAIFunctionSchema(
+                name="flaky_fn",
+                description="Stateless function tool",
+                parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+            ),
+        )
+        fn_tool = FunctionTool(name="flaky_fn", fn=flaky_fn, tool_schema=schema, is_async=True)
+        loop = _make_tool_agent_loop({"flaky_fn": fn_tool})
+        loop.tool_retry = ToolRetryConfig(enable=True, max_retries=3, retry_delay=0.0)
+        agent_data = FakeAgentData()
+        agent_data.extra_fields = {}
+
+        response, reward, _ = await loop._call_tool(FakeFunctionCall("flaky_fn", '{"query": "hi"}'), {}, agent_data)
+        assert reward == 0.0
+        assert calls == 1
+        assert "stateless timeout" in response.text
+        assert "tool_retry_metrics" not in agent_data.extra_fields
+
+    async def test_release_failure_does_not_abort_retry(self):
+        from verl.tools.base_tool import ToolSandboxCrashError
+        from verl.workers.config.rollout import ToolRetryConfig
+
+        tool = _SequencedBaseTool(
+            "sandbox",
+            [ToolSandboxCrashError("worker died"), "recovered"],
+            release_errors={"inst_1": ConnectionResetError("sandbox already gone")},
+        )
+        loop = _make_tool_agent_loop({"sandbox": tool})
+        loop.tool_retry = ToolRetryConfig(enable=True, max_retries=1, retry_delay=0.0)
+        agent_data = FakeAgentData()
+        agent_data.extra_fields = {}
+
+        response, reward, _ = await loop._call_tool(FakeFunctionCall("sandbox", "{}"), {}, agent_data)
+        assert reward == 1.0
+        assert response.text == "recovered"
+        assert agent_data.extra_fields["tool_retry_metrics"]["release_failures"] == 1
+        assert agent_data.extra_fields["tool_retry_metrics"]["recovered_calls"] == 1
+
+    def test_tool_retry_config_validation_and_coercion(self):
+        from verl.workers.config.rollout import MultiTurnConfig, ToolRetryConfig
+
+        cfg = MultiTurnConfig(tool_retry={"enable": True, "max_retries": 2, "retry_delay": 0.5})
+        assert isinstance(cfg.tool_retry, ToolRetryConfig)
+        assert cfg.tool_retry.enable is True
+        assert cfg.tool_retry.max_retries == 2
+        assert cfg.tool_retry.retry_delay == 0.5
+
+        with self.assertRaises(ValueError):
+            ToolRetryConfig(max_retries=-1)
+        with self.assertRaises(ValueError):
+            ToolRetryConfig(retry_delay=-0.5)
+
+    async def test_tool_agent_loop_run_seeds_uniform_retry_metrics_key(self):
+        from omegaconf import OmegaConf
+
+        from verl.experimental.agent_loop.agent_loop import DictConfigWrap
+        from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
+        from verl.workers.rollout.replica import TokenOutput
+
+        class _StubServer:
+            async def generate(self, request_id, *, prompt_ids, sampling_params, **kwargs):
+                return TokenOutput(token_ids=[11, 12], log_probs=[0.0, 0.0])
+
+        class _StubTokenizer:
+            padding_side = "right"
+
+            def apply_chat_template(self, messages, *, tokenize=True, **kwargs):
+                return [101, 102] if tokenize else "prompt"
+
+            def decode(self, ids, skip_special_tokens=False):
+                return "final answer without tool call"
+
+            def encode(self, text, add_special_tokens=False):
+                return [11, 12]
+
+        cfg = OmegaConf.create(
+            {
+                "actor_rollout_ref": {
+                    "rollout": {
+                        "prompt_length": 16,
+                        "response_length": 16,
+                        "full_determinism": True,
+                        "multi_turn": {
+                            "enable": True,
+                            "max_user_turns": 2,
+                            "max_assistant_turns": 2,
+                            "max_parallel_calls": 1,
+                            "max_tool_response_length": 256,
+                            "tool_response_truncate_side": "middle",
+                            "format": "hermes",
+                            "tool_retry": {"enable": True, "max_retries": 1, "retry_delay": 0.0},
+                        },
+                    },
+                    "model": {"path": "dummy", "tokenizer_path": "dummy"},
+                },
+                "data": {"apply_chat_template_kwargs": {}},
+            }
+        )
+        loop = ToolAgentLoop(
+            trainer_config=DictConfigWrap(cfg),
+            server_manager=_StubServer(),
+            tokenizer=_StubTokenizer(),
+            processor=None,
+            dataset_cls=object,
+            data_config=DictConfigWrap(cfg.data),
+        )
+        out = await loop.run(sampling_params={}, raw_prompt=[{"role": "user", "content": "hi"}])
+        assert out.extra_fields["tool_retry_metrics"]["total_calls"] == 0
+
+
 if __name__ == "__main__":
     unittest.main()

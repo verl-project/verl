@@ -335,6 +335,11 @@ actor_rollout_ref:
       tokenization_sanity_check_mode: strict
       format: hermes
       num_repeat_rollouts: null
+      tool_retry:
+        _target_: verl.workers.config.ToolRetryConfig
+        enable: false
+        max_retries: 1
+        retry_delay: 1.0
     calculate_log_probs: true
     topk_log_probs: 0
     agent:

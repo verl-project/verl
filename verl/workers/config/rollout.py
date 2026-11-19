@@ -25,6 +25,7 @@ from verl.workers.config.model import MtpConfig
 
 __all__ = [
     "SamplingConfig",
+    "ToolRetryConfig",
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
@@ -47,6 +48,19 @@ class SamplingConfig(BaseConfig):
 
 
 @dataclass
+class ToolRetryConfig(BaseConfig):
+    enable: bool = False
+    max_retries: int = 1
+    retry_delay: float = 1.0
+
+    def __post_init__(self):
+        if self.max_retries < 0:
+            raise ValueError("`max_retries` must be a non-negative integer.")
+        if self.retry_delay < 0:
+            raise ValueError("`retry_delay` must be non-negative.")
+
+
+@dataclass
 class MultiTurnConfig(BaseConfig):
     _mutable_fields = {"max_assistant_turns", "max_user_turns"}
 
@@ -62,6 +76,12 @@ class MultiTurnConfig(BaseConfig):
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
     num_repeat_rollouts: Optional[int] = None
+    tool_retry: ToolRetryConfig = field(default_factory=ToolRetryConfig)
+
+    def __post_init__(self):
+        if isinstance(self.tool_retry, dict | DictConfig) and not isinstance(self.tool_retry, ToolRetryConfig):
+            kwargs = {k: v for k, v in self.tool_retry.items() if k != "_target_"}
+            object.__setattr__(self, "tool_retry", ToolRetryConfig(**kwargs))
 
 
 @dataclass
