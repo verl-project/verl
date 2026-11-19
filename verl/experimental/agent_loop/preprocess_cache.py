@@ -59,6 +59,32 @@ class PromptPreprocessCache:
     def __init__(self):
         self._entries: dict[str, list[tuple[Any, asyncio.Future]]] = {}
 
+    def attach(self, agent_loop) -> None:
+        """Route the preprocessing steps of one agent loop through this cache.
+
+        The wrappers shadow the methods on the instance, so an agent loop that overrides them shares
+        its own version. Everything they return is cached and therefore shared: copy before mutating.
+        """
+        extract, build = agent_loop.process_multi_modal_info, agent_loop.ct_build_initial_tokens
+
+        async def shared_multi_modal_info(messages: list[dict]) -> dict:
+            multi_modal_data = await self.get_or_compute("multi_modal_data", messages, lambda: extract(messages))
+            # Agent loops append tool media to these lists.
+            return {key: list(value) if isinstance(value, list) else value for key, value in multi_modal_data.items()}
+
+        async def shared_initial_tokens(messages, *args, mm_inputs_out=None, **kwargs) -> list[int]:
+            async def compute() -> tuple[list[int], dict[str, Any]]:
+                mm_inputs: dict[str, Any] = {}
+                return await build(messages, *args, mm_inputs_out=mm_inputs, **kwargs), mm_inputs
+
+            prompt_ids, mm_inputs = await self.get_or_compute("initial_tokens", (messages, args, kwargs), compute)
+            if mm_inputs_out is not None:
+                mm_inputs_out.update(mm_inputs)
+            return list(prompt_ids)
+
+        agent_loop.process_multi_modal_info = shared_multi_modal_info
+        agent_loop.ct_build_initial_tokens = shared_initial_tokens
+
     async def get_or_compute(self, step: str, inputs: Any, compute: Callable[[], Awaitable[Any]]) -> Any:
         entries = self._entries.setdefault(step, [])
         for cached_inputs, future in entries:
