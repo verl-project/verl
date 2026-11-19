@@ -1889,16 +1889,9 @@ class PPOTrainer(ABC):
 
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
-        # kv_batch_get raises on fields absent from any key, so request optional fields only when written.
-        fields = ["uid", "response_mask", "rm_scores", "old_log_probs"]
-        if self.use_reference_policy:
-            fields.append("ref_log_prob")
+        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob"]
         if self.use_critic:
             fields.append("values")
-        # rollout_log_probs exists only if the rollout returned log probs for every sample
-        ready_fields = tq.get_client().kv_retrieve_meta(keys=batch.keys, partition_id=batch.partition_id).field_names
-        if "rollout_log_probs" in ready_fields:
-            fields.append("rollout_log_probs")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]
