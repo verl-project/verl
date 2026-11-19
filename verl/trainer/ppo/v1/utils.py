@@ -22,6 +22,17 @@ from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.trainer_utils import compute_advantage
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
 
+_SESSION_LEVEL_ADV_ESTIMATORS = frozenset(
+    {
+        core_algos.AdvantageEstimator.GRPO.value,
+        core_algos.AdvantageEstimator.GRPO_VECTORIZED.value,
+        core_algos.AdvantageEstimator.RLOO.value,
+        core_algos.AdvantageEstimator.RLOO_VECTORIZED.value,
+        core_algos.AdvantageEstimator.GRPO_PASSK.value,
+        core_algos.AdvantageEstimator.GPG.value,
+    }
+)
+
 
 class MetricsAggregator:
     """
@@ -156,16 +167,22 @@ def compute_advantage_for_multi_trajectories(
     norm_adv_by_std_in_grpo: bool = True,
     config: Any = None,
 ) -> DataProto:
-    """Compute GRPO advantages from each session's final output. For non-GRPO
-    estimators, such as GAE, are delegated to the original compute_advantage() unchanged.
+    """Compute advantages from each session's final output.
 
-    For GRPO, only the final output in each ``{uid}_{session_id}`` group participates
-    in advantage computation, and the result is broadcast to the other outputs in
-    the same session. Sessions whose AgentLoop returns ``None`` simply do not appear
-    in ``batch_keys``. Non-GRPO estimators, such as GAE, are delegated to the
+    For session-level group outcome estimators (GRPO, GRPO_VECTORIZED, RLOO,
+    RLOO_VECTORIZED, GRPO_PASSK and GPG), only the final output in each
+    ``{uid}_{session_id}`` group participates in advantage computation, and the
+    result is broadcast to the other outputs in the same session. Sessions whose
+    AgentLoop returns ``None`` simply do not appear in ``batch_keys``. Estimators
+    that operate on token-level rewards (for example GAE) are delegated to the
     original ``compute_advantage()`` unchanged.
     """
-    if adv_estimator != core_algos.AdvantageEstimator.GRPO:
+    estimator_name = (
+        adv_estimator.value
+        if isinstance(adv_estimator, core_algos.AdvantageEstimator)
+        else adv_estimator
+    )
+    if estimator_name not in _SESSION_LEVEL_ADV_ESTIMATORS:
         return compute_advantage(
             data,
             adv_estimator=adv_estimator,
@@ -197,17 +214,62 @@ def compute_advantage_for_multi_trajectories(
     row_to_local_index = [session_key_to_local_index[session_key] for session_key in row_session_keys]
 
     # select final sessions from batch data for group relative advantage computation
-    final_data = compute_advantage(
-        data.select_idxs(final_indices),
-        adv_estimator=adv_estimator,
-        gamma=gamma,
-        lam=lam,
-        num_repeat=num_repeat,
-        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-        config=config,
-    )
-    first_nnz_indices = final_data.batch["response_mask"].argmax(dim=1)
-    final_scores = final_data.batch["advantages"][torch.arange(len(final_data)), first_nnz_indices]
+    final_data = data.select_idxs(final_indices)
+    if len(final_data) == 0:
+        return data
+
+    final_uids = final_data.non_tensor_batch["uid"]
+    reward_dtype = final_data.batch["token_level_rewards"].dtype
+    reward_device = final_data.batch["token_level_rewards"].device
+
+    if estimator_name == core_algos.AdvantageEstimator.GRPO_PASSK.value:
+        # Pass@k needs at least two sessions per uid. A session can disappear when
+        # its AgentLoop returns None, so evaluate eligible groups and leave the
+        # singleton groups at zero advantage instead of aborting the batch.
+        uid_counts = Counter(final_uids)
+        eligible = [i for i, uid in enumerate(final_uids) if uid_counts[uid] >= 2]
+        final_scores = torch.zeros(len(final_data), dtype=reward_dtype, device=reward_device)
+        if eligible:
+            eligible_data = compute_advantage(
+                final_data.select_idxs(eligible),
+                adv_estimator=adv_estimator,
+                gamma=gamma,
+                lam=lam,
+                num_repeat=num_repeat,
+                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                config=config,
+            )
+            first_nnz_indices = eligible_data.batch["response_mask"].argmax(dim=1)
+            eligible_scores = eligible_data.batch["advantages"][
+                torch.arange(len(eligible_data), device=eligible_data.batch["advantages"].device),
+                first_nnz_indices,
+            ]
+            final_scores[eligible] = eligible_scores.to(final_scores.dtype)
+    else:
+        final_data = compute_advantage(
+            final_data,
+            adv_estimator=adv_estimator,
+            gamma=gamma,
+            lam=lam,
+            num_repeat=num_repeat,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            config=config,
+        )
+        first_nnz_indices = final_data.batch["response_mask"].argmax(dim=1)
+        final_scores = final_data.batch["advantages"][torch.arange(len(final_data)), first_nnz_indices]
+
+    if estimator_name == core_algos.AdvantageEstimator.RLOO_VECTORIZED.value:
+        # Scalar RLOO keeps the reward of a prompt with a single response. The
+        # vectorized variant returns zero for that case, so restore parity here.
+        uid_counts = Counter(final_uids)
+        singleton = torch.tensor(
+            [uid_counts[uid] == 1 for uid in final_uids],
+            dtype=torch.bool,
+            device=reward_device,
+        )
+        if singleton.any():
+            rewards = final_data.batch["token_level_rewards"].sum(dim=-1).to(final_scores.dtype)
+            final_scores = torch.where(singleton, rewards, final_scores)
 
     # scatter final scores to all rows in batch data
     scores = final_scores[row_to_local_index]

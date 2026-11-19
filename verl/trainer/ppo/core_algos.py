@@ -474,7 +474,7 @@ def compute_grpo_passk_outcome_advantage(
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
-    norm_adv_by_std_in_grpo: bool = True,
+    norm_adv_by_std_in_grpo: bool | None = None,
     config: Optional[AlgoConfig] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -496,8 +496,10 @@ def compute_grpo_passk_outcome_advantage(
         returns: (bs, response_length)
     """
     assert config is not None
-    # if True, normalize advantage by std within group
-    norm_adv_by_std_in_grpo = config.get("norm_adv_by_std_in_grpo", True)
+    # An explicit argument (for example from compute_advantage) takes precedence;
+    # fall back to the algorithm config for direct callers.
+    if norm_adv_by_std_in_grpo is None:
+        norm_adv_by_std_in_grpo = config.get("norm_adv_by_std_in_grpo", True)
     scores = token_level_rewards.sum(dim=-1)  # (bs,)
     advantages = torch.zeros_like(scores)
 
