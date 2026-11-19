@@ -53,11 +53,11 @@ distillation_loss:
   # PPO clipping ratio for policy loss.
   clip_ratio: 0.2
 
-  # Lower bound for PPO clipping ratio.
-  clip_ratio_low: 0.2 
+  # Lower bound for asymmetric PPO clipping. Defaults to clip_ratio.
+  clip_ratio_low: null
 
-  # Upper bound for PPO clipping ratio.
-  clip_ratio_high: 0.2
+  # Upper bound for asymmetric PPO clipping. Defaults to clip_ratio.
+  clip_ratio_high: null
 
 
 # Number of GPUs per node in the distillation teacher resource pool

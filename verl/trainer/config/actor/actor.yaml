@@ -35,11 +35,11 @@ ppo_max_token_len_per_gpu: 16384
 # PPO clip ratio
 clip_ratio: 0.2
 
-# Lower bound for asymmetric clipping (used in dual-clip PPO)
-clip_ratio_low: 0.2
+# Lower bound for asymmetric clipping (used in dual-clip PPO). Defaults to clip_ratio.
+clip_ratio_low: null
 
-# Upper bound for asymmetric clipping (used in dual-clip PPO)
-clip_ratio_high: 0.2
+# Upper bound for asymmetric clipping (used in dual-clip PPO). Defaults to clip_ratio.
+clip_ratio_high: null
 
 # Positive and negative tau for smoothing function in SAPO (https://arxiv.org/pdf/2511.20347)
 # default values used in the paper with Qwen3-30B-A3B-Base

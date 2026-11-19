@@ -2,7 +2,7 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 10/03/2026.
+Last updated: 10/21/2026.
 
 ## Background
 
@@ -358,13 +358,13 @@ Name of the policy loss to use when `use_policy_gradient=True`. Default:
 PPO clip ratio used by the policy-gradient update when
 `use_policy_gradient=True`. Default: `0.2`.
 
-### `distillation.distillation_loss.clip_ratio_low` (float)
+### `distillation.distillation_loss.clip_ratio_low` (float or null)
 
-Lower bound of the PPO clip range. Default: `0.2`.
+Lower bound of the PPO clip range. Default: `null`, which uses `clip_ratio`.
 
-### `distillation.distillation_loss.clip_ratio_high` (float)
+### `distillation.distillation_loss.clip_ratio_high` (float or null)
 
-Upper bound of the PPO clip range. Default: `0.2`.
+Upper bound of the PPO clip range. Default: `null`, which uses `clip_ratio`.
 
 ### `distillation.distillation_loss.global_batch_info` / `loss_settings`
 
