@@ -524,22 +524,22 @@ def test_vllm_replica_build_server_runtime_env(options, expected_env):
         world_size=4,
         replica_rank=3,
         config=SimpleNamespace(profiler={}),
+        _get_server_env_vars=Mock(return_value={"NOSET_DEVICE": "1", "EXTRA": "value"}),
     )
 
-    platform = Mock()
-    platform.ray_noset_envvars.return_value = ["NOSET_DEVICE"]
-    platform.rollout_env_vars.return_value = {"EXTRA": "value"}
     with (
-        patch.object(backend, "get_platform", return_value=platform),
         patch.object(backend, "get_visible_devices_keyword", return_value="VISIBLE_DEVICES"),
         patch.object(backend, "_build_rollout_ray_actor_nsight_launch_options", return_value=options) as build_options,
     ):
-        runtime_env = backend.vLLMReplica._build_server_runtime_env(replica, node_rank=1, cuda_visible_devices="2,3")
+        runtime_env = backend.vLLMReplica._build_server_runtime_env(
+            replica, node_rank=1, cuda_visible_devices="2,3", node_ids=["first-node", "second-node"]
+        )
 
     build_options.assert_called_once_with(
         replica.config.profiler, replica_rank=3, replica_world_size=4, role="rollout_server_node_1"
     )
     assert runtime_env == expected_env
+    replica._get_server_env_vars.assert_called_once_with(["first-node", "second-node"])
 
 
 @pytest.mark.asyncio
@@ -575,11 +575,7 @@ async def test_vllm_replica_sets_assigned_devices_before_server_creation():
     replica._build_server_runtime_env = lambda *args, **kwargs: backend.vLLMReplica._build_server_runtime_env(
         replica, *args, **kwargs
     )
-    platform = Mock()
-    platform.ray_noset_envvars.return_value = ["NOSET_DEVICE"]
-    platform.rollout_env_vars.return_value = {}
     with (
-        patch.object(backend, "get_platform", return_value=platform),
         patch.object(backend, "get_visible_devices_keyword", return_value="VISIBLE_DEVICES"),
         patch.object(backend, "_build_rollout_ray_actor_nsight_launch_options", return_value={"o": "test_%p"}),
     ):

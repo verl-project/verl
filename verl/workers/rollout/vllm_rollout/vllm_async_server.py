@@ -1617,18 +1617,11 @@ class vLLMReplica(RolloutReplica):
         )
         self.server_class = ray.remote(vLLMHttpServer)
 
-    def _build_server_runtime_env(
-        self, node_rank: int, cuda_visible_devices: str, env_vars: dict[str, str] | None = None
-    ) -> dict:
+    def _build_server_runtime_env(self, node_rank: int, cuda_visible_devices: str, node_ids: list[str]) -> dict:
         """Bind assigned devices and Nsight options before the server starts."""
-        if env_vars is None:
-            env_vars = {
-                **{var: "1" for var in get_platform().ray_noset_envvars()},
-                **get_platform().rollout_env_vars(),
-            }
         runtime_env = {
             "env_vars": {
-                **env_vars,
+                **self._get_server_env_vars(node_ids),
                 # Nsight can initialize CUDA before the server constructor runs.
                 get_visible_devices_keyword(): cuda_visible_devices,
             }
@@ -1677,7 +1670,7 @@ class vLLMReplica(RolloutReplica):
 
         # create server actor in each node with node affinity and cuda visible devices
         nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
-        env_vars = self._get_server_env_vars(worker_node_ids[::gpus_per_replica_node])
+        node_ids = worker_node_ids[::gpus_per_replica_node]
         for node_rank in range(nnodes):
             workers = self.workers[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             node_cuda_visible_devices = get_node_visible_devices(
@@ -1696,7 +1689,7 @@ class vLLMReplica(RolloutReplica):
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env=self._build_server_runtime_env(node_rank, node_cuda_visible_devices, env_vars),
+                runtime_env=self._build_server_runtime_env(node_rank, node_cuda_visible_devices, node_ids),
                 name=name,
                 max_concurrency=self.config.ray_actor_max_concurrency,
             ).remote(
