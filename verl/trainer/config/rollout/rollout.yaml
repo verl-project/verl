@@ -514,6 +514,9 @@ quantization:
 mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 
 # Prefill-Decode disaggregation (backend support and topology limits vary).
+# 【配置阅读示例】2P2D、P/D均TP4时，外层tensor_model_parallel_size=4，本组共需16个设备。
+# 一组P/D必须同节点；整个任务有多少组，由Manager按总资源÷每组footprint计算。
+# 本段的P/D replicas指组内引擎数；下面这些参数不会自动向集群申请额外设备。
 disaggregation:
 
   # Master switch for PD disaggregation.
@@ -526,9 +529,12 @@ disaggregation:
   decode_replicas: 1
 
   # Decode TP override; null = same as tensor_model_parallel_size.
+  # D的TP与P可不同：例如1P2D、P TP8/D TP4同样需要16个设备；具体组合还需底层Connector支持。
   decode_tensor_model_parallel_size: null
 
   # vLLM role-specific memory fractions; null inherits rollout.gpu_memory_utilization.
+  # 显式P/D比例会覆盖公共和角色engine_kwargs中的同名比例；null保留既有继承/kwargs覆盖规则。
+  # 例如公共kwargs写0.8、decode_gpu_memory_utilization写0.5，最终D应收到0.5。
   prefill_gpu_memory_utilization: null
   decode_gpu_memory_utilization: null
 
@@ -538,10 +544,14 @@ disaggregation:
   decode_engine_kwargs: {}
 
   # KV cache transport: nixl | mooncake | ascend | mori | fake.
+  # 当前vLLMPDReplica实际实现nixl/mooncake；其他枚举值是配置预留，并不表示此路径已经实现。
+  # GPU mooncake选MooncakeConnector；Ascend选MooncakeConnectorV1，NPU配置nixl时会警告并回退。
   transfer_backend: nixl
 
   # Bootstrap server port on prefill side; null = auto-assign.
+  # 此字段保留在通用配置中；当前多PD启动器通过_reserve_pd_ports自动分配端口，没有读取该手工值。
   bootstrap_port: null
 
   # InfiniBand device (required for mooncake over RDMA).
+  # 这是通用传输配置字段；当前这个PD启动器未把它显式接入Connector参数，实际设备选择需看运行栈。
   ib_device: null

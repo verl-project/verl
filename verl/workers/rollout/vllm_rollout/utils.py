@@ -455,11 +455,16 @@ class vLLMColocateWorkerExtension:
         In PD mode, each engine actor's local ranks start at 0; the optional
         VERL_ZMQ_BASE_TRAINER_RANK offset maps them back to trainer ranks.
         """
+        # 【讲解入口 6：推理侧权重接收地址】与ServerAdapter.__init__中的发送地址成对阅读。
+        # 注意这里的local_rank是“当前独立引擎内部”的编号；每个P/D都各自从0开始。
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
         vllm_config = getattr(self.model_runner, "vllm_config", None)
         parallel_config = getattr(vllm_config, "parallel_config", None)
         local_rank = _resolve_vllm_weight_sync_local_rank(self.local_rank, parallel_config)
+        # 启动器把各引擎在整组中的起点写入环境变量；2P2D/TP4的起点分别是0、4、8、12。
+        # D1的内部rank1 → 12+1=13，匹配训练侧rollout_rank13的IPC路径。
+        # 没有base环境变量的普通路径保留原有local_rank；不能用GPU可见编号替代这里的协议编号。
         trainer_rank_base = os.environ.get("VERL_ZMQ_BASE_TRAINER_RANK")
         trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"

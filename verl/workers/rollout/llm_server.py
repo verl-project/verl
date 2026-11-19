@@ -118,6 +118,9 @@ class LLMServerClient:
         Returns:
             TokenOutput | DiffusionOutput: token or diffusion output
         """
+        # 【请求第 1 跳】这个 client 先问外层路由器选哪个完整请求入口。
+        # server_id 是登记地址/标识，server 是 Ray ActorHandle，实际调用通过后者的 .remote()。
+        # 普通 rollout 入口是普通引擎；PD 入口是某个 P，由它继续协调组内 D。
         server_id, server = await self._acquire_server(
             request_id,
             prompt_ids=prompt_ids,
@@ -147,6 +150,8 @@ class LLMServerClient:
             priority_kwargs = (
                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
             )
+            # 一次调用等待完整结果，包括 P 计算和 D 生成；返回结果之后才走 finally 释放外层计数。
+            # request_id 用于本次引擎请求，session_id 保留会话关联，供后续 P/D 路由使用。
             output: TokenOutput = await server.generate.remote(
                 request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
                 prompt_ids=prompt_ids,
@@ -456,6 +461,9 @@ class LLMServerManager:
         )
         # PD inflates per-replica footprint; miss this and init_hybrid slices
         # past worker_group → empty workers on replica_rank>=1.
+        # 【讲解入口 2：Manager 管多少组】普通引擎的设备数和整个 PD 组的设备数不同。
+        # 例如每组 2P2D/TP4 占 16 个 worker；总资源 32 个 worker 时可组成两组 replica。
+        # 这个数必须与 vLLMPDReplica.world_size、ServerAdapter 的 rank 划分完全一致。
         disagg = getattr(self.rollout_config, "disaggregation", None)
         if disagg is not None and getattr(disagg, "enabled", False):
             prefill_tp = self.rollout_config.tensor_model_parallel_size
@@ -475,6 +483,8 @@ class LLMServerManager:
             if self.worker_group
             else self.rollout_config.n_gpus_per_node * self.rollout_config.nnodes
         )
+        # // 是整除：总 worker 数 ÷ 每组所需 worker 数，得到完整组数。
+        # 这里不会凭空增加设备；真实分配还要满足资源池及每组单节点的限制。
         num_replicas = world_size // rollout_world_size
 
         self.rollout_replicas = [
@@ -500,14 +510,21 @@ class LLMServerManager:
         else:
             await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
 
+        # 【请求入口名单】先从每组取端点，再展平为一份列表。
+        # 假设两组各有 P0/P1：最终得到 组0P0、组0P1、组1P0、组1P1 四个入口。
+        # PD 的 D 不在这份外层入口名单里，它们由所属组的 P 通过句柄调用。
         request_endpoints = [
             endpoint for replica in self.rollout_replicas for endpoint in replica.get_request_server_endpoints()
         ]
+        # 两个列表按相同顺序拆出：同一下标的地址与句柄属于同一个服务。
+        # 地址是字符串，可作 HTTP 地址和路由键；句柄是 Ray 调用引用，不是端口号。
         self.server_addresses = [address for address, _ in request_endpoints]
         self.server_handles = [handle for _, handle in request_endpoints]
         print(f"LLMServerManager: {self.server_addresses}")
 
         # Scrape targets may include engines that are not generation entries (PD decode).
+        # 【监控名单】与请求入口分开收集：2P2D 的路由入口只有两个 P，监控目标却有全部四个 P/D。
+        # 否则只看 P 指标，会漏掉 D 的队列、KV 使用等运行情况。
         metrics_addresses = []
         metrics_labels = []
         for replica in self.rollout_replicas:
@@ -516,6 +533,8 @@ class LLMServerManager:
                 metrics_labels.append(endpoint_labels)
 
         # Update Prometheus / rl-insight metrics with server addresses
+        # Prometheus 在这里使用采集地址，RL-Insight 还使用 replica/pd_role/pd_index 标签。
+        # 现状：这里检查公共 disable_log_stats；没有额外验证每个角色 kwargs 的最终覆盖值。
         needs_metrics = self.rollout_config.prometheus.enable or RLInsightLogger.enabled()
         if self.rollout_config.disable_log_stats:
             if needs_metrics:
@@ -533,6 +552,9 @@ class LLMServerManager:
     async def _init_global_load_balancer(self) -> None:
         from verl.workers.rollout.router import get_router_handle
 
+        # zip 把同下标的地址/句柄配对，dict 变成 {地址: ActorHandle} 交给外层路由器。
+        # strict=True 要求两份列表等长，避免 zip 默默截断而漏注册服务。
+        # 外层选择 P，P 内部再选择 D；这与可选的 custom.pd_router_config_path 是两层路由。
         self.global_load_balancer = get_router_handle(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
             router_config_path=getattr(self.rollout_config, "router_config_path", None),

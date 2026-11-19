@@ -162,6 +162,9 @@ class GlobalRequestLoadBalancer:
         # Allow empty initial servers: in dynamic-resource-scheduling mode all
         # replicas are hybrid and will be registered later via add_servers().
 
+        # 【外层路由器的目录与账本】_servers保存{入口地址:Ray句柄}，_inflight_requests记当前未结束调用数。
+        # PD中这些入口是全部P；P的一次调用会等待D完整生成，所以外层计数覆盖整条P→D链路。
+        # 这不是每个D的全局负载，也不是UniAgent各P内部的reservation账本。
         self._servers: dict[str, ray.actor.ActorHandle] = dict(servers)
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
         self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
@@ -177,6 +180,8 @@ class GlobalRequestLoadBalancer:
             A tuple of ``(server_id, actor_handle)`` in a single atomic call.
         """
         # Try sticky session first
+        # 默认策略先尝试会话亲和；未命中时在新键分支选最少inflight入口，full_determinism可改变该策略。
+        # acquire返回地址和句柄并增加计数，真正生成由client调用句柄上的generate完成。
         if request_id in self._request_id_to_server:
             server_id = self._request_id_to_server[request_id]
             # Check if server is still in the active pool
@@ -328,6 +333,8 @@ def _load_router_yaml(router_config_path: str) -> dict:
     Hydra ``defaults`` blocks are rejected: inline the referenced configs or
     compose them inside the router plugin's constructor.
     """
+    # 【插件配置读取位置】这是普通Python文件读取，不会自动把路径投递到将创建的router actor。
+    # PD中由P的set_pd_peer调用工厂，因此需要P进程能读到YAML；只有router节点可读还不够。
     full_path = resolve_config_path(router_config_path)
     if not os.path.isfile(full_path):
         raise FileNotFoundError(f"Router config file not found: {full_path}")

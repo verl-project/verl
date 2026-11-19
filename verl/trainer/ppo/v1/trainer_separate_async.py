@@ -441,6 +441,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         if not self._enable_hybrid_replicas:
             return
         global_load_balancer = self.standalone_server_manager.global_load_balancer
+        # 【动态资源加入】使用Manager已经展平的全部请求入口，而不是每组只取P0。
+        # 例如混合组是2P2D，这里登记两个P的地址/句柄；D仍由P在组内调用。
         servers = dict(
             zip(self.llm_server_manager.server_addresses, self.llm_server_manager.server_handles, strict=True)
         )
@@ -450,6 +452,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         if not self._enable_hybrid_replicas:
             return
         global_load_balancer = self.standalone_server_manager.global_load_balancer
+        # 移除只需入口地址，因为路由器已有地址→句柄映射；全部P应一起退出这个动态路由池。
+        # 这里改变路由成员，不直接销毁actor或完成底层KV传输收尾。
         ray.get(global_load_balancer.remove_servers.remote(self.llm_server_manager.server_addresses))
 
     def clear_sticky_cache(self) -> dict:

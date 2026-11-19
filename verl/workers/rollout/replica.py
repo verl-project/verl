@@ -151,6 +151,9 @@ class RolloutReplica(ABC):
             worker_group: RayWorkerGroup, fused workers where training engine(fsdp/megatron) have been initialized.
         """
         self.rollout_mode = RolloutMode.HYBRID
+        # 【整组切片】Manager 创建的是第 replica_rank 组，这里取这整组的训练 worker。
+        # 例如每组 world_size=16：组0取 [0:16]，组1取 [16:32]；右边界不包含在切片里。
+        # PD 子类稍后再把这一组按 P0、P1、D0、D1 顺序切成各个引擎。
         self.workers = worker_group.workers[
             self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
         ]
@@ -281,6 +284,9 @@ class RolloutReplica(ABC):
 
     def get_request_server_endpoints(self) -> list[tuple[str, ActorHandle]]:
         """Return the entries that can accept complete generation requests."""
+        # 【普通 replica 的默认请求入口】返回列表，是为了允许子类暴露多个入口。
+        # 每项是 (地址字符串, Ray调用句柄)，表示可以接 prompt 并最终返回完整答案的服务。
+        # PD 子类重写这个方法，返回全部 P；P 负责把后续 decode 交给组内 D。
         return [(self._server_address, self._server_handle)]
 
     def get_metrics_server_endpoints(self) -> list[tuple[str, dict[str, Any]]]:
@@ -290,6 +296,8 @@ class RolloutReplica(ABC):
         with independent engines can expose additional scrape targets without
         adding those engines to the generation router.
         """
+        # 【普通 replica 的默认监控入口】每项是 (采集地址, 标签字典)，没有调用句柄。
+        # PD 子类重写后会暴露全部 P/D；被监控不等于被加入外层生成路由池。
         return [(self._server_address, {"replica": self.replica_rank})]
 
     def rollout_worker_use_gpu(self) -> bool:
