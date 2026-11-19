@@ -111,6 +111,41 @@ def _default_omp_num_threads(config) -> int:
     return max(available_physical_cores() // n_gpus_per_node, 1)
 
 
+# The process-level part of vLLM's batch invariance that the actor forward needs: the cuBLAS workspace
+# pair enable_batch_invariant_mode() sets on SM90/SM100, where cuBLAS is the only matmul path, plus the
+# vLLM switches. cuBLAS reads its workspace config when it initializes, so this is exported before the
+# workers start. vLLM's NCCL profile is not forwarded: the rollout process writes it itself from
+# VLLM_BATCH_INVARIANT, and it would throttle the training collectives.
+BATCH_INVARIANT_ENV = {
+    "VLLM_BATCH_INVARIANT": "1",
+    "VLLM_ALLREDUCE_USE_SYMM_MEM": "0",
+    "VLLM_USE_AOT_COMPILE": "0",
+    "CUBLAS_WORKSPACE_CONFIG": ":16:8",
+    "CUBLASLT_WORKSPACE_SIZE": "1",
+}
+
+
+def export_batch_invariant_env():
+    """Export BATCH_INVARIANT_ENV into this process so get_ppo_ray_runtime_env() forwards it."""
+    os.environ.update(BATCH_INVARIANT_ENV)
+
+
+def batch_invariant_requested(config) -> bool:
+    """Whether any FSDP engine in the resolved config sets ``batch_invariant``.
+
+    The flag lives on the shared FSDP engine schema, so the critic and the ref expose it too; every
+    worker that installs the overrides needs the cuBLAS env exported before it starts.
+    """
+    engine_configs = (
+        config.actor_rollout_ref.actor.get("fsdp_config"),
+        config.actor_rollout_ref.ref.get("fsdp_config"),
+        config.critic.get("fsdp"),
+    )
+    return any(
+        engine_config is not None and engine_config.get("batch_invariant", False) for engine_config in engine_configs
+    )
+
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
@@ -178,6 +213,7 @@ def get_ppo_ray_runtime_env(config=None):
         "FLASH_ATTENTION_DETERMINISTIC",
         "NCCL_DETERMINISTIC",
         "NCCL_ALGO",
+        *BATCH_INVARIANT_ENV,
     ):
         val = os.environ.get(key)
         if val is not None:

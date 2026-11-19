@@ -58,7 +58,6 @@ on:
       # Entrypoints
       - ".github/workflows/vllm.yml"
       - "tests/special_e2e/generation"
-      - "tests/experimental/reward_loop/run_determinism_e2e_with_rm.py"
       - "tests/workers/rollout"
       - "verl/trainer/main_generation.py"
       - "verl/trainer/config/generation.yaml"
@@ -150,6 +149,10 @@ jobs:
       - name: Test vllm server abort functionality
         run: |
           $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
+      - name: Test vLLM salted external KV cache invalidation
+        run: |
+          $UV_RUN ray stop --force
+          $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_vllm_prefix_cache_versioning.py -v -s
       - name: Test vLLM score-centering support coverage
         run: |
           $UV_RUN ray stop --force

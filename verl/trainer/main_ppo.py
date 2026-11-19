@@ -21,7 +21,12 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from verl.plugin.platform import get_platform
-from verl.trainer.constants_ppo import available_physical_cores, get_ppo_ray_runtime_env
+from verl.trainer.constants_ppo import (
+    available_physical_cores,
+    batch_invariant_requested,
+    export_batch_invariant_env,
+    get_ppo_ray_runtime_env,
+)
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
@@ -50,6 +55,8 @@ def run_ppo(config, task_runner_class) -> None:
         os.environ["VERL_FULL_DETERMINISM"] = "1"
         os.environ["VLLM_BATCH_INVARIANT"] = "1"
         os.environ["PYTHONHASHSEED"] = str(rollout_cfg.seed)
+    if batch_invariant_requested(config):
+        export_batch_invariant_env()
 
     trainer_logger = config.trainer.get("logger", [])
     if "rl_insight" in ([trainer_logger] if isinstance(trainer_logger, str) else trainer_logger or []):
@@ -193,16 +200,7 @@ def main(config):
         use_critic=need_critic(config),
     )
 
-    if config.trainer.use_v1:
-        run_ppo(config, task_runner_class=TaskRunnerV1)
-    else:
-        from verl.trainer.main_ppo_v0 import TaskRunner
-
-        logger.warning(
-            "Legacy trainer `main_ppo_v0.py` is deprecated, and wil be removed in v0.9.0."
-            "Please set `trainer.use_v1=True` in config to use V1 trainer."
-        )
-        run_ppo(config, task_runner_class=TaskRunner)
+    run_ppo(config, task_runner_class=TaskRunnerV1)
 
 
 if __name__ == "__main__":

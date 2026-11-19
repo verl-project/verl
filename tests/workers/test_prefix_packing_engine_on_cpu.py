@@ -75,6 +75,7 @@ def _make_engine(cls=FSDPEngineWithLMHead, pad_to_length=False):
     engine.pad_to_length = pad_to_length
     engine.pad_to_length_bucket = 16
     engine.module = SimpleNamespace()
+    engine.engine_config = SimpleNamespace(batch_invariant=False, entropy_checkpointing=False)
     return engine
 
 

@@ -1,7 +1,7 @@
 昇腾安装指南(Ascend 950PR&950DT系列产品)
 =================
 
-Last updated: 11/06/2026.
+Last updated: 11/13/2026.
 
 
 .. contents:: 目录
@@ -13,7 +13,7 @@ Last updated: 11/06/2026.
 框架后端支持说明
 ----------------
 
-当前NPU在Ascend 950PR&950DT系列产品上支持以下常见训推后端的部署，您可以根据我们的 :doc:`昇腾镜像说明 <dockerfile_build_guidance>` 直接获取发布的镜像，也可以根据下文进行自定义安装。
+当前NPU在Ascend 950PR&950DT系列产品上支持以下常见训推后端的部署，您可以根据我们的 `昇腾镜像说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/dockerfile_build_guidance.html>`_ 直接获取发布的镜像，也可以根据下文进行自定义安装。
 
 .. list-table::
    :header-rows: 1
@@ -30,8 +30,9 @@ Last updated: 11/06/2026.
 1. Docker镜像获取、构建和使用
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-您可以从 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 获取相关镜像，或者自行从DockerFile构建，相关说明参照
-:doc:`昇腾镜像说明 <dockerfile_build_guidance>`\ 。
+推荐优先使用 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 提供的已有镜像，以减少环境配置和依赖安装工作。
+如需自定义环境，也可以根据 Dockerfile 自行构建镜像。镜像获取、构建和使用方法请参照
+`昇腾镜像说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/dockerfile_build_guidance.html>`_\ 。
 
 
 2. 自定义安装
@@ -128,12 +129,23 @@ vLLM推理后端支持
     git clone https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
     git checkout releases/v0.30.0
-    pip install -v -e . --no-build-isolation --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    git submodule update --init --recursive
+    pip install -r requirements.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    COMPILE_CUSTOM_KERNELS=1 pip install --no-build-isolation --no-deps -v -e .
     cd ..
 
 
 Megatron 训练后端支持
 ^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. note::
+
+   Megatron-Bridge ``v0.5.0`` 配合本文的 Transformers ``5.14.1`` 环境时，需要应用
+   `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_。
+   当 Transformers 已提供原生 Qwen3-ASR 配置时，补丁会跳过内置的 AutoConfig、
+   AutoModel 和 AutoProcessor 注册，避免导入时出现 ``qwen3_asr`` 重复注册错误。
+   下方的 verl 依赖安装命令会在克隆 verl 后，仅向已存在的 Megatron-Bridge 目录应用该补丁。
+   仅使用 FSDP 时会跳过此步骤；使用 Megatron 时，请将 Megatron-Bridge 与 verl 源码目录放在同一父目录下。
 
 .. code:: bash
     
@@ -165,12 +177,20 @@ verl 依赖安装
 
 .. code:: bash
 
-    git clone https://github.com/verl-project/verl.git
+    git clone --recursive https://github.com/verl-project/verl.git
+    # 仅在已克隆 Megatron-Bridge 时应用兼容性补丁
+    if [ -d Megatron-Bridge ]; then
+        git -C Megatron-Bridge apply --unidiff-zero \
+            "$(pwd)/verl/docker/ascend/patches/megatron_bridge_qwen3_asr.patch"
+    fi
     cd verl
     pip install -e .
     pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
     # 恢复 vLLM 所需的 Triton 版本
     pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    # 安装 Ascend 950 对应的 FLA NPU 后端（FSDP 和 Megatron 均需要）
+    pip install --no-deps "flash-linear-attention-npu-a5==26.9.1" \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
 
 日志过滤

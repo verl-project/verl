@@ -31,6 +31,7 @@ from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
 import verl.utils.torch_functional as verl_F
+from verl.models.transformers.monkey_patch import patch_veomni_forward_with_backends
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -371,6 +372,15 @@ class VeOmniEngine(FSDPEngine):
             attn_implementation=self.engine_config.attn_implementation,
             ops_implementation=ops_implementation,
             init_device=self.engine_config.init_device,
+        )
+        fused_kernel_options = self.model_config.fused_kernel_options
+        fused_kernels_backend = (
+            fused_kernel_options.get("impl_backend", None) if fused_kernel_options is not None else None
+        )
+        patch_veomni_forward_with_backends(
+            model=module,
+            use_fused_kernels=self.model_config.use_fused_kernels,
+            fused_kernels_backend=fused_kernels_backend,
         )
         log_gpu_memory_usage("After load base model", logger=logger)
 
@@ -880,47 +890,19 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
     def prepare_model_inputs(self, micro_batch: TensorDict):
+        use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
         self._apply_veomni_input_transforms(model_inputs, micro_batch)
 
-        # Activate VeOmni's chunk_logprobs path: ForCausalLMLoss short-circuits
-        # to per-token log_probs/entropy on return_log_probs=True. Pass the
-        # already-rolled labels as shift_labels so chunk_logprobs skips its
-        # internal causal shift and the output seq length matches the input —
-        # prepare_model_outputs().squeeze(0) then lands at (total_nnz,).
+        # Activate verl's fused-linear loss hook. Pass the already-rolled labels
+        # as shift_labels so the kernel output stays aligned with the packed
+        # input sequence.
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
-        use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
-        if use_fused_kernels and use_remove_padding:
-            input_ids_rmpad = model_inputs["input_ids"]
-            shift_labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
-            model_inputs["labels"] = input_ids_rmpad
-            model_inputs["shift_labels"] = shift_labels
+        if use_fused_kernels:
+            model_inputs["labels"] = model_inputs["input_ids"]
             model_inputs["return_log_probs"] = True
-
-            # Pass teacher top-K tensors so ForCausalLMLoss routes to
-            # chunk_topk_distill_function for fused distillation. TD keys
-            # teacher_ids / teacher_logprobs are populated by verl's native
-            # distillation pipeline (see verl/trainer/distillation/losses.py).
-            distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
-            if distillation_use_topk and "teacher_ids" in micro_batch.keys():
-                if "teacher_logprobs" not in micro_batch.keys():
-                    raise ValueError(
-                        "teacher_ids present without teacher_logprobs; "
-                        "both must be provided together for fused top-K distillation."
-                    )
-                # Kernel kwarg names follow veomni's chunk_topk_distill_function API.
-                teacher_topk_ids = micro_batch["teacher_ids"].values().unsqueeze(0)
-                teacher_topk_log_probs = micro_batch["teacher_logprobs"].values().unsqueeze(0)
-                # SP-slice along seqlen (dim=1); teacher tensors are 3D
-                # (1, total_nnz, K) so use slice_input_tensor directly —
-                # ulysses_pad_and_slice_inputs hardcodes 2D.
-                if self.use_ulysses_sp:
-                    from verl.utils.ulysses import slice_input_tensor
-
-                    teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1, padding=True)
-                    teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1, padding=True)
-                model_inputs["teacher_topk_ids"] = teacher_topk_ids
-                model_inputs["teacher_topk_log_probs"] = teacher_topk_log_probs
+            if use_remove_padding:
+                model_inputs["shift_labels"] = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
 
         # Arm router replay for this micro-batch. In REPLAY mode this also
         # reshapes routed_experts with the same pad + Ulysses rule that

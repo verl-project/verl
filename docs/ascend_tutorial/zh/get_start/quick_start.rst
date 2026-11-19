@@ -1,7 +1,7 @@
 昇腾快速上手说明
 =================
 
-**Last updated:** 2026/07/14.
+**Last updated:** 2026/11/12.
 
 .. contents:: 目录
    :local:
@@ -18,9 +18,8 @@
 硬件支持
 --------
 
-- Atlas 200T A2 Box16
-- Atlas 900 A2 PoD
-- Atlas 800T A3
+- Atlas A2训练系列产品
+- Atlas A3训练系列产品
 
 
 
@@ -45,7 +44,7 @@
 环境准备
 ~~~~~~~~~~~~~~~
 
-运行本文脚本前，请确认已完成 verl Ascend 环境安装。环境安装详见 :doc:`昇腾安装指南 <./install_guidance>` 。
+运行本文脚本前，请确认已完成 verl Ascend 环境安装。环境安装详见 `昇腾安装指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/install_guidance.html>`_ 。
 
 权重准备
 ~~~~~~~~~~~~~~~
@@ -111,9 +110,20 @@
      - SGLang
      - bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
-脚本内具体参数说明详见 :doc:`训练配置参数与指标说明 <../dev_guide/model_dev/parameter_and_metrics>`。
+脚本内具体参数说明详见 `训练配置参数与指标说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/dev_guide/model_dev/parameter_and_metrics.html>`_。
 
-多节点任务拉起详见 :doc:`多机任务拉起操作指南 <../model_support/examples/multi-machine_task_startup_practice>`。
+多节点任务拉起详见 `多机任务拉起操作指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/model_support/examples/multi-machine_task_startup_practice.html>`_。
+
+更多训练示例
+---------------------------------
+
+已支持的模型、算法、训推后端组合及启动脚本详见
+`NPU 模型与算法支持情况 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/model_support/model_and_algorithm_support.html>`_。
+
+完成上述快速验证后，如需体验更多昇腾场景下的模型与算法训练示例，请访问
+`verl-ascend-recipe 仓库 <https://github.com/verl-project/verl-ascend-recipe>`_。
+
+请根据目标模型和算法选择对应示例，并按照示例文档中的版本要求、环境配置和运行步骤执行。
 
 附录
 -------------------------------------------

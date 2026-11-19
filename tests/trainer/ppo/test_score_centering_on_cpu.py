@@ -123,7 +123,7 @@ def _config(algorithm_rc=None, actor_rc=None, **overrides):
             "rollout": {"name": "vllm", "topk_log_probs": 128},
         },
         "distillation": {"enabled": False},
-        "trainer": {"use_v1": True},
+        "trainer": {},
     }
     if actor_rc is not False:
         config["actor_rollout_ref"]["actor"]["policy_loss"]["rollout_correction"] = {
@@ -153,7 +153,7 @@ def test_score_centering_config_skips_checks_when_off():
         _config(
             algorithm_rc={"score_centering": False},
             actor_rc=False,
-            **{"trainer.use_v1": False, "actor_rollout_ref.rollout.temperature": 0},
+            **{"actor_rollout_ref.rollout.temperature": 0},
         )
     )
 
@@ -165,7 +165,6 @@ def test_score_centering_config_skips_checks_when_off():
         (dict(algorithm_rc={"score_centering": False}), "both"),
         (dict(actor_rc={"rollout_is": "sequence"}), "score_centering"),
         (dict(actor_rc={"rollout_is_threshold": 3.0}), "match"),
-        ({"trainer.use_v1": False}, "use_v1"),
         ({"actor_rollout_ref.actor.strategy": "veomni"}, "strategy"),
         ({"actor_rollout_ref.rollout.name": "sglang"}, "vllm"),
         ({"actor_rollout_ref.rollout.topk_log_probs": 0}, "topk_log_probs"),
@@ -633,6 +632,33 @@ def test_logits_processor_returns_per_token_scalars():
     assert (out["sc_sampler_head_mass"] <= 1.0 + 1e-6).all()
 
 
+def test_logits_processor_accepts_precomputed_topk_log_probs_with_gradient():
+    torch.manual_seed(21)
+    lengths, k, vocab = [3, 5], 4, 17
+    data = _nested_batch(lengths, k, vocab)
+    # Repeated query ids are valid and their gradient contributions must be preserved.
+    data["rollout_topk_ids"].values()[0, 1] = data["rollout_topk_ids"].values()[0, 0]
+    config = _actor_config(RolloutCorrectionConfig.bypass_pg_sc())
+
+    eager_logits = torch.randn(1, sum(lengths), vocab, requires_grad=True)
+    eager = score_centering_logits_processor(student_logits=eager_logits, data=data, config=config)
+    fused_logits = eager_logits.detach().clone().requires_grad_(True)
+    ids = data["rollout_topk_ids"].values()
+    precomputed = topk_log_probs_from_logits(fused_logits.squeeze(0), ids).unsqueeze(0)
+    fused = score_centering_logits_processor(
+        student_logits=None,
+        student_topk_log_probs=precomputed,
+        data=data,
+        config=config,
+    )
+
+    for key in eager:
+        torch.testing.assert_close(fused[key], eager[key])
+    eager["sc_correction"].sum().backward()
+    fused["sc_correction"].sum().backward()
+    torch.testing.assert_close(fused_logits.grad, eager_logits.grad)
+
+
 @pytest.mark.parametrize(
     "preset, rollout_correction",
     [
@@ -672,8 +698,12 @@ def test_logits_processor_megatron_splits_head_by_cp_and_uses_tp_group():
         ) as mock_split,
         patch("megatron.core.parallel_state.get_tensor_model_parallel_group", return_value=None) as mock_group,
     ):
-        out = score_centering_logits_processor(student_logits=logits, data=data, config=config)
+        out = score_centering_logits_processor(
+            student_logits=logits, data=data, config=config, pad_to_length_bucket=512
+        )
     assert mock_split.call_count == 2 and mock_group.call_count == 1
+    for call in mock_split.call_args_list:
+        assert call.kwargs["pad_to_length_bucket"] == 512
     for key in expected:
         torch.testing.assert_close(out[key], expected[key])
 

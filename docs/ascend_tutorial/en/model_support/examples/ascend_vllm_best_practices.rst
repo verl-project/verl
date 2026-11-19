@@ -19,16 +19,16 @@ The example model script and its required hardware conditions are as follows:
 
 - Note: verl recently performed script cleanup and naming changes. It is recommended to build based on the documentation and scripts corresponding to commit id c98cb8cc `doclink`_ to avoid broken links.
 
-+----------------------+---------------------+--------+------------------------------+
-| Model                | NPU Model           | Nodes  | Training/Inference Backend   |
-+======================+=====================+========+==============================+
-| `Qwen3-30B`_         | Atlas 800T A3       | 1      | vLLM + Megatron              |
-+----------------------+---------------------+--------+------------------------------+
++----------------------+----------------------------+--------+------------------------------+
+| Model                | NPU Model                  | Nodes  | Training/Inference Backend   |
++======================+============================+========+==============================+
+| `Qwen3-30B`_         | Atlas A3 training products | 1      | vLLM + Megatron              |
++----------------------+----------------------------+--------+------------------------------+
 
 
 Environment Setup
 -----------------------------------
-We provide two methods for building the environment in the :doc:`Ascend Installation Guide <../../get_start/install_guidance>`: 1. Build from a DockerFile image file 2. Build from a custom Conda environment.
+We provide two methods for building the environment in the `Ascend Installation Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/install_guidance.html>`_: 1. Build from a DockerFile image file 2. Build from a custom Conda environment.
 
 In this practice, we additionally specify the verl commit id to avoid introducing other issues.
 
@@ -299,7 +299,7 @@ After training, the model's score on aime2024 improved significantly.
 
 Performance Collection
 -----------------------------------
-For detailed documentation on NPU profiling, refer to the :doc:`Profiling Collection Guide <../../dev_guide/performance/ascend_profiling>`.
+For detailed documentation on NPU profiling, refer to the `Profiling Collection Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/dev_guide/performance/ascend_profiling.html>`_.
 
 After collection is complete, developers can use `MindStudio Insight <https://www.hiascend.com/document/detail/en/mindstudio/830/GUI_baseddevelopmenttool/MindStudioInsight/Insight_userguide_0002.html?framework=mindspore>`_ for data parsing.
 
