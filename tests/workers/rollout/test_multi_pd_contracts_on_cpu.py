@@ -208,7 +208,21 @@ def test_invalid_role_memory_fraction_is_rejected(role, value):
 
 
 @pytest.mark.parametrize("role", ["prefill", "decode"])
-def test_role_overrides_cannot_change_the_planned_topology(role):
+@pytest.mark.parametrize(
+    "key",
+    [
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "data_parallel_size",
+        "data_parallel_size_local",
+        "data_parallel_start_rank",
+        "kv_transfer_config",
+        "worker_extension_cls",
+    ],
+)
+@pytest.mark.parametrize("dashed", [False, True])
+@pytest.mark.parametrize("value", [8, None])
+def test_role_overrides_cannot_change_the_planned_topology(role, key, dashed, value):
     validate = _load_functions(
         "verl/workers/config/disaggregation.py",
         ["__post_init__"],
@@ -229,9 +243,13 @@ def test_role_overrides_cannot_change_the_planned_topology(role):
         decode_engine_kwargs={},
         bootstrap_port=None,
     )
-    setattr(config, f"{role}_engine_kwargs", {"tensor_parallel_size": 8})
-    with pytest.raises(ValueError, match="cannot override PD topology"):
+    key = key.replace("_", "-") if dashed else key
+    setattr(config, f"{role}_engine_kwargs", {key: value})
+    if value is None:
         validate(config)
+    else:
+        with pytest.raises(ValueError, match="cannot override PD topology"):
+            validate(config)
 
 
 @pytest.mark.parametrize(
@@ -326,7 +344,8 @@ class _RoleConfig:
     ray_actor_max_concurrency: int = 128
 
 
-def test_role_overrides_are_isolated_and_default_memory_is_inherited():
+def _spawn_role_configs(config):
+    """Capture both roles' actor configs without starting Ray or vLLM."""
     spawn = _load_functions(
         REPLICA,
         ["_spawn_pd_server"],
@@ -339,15 +358,6 @@ def test_role_overrides_are_isolated_and_default_memory_is_inherited():
             util=SimpleNamespace(scheduling_strategies=SimpleNamespace(NodeAffinitySchedulingStrategy=lambda **kw: kw)),
         ),
     )._spawn_pd_server
-    config = _RoleConfig(
-        disaggregation=SimpleNamespace(
-            prefill_gpu_memory_utilization=0.7,
-            decode_gpu_memory_utilization=None,
-            prefill_engine_kwargs={"max_num_batched_tokens": 65536, "max_num_seqs": None},
-            decode_engine_kwargs={"max_num_batched_tokens": 8192},
-        ),
-        engine_kwargs={"vllm": {"max_num_seqs": 32, "compilation_config": {"cudagraph_mode": "NONE"}}},
-    )
     actor = Mock()
     actor.options.return_value.remote.side_effect = lambda **kwargs: kwargs
     replica = SimpleNamespace(
@@ -361,7 +371,20 @@ def test_role_overrides_are_isolated_and_default_memory_is_inherited():
     outputs = []
     for role, offset in (("prefill", 0), ("decode", 4)):
         outputs.append(spawn(replica, role, [], "node", "0,1", 2, {}, "127.0.0.1", 39000, 40000, role, offset))
-    p, d = [result["config"] for result in outputs]
+    return [result["config"] for result in outputs], actor
+
+
+def test_role_overrides_are_isolated_and_default_memory_is_inherited():
+    config = _RoleConfig(
+        disaggregation=SimpleNamespace(
+            prefill_gpu_memory_utilization=0.7,
+            decode_gpu_memory_utilization=None,
+            prefill_engine_kwargs={"max_num_batched_tokens": 65536, "max_num_seqs": None},
+            decode_engine_kwargs={"max_num_batched_tokens": 8192},
+        ),
+        engine_kwargs={"vllm": {"max_num_seqs": 32, "compilation_config": {"cudagraph_mode": "NONE"}}},
+    )
+    (p, d), actor = _spawn_role_configs(config)
     assert p.gpu_memory_utilization == 0.7 and d.gpu_memory_utilization == 0.5
     assert p.tensor_model_parallel_size == d.tensor_model_parallel_size == 2
     assert p.engine_kwargs["vllm"]["max_num_batched_tokens"] == 65536
@@ -373,3 +396,51 @@ def test_role_overrides_are_isolated_and_default_memory_is_inherited():
     assert [
         call.kwargs["runtime_env"]["env_vars"]["VERL_ZMQ_BASE_TRAINER_RANK"] for call in actor.options.call_args_list
     ] == ["0", "4"]
+
+
+@pytest.mark.parametrize("engine_kwargs", [{}, {"vllm": None}, {"vllm": {}}])
+def test_missing_or_null_vllm_kwargs_accept_role_overrides(engine_kwargs):
+    original = copy.deepcopy(engine_kwargs)
+    config = _RoleConfig(
+        disaggregation=SimpleNamespace(
+            prefill_gpu_memory_utilization=None,
+            decode_gpu_memory_utilization=None,
+            prefill_engine_kwargs={},
+            decode_engine_kwargs={"max_num_batched_tokens": 8192},
+        ),
+        engine_kwargs=engine_kwargs,
+    )
+    (p, d), _ = _spawn_role_configs(config)
+    assert p.engine_kwargs["vllm"] == {}
+    assert d.engine_kwargs["vllm"] == {"max_num_batched_tokens": 8192}
+    assert p.gpu_memory_utilization == d.gpu_memory_utilization == 0.5
+    assert config.engine_kwargs == original
+
+
+@pytest.mark.parametrize("role", ["prefill", "decode"])
+@pytest.mark.parametrize("memory", [None, 0.6])
+@pytest.mark.parametrize("key", ["gpu_memory_utilization", "gpu-memory-utilization"])
+def test_explicit_role_memory_takes_priority_over_engine_kwargs(role, memory, key):
+    config = _RoleConfig(
+        disaggregation=SimpleNamespace(
+            prefill_gpu_memory_utilization=None,
+            decode_gpu_memory_utilization=None,
+            prefill_engine_kwargs={},
+            decode_engine_kwargs={},
+        ),
+        engine_kwargs={"vllm": {key: 0.8, "max_num_seqs": 32}},
+    )
+    setattr(config.disaggregation, f"{role}_gpu_memory_utilization", memory)
+    # Include a conflicting role kwarg as well: the explicit field wins over both.
+    setattr(config.disaggregation, f"{role}_engine_kwargs", {key: 0.9})
+    (p, d), _ = _spawn_role_configs(config)
+    selected, other = (p, d) if role == "prefill" else (d, p)
+    if memory is None:
+        assert selected.gpu_memory_utilization == 0.5
+        assert selected.engine_kwargs["vllm"] == {key: 0.9, "max_num_seqs": 32}
+    else:
+        assert selected.gpu_memory_utilization == 0.6
+        assert selected.engine_kwargs["vllm"] == {"gpu_memory_utilization": 0.6, "max_num_seqs": 32}
+    assert other.gpu_memory_utilization == 0.5
+    assert other.engine_kwargs["vllm"] == {key: 0.8, "max_num_seqs": 32}
+    assert config.engine_kwargs == {"vllm": {key: 0.8, "max_num_seqs": 32}}

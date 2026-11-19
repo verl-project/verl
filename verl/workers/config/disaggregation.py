@@ -65,7 +65,9 @@ class DisaggregationConfig(BaseConfig):
                 "kv_transfer_config",
                 "worker_extension_cls",
             }
-            conflicting = sorted(key for key in topology_keys if overrides.get(key) is not None)
+            conflicting = sorted(
+                key for key, value in overrides.items() if value is not None and key.replace("-", "_") in topology_keys
+            )
             if conflicting:
                 raise ValueError(f"disaggregation.{role}_engine_kwargs cannot override PD topology: {conflicting}")
         if self.bootstrap_port is not None and not (0 < self.bootstrap_port < 65536):

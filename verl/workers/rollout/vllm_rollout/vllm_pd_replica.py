@@ -455,9 +455,12 @@ class vLLMPDReplica(vLLMReplica):
         )
         role_overrides = disagg.prefill_engine_kwargs if role == "prefill" else disagg.decode_engine_kwargs
         engine_kwargs = copy.deepcopy(self.config.engine_kwargs)
-        engine_kwargs.setdefault("vllm", {}).update(
-            {key: value for key, value in role_overrides.items() if value is not None}
-        )
+        engine_kwargs["vllm"] = engine_kwargs.get("vllm") or {}
+        engine_kwargs["vllm"].update({key: value for key, value in role_overrides.items() if value is not None})
+        if memory_utilization is not None:
+            # Explicit role fractions must also win in the final vLLM CLI args.
+            engine_kwargs["vllm"].pop("gpu-memory-utilization", None)
+            engine_kwargs["vllm"]["gpu_memory_utilization"] = memory_utilization
         per_role_config = _dc_replace(
             self.config,
             tensor_model_parallel_size=tp,

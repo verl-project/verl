@@ -1,6 +1,6 @@
 # Single-node vLLM multi-prefill / multi-decode rollout
 
-Last updated: 11/16/2026.
+Last updated: 11/19/2026.
 
 A PD replica contains `N` independent prefill engines and `M` independent decode engines. Every prefill can hand a request to any decode in its own replica. The complete group must fit on one physical node, with rollout DP=PP=1. The connectors remain GPU NIXL/Mooncake and Ascend MooncakeConnectorV1.
 
@@ -72,7 +72,7 @@ disaggregation:
   decode_engine_kwargs: {}
 ```
 
-For example, `prefill_engine_kwargs: {max_num_batched_tokens: 65536}` changes P's vLLM batch-token budget. Each role gets a deep copy of the common engine kwargs; non-null overrides replace individual keys, including whole nested objects. Memory fractions must be in `(0, 1]`. Use the explicit topology fields for TP and engine counts; role overrides reject conflicting parallelism, worker-extension and connector configuration. Existing common `engine_kwargs` must also agree with the planned topology.
+For example, `prefill_engine_kwargs: {max_num_batched_tokens: 65536}` changes P's vLLM batch-token budget. Each role gets a deep copy of the common engine kwargs; a missing or null `engine_kwargs.vllm` is treated as an empty mapping. Non-null role overrides replace individual keys, including whole nested objects. Memory fractions must be in `(0, 1]`. An explicit `prefill_gpu_memory_utilization` or `decode_gpu_memory_utilization` takes precedence over memory fractions in both common and role engine kwargs, including their dashed spellings. Leaving the explicit role fraction null preserves the existing engine-kwargs precedence. Use the explicit topology fields for TP and engine counts; role overrides reject conflicting parallelism, worker-extension and connector configuration in both underscore and dashed spellings. Existing common `engine_kwargs` must also agree with the planned topology.
 
 For a controlled PD/non-PD comparison, align batch-token budgets and memory fractions before attributing a throughput difference to separation. This feature does not claim a speedup for SWE or other workloads.
 
