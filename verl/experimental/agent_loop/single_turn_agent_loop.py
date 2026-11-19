@@ -91,6 +91,9 @@ class SingleTurnAgentLoop(AgentLoopBase):
         response_ids = merge_result.token_ids[-len(response_mask) :] if response_mask else []
         prompt_ids = merge_result.token_ids[: len(merge_result.token_ids) - len(response_mask)]
 
+        output.extra_fields["response_truncated"] = (
+            True if len(response_ids) > self.response_length else output.is_truncated
+        )
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
