@@ -119,6 +119,7 @@ jobs:
         run: |
           uv pip list
       - name: Preprocess gsm8k dataset
+        id: preprocess_gsm8k
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k
       - name: Print system memory before tests
@@ -144,10 +145,45 @@ jobs:
           ray stop --force
           USE_DIST_CKPT=False bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh trainer.n_gpus_per_node=16
           rm -rf $HOME/ckpts
-      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend, MoE Model)
+      - name: Compare GRPO Qwen3-30B MindSpeed with and without R3 on Ascend NPUs
+        if: ${{ !cancelled() && steps.preprocess_gsm8k.outcome == 'success' }}
+        shell: bash
         run: |
-          ray stop --force
-          USE_DIST_CKPT=False USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh trainer.n_gpus_per_node=16
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qwen3-30b-r3"
+          # Keep the existing two-layer CI model, sharing identical weights between modes.
+          python scripts/init_random_model.py \
+            --hf_model_path "$HOME/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B-Instruct-2507" \
+            --new_config_path tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json \
+            --output_path "$RUNNER_TEMP/qwen3-30b-r3/model"
+          status=0
+          # This measures the reduced CI model, not full Qwen3-30B throughput.
+          for mode in disabled R3; do
+            ray stop --force
+            replay=False
+            if [[ "$mode" == R3 ]]; then replay=True; fi
+            if USE_DIST_CKPT=False USE_DUMMY_MODEL=False \
+              MODEL_PATH="$RUNNER_TEMP/qwen3-30b-r3/model" \
+              PYTHONUNBUFFERED=1 bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh \
+                trainer.n_gpus_per_node=16 trainer.total_training_steps=6 \
+                trainer.val_before_train=False \
+                trainer.experiment_name="qwen3-30b-ci-$mode" \
+                actor_rollout_ref.actor.megatron.router_replay.mode="$mode" \
+                actor_rollout_ref.rollout.enable_rollout_routing_replay="$replay" \
+                2>&1 | tee "$RUNNER_TEMP/qwen3-30b-r3/$mode.log"; then
+              echo "$mode completed"
+            else
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Upload Qwen3-30B R3 comparison logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen3-30b-r3-comparison
+          path: ${{ runner.temp }}/qwen3-30b-r3/*.log
+          if-no-files-found: warn
 
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'

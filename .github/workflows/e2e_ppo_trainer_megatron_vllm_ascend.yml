@@ -124,9 +124,36 @@ jobs:
           awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
               printf "%-16s %10.3f GiB\n", $1, $2/1048576
           }' /proc/meminfo
-      - name: Running GRPO Qwen3.5-35B Megatron E2E training test on Ascend NPUs
+      - name: Compare GRPO Qwen3.5-35B Megatron with and without R3 on Ascend NPUs
+        shell: bash
         env:
           MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3.5-35B-A3B
+          TOTAL_TRAINING_STEPS: "6"
         run: |
-          ray stop --force
-          bash tests/special_npu/run_qwen3_5_35b_grpo_megatron.sh
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qwen3-5-35b-r3"
+          status=0
+          # Separate first-step warmup from steps 2-6 in the performance comparison.
+          for mode in disabled R3; do
+            ray stop --force
+            replay=False
+            if [[ "$mode" == R3 ]]; then replay=True; fi
+            if LOG_DIR="$RUNNER_TEMP/qwen3-5-35b-r3/$mode" \
+              bash tests/special_npu/run_qwen3_5_35b_grpo_megatron.sh \
+                actor_rollout_ref.actor.megatron.router_replay.mode="$mode" \
+                actor_rollout_ref.rollout.enable_rollout_routing_replay="$replay" \
+                trainer.experiment_name="qwen3-5-35b-$mode" \
+                2>&1 | tee "$RUNNER_TEMP/qwen3-5-35b-r3/$mode.log"; then
+              echo "$mode completed"
+            else
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Upload Qwen3.5-35B R3 comparison logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen3-5-35b-r3-comparison
+          path: ${{ runner.temp }}/qwen3-5-35b-r3/*.log
+          if-no-files-found: warn
