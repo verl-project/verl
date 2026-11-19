@@ -161,11 +161,10 @@ class vLLMPDReplica(vLLMReplica):
                     decode_tp=self._decode_tp,
                 )
                 # Keep the existing actor name for 1P callers and weight adapters.
-                actor_name = (
-                    f"vllm_server_{self.replica_rank}_0{self.name_suffix}"
-                    if self._n_prefill == 1
-                    else f"vllm_server_prefill_{self.replica_rank}_{i}_0{self.name_suffix}"
-                )
+                if self._n_prefill == 1:
+                    actor_name = f"vllm_server_{self.replica_rank}_0{self.name_suffix}"
+                else:
+                    actor_name = f"vllm_server_prefill_{self.replica_rank}_{i}_0{self.name_suffix}"
                 server = self._spawn_pd_server(
                     role="prefill",
                     workers=self.workers[start:end],
