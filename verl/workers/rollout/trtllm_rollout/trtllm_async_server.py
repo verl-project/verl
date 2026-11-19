@@ -35,7 +35,7 @@ from verl.utils.profiler import (
 )
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, prefix_cache_salt
-from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
+from verl.workers.rollout.utils import dedup_image_tokens, get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -343,7 +343,7 @@ class TRTLLMHttpServer:
         # Only pass it when set, so "reset" keeps working on TRT-LLM releases without cache_salt.
         salt_kwargs = {"cache_salt": cache_salt} if cache_salt is not None else {}
         if self.is_vlm_model and (image_data or video_data):
-            deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+            deduped_ids = dedup_image_tokens(prompt_ids, self.model_config.processor)
             org_prompt = self.llm.tokenizer.decode(deduped_ids)
             input_dict = {
                 "prompt": org_prompt,
