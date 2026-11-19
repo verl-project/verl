@@ -155,10 +155,12 @@ def test_create_gpu_metrics_profiler(hook_settings):
     with (
         patch.object(ray_profile, "_is_gpu_metrics_profile_enabled", return_value=True) as is_enabled,
         patch.object(ray_profile, "_build_gpu_metrics_nsight_launch_options", return_value=options) as build_options,
+        patch.object(ray_profile, "get_platform") as platform,
         patch.object(ray_profile, "_GpuMetricsProfilerActor") as actor_class,
         patch.object(ray_profile.ray, "get_runtime_context") as context,
         patch.object(ray_profile, "NodeAffinitySchedulingStrategy", return_value=sentinel.affinity) as affinity,
     ):
+        platform.return_value.ray_noset_envvars.return_value = ["NOSET_DEVICE"]
         context.return_value.get_node_id.return_value = "controller-node"
         manager = create_gpu_metrics_profiler(config)
 
@@ -166,7 +168,9 @@ def test_create_gpu_metrics_profiler(hook_settings):
     build_options.assert_called_once_with(config)
     affinity.assert_called_once_with(node_id="controller-node", soft=False)
     actor_class.options.assert_called_once_with(
-        num_cpus=0, runtime_env={"nsight": options}, scheduling_strategy=sentinel.affinity
+        num_cpus=0,
+        runtime_env={"nsight": options, "env_vars": {"NOSET_DEVICE": "1"}},
+        scheduling_strategy=sentinel.affinity,
     )
     actor_class.options.return_value.remote.assert_called_once_with(
         ProfilerConfig(
