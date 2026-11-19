@@ -14,7 +14,9 @@
 
 import copy
 import heapq
-from itertools import chain
+from collections.abc import Callable
+from itertools import chain, islice
+from typing import Literal
 
 import torch
 from torch import distributed as dist
@@ -345,6 +347,23 @@ def roundup_divisible(a: int, b: int) -> int:
     return ((a + b - 1) // b) * b
 
 
+TokenBudgetMode = Literal["valid", "dense"]
+
+
+def _split_to_count(partitions: list[list[int]], count: int) -> list[list[int]]:
+    """Split budget-compliant partitions into the required number of nonempty pieces."""
+    extra = count - len(partitions)
+    result = []
+    for partition in partitions:
+        pieces = min(len(partition), extra + 1)
+        size, remainder = divmod(len(partition), pieces)
+        groups = iter(partition)
+        for i in range(pieces):
+            result.append(sorted(islice(groups, size + (i < remainder))))
+        extra -= pieces - 1
+    return result
+
+
 def rearrange_micro_batches(
     batch,
     max_token_len,
@@ -354,6 +373,7 @@ def rearrange_micro_batches(
     min_num_micro_batch=None,
     use_dynamic_bsz_balance=True,
     force_group_size=1,
+    token_budget_mode: TokenBudgetMode | Callable[[], TokenBudgetMode] = "valid",
 ):
     """
     Split a batch into micro-batches by total token count, with optional DP sync and padding.
@@ -367,6 +387,8 @@ def rearrange_micro_batches(
         min_num_micro_batch (int, optional): force at least this many splits (pads empty ones).
         use_dynamic_bsz_balance (bool, optional): balance the computational workload between micro-batches
         force_group_size (int, optional): force consecutive samples to be in the same micro-batch (for RM training).
+        token_budget_mode: Count valid tokens (default) or rows padded to the longest sequence
+            in each micro-batch ("dense"). A backend can supply a callable to select the mode.
 
     Returns:
         List[TensorDict]: the micro-batches.
@@ -391,11 +413,48 @@ def rearrange_micro_batches(
         f"Batch size {batch_size} must be divisible by force_group_size {force_group_size}"
     )
 
-    total_seqlen = seq_len_effective.sum().item()
-    # NOTE: num_microbatches <= batch_size, so take the min of this two.
+    if callable(token_budget_mode):
+        token_budget_mode = token_budget_mode()
     # When force_group_size > 1, we work with groups instead of individual samples
     num_groups = batch_size // force_group_size
-    num_micro_batches = min(num_groups, ceildiv(total_seqlen, max_token_len))
+    # upcast to int64 to avoid potential overflow im `calculate_workload` computation.
+    seq_len_effective = seq_len_effective.long()
+
+    # When force_group_size > 1, aggregate workloads by groups
+    if force_group_size > 1:
+        # Calculate workload for each group (sum of workloads of samples in the group)
+        workloads_per_sample = calculate_workload(seq_len_effective)
+        workloads_per_sample_grouped = workloads_per_sample.view(num_groups, force_group_size)
+        group_workloads = workloads_per_sample_grouped.sum(dim=1).cpu().tolist()
+        group_lengths = seq_len_effective.view(num_groups, force_group_size)
+        if token_budget_mode == "dense":
+            group_token_lens = (force_group_size * group_lengths.amax(dim=1)).cpu().tolist()
+        else:
+            group_token_lens = group_lengths.sum(dim=1).cpu().tolist()
+        workloads = group_workloads
+    else:
+        # note that seq_len_effective is a GPU tensor. We need to make it a list to avoid D2H!
+        workloads = calculate_workload(seq_len_effective).cpu().tolist()
+        group_token_lens = seq_len_effective.cpu().tolist()
+
+    dense_partitions = []
+    if token_budget_mode == "valid":
+        total_seqlen = sum(group_token_lens)
+        # NOTE: num_microbatches <= batch_size, so take the min of this two.
+        num_micro_batches = min(num_groups, ceildiv(total_seqlen, max_token_len))
+    elif token_budget_mode == "dense":
+        order = sorted(range(num_groups), key=group_token_lens.__getitem__, reverse=True)
+        # Widest first: fill each batch to its row capacity. Its cost also bounds the valid-token sum.
+        start = 0
+        while start < num_groups:
+            group_cost = group_token_lens[order[start]]
+            # Oversized groups are rejected by the synchronized constraint check below.
+            capacity = max(1, int(max_token_len // group_cost)) if group_cost else num_groups
+            dense_partitions.append(order[start : start + capacity])
+            start += capacity
+        num_micro_batches = len(dense_partitions)
+    else:
+        raise ValueError(f"Unknown token budget mode: {token_budget_mode!r}")
     if min_num_micro_batch is not None:
         # used to support pp
         num_micro_batches = max(min_num_micro_batch, num_micro_batches)
@@ -406,22 +465,6 @@ def rearrange_micro_batches(
         num_micro_batches = num_micro_batches.cpu().item()
     if num_batches_divided_by is not None:
         num_micro_batches = roundup_divisible(num_micro_batches, num_batches_divided_by)
-
-    # upcast to int64 to avoid potential overflow im `calculate_workload` computation.
-    seq_len_effective = seq_len_effective.long()
-
-    # When force_group_size > 1, aggregate workloads by groups
-    if force_group_size > 1:
-        # Calculate workload for each group (sum of workloads of samples in the group)
-        workloads_per_sample = calculate_workload(seq_len_effective)
-        workloads_per_sample_grouped = workloads_per_sample.view(num_groups, force_group_size)
-        group_workloads = workloads_per_sample_grouped.sum(dim=1).cpu().tolist()
-        group_token_lens = seq_len_effective.view(num_groups, force_group_size).sum(dim=1).cpu().tolist()
-        workloads = group_workloads
-    else:
-        # note that seq_len_effective is a GPU tensor. We need to make it a list to avoid D2H!
-        workloads = calculate_workload(seq_len_effective).cpu().tolist()
-        group_token_lens = seq_len_effective.cpu().tolist()
 
     max_group_token_len = max(group_token_lens)
     min_num_groups = num_groups
@@ -450,9 +493,17 @@ def rearrange_micro_batches(
                 f"{min_num_groups} forced groups."
             )
         micro_bsz_group_idx = get_seqlen_balanced_partitions(workloads, num_micro_batches, equal_size=False)
-        within_limit = all(
-            sum(group_token_lens[idx] for idx in partition) <= max_token_len for partition in micro_bsz_group_idx
-        )
+        if dense_partitions:
+            if any(
+                len(partition) * max(group_token_lens[idx] for idx in partition) > max_token_len
+                for partition in micro_bsz_group_idx
+            ):
+                micro_bsz_group_idx = _split_to_count(dense_partitions, num_micro_batches)
+            within_limit = True
+        else:
+            within_limit = all(
+                sum(group_token_lens[idx] for idx in partition) <= max_token_len for partition in micro_bsz_group_idx
+            )
         if sync_micro_batch_count:
             within_limit_tensor = torch.tensor([int(within_limit)], device=get_device_name())
             dist.all_reduce(within_limit_tensor, op=dist.ReduceOp.MIN, group=dp_group)

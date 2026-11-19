@@ -896,12 +896,20 @@ class MegatronEngine(BaseEngine):
             )
             indices = None
         else:
+            from verl.models.mcore.util import get_token_budget_mode
+
             micro_batches, indices = prepare_micro_batches(
                 data=data,
                 dp_group=self.get_data_parallel_group(),
                 num_batches_divided_by=num_batches_divided_by,
                 same_micro_num_in_dp=True,
                 min_num_micro_batch=None,
+                token_budget_mode=lambda: get_token_budget_mode(
+                    self.model_config.hf_config,
+                    self.module,
+                    data.get("position_ids", None),
+                    use_remove_padding=self.engine_config.use_remove_padding,
+                ),
             )
 
         if num_batches_divided_by is not None:

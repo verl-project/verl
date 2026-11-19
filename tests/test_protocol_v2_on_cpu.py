@@ -143,6 +143,7 @@ def test_index_select_tensor_dict_preserves_3d_nested_tensor_layout_with_equal_s
     expected = tu.nested_tensor_from_tensor_list([position_ids[1], position_ids[2]], ragged_idx=2)
 
     assert selected["position_ids"]._ragged_idx == 2
+    assert selected["position_ids"].size(1) == 4
     assert selected["position_ids"].values().shape == torch.Size([4, 10])
     assert torch.equal(selected["position_ids"].values(), expected.values())
     assert torch.equal(selected["position_ids"].offsets(), expected.offsets())
@@ -900,6 +901,7 @@ def test_chunk_tensordict_preserves_3d_nested_tensor_layout_with_equal_seq_len_p
 
     assert chunks[0]["position_ids"]._ragged_idx == 2
     assert chunks[1]["position_ids"]._ragged_idx == 2
+    assert all(chunk["position_ids"].size(1) == 4 for chunk in chunks)
     assert torch.equal(chunks[0]["position_ids"].values(), expected_chunk_0.values())
     assert torch.equal(chunks[1]["position_ids"].values(), expected_chunk_1.values())
     assert torch.equal(chunks[0]["position_ids"].offsets(), expected_chunk_0.offsets())
@@ -937,6 +939,7 @@ def test_index_select_tensor_dict_preserves_3d_nested_tensor_layout_with_non_las
     selected = tu.index_select_tensor_dict(td, torch.tensor([1, 3]))
 
     assert selected["teacher_logprobs"]._ragged_idx == 1
+    assert selected["teacher_logprobs"].size(2) == topk
     assert torch.equal(selected["teacher_logprobs"].unbind(0)[0], elements[1])
     assert torch.equal(selected["teacher_logprobs"].unbind(0)[1], elements[3])
 
