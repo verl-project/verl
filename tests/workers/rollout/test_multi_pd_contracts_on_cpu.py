@@ -29,25 +29,19 @@ UTILS = "verl/workers/rollout/vllm_rollout/utils.py"
 
 
 @pytest.mark.parametrize("reason", ["aborted", "abort"])
-def test_aborted_prefill_returns_without_decode_and_releases_reservation(reason):
+def test_aborted_prefill_still_skips_decode(reason):
     dispatch = _load_functions(SERVER, ["_pd_dispatch"], "vLLMHttpServer")._pd_dispatch
     decode = AsyncMock()
     peer = SimpleNamespace(generate=SimpleNamespace(remote=decode))
     result = SimpleNamespace(stop_reason=reason, extra_fields={})
-    replica = SimpleNamespace(
-        _select_decode_peer_for_dispatch=AsyncMock(return_value=(peer, "d0")),
-        _release_pd_decode_peer=AsyncMock(),
+    stub = SimpleNamespace(
+        _select_decode_peer=Mock(return_value=peer),
         _disaggregation_kv_transfer_config={"kv_connector": "MooncakeConnectorV1"},
-        _build_pd_decode_kv_params=Mock(side_effect=AssertionError("aborted prefill has no KV")),
+        _build_pd_decode_kv_params=Mock(side_effect=AssertionError("no completed handoff")),
         generate=AsyncMock(return_value=result),
     )
-    original_sampling = {"max_tokens": 100, "ignore_eos": False}
-    assert asyncio.run(dispatch(replica, [1], original_sampling, "turn")) is result
+    assert asyncio.run(dispatch(stub, [1], {}, "req")) is result
     decode.assert_not_awaited()
-    assert replica.generate.await_args.args[1] == {"max_tokens": 1, "ignore_eos": True}
-    assert original_sampling == {"max_tokens": 100, "ignore_eos": False}
-    reservation = replica._select_decode_peer_for_dispatch.await_args.kwargs["reservation_id"]
-    replica._release_pd_decode_peer.assert_awaited_once_with("d0", "turn", reservation_id=reservation)
 
 
 @pytest.mark.parametrize("device,backend", [("cuda", "nixl"), ("cuda", "mooncake"), ("npu", "mooncake")])

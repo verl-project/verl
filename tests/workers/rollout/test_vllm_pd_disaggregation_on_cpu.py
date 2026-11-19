@@ -424,13 +424,9 @@ def test_pd_replica_init_requires_disaggregation_enabled(patched_replica_cls):
 class _DispatchStub:
     """Minimal vLLMHttpServer-like instance for unbound-method tests."""
 
-    def __init__(self, decode_peers, role="prefill", connector="NixlConnector", router=None):
+    def __init__(self, decode_peers, role="prefill", connector="NixlConnector"):
         self._disaggregation_role = role
         self._pd_decode_peers = list(decode_peers)
-        self._pd_decode_peer_ids = list(decode_peers)
-        self._pd_router = router
-        self._pd_router_acquire_fields = ["prompt_ids"]
-        self._pd_router_release_fields = ["request_id"]
         self._pd_peer_idx = 0
         # Used by _pd_dispatch to branch between NIXL (read kv_transfer_params
         # back from prefill) and Mooncake (construct it locally from prefill
@@ -445,13 +441,6 @@ class _DispatchStub:
 
         return vLLMHttpServer._select_decode_peer(self)
 
-    async def _select_decode_peer_for_dispatch(self, routing_key, prompt_ids, reservation_id=None, **generation_kwargs):
-        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
-
-        return await vLLMHttpServer._select_decode_peer_for_dispatch(
-            self, routing_key, prompt_ids, reservation_id=reservation_id, **generation_kwargs
-        )
-
     def _build_pd_decode_kv_params(self, prefill_out, connector, transfer_id, request_id):
         from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
@@ -463,11 +452,6 @@ class _DispatchStub:
             request_id,
         )
 
-    async def _release_pd_decode_peer(self, server_id, request_id, reservation_id=None):
-        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
-
-        return await vLLMHttpServer._release_pd_decode_peer(self, server_id, request_id, reservation_id=reservation_id)
-
 
 def _import_http_server():
     pytest.importorskip("vllm")
@@ -476,15 +460,10 @@ def _import_http_server():
     return vLLMHttpServer
 
 
-def _select_peer(server_cls, stub, routing_key="test"):
-    peer, _ = asyncio.run(server_cls._select_decode_peer_for_dispatch(stub, routing_key, []))
-    return peer
-
-
 def test_select_decode_peer_round_robin_cycles():
     server_cls = _import_http_server()
     stub = _DispatchStub(decode_peers=["peer0", "peer1", "peer2"])
-    picks = [_select_peer(server_cls, stub) for _ in range(7)]
+    picks = [server_cls._select_decode_peer(stub) for _ in range(7)]
     assert picks == ["peer0", "peer1", "peer2", "peer0", "peer1", "peer2", "peer0"]
     # Internal counter advances exactly once per call.
     assert stub._pd_peer_idx == 7
@@ -493,7 +472,7 @@ def test_select_decode_peer_round_robin_cycles():
 def test_select_decode_peer_single_peer_returns_same():
     server_cls = _import_http_server()
     stub = _DispatchStub(decode_peers=["only_peer"])
-    assert all(_select_peer(server_cls, stub) == "only_peer" for _ in range(5))
+    assert all(server_cls._select_decode_peer(stub) == "only_peer" for _ in range(5))
 
 
 def test_select_decode_peer_distribution_balanced_at_32_with_3_peers():
@@ -503,31 +482,11 @@ def test_select_decode_peer_distribution_balanced_at_32_with_3_peers():
     future change that randomizes for cache-locality but loses balance)."""
     server_cls = _import_http_server()
     stub = _DispatchStub(decode_peers=["peer0", "peer1", "peer2"])
-    counts = Counter(_select_peer(server_cls, stub) for _ in range(32))
+    counts = Counter(server_cls._select_decode_peer(stub) for _ in range(32))
     assert sorted(counts.values()) == [10, 11, 11], (
         f"expected (10, 11, 11) hit counts under strict round-robin, got {dict(counts)}"
     )
     assert max(counts.values()) - min(counts.values()) <= 1
-
-
-def test_router_selection_acquires_and_releases_peer():
-    from unittest.mock import AsyncMock, MagicMock
-
-    server_cls = _import_http_server()
-    router = MagicMock()
-    router.acquire_server.remote = AsyncMock(return_value=("peer1", "handle1"))
-    router.release_server.remote = AsyncMock()
-    stub = _DispatchStub(decode_peers=["peer0", "peer1"], router=router)
-
-    peer, server_id = asyncio.run(server_cls._select_decode_peer_for_dispatch(stub, "session-1", [1, 2, 3]))
-    assert peer == "handle1"
-    assert server_id == "peer1"
-    router.acquire_server.remote.assert_awaited_once_with(request_id="session-1", prompt_ids=[1, 2, 3])
-    asyncio.run(server_cls._release_pd_decode_peer(stub, server_id, "session-1"))
-    router.release_server.remote.assert_awaited_once_with(
-        server_id="peer1",
-        request_id="session-1",
-    )
 
 
 def test_pd_dispatch_routes_prefill_leg_then_decode_peer():

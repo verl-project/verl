@@ -251,188 +251,57 @@ def test_manager_registers_metrics_separately_from_request_routing(
         update_prometheus.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "fields",
-    [
-        [],
-        ["prompt_ids"],
-        ["prompt_ids", "reservation_id"],
-        ["sampling_params", "priority", "session_id"],
-        ["image_data", "video_data", "audio_data", "mm_processor_kwargs"],
-    ],
-)
-def test_decode_router_only_receives_declared_fields(fields):
-    functions = _load_functions(SERVER, ["_select_decode_peer_for_dispatch"], "vLLMHttpServer")
-    calls = []
-    peer = object()
-
-    def acquire(request_id, **kwargs):
-        calls.append((request_id, kwargs))
-        assert set(kwargs) == set(fields)
-        return "d", peer
-
-    stub = types.SimpleNamespace(
-        _pd_router=types.SimpleNamespace(acquire_server=_remote(acquire)),
-        _pd_router_acquire_fields=fields,
-        _pd_decode_peer_ids=["d"],
-        _pd_decode_peers=[peer],
-        _select_decode_peer=Mock(side_effect=AssertionError("unexpected fallback")),
-    )
-    generation = {
-        "sampling_params": {"max_tokens": 20},
-        "priority": 7,
-        "session_id": "session",
-        "image_data": ["image"],
-        "video_data": ["video"],
-        "audio_data": ["audio"],
-        "mm_processor_kwargs": {"fps": 1},
-    }
-    result = asyncio.run(
-        functions._select_decode_peer_for_dispatch(stub, "session", [1, 2], reservation_id="turn", **generation)
-    )
-    assert result == (peer, "d")
-    assert calls == [
-        (
-            "session",
-            {
-                key: value
-                for key, value in {**generation, "prompt_ids": [1, 2], "reservation_id": "turn"}.items()
-                if key in fields
-            },
-        )
-    ]
-    stub._select_decode_peer.assert_not_called()
-
-
+@pytest.mark.parametrize("connector", ["NixlConnector", "MooncakeConnector", "MooncakeConnectorV1"])
 @pytest.mark.parametrize("outcome", ["success", "prefill_error", "decode_error", "cancelled"])
-@pytest.mark.parametrize("release_fields", [[], ["request_id"], ["request_id", "reservation_id"]])
-def test_dispatch_releases_reservation_on_every_exit(outcome, release_fields):
+def test_pd_dispatch_preserves_handoff_and_errors(connector, outcome):
     helper = _load_functions(SERVER, ["_build_mooncake_decode_kv_params"])
     methods = _load_functions(
         SERVER,
-        ["_pd_dispatch", "_build_pd_decode_kv_params", "_release_pd_decode_peer"],
+        ["_pd_dispatch", "_build_pd_decode_kv_params"],
         "vLLMHttpServer",
         _build_mooncake_decode_kv_params=helper._build_mooncake_decode_kv_params,
     )
-    release = AsyncMock()
     decode = AsyncMock(return_value="generated")
     if outcome == "decode_error":
         decode.side_effect = RuntimeError("decode failed")
     peer = types.SimpleNamespace(generate=types.SimpleNamespace(remote=decode))
-    prefill_params = {"remote_block_ids": [[1, 2]], "remote_engine_id": "original"}
-    generate = AsyncMock(return_value=types.SimpleNamespace(extra_fields={"kv_transfer_params": prefill_params}))
+    metadata = {"remote_block_ids": [[0, 2]], "remote_engine_id": "P0"}
+    generate = AsyncMock(return_value=types.SimpleNamespace(extra_fields={"kv_transfer_params": metadata}))
     if outcome == "prefill_error":
         generate.side_effect = RuntimeError("prefill failed")
     elif outcome == "cancelled":
         generate.side_effect = asyncio.CancelledError()
-    select = AsyncMock(return_value=(peer, "d"))
     stub = types.SimpleNamespace(
-        _select_decode_peer_for_dispatch=select,
-        _pd_router=types.SimpleNamespace(release_server=types.SimpleNamespace(remote=release)),
-        _pd_router_release_fields=release_fields,
-        _disaggregation_kv_transfer_config={"kv_connector": "MooncakeConnectorV1"},
-        _pd_prefill_engine_id="fallback",
-        _pd_prefill_side_channel_port=12345,
+        _select_decode_peer=Mock(return_value=peer),
+        _disaggregation_kv_transfer_config={"kv_connector": connector},
+        _pd_prefill_engine_id="P0",
+        _pd_prefill_side_channel_port=30000,
         generate=generate,
     )
     stub._build_pd_decode_kv_params = types.MethodType(methods._build_pd_decode_kv_params, stub)
-    stub._release_pd_decode_peer = types.MethodType(methods._release_pd_decode_peer, stub)
+    sampling = {"max_tokens": 20, "ignore_eos": False}
 
     async def run():
-        return await methods._pd_dispatch(stub, [1, 2], {"max_tokens": 20}, "turn", session_id="session")
+        return await methods._pd_dispatch(stub, [1, 2], sampling, "req", session_id="session")
 
     if outcome == "success":
         assert asyncio.run(run()) == "generated"
-        params = decode.call_args.kwargs["kv_transfer_params"]
-        assert params["remote_block_ids"] == [[1, 2]]
-        assert params["remote_engine_id"] == "original"
-        assert params["do_remote_prefill"] is True
-        assert prefill_params == {"remote_block_ids": [[1, 2]], "remote_engine_id": "original"}
+        assert decode.await_args.args == ([1, 2], sampling, "req_D")
+        params = decode.await_args.kwargs["kv_transfer_params"]
+        if connector != "NixlConnector":
+            assert params["do_remote_prefill"] is True
+            assert params["do_remote_decode"] is False
+        if connector != "MooncakeConnector":
+            assert params["remote_block_ids"] == [[0, 2]]
     else:
-        exception = asyncio.CancelledError if outcome == "cancelled" else RuntimeError
-        with pytest.raises(exception):
+        error = asyncio.CancelledError if outcome == "cancelled" else RuntimeError
+        with pytest.raises(error):
             asyncio.run(run())
-    assert select.await_count == 1
-    assert select.await_args.args == ("session", [1, 2])
-    assert select.await_args.kwargs["sampling_params"] == {"max_tokens": 20}
-    assert generate.await_args.args[1]["max_tokens"] == 1
-    reservation_id = select.await_args.kwargs["reservation_id"]
-    assert len(reservation_id) == 32
-    identity_fields = {"request_id": "session", "reservation_id": reservation_id}
-    release.assert_awaited_once_with(
-        server_id="d", **{key: value for key, value in identity_fields.items() if key in release_fields}
-    )
-
-
-@pytest.mark.parametrize("repeat_cancel", [None, "acquire", "release"])
-def test_pending_acquire_cancellation_releases_after_reply(repeat_cancel):
-    methods = _load_functions(
-        SERVER, ["_pd_dispatch", "_select_decode_peer_for_dispatch", "_release_pd_decode_peer"], "vLLMHttpServer"
-    )
-
-    async def run():
-        recorded, reply, releasing, release_reply = [asyncio.Event() for _ in range(4)]
-        reservations = {}
-        remote_tasks = []
-        peer = object()
-
-        async def acquire(request_id, prompt_ids, reservation_id):
-            assert prompt_ids == [1]
-            reservations[reservation_id] = "d"
-            recorded.set()
-            await reply.wait()
-            return "d", peer
-
-        def remote_acquire(**kwargs):
-            task = asyncio.create_task(acquire(**kwargs))
-            remote_tasks.append(task)
-            # Like a Ray ObjectRef: cancelling the waiter does not stop remote work.
-            return asyncio.shield(task)
-
-        async def release(server_id, request_id, reservation_id):
-            releasing.set()
-            await release_reply.wait()
-            assert request_id == "session"
-            assert reservations.pop(reservation_id) == server_id
-
-        release_call = AsyncMock(side_effect=release)
-        stub = types.SimpleNamespace(
-            _pd_router=types.SimpleNamespace(
-                acquire_server=types.SimpleNamespace(remote=remote_acquire),
-                release_server=types.SimpleNamespace(remote=release_call),
-            ),
-            _pd_router_acquire_fields=["prompt_ids", "reservation_id"],
-            _pd_router_release_fields=["request_id", "reservation_id"],
-            _pd_decode_peer_ids=["d"],
-            _select_decode_peer=Mock(side_effect=AssertionError("unexpected fallback")),
-            generate=AsyncMock(side_effect=AssertionError("cancelled request must not run prefill")),
-        )
-        for name in ("_select_decode_peer_for_dispatch", "_release_pd_decode_peer"):
-            setattr(stub, name, types.MethodType(getattr(methods, name), stub))
-        dispatch = asyncio.create_task(
-            methods._pd_dispatch(stub, [1], {"max_tokens": 20}, "turn", session_id="session")
-        )
-        await asyncio.wait_for(recorded.wait(), 1)
-        dispatch.cancel("request cancelled")
-        # Let the first cancellation enter cleanup before issuing another.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        if repeat_cancel == "acquire":
-            dispatch.cancel()
-        assert not remote_tasks[0].cancelled()
-        reply.set()
-        await asyncio.wait_for(releasing.wait(), 1)
-        if repeat_cancel == "release":
-            dispatch.cancel()
-        release_reply.set()
-        with pytest.raises(asyncio.CancelledError, match="request cancelled"):
-            await asyncio.wait_for(dispatch, 1)
-        await asyncio.gather(*remote_tasks)
-        assert reservations == {}
-        assert release_call.await_count == 1
-        stub.generate.assert_not_awaited()
-
-    asyncio.run(run())
+        if outcome != "decode_error":
+            decode.assert_not_awaited()
+    stub._select_decode_peer.assert_called_once()
+    assert generate.await_args.args[1] == {"max_tokens": 1, "ignore_eos": True}
+    assert sampling == {"max_tokens": 20, "ignore_eos": False}
 
 
 @pytest.mark.parametrize("blocks", [None, [], (), [[]], [[], []], ([], [])])
@@ -564,12 +433,11 @@ def test_sleep_propagates_worker_failure():
     failure.assert_awaited_once()
 
 
-def test_no_router_keeps_round_robin():
-    select = _load_functions(SERVER, ["_select_decode_peer_for_dispatch"], "vLLMHttpServer")
-    peer = object()
-    stub = types.SimpleNamespace(_pd_router=None, _select_decode_peer=Mock(return_value=peer))
-    assert asyncio.run(select._select_decode_peer_for_dispatch(stub, "session", [1])) == (peer, None)
-    stub._select_decode_peer.assert_called_once()
+def test_round_robin_still_visits_every_decode():
+    select = _load_functions(SERVER, ["_select_decode_peer"], "vLLMHttpServer")._select_decode_peer
+    peers = [object(), object()]
+    stub = types.SimpleNamespace(_pd_decode_peers=peers, _pd_peer_idx=0)
+    assert [select(stub) for _ in range(5)] == [peers[0], peers[1], peers[0], peers[1], peers[0]]
 
 
 @pytest.mark.parametrize("connector,remote", [("MooncakeConnector", True), ("MooncakeConnectorV1", False)])
@@ -635,60 +503,11 @@ def test_metrics_endpoints_cover_both_roles():
     ]
 
 
-def test_original_router_selection_test_matches_current_production_methods():
-    """Run the existing integration test body without importing the hardware stack."""
-    methods = _load_functions(
-        SERVER,
-        ["_select_decode_peer", "_select_decode_peer_for_dispatch", "_release_pd_decode_peer"],
-        "vLLMHttpServer",
-    )
-    test_path = "tests/workers/rollout/test_vllm_pd_disaggregation_on_cpu.py"
-    stub_class = _load_functions(test_path, ["_DispatchStub"])._DispatchStub
-    # Replace only the deferred vLLM import inside the stub's fallback method.
-    stub_class._select_decode_peer = methods._select_decode_peer
-    test = _load_functions(
-        test_path,
-        ["test_router_selection_acquires_and_releases_peer"],
-        _DispatchStub=stub_class,
-        _import_http_server=lambda: methods,
-    ).test_router_selection_acquires_and_releases_peer
-    test()
-
-
-def test_concurrent_same_session_dispatches_have_distinct_matching_reservations():
-    methods = _load_functions(
-        SERVER,
-        ["_pd_dispatch", "_select_decode_peer_for_dispatch", "_release_pd_decode_peer", "_build_pd_decode_kv_params"],
-        "vLLMHttpServer",
-    )
-    acquire = AsyncMock()
-    release = AsyncMock()
-    decode = AsyncMock(return_value="generated")
-    peer = types.SimpleNamespace(generate=types.SimpleNamespace(remote=decode))
-    acquire.return_value = ("d", peer)
-    stub = types.SimpleNamespace(
-        _pd_router=types.SimpleNamespace(
-            acquire_server=types.SimpleNamespace(remote=acquire),
-            release_server=types.SimpleNamespace(remote=release),
-        ),
-        _pd_router_acquire_fields=["prompt_ids", "reservation_id"],
-        _pd_router_release_fields=["request_id", "reservation_id"],
-        _pd_decode_peer_ids=["d"],
-        _disaggregation_kv_transfer_config={"kv_connector": "NixlConnector"},
-        generate=AsyncMock(return_value=types.SimpleNamespace(extra_fields={"kv_transfer_params": {}})),
-    )
-    for name in ("_select_decode_peer_for_dispatch", "_release_pd_decode_peer", "_build_pd_decode_kv_params"):
-        setattr(stub, name, types.MethodType(getattr(methods, name), stub))
-
-    async def run():
-        return await asyncio.gather(
-            *[methods._pd_dispatch(stub, [1], {}, "same-request-id", session_id="session") for _ in range(2)]
-        )
-
-    assert asyncio.run(run()) == ["generated", "generated"]
-    acquired = [call.kwargs for call in acquire.await_args_list]
-    released = [call.kwargs for call in release.await_args_list]
-    assert all(call["request_id"] == "session" for call in acquired + released)
-    acquire_ids = {call["reservation_id"] for call in acquired}
-    assert len(acquire_ids) == 2
-    assert {call["reservation_id"] for call in released} == acquire_ids
+def test_peer_setup_needs_no_router_or_http_discovery():
+    setup = _load_functions(SERVER, ["set_pd_peer"], "vLLMHttpServer").set_pd_peer
+    stub = types.SimpleNamespace(_disaggregation_role="prefill")
+    peers = [object(), object()]
+    asyncio.run(setup(stub, peers, 30000, "P0"))
+    assert stub._pd_decode_peers == peers
+    assert stub._pd_prefill_side_channel_port == 30000
+    assert stub._pd_prefill_engine_id == "P0"
