@@ -71,12 +71,6 @@ from verl.trainer.ppo.utils import (
     need_reference_policy,
     need_teacher_policy,
 )
-from verl.trainer.ppo.v1.prompt_sharing import (
-    prompt_sharing_enabled,
-    put_missing_public_prompts,
-    put_public_prompts,
-    release_public_prompts,
-)
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
 from verl.utils import tensordict_utils as tu
@@ -141,7 +135,6 @@ class PPOTrainer(ABC):
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.trainer_mode = self.config.trainer.v1.trainer_mode
-        self.share_prompt_fields = prompt_sharing_enabled(self.config)
         self.parameter_sync_step = self.config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
         self.replay_buffer = self._build_replay_buffer()
         self._rollout_moe_lb_metrics_accumulator = RolloutMoELoadBalanceMetricsAccumulator(
@@ -555,7 +548,6 @@ class PPOTrainer(ABC):
 
             # 7. cleanup transfer queue
             tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
-            release_public_prompts()
 
             dapo_filtered_reward_counts = metrics.pop(DAPO_FILTERED_REWARD_COUNTS_KEY, None)
             self.logger.log(data=metrics, step=self.global_steps)
@@ -1029,16 +1021,11 @@ class PPOTrainer(ABC):
         ]
         if old_trajectory_keys:
             tq.kv_clear(keys=old_trajectory_keys, partition_id=partition_id)
-            # Free the multi_modal_inputs only the old trajectories linked, before new sessions put them again.
-            release_public_prompts()
 
         # Treat this as a new dispatch attempt for the resumed training step.
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in inflight_uids]
         tq.kv_batch_put(keys=inflight_uids, partition_id=partition_id, tags=tags)
-        if self.share_prompt_fields:
-            # The sessions link the public prompt, which the run that submitted it may not have written.
-            put_missing_public_prompts(batch)
         self.agent_loop_manager.generate_sequences(batch)
 
         logger.info(
@@ -1183,8 +1170,6 @@ class PPOTrainer(ABC):
             tags = [
                 {"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))
             ]
-            if self.share_prompt_fields:
-                put_public_prompts(batch)
             tq.kv_batch_put(keys=list(batch["uid"]), partition_id="val", tags=tags)
             self.agent_loop_manager.generate_sequences(batch)
 
@@ -1273,7 +1258,6 @@ class PPOTrainer(ABC):
 
             # 5. cleanup transfer queue
             tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
-            release_public_prompts()
 
         # logger to wandb
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
@@ -1649,26 +1633,17 @@ class PPOTrainer(ABC):
     def _submit_batch_to_rollout(self, batch: TensorDict) -> int:
         """Register prompts in TransferQueue and dispatch them for generation."""
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))]
-        uids = list(batch["uid"])
-        shared_fields = put_public_prompts(batch) if self.share_prompt_fields else []
         if self.trainer_mode != "sync":
-            # Persist prompt data for async checkpoint recovery.
-            # TODO: maybe let workers do it?
-            private_fields = [
-                key
-                for key in batch.keys()
-                if not isinstance(batch.get(key), NonTensorData) and key not in shared_fields
-            ]
             tq.kv_batch_put(
-                keys=uids,
+                keys=list(batch["uid"]),
                 partition_id="train",
                 tags=tags,
-                fields=batch.select(*private_fields) if private_fields else None,
+                # Persist prompt data for async checkpoint recovery.
+                # TODO: maybe let workers do it?
+                fields=batch.select(*[key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)]),
             )
-            if shared_fields:
-                tq.kv_link(keys=uids, partition_id="train", public_key=uids, fields=shared_fields)
         else:
-            tq.kv_batch_put(keys=uids, partition_id="train", tags=tags)
+            tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
 
         self.agent_loop_manager.generate_sequences(batch)
         return len(batch)

@@ -36,11 +36,12 @@ from verl.experimental.agent_loop import (
 from verl.experimental.agent_loop.preprocess_cache import PromptPreprocessCache
 from verl.trainer.ppo.v1.prompt_sharing import (
     PUBLIC_PARTITION,
+    async_release_public_prompts,
     multi_modal_inputs_equal,
     prompt_sharing_enabled,
     prompt_sharing_requested,
     public_multi_modal_key,
-    shared_prompt_fields,
+    publish_public_prompts,
 )
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
@@ -87,7 +88,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         self.background_tasks = set()
         self.share_prompt_fields = prompt_sharing_enabled(self.config)
         self.share_preprocessing = prompt_sharing_requested(self.config)
-        # uid => fields its trajectories link from the public prompt the trainer put under uid
+        # uid => fields its trajectories link from the public prompt put under uid
         self.public_prompt_fields: dict[str, list[str]] = {}
         # uid => multi_modal_inputs the first finished session of uid put under public_multi_modal_key(uid)
         self.public_multi_modal_inputs: dict[str, _PublicMultiModalInputs] = {}
@@ -102,7 +103,12 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         """Spawn agent loop for each sample in the batch without waiting for the results."""
         validate = batch["validate"] if "validate" in batch else False
         batch.pop("validate", None)
-        public_fields = shared_prompt_fields(batch) if self.share_prompt_fields else []
+        public_fields = []
+        if self.share_prompt_fields:
+            # Freeing runs here because this is the point reached after a step cleared the trajectories
+            # that were linking the public prompts of the previous batch.
+            await async_release_public_prompts()
+            public_fields = await publish_public_prompts(batch)
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,

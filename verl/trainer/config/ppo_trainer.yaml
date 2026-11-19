@@ -237,11 +237,6 @@ trainer:
     # Trainer mode: "sync", "colocate_async", "separate_async"
     trainer_mode: sync
 
-    # Whether the rollout.n trajectories of a prompt share its preprocessing and storage:
-    # media is decoded and run through the processor once per prompt, and the prompt fields and
-    # multi_modal_inputs are stored once in TransferQueue (storage sharing requires SimpleStorage).
-    share_prompts: True
-
     # Synchronous PPO trainer
     sync: {}
 
