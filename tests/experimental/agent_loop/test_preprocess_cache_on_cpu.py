@@ -110,7 +110,8 @@ def _agent_loop(cache: PromptPreprocessCache, builder: _CountingBuilder) -> Sing
     agent_loop.rollout_config = OmegaConf.create({"prompt_length": 16})
     agent_loop.continuous_token_builder = builder
     agent_loop.loop = get_event_loop()
-    agent_loop.preprocess_cache = cache
+    if cache is not None:
+        cache.attach(agent_loop)
     return agent_loop
 
 
