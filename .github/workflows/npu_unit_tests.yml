@@ -123,6 +123,8 @@ jobs:
       - name: Run all NPU unit tests
         env:
           VERL_TEST_N_GPUS_PER_NODE: "16"
+          # Ascend's precision-aware optimizer requires BF16 model parameters when storing remainders.
+          VERL_TEST_OPTIMIZER_OFFLOAD_BF16_ALL: "1"
         run: |
           pytest -s -x \
             --ignore-glob="*test_special_*.py" \
@@ -143,7 +145,6 @@ jobs:
             --ignore-glob="tests/checkpoint_engine" \
             --ignore-glob="*test_shared_memory*" \
             --ignore-glob="tests/workers/rollout/rollout_trtllm" \
-            --ignore-glob="*test_optimizer_offload_and_load.py*" \
             tests/ -k "not test_sender_accepts_strided_tensor"
       - name: Running NPU profiling unit tests
         run: |
