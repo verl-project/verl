@@ -59,10 +59,10 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 from verl.trainer.ppo.rollout_corr_helper import compute_offpolicy_metrics
+from verl.trainer.ppo.utils import Role
 from verl.utils import omega_conf_to_dataclass
 from verl.utils import tensordict_utils as tu
 from verl.utils.debug.metrics import calculate_debug_metrics

@@ -605,6 +605,8 @@ class CheckpointEngineManager:
             global_steps: The global steps of the actor worker group.
         """
         # 0. update weights for sync training with colocated actor and rollout
+        # No global_steps check here: the only caller without one wakes replicas back up on unchanged
+        # weights, so the current salt still matches what the external KV store holds.
         if self.backend == "naive":
             await asyncio.gather(*self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
@@ -621,6 +623,11 @@ class CheckpointEngineManager:
             return await self._update_ticket.wait_committed()
 
     async def submit_update(self, global_steps: int | None, rollout_quiesced: bool = False) -> WeightUpdateTicket:
+        # Salted external KV caches tell weights apart only by global_steps, and the shared KV store
+        # is no longer wiped, so a weight change without a new version would serve stale KV.
+        if global_steps is None and any(r.config.external_kv_cache_invalidation == "salt" for r in self.replicas):
+            raise ValueError("external_kv_cache_invalidation='salt' requires global_steps on every weight update")
+
         # 1. create a temporay worker group for all replicas
         workers = []
         for replica in self.replicas:

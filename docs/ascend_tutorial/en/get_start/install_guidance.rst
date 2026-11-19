@@ -1,7 +1,7 @@
 Ascend Installation Guide
 ==========================
 
-Last updated: 11/11/2026.
+Last updated: 11/13/2026.
 
 .. contents:: Table of Contents
    :local:
@@ -158,6 +158,11 @@ We provide a conda-based one-stop `Installation Script <https://github.com/verl-
    registration errors when importing Megatron-Bridge. Keep the patch file in
    the cloned verl repository when running the installation script.
 
+   The script also installs the FLA NPU backend required by vLLM-Ascend (version ``26.9.1``).
+   Set ``FLA_NPU_DEVICE`` before running it: ``a2`` for A2 or ``a3`` for A3,
+   selecting ``flash-linear-attention-npu-a2`` or ``flash-linear-attention-npu-a3`` respectively.
+   This dependency is installed for both FSDP and Megatron.
+
 .. code:: bash
 
    # Note: On x86 platforms, pip requires an additional source. The command is as follows:
@@ -168,6 +173,8 @@ We provide a conda-based one-stop `Installation Script <https://github.com/verl-
    conda create -n verl-vllm-npu python=3.12 -y
    conda activate verl-vllm-npu
    git clone --recursive https://github.com/verl-project/verl.git
+   # Select a2 or a3 for your hardware; this example uses A3.
+   export FLA_NPU_DEVICE=a3
    bash verl/scripts/install_vllm_mcore_npu.sh
    # If you only need the FSDP backend
    # USE_MEGATRON=0 bash verl/scripts/install_vllm_mcore_npu.sh

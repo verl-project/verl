@@ -2,7 +2,7 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 10/03/2026.
+Last updated: 10/30/2026.
 
 ## Background
 
@@ -339,9 +339,15 @@ How the distillation signal is applied. `true` corresponds to PG OPD, `false` to
 
 **Validation:**
 
-- `use_policy_gradient=False` + `loss_mode="k1"` $\to$ `ValueError`. The k1 loss
-  has no gradient through the teacher logprob, so backpropagating it directly
-  is meaningless.
+- `use_policy_gradient=False` + `loss_mode="k1"` or `"kl"` $\to$ `ValueError`.
+  The direct loss gradient is independent of the teacher log probabilities.
+- `use_policy_gradient=True` with `abs`, `mse`, `k2`, `k3`, or `low_var_kl`
+  raises `ValueError`. Use `k1` or `kl` for reverse-KL policy gradients.
+  These non-negative losses can be large whether the student overestimates or
+  underestimates the teacher's token probability. As negative rewards, they
+  favor tokens with smaller penalties, which can move the student away from
+  the teacher. The k1 estimator keeps the sign of
+  $\log \pi_\theta(y_t \mid s_t) - \log \nu(y_t \mid s_t)$.
 - `use_policy_gradient=True` with either teacher-top-k forward KL mode $\to$
   warning. The
   PG update only moves $\nabla_\theta\log\pi_\theta(y_t|s_t)$ for the sampled token $y_t$, so the top-$k$
@@ -833,8 +839,8 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `verl/trainer/distillation/tail_kl.py` — shared tail-bucket value and analytic logit-gradient helpers
 - `verl/workers/engine_workers.py` — `ActorRolloutRefWorker.init_model`; binds `distillation_ppo_loss` as the actor's `loss_fn` when distillation is enabled
 - `verl/workers/engine/{fsdp,megatron}/transformer_impl.py` — training-engine forward steps; invoke `distillation_ppo_loss` first as a logits processor (top-$k$ modes) and again as the final loss
-- `verl/trainer/main_ppo.py` — `is_distillation_enabled` gate; allocates the dedicated `teacher_pool` resource pool
-- `verl/trainer/ppo/ray_trainer.py` — constructs `MultiTeacherModelManager` and hands its `get_client()` dict to `AgentLoopWorker(... teacher_client=...)`
+- `verl/trainer/main_ppo.py` — passes the trainer’s teacher clients to `AgentLoopManagerTQ`
+- `verl/trainer/ppo/v1/trainer_base.py` — allocates `teacher_pool`, constructs `MultiTeacherModelManager`, and exposes teacher clients through `get_teacher_client()`
 - `verl/workers/rollout/llm_server.py` — `LLMServerClient` used for both student rollout and teacher logprob computation
 - `verl/workers/rollout/router.py` — pluggable router (`GlobalRequestLoadBalancer`, `get_router_handle`) selecting the backing server
 

@@ -89,8 +89,8 @@ def main():
     """Main function to check docstrings in specified files."""
 
     files_to_check = [
-        "verl/trainer/ppo/ray_trainer.py",
         "verl/trainer/main_ppo.py",
+        "verl/trainer/ppo/trainer_utils.py",
         "verl/trainer/ppo/reward.py",
         "verl/utils/reward_score/__init__.py",
         "verl/trainer/ppo/core_algos.py",

@@ -14,13 +14,13 @@ the tutorial: [`docs/amd_tutorial/amd_quick_start.rst`](../../docs/amd_tutorial/
 
 ## Supported Hardware
 
-The image targets the following GPU architectures (`GPU_ARCH`):
+The image targets the following GPU architectures (set via `PYTORCH_ROCM_ARCH`
+in `Dockerfile.rocm`):
 
 - `gfx942` — MI300 series (MI300X / MI300A / MI325X)
 - `gfx950` — MI350 series (MI350X / MI355X)
 
-Other architectures (e.g. `gfx90a` for MI200/MI250) can be built by overriding
-`GPU_ARCH`, but are not validated here.
+Other architectures (e.g. `gfx90a` for MI200/MI250) are not validated here.
 
 ## Key Versions
 
@@ -30,8 +30,10 @@ Other architectures (e.g. `gfx90a` for MI200/MI250) can be built by overriding
 | Python | 3.12 |
 | PyTorch | 2.12.0+rocm7.14 |
 | Triton | 3.7.0 |
-| vLLM | 0.22.1rc1 source @ `18d87a87d` |
-| SGLang | 0.5.15 source @ `0801cc05ed` |
+| vLLM | v0.32.0 source @ `5df63a720` + [vllm#61872](https://github.com/vllm-project/vllm/pull/61872) |
+| SGLang | 0.5.23 source @ `0801cc05ed` |
+| transformers | 5.16.1 |
+| TileLang | 0.1.10 |
 | Flash Attention | ROCm fork (CK backend) @ `v2.8.3` |
 | TransformerEngine |2.14.0 ROCm fork @ `e6ede467` |
 | aiter | ROCm @ `b5e03ed19` |
@@ -58,38 +60,28 @@ Starting from a base image  `rocm/primus:v26.4` , `Dockerfile.rocm` installs:
 
 ## Building Locally
 
-The Dockerfile uses BuildKit cache mounts (`RUN --mount=...`), so **BuildKit is
-required** (with the `buildx` plugin). If you see
-`the --mount option requires BuildKit`, install `buildx`
-(`sudo apt-get install -y docker-buildx`) and prefix the build with
-`DOCKER_BUILDKIT=1`.
-
 ```sh
 DOCKER_BUILDKIT=1 docker build \
     -f docker/rocm/Dockerfile.rocm \
     -t verl-rocm:local .
 ```
 
+The vLLM build uses `MAX_JOBS=64`.
+
 ### Useful build arguments
 
 | Build arg | Default | Purpose |
 | --------- | ------- | ------- |
-| `GPU_ARCH` | `gfx942;gfx950` | GPU architectures to compile kernels for. Set to a single arch (e.g. `gfx942`) to roughly halve Flash Attention build time. |
-| `PYTHON_VERSION` | `3.12` | Python version. Note: the prebuilt wheel URLs are pinned to the `cp312` ABI; changing this also requires updating those URLs. |
-| `MAX_JOBS` | `$(nproc)` | Parallel compile jobs. Lower it (e.g. `64`) if the vLLM build runs out of memory. |
-|`VLLM_TAG` / `AITER_TAG` | pinned | Source commits for the from-source components. |
-
-Example — build only for MI300 with a memory-safe job count:
-
-```sh
-DOCKER_BUILDKIT=1 docker build \
-    -f docker/rocm/Dockerfile.rocm \
-    --build-arg GPU_ARCH=gfx942 \
-    --build-arg MAX_JOBS=64 \
-    -t verl-rocm:mi300 .
-```
+| `BASE_IMAGE` | `rocm/primus:v26.4` | Base image providing ROCm, torch, Flash Attention, TransformerEngine and aiter. |
+| `VLLM_TAG` / `SGLANG_TAG` / `VERL_TAG` | pinned | Source commits for the from-source components. |
 
 ## Release History
+
+- 2026/11/13: vLLM v0.32.0 @`5df63a720` (+ vllm#61872), aligned with verl's CUDA
+  stack; TileLang 0.1.10 kept (no longer uninstalled); transformers==5.16.1,
+  mcore_bridge==1.7.0, TransferQueue==0.1.11, verl @`3503bec34`. Same ROCm 7.14
+  base (`rocm/primus:v26.4`), torch==2.12.0, triton==3.7.0; targets gfx942 / gfx950.
+  Prebuilt as `verlai/verl:rocm7.14_torch2.12_release_1112`.
 
 - 2026/07/20: ROCm 7.14 stack — torch==2.12.0, triton==3.7.0, vLLM @`18d87a87d`,   SGLang @`0801cc05ed`, 
   Flash Attention (CK) @`v2.8.3`, TransformerEngine @`e6ede467`,
