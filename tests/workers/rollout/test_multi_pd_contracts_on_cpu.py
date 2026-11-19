@@ -64,6 +64,12 @@ def test_all_engines_have_disjoint_workers_and_every_prefill_gets_all_decodes(de
     assert [o["tp"] for o, _ in spawned] == [ptp] * np + [dtp] * nd
     assert len({o["actor_name"] for o, _ in spawned}) == np + nd
     assert len({o["kv_transfer_config"]["engine_id"] for o, _ in spawned}) == np + nd
+    if device == "npu":
+        assert all(options["mooncake_bootstrap_port"] is None for options, _ in spawned)
+    else:
+        assert all(
+            options["mooncake_bootstrap_port"] == spawned[0][0]["side_channel_port"] for options, _ in spawned[np:]
+        )
     for options, server in spawned[:np]:
         if device == "cuda" and backend == "mooncake":
             assert options["mooncake_bootstrap_port"] == options["side_channel_port"]
@@ -317,17 +323,17 @@ def test_each_engine_port_reservation_is_disjoint(contiguous):
         world_size=16,
         _reserve_port_range=methods._reserve_port_range,
     )
-    pp, bootstrap, dp, sockets, close_before_launch = methods._reserve_pd_ports(replica, "127.0.0.1", contiguous)
+    pp, dp, sockets, close_before_launch = methods._reserve_pd_ports(replica, "127.0.0.1", contiguous)
     try:
         assert len(pp) == 2 and len(dp) == 3
         actual_ports = [sock.getsockname()[1] for sock in sockets]
         assert len(actual_ports) == len(set(actual_ports))
         if contiguous:
             expected = [port + rank for ports, tp in ((pp, 2), (dp, 4)) for port in ports for rank in range(tp)]
-            expected += list(range(bootstrap, bootstrap + 16))
+            assert len(sockets) == 16  # Only P/D TP ports; no extra world-size bootstrap range.
             assert set(expected) == set(actual_ports)
         else:
-            assert bootstrap == pp[0]
+            assert len(sockets) == 5
             assert set(pp + dp) == set(actual_ports)
         assert close_before_launch is contiguous
     finally:
@@ -344,7 +350,7 @@ class _RoleConfig:
     ray_actor_max_concurrency: int = 128
 
 
-def _spawn_role_configs(config):
+def _spawn_role_configs(config, mooncake_bootstrap_port=40000):
     """Capture both roles' actor configs without starting Ray or vLLM."""
     spawn = _load_functions(
         REPLICA,
@@ -370,8 +376,30 @@ def _spawn_role_configs(config):
     )
     outputs = []
     for role, offset in (("prefill", 0), ("decode", 4)):
-        outputs.append(spawn(replica, role, [], "node", "0,1", 2, {}, "127.0.0.1", 39000, 40000, role, offset))
+        outputs.append(
+            spawn(replica, role, [], "node", "0,1", 2, {}, "127.0.0.1", 39000, mooncake_bootstrap_port, role, offset)
+        )
     return [result["config"] for result in outputs], actor
+
+
+@pytest.mark.parametrize("bootstrap_port", [None, 40000])
+def test_bootstrap_environment_is_only_set_when_requested(bootstrap_port):
+    config = _RoleConfig(
+        disaggregation=SimpleNamespace(
+            prefill_gpu_memory_utilization=None,
+            decode_gpu_memory_utilization=None,
+            prefill_engine_kwargs={},
+            decode_engine_kwargs={},
+        ),
+        engine_kwargs={"vllm": {}},
+    )
+    _, actor = _spawn_role_configs(config, mooncake_bootstrap_port=bootstrap_port)
+    for call in actor.options.call_args_list:
+        env_vars = call.kwargs["runtime_env"]["env_vars"]
+        if bootstrap_port is None:
+            assert "VLLM_MOONCAKE_BOOTSTRAP_PORT" not in env_vars
+        else:
+            assert env_vars["VLLM_MOONCAKE_BOOTSTRAP_PORT"] == "40000"
 
 
 def test_role_overrides_are_isolated_and_default_memory_is_inherited():

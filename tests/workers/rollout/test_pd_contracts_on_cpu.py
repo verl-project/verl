@@ -109,7 +109,6 @@ def _metrics_pd_replica(rank, device, backend, n_prefill=1, n_decode=2, prefill_
         _reserve_pd_ports=Mock(
             return_value=(
                 [39000 + i * 10 for i in range(n_prefill)],
-                40000,
                 [41000 + i * 10 for i in range(n_decode)],
                 [],
                 False,

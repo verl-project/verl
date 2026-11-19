@@ -33,7 +33,7 @@ Supply the model, training configuration and resource pool as usual. The footpri
 | 8–11 | D0 | 0–3 | 8 |
 | 12–15 | D1 | 0–3 | 12 |
 
-`vLLMPDReplica.launch_servers()` slices workers in this order and creates distinct engine IDs and side-channel ports. It checks that the group's workers share a node. Ascend reserves consecutive per-TP port ranges; GPU Mooncake gives each P its own bootstrap endpoint. Reserved ports still have a release-to-bind race window; this is not a cross-job port lease.
+`vLLMPDReplica.launch_servers()` slices workers in this order and creates distinct engine IDs and side-channel ports. It checks that the group's workers share a node. Ascend reserves only the P/D per-TP `kv_port` ranges, without an extra bootstrap range or bootstrap environment override; MooncakeConnectorV1 uses those KV handshake endpoints. GPU Mooncake keeps each P's bootstrap endpoint on that P's assigned port. Reserved ports still have a release-to-bind race window; this is not a cross-job port lease.
 
 ## Request path
 

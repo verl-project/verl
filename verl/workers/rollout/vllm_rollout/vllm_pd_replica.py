@@ -135,7 +135,6 @@ class vLLMPDReplica(vLLMReplica):
         prefill_host_ip = worker_infos[0][2]
         (
             prefill_side_channel_ports,
-            bootstrap_port,
             decode_side_channel_ports,
             reserved_socks,
             close_sockets_before_launch,
@@ -176,8 +175,8 @@ class vLLMPDReplica(vLLMReplica):
                     kv_transfer_config=prefill_kv_cfg,
                     side_channel_host=prefill_host_ip,
                     side_channel_port=prefill_side_channel_port,
-                    # Native GPU Mooncake starts one bootstrap server per P.
-                    mooncake_bootstrap_port=(bootstrap_port if use_ascend_mooncake_v1 else prefill_side_channel_port),
+                    # GPU Mooncake keeps one bootstrap per P; Ascend V1 uses kv_port instead.
+                    mooncake_bootstrap_port=(None if use_ascend_mooncake_v1 else prefill_side_channel_port),
                     actor_name=actor_name,
                     zmq_base_trainer_rank=start,
                 )
@@ -212,7 +211,7 @@ class vLLMPDReplica(vLLMReplica):
                         kv_transfer_config=decode_kv_cfg,
                         side_channel_host=prefill_host_ip,
                         side_channel_port=decode_side_channel_port,
-                        mooncake_bootstrap_port=bootstrap_port,
+                        mooncake_bootstrap_port=(None if use_ascend_mooncake_v1 else prefill_side_channel_ports[0]),
                         actor_name=f"vllm_server_decode_{self.replica_rank}_{i}{self.name_suffix}",
                         zmq_base_trainer_rank=start,
                     )
@@ -321,7 +320,7 @@ class vLLMPDReplica(vLLMReplica):
         self,
         address: str,
         contiguous: bool,
-    ) -> tuple[list[int], int, list[int], list[socket.socket], bool]:
+    ) -> tuple[list[int], list[int], list[socket.socket], bool]:
         """Reserve P/D ports using either upstream or Ascend allocation semantics."""
         reserved_socks: list[socket.socket] = []
         prefill_ports: list[int] = []
@@ -332,13 +331,11 @@ class vLLMPDReplica(vLLMReplica):
                     prefill_port, prefill_socks = self._reserve_port_range(address, self._prefill_tp)
                     prefill_ports.append(prefill_port)
                     reserved_socks.extend(prefill_socks)
-                bootstrap_port, bootstrap_socks = self._reserve_port_range(address, self.world_size)
-                reserved_socks.extend(bootstrap_socks)
                 for _ in range(self._n_decode):
                     decode_port, decode_socks = self._reserve_port_range(address, self._decode_tp)
                     decode_ports.append(decode_port)
                     reserved_socks.extend(decode_socks)
-                return prefill_ports, bootstrap_port, decode_ports, reserved_socks, True
+                return prefill_ports, decode_ports, reserved_socks, True
 
             for _ in range(self._n_prefill):
                 prefill_port, prefill_sock = get_free_port(address, with_alive_sock=True)
@@ -348,7 +345,7 @@ class vLLMPDReplica(vLLMReplica):
                 decode_port, decode_sock = get_free_port(address, with_alive_sock=True)
                 decode_ports.append(decode_port)
                 reserved_socks.append(decode_sock)
-            return prefill_ports, prefill_ports[0], decode_ports, reserved_socks, False
+            return prefill_ports, decode_ports, reserved_socks, False
         except Exception:
             # Reservation may fail before launch_servers enters its try/finally.
             for sock in reserved_socks:
@@ -444,7 +441,7 @@ class vLLMPDReplica(vLLMReplica):
         kv_transfer_config: dict,
         side_channel_host: str,
         side_channel_port: int,
-        mooncake_bootstrap_port: int,
+        mooncake_bootstrap_port: Optional[int],
         actor_name: str,
         zmq_base_trainer_rank: int = 0,
     ) -> ActorHandle:
@@ -476,12 +473,14 @@ class vLLMPDReplica(vLLMReplica):
             "NCCL_CUMEM_ENABLE": "0",
             "VLLM_NIXL_SIDE_CHANNEL_HOST": side_channel_host,
             "VLLM_NIXL_SIDE_CHANNEL_PORT": str(side_channel_port),
-            "VLLM_MOONCAKE_BOOTSTRAP_PORT": str(mooncake_bootstrap_port),
             # Avoid Mooncake TCP port exhaustion under validation concurrency.
             "MC_TCP_ENABLE_CONNECTION_POOL": os.environ.get("MC_TCP_ENABLE_CONNECTION_POOL", "1"),
             "VERL_ZMQ_BASE_TRAINER_RANK": str(zmq_base_trainer_rank),
             "VERL_RAY_JOB_ID": ray.get_runtime_context().get_job_id(),
         }
+        # GPU Mooncake uses bootstrap; Ascend V1 handshakes use kv_port.
+        if mooncake_bootstrap_port is not None:
+            env_vars["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(mooncake_bootstrap_port)
 
         return self.server_class.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
