@@ -14,12 +14,15 @@
 """Store the dataset fields of a prompt once in TransferQueue and link its trajectories to them.
 
 A GRPO prompt is rolled out ``n`` times, and every trajectory ``{uid}_{session_id}_{index}`` would
-otherwise store its own copy of the dataset fields (``raw_prompt``, ``reward_model``, ...). The trainer
-puts those fields once under key ``uid`` in ``tq.PUBLIC_PARTITION`` before dispatching the prompt, and
+otherwise store its own copy of the dataset fields (``raw_prompt``, ``reward_model``, ...). The rollout
+worker puts those fields once under key ``uid`` in ``tq.PUBLIC_PARTITION`` before running the prompt, and
 each trajectory links them instead. The first finished session of a multimodal prompt likewise puts its
 ``multi_modal_inputs`` (e.g. ``pixel_values``) under ``{uid}-mm``, and the sessions whose inputs are equal
-link them. A public key is freed once no key links to it any more, so the
-trainer only has to call ``release_public_prompts`` after clearing trajectories or prompt groups.
+link them. A public key is freed once no key links to it any more, which
+``release_public_prompts`` sweeps for; it runs where the prompts of the next batch are published,
+the one point that is reached after a step cleared the trajectories of the previous one.
+
+The trainer knows none of this: everything here is called from the TransferQueue rollout adapter.
 """
 
 from typing import Iterable
@@ -36,8 +39,8 @@ _PRIVATE_PROMPT_FIELDS = frozenset({"agent_name", "multi_modal_data", "__rollout
 
 
 def prompt_sharing_requested(config: DictConfig) -> bool:
-    """Whether ``trainer.v1.share_prompts`` asks the trajectories of a prompt to share preprocessing and storage."""
-    return bool(config.trainer.v1.get("share_prompts", True))
+    """Whether ``transfer_queue.share_prompts`` asks the trajectories of a prompt to share preprocessing."""
+    return bool(config.transfer_queue.get("share_prompts", True))
 
 
 def prompt_sharing_enabled(config: DictConfig) -> bool:
@@ -80,29 +83,20 @@ def multi_modal_inputs_equal(a: dict, b: dict) -> bool:
     return True
 
 
-def put_public_prompts(batch: TensorDict) -> list[str]:
-    """Put the shared fields of each prompt under its uid in ``PUBLIC_PARTITION``; return the fields."""
-    fields = shared_prompt_fields(batch)
-    if fields:
-        tq.kv_batch_put(keys=list(batch["uid"]), partition_id=PUBLIC_PARTITION, fields=batch.select(*fields))
-    return fields
+async def publish_public_prompts(batch: TensorDict) -> list[str]:
+    """Put the shared fields of each prompt under its uid in ``PUBLIC_PARTITION``; return the fields.
 
-
-def put_missing_public_prompts(batch: TensorDict) -> list[str]:
-    """Put the shared fields of the prompts that have no public key yet; return the fields.
-
-    Recovering an async checkpoint re-dispatches prompts that were already submitted, so their public
-    keys normally exist and TransferQueue refuses to write a key twice. They are missing when the run
-    that submitted them had prompt sharing off.
+    Only the prompts that have no public key yet are written: recovering an async checkpoint
+    re-dispatches prompts whose keys already exist, and TransferQueue refuses to write a key twice.
     """
     fields = shared_prompt_fields(batch)
     if not fields:
         return fields
     uids = list(batch["uid"])
-    present = tq.kv_exists(keys=uids, partition_id=PUBLIC_PARTITION)
+    present = await tq.async_kv_exists(keys=uids, partition_id=PUBLIC_PARTITION)
     missing = [i for i, uid in enumerate(uids) if uid not in present]
     if missing:
-        tq.kv_batch_put(
+        await tq.async_kv_batch_put(
             keys=[uids[i] for i in missing],
             partition_id=PUBLIC_PARTITION,
             fields=batch.select(*fields)[missing],
@@ -117,5 +111,14 @@ def release_public_prompts(uids: Iterable[str] = ()) -> None:
     trajectory ever linked them, e.g. a group whose sessions all failed.
     """
     if hasattr(tq, "kv_clear_unlinked_public"):
-        stale_keys = [key for uid in uids for key in (uid, public_multi_modal_key(uid))]
-        tq.kv_clear_unlinked_public(stale_keys=stale_keys or None)
+        tq.kv_clear_unlinked_public(stale_keys=_stale_public_keys(uids))
+
+
+async def async_release_public_prompts(uids: Iterable[str] = ()) -> None:
+    """``release_public_prompts`` for a caller that must not block its event loop."""
+    if hasattr(tq, "async_kv_clear_unlinked_public"):
+        await tq.async_kv_clear_unlinked_public(stale_keys=_stale_public_keys(uids))
+
+
+def _stale_public_keys(uids: Iterable[str]) -> list[str] | None:
+    return [key for uid in uids for key in (uid, public_multi_modal_key(uid))] or None

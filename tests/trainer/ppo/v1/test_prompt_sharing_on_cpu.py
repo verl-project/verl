@@ -28,11 +28,9 @@ from verl.trainer.ppo.v1.prompt_sharing import (
     prompt_sharing_enabled,
     prompt_sharing_requested,
     public_multi_modal_key,
-    put_missing_public_prompts,
-    put_public_prompts,
+    publish_public_prompts,
     release_public_prompts,
 )
-from verl.trainer.ppo.v1.trainer_base import PPOTrainer
 from verl.utils import tensordict_utils as tu
 
 pytestmark = pytest.mark.skipif(not hasattr(tq, "kv_link"), reason="TransferQueue has no public partition links")
@@ -66,11 +64,6 @@ class _DummyWorker:
         self.shareable_multi_modal_keys = shareable_multi_modal_keys
 
 
-class _FakeAgentLoopManager:
-    def generate_sequences(self, batch):
-        pass
-
-
 def _uid() -> str:
     return uuid.uuid4().hex
 
@@ -93,10 +86,10 @@ def _public_keys(uids: list[str]) -> set[str]:
 
 
 def _config(storage_backend: str = "SimpleStorage", share_prompts: bool | None = None) -> OmegaConf:
-    v1 = {} if share_prompts is None else {"share_prompts": share_prompts}
-    return OmegaConf.create(
-        {"trainer": {"v1": v1}, "transfer_queue": {"backend": {"storage_backend": storage_backend}}}
-    )
+    transfer_queue = {"backend": {"storage_backend": storage_backend}}
+    if share_prompts is not None:
+        transfer_queue["share_prompts"] = share_prompts
+    return OmegaConf.create({"transfer_queue": transfer_queue})
 
 
 def test_prompt_sharing_needs_simple_storage():
@@ -114,7 +107,7 @@ def test_share_prompts_switch_turns_off_storage_and_preprocessing_sharing():
 async def test_trajectories_link_public_prompt_until_all_are_cleared(tq_init):
     uid = _uid()
     batch = _prompt_batch([uid])
-    fields = put_public_prompts(batch)
+    fields = await publish_public_prompts(batch)
     assert set(fields) == {"uid", "raw_prompt", "index"}
 
     worker = _DummyWorker({uid: fields})
@@ -151,7 +144,7 @@ async def test_trajectories_link_public_prompt_until_all_are_cleared(tq_init):
 @pytest.mark.asyncio
 async def test_sessions_with_equal_multi_modal_inputs_link_one_copy(tq_init):
     uid = _uid()
-    fields = put_public_prompts(_prompt_batch([uid]))
+    fields = await publish_public_prompts(_prompt_batch([uid]))
     worker = _DummyWorker({uid: fields})
     image = {"pixel_values": torch.arange(12.0).reshape(3, 4), "image_grid_thw": torch.tensor([[1, 2, 2]])}
     other_image = {"pixel_values": torch.zeros(3, 4), "image_grid_thw": torch.tensor([[1, 2, 2]])}
@@ -182,7 +175,7 @@ async def test_sessions_with_equal_multi_modal_inputs_link_one_copy(tq_init):
 @pytest.mark.parametrize("text_dependent", [False, True])
 async def test_sessions_with_same_media_compute_multi_modal_inputs_once(tq_init, text_dependent):
     uid = _uid()
-    fields = put_public_prompts(_prompt_batch([uid]))
+    fields = await publish_public_prompts(_prompt_batch([uid]))
     worker = _DummyWorker({uid: fields}, shareable_multi_modal_keys=frozenset({"pixel_values", "image_grid_thw"}))
     worker.preprocess_caches[uid] = PromptPreprocessCache()
     computed = []
@@ -221,15 +214,16 @@ async def test_sessions_with_same_media_compute_multi_modal_inputs_once(tq_init,
     release_public_prompts([uid])
 
 
-def test_recovery_publishes_only_the_prompts_a_run_without_sharing_left_private(tq_init):
+@pytest.mark.asyncio
+async def test_publishing_skips_the_prompts_that_already_have_a_public_key(tq_init):
     """Resuming re-dispatches prompts whose public keys exist, and TransferQueue refuses to rewrite them."""
     shared, private = _uid(), _uid()
-    put_public_prompts(_prompt_batch([shared]))
+    await publish_public_prompts(_prompt_batch([shared]))
     assert _public_keys([shared, private]) == {shared}
 
     batch = _prompt_batch([shared, private])
     try:
-        assert set(put_missing_public_prompts(batch)) == {"uid", "raw_prompt", "index"}
+        assert set(await publish_public_prompts(batch)) == {"uid", "raw_prompt", "index"}
         assert _public_keys([shared, private]) == {shared, private}
         data = tq.kv_batch_get(keys=[private], partition_id=PUBLIC_PARTITION, select_fields=["raw_prompt"])
         assert data.get("raw_prompt").tolist() == [[{"role": "user", "content": f"question {private}"}]]
@@ -237,9 +231,10 @@ def test_recovery_publishes_only_the_prompts_a_run_without_sharing_left_private(
         tq.kv_clear(keys=[shared, private], partition_id=PUBLIC_PARTITION)
 
 
-def test_never_linked_public_prompt_is_freed_only_when_given_up(tq_init):
+@pytest.mark.asyncio
+async def test_never_linked_public_prompt_is_freed_only_when_given_up(tq_init):
     uids = [_uid(), _uid()]
-    put_public_prompts(_prompt_batch(uids))
+    await publish_public_prompts(_prompt_batch(uids))
     # A session put the shared multi_modal_inputs of uids[0], then the group failed before linking them.
     mm_key = public_multi_modal_key(uids[0])
     tq.kv_put(key=mm_key, partition_id=PUBLIC_PARTITION, fields={"pixel_values": torch.zeros(2)})
@@ -252,30 +247,4 @@ def test_never_linked_public_prompt_is_freed_only_when_given_up(tq_init):
     assert _public_keys([*uids, mm_key]) == {uids[1]}
 
     release_public_prompts(uids[1:])
-    assert _public_keys(uids) == set()
-
-
-def test_async_submission_links_prompt_key_and_keeps_private_fields(tq_init):
-    stub = type("Stub", (), {})()
-    stub.trainer_mode = "separate_async"
-    stub.share_prompt_fields = True
-    stub.global_steps = 1
-    stub.agent_loop_manager = _FakeAgentLoopManager()
-    uids = [_uid(), _uid()]
-    batch = _prompt_batch(uids, agent_name=["tool_agent", "single_turn_agent"])
-
-    assert PPOTrainer._submit_batch_to_rollout(stub, batch) == 2
-
-    rows = tq.kv_describe(keys=uids, partition_id="train")
-    for uid in uids:
-        assert rows[uid]["links"] == {"uid": uid, "raw_prompt": uid, "index": uid}
-    data = tq.kv_batch_get(keys=uids, partition_id="train")
-    assert set(data.keys()) == {"uid", "raw_prompt", "index", "agent_name"}
-    assert data.get("agent_name").tolist() == ["tool_agent", "single_turn_agent"]
-    tags = tq.kv_list(partition_id="train")["train"]
-    assert all(tags[uid]["status"] == "pending" for uid in uids)
-
-    # ReplayBuffer clears the prompt key when it materializes the group; no trajectory links the prompt then.
-    tq.kv_clear(keys=uids, partition_id="train")
-    release_public_prompts(uids)
     assert _public_keys(uids) == set()
