@@ -307,9 +307,9 @@ class RewardLoopManager:
                 with open_dict(self.config):
                     rm_rollout.max_num_seqs = 1
             reward_model_config = copy.deepcopy(config.reward.reward_model)
-            reward_model_config.rollout.profiler = resolve_ray_actor_profiler_config(
-                reward_model_config.rollout.profiler, config
-            )
+            profiler_config = reward_model_config.rollout.get("profiler")
+            if profiler_config is not None:
+                reward_model_config.rollout.profiler = resolve_ray_actor_profiler_config(profiler_config, config)
             self.reward_model_manager = RewardModelManager(reward_model_config, rm_resource_pool)
             self.reward_router_address = self.reward_model_manager.get_router_address()
         else:

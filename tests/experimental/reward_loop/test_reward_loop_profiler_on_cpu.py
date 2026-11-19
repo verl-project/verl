@@ -112,6 +112,7 @@ def test_constructor_resolves_a_private_reward_model_config_and_initializes_work
             }
         }
     )
+    OmegaConf.set_struct(config, True)
     original = copy.deepcopy(config)
     resolved = OmegaConf.create({"ray_actor_nsight_options": {"o": "resolved"}})
     events = Mock()
@@ -134,3 +135,25 @@ def test_constructor_resolves_a_private_reward_model_config_and_initializes_work
     resolve.call_args.args[0].tool = "modified-by-test"
     assert config == original
     assert events.mock_calls == [call.create_workers(), call.init_profilers()]
+
+
+@pytest.mark.parametrize(
+    "rollout",
+    [{"full_determinism": False}, {"full_determinism": False, "profiler": None}],
+    ids=["missing-profiler", "null-profiler"],
+)
+def test_constructor_preserves_unconfigured_reward_model_profiler(rollout):
+    config = OmegaConf.create({"reward": {"reward_model": {"enable": True, "rollout": rollout}}})
+    OmegaConf.set_struct(config, True)
+    original = copy.deepcopy(config)
+    with (
+        patch.object(reward_loop.ray, "remote"),
+        patch.object(reward_loop, "resolve_reward_manager_cls"),
+        patch.object(reward_loop, "RewardModelManager") as model_manager,
+        patch.object(RewardLoopManager, "_init_reward_loop_workers"),
+        patch.object(RewardLoopManager, "_init_reward_loop_profilers"),
+    ):
+        RewardLoopManager(config)
+
+    assert model_manager.call_args.args[0] == original.reward.reward_model
+    assert config == original
