@@ -283,8 +283,11 @@ class ToolAgentLoop(AgentLoopBase):
         else:
             agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
 
-        if not agent_data.extra_fields:
-            agent_data.extra_fields.update(output.extra_fields)
+        has_backend_extra_fields = any(key != "tool_retry_metrics" for key in agent_data.extra_fields)
+        if not has_backend_extra_fields:
+            for key, value in output.extra_fields.items():
+                if key != "tool_retry_metrics":
+                    agent_data.extra_fields[key] = value
         else:
             # Multi-round calls, only update the maximum max_global_steps.
             max_global_steps = output.extra_fields.get("max_global_steps", None)
@@ -521,11 +524,11 @@ class ToolAgentLoop(AgentLoopBase):
             if retry_metrics is not None:
                 retry_metrics["total_calls"] += 1
 
-            create_kwargs = tools_kwargs.get(tool_name, {}).get("create_kwargs", {})
             for attempt in range(max_attempts):
                 instance_id = None
                 try:
-                    instance_id, _ = await tool.create(create_kwargs=create_kwargs)
+                    kwargs = tools_kwargs.get(tool_name, {})
+                    instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
                     tool_execution_response, tool_reward, res = await tool.execute(
                         instance_id, tool_args, agent_data=agent_data
                     )

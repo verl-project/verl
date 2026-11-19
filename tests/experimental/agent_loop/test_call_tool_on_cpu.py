@@ -403,25 +403,92 @@ class TestCallToolRetryPolicy(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             ToolRetryConfig(retry_delay=-0.5)
 
+    async def test_retry_delay_waits_after_release_before_recreate(self):
+        from unittest.mock import patch
+
+        from verl.tools.base_tool import ToolTimeoutError
+        from verl.workers.config.rollout import ToolRetryConfig
+
+        tool = _SequencedBaseTool("sandbox", [ToolTimeoutError("timeout"), "ok"])
+        loop = _make_tool_agent_loop({"sandbox": tool})
+        loop.tool_retry = ToolRetryConfig(enable=True, max_retries=1, retry_delay=0.25)
+        agent_data = FakeAgentData()
+        agent_data.extra_fields = {}
+
+        async def _record_sleep(delay: float):
+            tool.events.append(f"sleep:{delay}")
+
+        with patch("verl.experimental.agent_loop.tool_agent_loop.asyncio.sleep", side_effect=_record_sleep):
+            response, reward, _ = await loop._call_tool(FakeFunctionCall("sandbox", "{}"), {}, agent_data)
+
+        assert reward == 1.0
+        assert response.text == "ok"
+        assert tool.events == [
+            "create:inst_1",
+            "execute:inst_1",
+            "release:inst_1",
+            "sleep:0.25",
+            "create:inst_2",
+            "execute:inst_2",
+            "release:inst_2",
+        ]
+
+    async def test_null_per_tool_kwargs_entry_returns_error_response(self):
+        from verl.workers.config.rollout import ToolRetryConfig
+
+        tool = _SequencedBaseTool("sandbox", ["unreachable"])
+        loop = _make_tool_agent_loop({"sandbox": tool})
+        loop.tool_retry = ToolRetryConfig(enable=True, max_retries=2, retry_delay=0.0)
+        agent_data = FakeAgentData()
+        agent_data.extra_fields = {}
+
+        response, reward, _ = await loop._call_tool(
+            FakeFunctionCall("sandbox", "{}"),
+            {"sandbox": None},
+            agent_data,
+        )
+        assert reward == 0.0
+        assert "Error executing tool 'sandbox':" in response.text
+        assert tool.events == []
+        assert agent_data.extra_fields["tool_retry_metrics"] == {
+            "total_calls": 1,
+            "retried_calls": 0,
+            "retry_attempts": 0,
+            "recovered_calls": 0,
+            "exhausted_calls": 0,
+            "non_recoverable_failures": 1,
+            "release_failures": 0,
+        }
+
     async def test_tool_agent_loop_run_seeds_uniform_retry_metrics_key(self):
         from omegaconf import OmegaConf
 
-        from verl.experimental.agent_loop.agent_loop import DictConfigWrap
+        from verl.experimental.agent_loop.agent_loop import DictConfigWrap, ToolListWrap
         from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
+        from verl.tools.base_tool import ToolTimeoutError
+        from verl.tools.schemas import OpenAIFunctionSchema, OpenAIFunctionToolSchema
         from verl.workers.rollout.replica import TokenOutput
 
         class _StubServer:
+            def __init__(self, outputs: list[TokenOutput]):
+                self._outputs = list(outputs)
+
             async def generate(self, request_id, *, prompt_ids, sampling_params, **kwargs):
-                return TokenOutput(token_ids=[11, 12], log_probs=[0.0, 0.0])
+                return self._outputs.pop(0)
 
         class _StubTokenizer:
             padding_side = "right"
 
+            def __init__(self, decoded_turns: list[str]):
+                self._decoded_turns = list(decoded_turns)
+
             def apply_chat_template(self, messages, *, tokenize=True, **kwargs):
-                return [101, 102] if tokenize else "prompt"
+                if not tokenize:
+                    return "prompt"
+                return [100 + idx for idx in range(len(messages) * 2)]
 
             def decode(self, ids, skip_special_tokens=False):
-                return "final answer without tool call"
+                return self._decoded_turns.pop(0) if self._decoded_turns else "final answer"
 
             def encode(self, text, add_special_tokens=False):
                 return [11, 12]
@@ -430,13 +497,13 @@ class TestCallToolRetryPolicy(unittest.IsolatedAsyncioTestCase):
             {
                 "actor_rollout_ref": {
                     "rollout": {
-                        "prompt_length": 16,
-                        "response_length": 16,
+                        "prompt_length": 32,
+                        "response_length": 32,
                         "full_determinism": True,
                         "multi_turn": {
                             "enable": True,
-                            "max_user_turns": 2,
-                            "max_assistant_turns": 2,
+                            "max_user_turns": 3,
+                            "max_assistant_turns": 3,
                             "max_parallel_calls": 1,
                             "max_tool_response_length": 256,
                             "tool_response_truncate_side": "middle",
@@ -449,16 +516,81 @@ class TestCallToolRetryPolicy(unittest.IsolatedAsyncioTestCase):
                 "data": {"apply_chat_template_kwargs": {}},
             }
         )
-        loop = ToolAgentLoop(
+
+        # Case 1: Zero-tool-call trajectory still emits uniform tool_retry_metrics schema.
+        loop_no_tools = ToolAgentLoop(
             trainer_config=DictConfigWrap(cfg),
-            server_manager=_StubServer(),
-            tokenizer=_StubTokenizer(),
+            server_manager=_StubServer([TokenOutput(token_ids=[11, 12], log_probs=[0.0, 0.0])]),
+            tokenizer=_StubTokenizer(["final answer without tool call"]),
             processor=None,
             dataset_cls=object,
             data_config=DictConfigWrap(cfg.data),
         )
-        out = await loop.run(sampling_params={}, raw_prompt=[{"role": "user", "content": "hi"}])
-        assert out.extra_fields["tool_retry_metrics"]["total_calls"] == 0
+        out_no_tools = await loop_no_tools.run(sampling_params={}, raw_prompt=[{"role": "user", "content": "hi"}])
+        assert out_no_tools.extra_fields["tool_retry_metrics"]["total_calls"] == 0
+
+        # Case 2: Multi-round trajectory preserves backend extra_fields and accumulates spec-decode counters.
+        tool = _SequencedBaseTool("sandbox", [ToolTimeoutError("transient"), "42"])
+        tool.tool_schema = OpenAIFunctionToolSchema(
+            type="function",
+            function=OpenAIFunctionSchema(
+                name="sandbox",
+                description="Sandbox tool",
+                parameters={"type": "object", "properties": {}},
+            ),
+        )
+        server_outputs = [
+            TokenOutput(
+                token_ids=[21, 22],
+                log_probs=[0.0, 0.0],
+                extra_fields={
+                    "backend_tag": "sglang",
+                    "max_global_steps": 10,
+                    "spec_num_draft_tokens": 4,
+                    "spec_num_accepted_tokens": 3,
+                    "spec_num_verify_steps": 1,
+                },
+            ),
+            TokenOutput(
+                token_ids=[31, 32],
+                log_probs=[0.0, 0.0],
+                extra_fields={
+                    "max_global_steps": 12,
+                    "spec_num_draft_tokens": 6,
+                    "spec_num_accepted_tokens": 5,
+                    "spec_num_verify_steps": 2,
+                },
+            ),
+        ]
+        loop_multi_turn = ToolAgentLoop(
+            trainer_config=DictConfigWrap(cfg),
+            server_manager=_StubServer(server_outputs),
+            tokenizer=_StubTokenizer(
+                [
+                    '<tool_call>{"name": "sandbox", "arguments": {}}</tool_call>',
+                    "The answer is 42.",
+                ]
+            ),
+            processor=None,
+            dataset_cls=object,
+            data_config=DictConfigWrap(cfg.data),
+            tools=ToolListWrap(tools=[tool]),
+        )
+        out_multi = await loop_multi_turn.run(sampling_params={}, raw_prompt=[{"role": "user", "content": "solve"}])
+        assert out_multi.extra_fields["backend_tag"] == "sglang"
+        assert out_multi.extra_fields["max_global_steps"] == 12
+        assert out_multi.extra_fields["spec_num_draft_tokens"] == 10
+        assert out_multi.extra_fields["spec_num_accepted_tokens"] == 8
+        assert out_multi.extra_fields["spec_num_verify_steps"] == 3
+        assert out_multi.extra_fields["tool_retry_metrics"] == {
+            "total_calls": 1,
+            "retried_calls": 1,
+            "retry_attempts": 1,
+            "recovered_calls": 1,
+            "exhausted_calls": 0,
+            "non_recoverable_failures": 0,
+            "release_failures": 0,
+        }
 
 
 if __name__ == "__main__":
