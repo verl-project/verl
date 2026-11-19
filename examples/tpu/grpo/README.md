@@ -223,3 +223,12 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash example
 ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   env NNODES_TRAINER=4 N_CHIPS_TRAINER=4 NNODES_ROLLOUT=4 N_CHIPS_ROLLOUT=4 bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
 ```
+
+**Graph-mode actor update (optional).** With a `verl-hardware-plugin` that has `engine_kwargs.tpu.trainer_mode=graph_trainer` (verl-hardware-plugin#134, e.g. `git -C ../verl-hardware-plugin checkout 3425d56c8ebdb2576ed43664cbfe2195dd901281`), `TRAINER_MODE=graph_trainer` runs the actor update through TorchTitan's `TpuGraphTrainer`: forward, fused log-prob, PPO loss and backward of a micro-batch are traced once and compiled as one program. The first step pays a one-time trace and compile of several minutes. Each rank must fit its mini-batch in one micro-batch, so raise `MAX_TOKEN_LEN_PER_GPU` if the run reports more than one; `STATIC_MICRO_BATCH_LEN` defaults to it.
+
+```bash
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env TRAINER_MODE=graph_trainer GRAPH_TRAINER_MEMORY_POLICY=tpu_selective \
+  GRAPH_TRAINER_SAVE_REGIONS=moe.routing,attention.inner_attention GRAPH_TRAINER_FSDP_SCHEDULE=interleave \
+  bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
+```

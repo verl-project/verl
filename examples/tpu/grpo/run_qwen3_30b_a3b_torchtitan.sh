@@ -136,6 +136,17 @@ SPLASH_MAX_BLOCK_SIZE="${SPLASH_MAX_BLOCK_SIZE:-1024}"
 # checkpoint load and the tpu-sync expert install are unchanged.
 MOE_PAIRED_GROUPED_MM="${MOE_PAIRED_GROUPED_MM:-True}"
 MOE_NATIVE_WEIGHT_LAYOUT="${MOE_NATIVE_WEIGHT_LAYOUT:-True}"
+# Optional, actor only: TRAINER_MODE=graph_trainer runs the actor update through TorchTitan's TpuGraphTrainer: the
+# whole micro-batch step (forward, fused log-prob, PPO loss, backward) is traced once and compiled as one program,
+# instead of per-block torch.compile (eager_blocks, the default). It needs bypass mode with the KL loss off (as here),
+# one micro-batch per mini-batch per rank (MAX_TOKEN_LEN_PER_GPU must hold a rank's mini-batch) and one static
+# length, so STATIC_MICRO_BATCH_LEN defaults to MAX_TOKEN_LEN_PER_GPU. GRAPH_TRAINER_MEMORY_POLICY (e.g. full,
+# tpu_selective), GRAPH_TRAINER_SAVE_REGIONS (with tpu_selective, e.g. moe.routing,attention.inner_attention) and
+# GRAPH_TRAINER_FSDP_SCHEDULE (none, prefetch, interleave) set the plugin's engine_kwargs.tpu.graph_trainer_* options.
+TRAINER_MODE="${TRAINER_MODE:-}"
+if [[ "${TRAINER_MODE}" == "graph_trainer" && -z "${STATIC_MICRO_BATCH_LEN}" ]]; then
+    STATIC_MICRO_BATCH_LEN="${MAX_TOKEN_LEN_PER_GPU}"
+fi
 TPU_PERF_OPTIONS=(
     "+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.splash_max_block_size=${SPLASH_MAX_BLOCK_SIZE}"
     "+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.moe_paired_grouped_mm=${MOE_PAIRED_GROUPED_MM}"
@@ -150,6 +161,17 @@ if [[ -n "${STATIC_MICRO_BATCH_LEN}" ]]; then
         "+actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.static_micro_batch_len=${STATIC_MICRO_BATCH_LEN}"
     )
 fi
+tpu_opts="actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu"
+if [[ -n "${TRAINER_MODE}" ]]; then
+    TPU_PERF_OPTIONS+=("+${tpu_opts}.trainer_mode=${TRAINER_MODE}")
+fi
+for option in memory_policy save_regions fsdp_schedule; do
+    env_name="GRAPH_TRAINER_${option^^}"
+    if [[ -n "${!env_name:-}" ]]; then
+        # Quoted for Hydra: save_regions is comma-separated.
+        TPU_PERF_OPTIONS+=("+${tpu_opts}.graph_trainer_${option}='${!env_name}'")
+    fi
+done
 # KL-to-reference loss, off by default: it adds a reference model (bf16 weights) on every trainer chip and a reference
 # log-prob pass per step.
 USE_KL_LOSS="${USE_KL_LOSS:-False}"
