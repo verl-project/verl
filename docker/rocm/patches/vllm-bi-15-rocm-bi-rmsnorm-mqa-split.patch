@@ -1,0 +1,672 @@
+# vLLM v0.26.0 patch 15/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Row-in-registers BI RMSNorm; KV-split DeepSeek-V4 decode indexer logits.
+#
+# - rms_norm_batch_invariant: rows of <= 8 x 1024 columns use a kernel that
+#   loads the row once instead of once per loop trip, with the same block
+#   layout and summation order (VLLM_BI_RMSNORM_ROWREG=0 keeps the loop kernel).
+# - rocm_dsv4_mqa_logits_split (new file): splits AITER's single-wave
+#   fp8_mqa_logits over the compressed context, same score arithmetic, with
+#   nan_to_num(nan=-inf) fused into the store.
+# Both are bitwise equal to the kernels they replace (3720 and 136 cases on
+# MI355X); they are decode latency changes.
+#
+# Upstream: the RMSNorm part is prepared as a separate vLLM change, not yet
+# proposed; the indexer part belongs to the DeepSeek-V4 ROCm RFC.
+#
+# Source commits:
+#   [ROCm][DSv4][BI] Row-in-registers BI RMSNorm; KV-split decode indexer logits
+#   [ROCm][DSv4][BI] Fuse nan_to_num into split indexer logits; opt-in RMSNorm+FP8 group quant
+#   [ROCm][BI] Drop the opt-in RMSNorm + FP8 group-quant stash
+#
+diff --git a/vllm/model_executor/layers/batch_invariant.py b/vllm/model_executor/layers/batch_invariant.py
+index 3fef8b99a1..9e60fcdde1 100644
+--- a/vllm/model_executor/layers/batch_invariant.py
++++ b/vllm/model_executor/layers/batch_invariant.py
+@@ -944,6 +944,140 @@ def _rms_norm_kernel(
+         tl.store(output_row_start_ptr + col_idx, output, mask=mask)
+ 
+ 
++@triton.jit
++def _rms_norm_blk_load(row_ptr, w_ptr, col_offset, n_cols, BLOCK_SIZE: tl.constexpr,
++                       HAS_WEIGHT: tl.constexpr):
++    col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
++    mask = col_idx < n_cols
++    vals = tl.load(row_ptr + col_idx, mask=mask, other=0.0)
++    if HAS_WEIGHT:
++        weight = tl.load(w_ptr + col_idx, mask=mask, other=1.0)
++    else:
++        weight = vals
++    return vals, weight
++
++
++@triton.jit
++def _rms_norm_blk_sumsq(vals, col_offset, n_cols, BLOCK_SIZE: tl.constexpr):
++    col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
++    mask = col_idx < n_cols
++    vals_f32 = vals.to(tl.float32)
++    sq_vals = vals_f32 * vals_f32
++    return tl.sum(tl.where(mask, sq_vals, 0.0))
++
++
++@triton.jit
++def _rms_norm_blk_store(out_ptr, vals, weight, inv_rms, col_offset, n_cols,
++                        BLOCK_SIZE: tl.constexpr, HAS_WEIGHT: tl.constexpr):
++    col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
++    mask = col_idx < n_cols
++    vals_f32 = vals.to(tl.float32)
++    output_f32 = vals_f32 * inv_rms
++    if HAS_WEIGHT:
++        output_f32 = output_f32 * weight.to(tl.float32)
++    output = output_f32.to(vals.dtype)
++    tl.store(out_ptr + col_idx, output, mask=mask)
++
++
++@triton.jit
++def _rms_norm_rowreg_kernel(
++    input_ptr,
++    weight_ptr,
++    output_ptr,
++    input_row_stride,
++    output_row_stride,
++    n_cols,
++    eps,
++    BLOCK_SIZE: tl.constexpr,
++    NUM_BLOCKS: tl.constexpr,
++    HAS_WEIGHT: tl.constexpr,
++):
++    """``_rms_norm_kernel`` with the row held in registers (n_cols <=
++    NUM_BLOCKS * BLOCK_SIZE, NUM_BLOCKS <= 8): every block of the row and of
++    the weight is loaded up front instead of once per serial loop trip in each
++    of two passes. The arithmetic is the same per element and in the same
++    order: one ``tl.sum`` per BLOCK_SIZE block of the same 1-D layout, added
++    to the fp32 running sum block by block from the left, the same rms /
++    inverse, then ``(x * inv_rms) * w`` rounded once."""
++    row_idx = tl.program_id(0).to(tl.int64)
++    row_ptr = input_ptr + row_idx * input_row_stride
++    out_ptr = output_ptr + row_idx * output_row_stride
++
++    v0, w0 = _rms_norm_blk_load(row_ptr, weight_ptr, 0 * BLOCK_SIZE, n_cols,
++                                BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 1:
++        v1, w1 = _rms_norm_blk_load(row_ptr, weight_ptr, 1 * BLOCK_SIZE, n_cols,
++                                    BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 2:
++        v2, w2 = _rms_norm_blk_load(row_ptr, weight_ptr, 2 * BLOCK_SIZE, n_cols,
++                                    BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 3:
++        v3, w3 = _rms_norm_blk_load(row_ptr, weight_ptr, 3 * BLOCK_SIZE, n_cols,
++                                    BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 4:
++        v4, w4 = _rms_norm_blk_load(row_ptr, weight_ptr, 4 * BLOCK_SIZE, n_cols,
++                                    BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 5:
++        v5, w5 = _rms_norm_blk_load(row_ptr, weight_ptr, 5 * BLOCK_SIZE, n_cols,
++                                    BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 6:
++        v6, w6 = _rms_norm_blk_load(row_ptr, weight_ptr, 6 * BLOCK_SIZE, n_cols,
++                                    BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 7:
++        v7, w7 = _rms_norm_blk_load(row_ptr, weight_ptr, 7 * BLOCK_SIZE, n_cols,
++                                    BLOCK_SIZE, HAS_WEIGHT)
++
++    sum_sq = tl.zeros([1], dtype=tl.float32)
++    sum_sq += _rms_norm_blk_sumsq(v0, 0 * BLOCK_SIZE, n_cols, BLOCK_SIZE)
++    if NUM_BLOCKS > 1:
++        sum_sq += _rms_norm_blk_sumsq(v1, 1 * BLOCK_SIZE, n_cols, BLOCK_SIZE)
++    if NUM_BLOCKS > 2:
++        sum_sq += _rms_norm_blk_sumsq(v2, 2 * BLOCK_SIZE, n_cols, BLOCK_SIZE)
++    if NUM_BLOCKS > 3:
++        sum_sq += _rms_norm_blk_sumsq(v3, 3 * BLOCK_SIZE, n_cols, BLOCK_SIZE)
++    if NUM_BLOCKS > 4:
++        sum_sq += _rms_norm_blk_sumsq(v4, 4 * BLOCK_SIZE, n_cols, BLOCK_SIZE)
++    if NUM_BLOCKS > 5:
++        sum_sq += _rms_norm_blk_sumsq(v5, 5 * BLOCK_SIZE, n_cols, BLOCK_SIZE)
++    if NUM_BLOCKS > 6:
++        sum_sq += _rms_norm_blk_sumsq(v6, 6 * BLOCK_SIZE, n_cols, BLOCK_SIZE)
++    if NUM_BLOCKS > 7:
++        sum_sq += _rms_norm_blk_sumsq(v7, 7 * BLOCK_SIZE, n_cols, BLOCK_SIZE)
++
++    mean_sq = sum_sq / n_cols
++    rms = tl.sqrt(mean_sq + eps)
++    inv_rms = 1.0 / rms
++
++    _rms_norm_blk_store(out_ptr, v0, w0, inv_rms, 0 * BLOCK_SIZE, n_cols,
++                        BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 1:
++        _rms_norm_blk_store(out_ptr, v1, w1, inv_rms, 1 * BLOCK_SIZE, n_cols,
++                            BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 2:
++        _rms_norm_blk_store(out_ptr, v2, w2, inv_rms, 2 * BLOCK_SIZE, n_cols,
++                            BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 3:
++        _rms_norm_blk_store(out_ptr, v3, w3, inv_rms, 3 * BLOCK_SIZE, n_cols,
++                            BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 4:
++        _rms_norm_blk_store(out_ptr, v4, w4, inv_rms, 4 * BLOCK_SIZE, n_cols,
++                            BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 5:
++        _rms_norm_blk_store(out_ptr, v5, w5, inv_rms, 5 * BLOCK_SIZE, n_cols,
++                            BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 6:
++        _rms_norm_blk_store(out_ptr, v6, w6, inv_rms, 6 * BLOCK_SIZE, n_cols,
++                            BLOCK_SIZE, HAS_WEIGHT)
++    if NUM_BLOCKS > 7:
++        _rms_norm_blk_store(out_ptr, v7, w7, inv_rms, 7 * BLOCK_SIZE, n_cols,
++                            BLOCK_SIZE, HAS_WEIGHT)
++
++
++# Row-in-registers RMSNorm (``_rms_norm_rowreg_kernel``) for rows of up to
++# 8 x 1024 columns; VLLM_BI_RMSNORM_ROWREG=0 keeps the two-pass loop kernel.
++_BI_RMSNORM_ROWREG = os.environ.get("VLLM_BI_RMSNORM_ROWREG", "1") == "1"
++
++
+ def rms_norm_batch_invariant(
+     input: torch.Tensor,
+     weight: torch.Tensor | None,
+@@ -992,6 +1126,21 @@ def rms_norm_batch_invariant(
+     output = torch.empty_like(input_2d)
+     BLOCK_SIZE = 1024
+     grid = (n_rows,)
++    num_blocks = triton.cdiv(n_cols, BLOCK_SIZE)
++    if _BI_RMSNORM_ROWREG and num_blocks <= 8:
++        _rms_norm_rowreg_kernel[grid](
++            input_2d,
++            weight if weight is not None else input_2d,
++            output,
++            input_2d.stride(0),
++            output.stride(0),
++            n_cols,
++            eps,
++            BLOCK_SIZE=BLOCK_SIZE,
++            NUM_BLOCKS=num_blocks,
++            HAS_WEIGHT=weight is not None,
++        )
++        return output.reshape(original_shape)
+     _rms_norm_kernel[grid](
+         input_2d,
+         weight if weight is not None else input_2d,
+diff --git a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+index 95b954de58..18ba03898a 100644
+--- a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
++++ b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+@@ -3,6 +3,7 @@
+ import functools
+ import importlib
+ import math
++import os
+ import sys
+ from importlib.util import find_spec
+ 
+@@ -1047,6 +1048,9 @@ def _aiter_fp8_mqa_logits_into(
+     ke: torch.Tensor,
+     logits: torch.Tensor,
+     stride_logits_s: int,
++    kv_chunk: int = 0,
++    max_kv_per_row: int = 0,
++    nan_to_neg_inf: bool = False,
+ ) -> bool:
+     """Launch AITER's gfx950 gluon fp8_mqa_logits kernel (the kernel and launch
+     configuration of its ``fp8_mqa_logits`` wrapper, used by the prefill
+@@ -1054,6 +1058,13 @@ def _aiter_fp8_mqa_logits_into(
+     ``stride_logits_s``. Row i writes only columns [ks[i], ke[i]), each
+     computed independently of the others, so the scores equal those of the
+     wrapper. Returns False when that kernel is not the one the wrapper uses.
++
++    ``kv_chunk > 0`` launches the same kernel body with the rows' key ranges
++    split into ``kv_chunk``-key pieces, one program each
++    (rocm_dsv4_mqa_logits_split; same scores, more programs);
++    ``max_kv_per_row`` bounds ``ke[i] - ks[i]`` and sizes that grid;
++    ``nan_to_neg_inf`` (split launch only) stores
++    ``nan_to_num(logit, nan=-inf)`` instead of the logit.
+     """
+     from vllm._aiter_ops import rocm_aiter_ops
+ 
+@@ -1075,6 +1086,47 @@ def _aiter_fp8_mqa_logits_into(
+     seq_len, num_heads, _ = q.shape
+     use_folded = m.FOLDED_REDUCTED_SUPPORT and num_heads > 16
+     limit = 2 * 1024 * 1024 * 1024
++    if kv_chunk > 0 and max_kv_per_row > 0:
++        from vllm.v1.attention.ops.rocm_dsv4_mqa_logits_split import (
++            _dsv4_split_fp8_mqa_logits_kernel,
++        )
++
++        _dsv4_split_fp8_mqa_logits_kernel[
++            (seq_len, triton.cdiv(max_kv_per_row, kv_chunk))
++        ](
++            Q_ptr=q,
++            KV_ptr=k,
++            kv_scales_ptr=k_scale,
++            weights_ptr=weights,
++            cu_start_ptr=ks,
++            cu_end_ptr=ke,
++            logits_ptr=logits,
++            seq_len_kv=k.shape[0],
++            NUM_HEADS=num_heads,
++            HEAD_SIZE=q.shape[2],
++            stride_q_s=q.stride(0),
++            stride_q_h=q.stride(1),
++            stride_q_d=q.stride(2),
++            stride_kv_s=k.stride(0),
++            stride_kv_d=k.stride(1),
++            stride_w_s=weights.stride(0),
++            stride_w_h=weights.stride(1),
++            stride_logits_s=stride_logits_s,
++            stride_logits_k=1,
++            CHUNK=kv_chunk,
++            BLOCK_KV=32,
++            NUM_WARPS=1,
++            NUM_BUFFERS=2,
++            NUM_CHAINS=4 if use_folded else 0,
++            USE_BUFFER_LOAD=k.numel() * k.element_size() < limit,
++            USE_BUFFER_STORE=logits.numel() * logits.element_size() < limit,
++            num_warps=1,
++            waves_per_eu=3,
++            USE_PADDED_SHARED_LAYOUT=m.ASYNC_COPY_SUPPORTS_DISTRIBUTED,
++            NAN_TO_NEG_INF=nan_to_neg_inf,
++        )
++        return True
++    assert not nan_to_neg_inf, "nan_to_neg_inf needs the split launch"
+     kernel[(seq_len,)](
+         Q_ptr=q,
+         KV_ptr=k,
+@@ -1109,6 +1161,20 @@ def _aiter_fp8_mqa_logits_into(
+     return True
+ 
+ 
++# Keys per program of the sparse decode indexer's logits kernel: unset = by
++# batch size (measured on MI355X), 0 = one program per request (AITER's
++# prefill launch), else a multiple of 32. Scores do not depend on it.
++_DSV4_DECODE_MQA_KV_CHUNK_ENV = os.environ.get("VLLM_DSV4_DECODE_MQA_KV_CHUNK")
++
++
++def _dsv4_decode_mqa_kv_chunk(num_reqs: int) -> int:
++    if _DSV4_DECODE_MQA_KV_CHUNK_ENV is not None:
++        chunk = int(_DSV4_DECODE_MQA_KV_CHUNK_ENV)
++        assert chunk >= 0 and chunk % 32 == 0, chunk
++        return chunk
++    return 64 if num_reqs <= 8 else 128
++
++
+ def use_dsv4_det_topk() -> bool:
+     """DSv4 indexer top-k on dsv4_det_topk_per_row (prefill chunks and sparse
+     decode rows) in batch-invariant mode. top_k_per_row_prefill's output order
+@@ -1180,10 +1246,24 @@ def dsv4_sparse_decode_indexer_topk(
+         HEAD_DIM=head_dim,
+         BLOCK_T=block_t,
+     )
++    kv_chunk = _dsv4_decode_mqa_kv_chunk(num_reqs)
+     if _aiter_fp8_mqa_logits_into(
+-        q_fp8, k_fp8, k_scale, weights, ks, ke, logits, stride_logits_s=0
++        q_fp8,
++        k_fp8,
++        k_scale,
++        weights,
++        ks,
++        ke,
++        logits,
++        stride_logits_s=0,
++        kv_chunk=kv_chunk,
++        max_kv_per_row=capacity,
++        nan_to_neg_inf=kv_chunk > 0,
+     ):
+-        logits.nan_to_num_(float("-inf"))
++        # Top-k reads columns [0, seq_len) of each row: the ones the kernel
++        # wrote (already nan_to_num'ed by the split launch).
++        if kv_chunk == 0:
++            logits.nan_to_num_(float("-inf"))
+         logits_2d = logits.view(num_reqs, capacity)
+     else:
+         # Reference / other-arch kernels: full [B, B * C] logits, diagonal view.
+diff --git a/vllm/v1/attention/ops/rocm_dsv4_mqa_logits_split.py b/vllm/v1/attention/ops/rocm_dsv4_mqa_logits_split.py
+new file mode 100644
+index 0000000000..16d264d72d
+--- /dev/null
++++ b/vllm/v1/attention/ops/rocm_dsv4_mqa_logits_split.py
+@@ -0,0 +1,346 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""KV-split launch of AITER's gfx950 gluon fp8 MQA-logits kernel for the
++DeepSeek-V4 sparse decode indexer.
++
++AITER's ``_gluon_fp8_mqa_logits_kernel`` runs one single-wave program per
++query row and walks the row's whole KV range in BLOCK_KV tiles. At decode a
++rank has only a few query rows (one per request) and thousands of compressed
++keys each, so a handful of waves run ~100 serial tiles while the GPU idles.
++
++This kernel is the same kernel body with a second grid axis: program
++``(row, chunk)`` handles keys ``[start + chunk * CHUNK, start + (chunk + 1) *
++CHUNK) ∩ [start, end)`` of the row. Every logit column is still computed by
++the same instructions (AITER's own ``mqa_logits_loop_double_buf`` with the same
++layouts and constexprs): one MFMA dot over HEAD_SIZE for each (head, key), the
++same relu / weighted head reduction / kv-scale multiply, and the column's
++value does not depend on the tile it lands in or on the other keys of the
++tile. So the logits are bitwise identical to the one-program-per-row launch
++(and to AITER's ``fp8_mqa_logits`` wrapper used by the prefill indexer and the
++trainer); only the number of programs changes.
++
++NAN_TO_NEG_INF additionally applies ``torch.nan_to_num(nan=-inf)`` to each
++stored logit (the decode path's next op), so the separate pass over the
++whole logits buffer is not needed for the columns the kernel writes.
++
++Import this module only on gfx950 with Triton >= 3.6 (it imports AITER's
++gluon kernel module).
++"""
++
++from aiter.ops.triton._gluon_kernels.gfx950.attention import (
++    fp8_mqa_logits as _aiter_gluon_mqa,
++)
++from triton.experimental import gluon
++from triton.experimental.gluon import language as gl
++
++from vllm.triton_utils import tl
++
++MQAAsyncKVLoader = _aiter_gluon_mqa.MQAAsyncKVLoader
++mqa_logits_loop_double_buf = _aiter_gluon_mqa.mqa_logits_loop_double_buf
++_load_kv_scales_block = _aiter_gluon_mqa._load_kv_scales_block
++_store_logits_block = _aiter_gluon_mqa._store_logits_block
++_mqa_dot = _aiter_gluon_mqa._mqa_dot
++relu_f32 = _aiter_gluon_mqa.relu_f32
++_weighted_sum_fma_fold = _aiter_gluon_mqa._weighted_sum_fma_fold
++
++_FLT_MAX: gl.constexpr = gl.constexpr(3.4028234663852886e38)
++
++
++@gluon.jit
++def _nan_to_num_neg_inf(x):
++    # torch.nan_to_num(x, nan=-inf): NaN -> -inf, +inf -> FLT_MAX,
++    # -inf -> -FLT_MAX, everything else unchanged.
++    y = gl.where(x == float("inf"), _FLT_MAX, x)
++    y = gl.where(x == float("-inf"), -_FLT_MAX, y)
++    return gl.where(x != x, float("-inf"), y)
++
++
++@gluon.jit
++def _mqa_logits_loop_nan_to_num(
++    kv_loader,
++    mfma_q,
++    w_block,
++    kv_scales_ptr,
++    logits_ptr,
++    start_ind,
++    end_ind,
++    num_full_tiles,
++    NUM_HEADS: gl.constexpr,
++    BLOCK_KV: gl.constexpr,
++    stride_logits_k,
++    mfma_layout: gl.constexpr,
++    dot_b_layout: gl.constexpr,
++    NUM_BUFFERS: gl.constexpr,
++    NUM_CHAINS: gl.constexpr,
++    USE_BUFFER_LOAD: gl.constexpr,
++    USE_BUFFER_STORE: gl.constexpr,
++):
++    # aiter's mqa_logits_loop_double_buf (same loads, waits, prefetches and
++    # per-tile score arithmetic, in the same order) with
++    # _nan_to_num_neg_inf applied to each tile right before its store.
++    store_arange = gl.arange(0, BLOCK_KV, layout=gl.SliceLayout(0, mfma_layout))
++    store_offsets = store_arange * stride_logits_k
++
++    kv_pos = start_ind
++    kv_scales_off: gl.int32 = 0
++
++    kv_loader.load_to_shared(
++        start_ind, buffer_id=0, USE_BUFFER_LOAD=USE_BUFFER_LOAD, masked=True
++    )
++    kv_loader.load_to_shared(
++        start_ind + BLOCK_KV, buffer_id=1, USE_BUFFER_LOAD=USE_BUFFER_LOAD,
++        masked=True,
++    )
++    relative_end: gl.int32 = end_ind - start_ind
++    buf_cur: gl.int32 = 0
++    for i in tl.range(0, num_full_tiles - 2):
++        kv_scales = _load_kv_scales_block(
++            kv_scales_ptr, kv_scales_off, BLOCK_KV, mfma_layout,
++            USE_BUFFER_LOAD, relative_end,
++        )
++        mfma_k = kv_loader.load_from_shared(
++            wait_count=1, target_layout=dot_b_layout, buffer_id=buf_cur
++        )
++        kv_loader.load_to_shared(
++            start_ind + (i + 2) * BLOCK_KV, buffer_id=buf_cur,
++            USE_BUFFER_LOAD=USE_BUFFER_LOAD,
++        )
++        scores = _mqa_dot(mfma_q, mfma_k, NUM_HEADS, BLOCK_KV, mfma_layout)
++        scores = relu_f32(scores)
++        scores = _weighted_sum_fma_fold(
++            scores, w_block, NUM_HEADS, BLOCK_KV, mfma_layout, NUM_CHAINS
++        )
++        scores = scores * kv_scales
++        scores = _nan_to_num_neg_inf(scores)
++        _store_logits_block(logits_ptr, store_offsets, scores, USE_BUFFER_STORE)
++
++        kv_scales_off += BLOCK_KV
++        logits_ptr += BLOCK_KV * stride_logits_k
++        kv_pos += BLOCK_KV
++        buf_cur = 1 - buf_cur
++
++    if num_full_tiles > 1:
++        kv_scales = _load_kv_scales_block(
++            kv_scales_ptr, kv_scales_off, BLOCK_KV, mfma_layout,
++            USE_BUFFER_LOAD, relative_end,
++        )
++        mfma_k = kv_loader.load_from_shared(
++            wait_count=1, target_layout=dot_b_layout, buffer_id=buf_cur
++        )
++        kv_loader.load_to_shared(
++            start_ind + num_full_tiles * BLOCK_KV, buffer_id=buf_cur,
++            USE_BUFFER_LOAD=USE_BUFFER_LOAD, masked=True,
++        )
++        scores = _mqa_dot(mfma_q, mfma_k, NUM_HEADS, BLOCK_KV, mfma_layout)
++        scores = relu_f32(scores)
++        scores = _weighted_sum_fma_fold(
++            scores, w_block, NUM_HEADS, BLOCK_KV, mfma_layout, NUM_CHAINS
++        )
++        scores = scores * kv_scales
++        scores = _nan_to_num_neg_inf(scores)
++        _store_logits_block(logits_ptr, store_offsets, scores, USE_BUFFER_STORE)
++
++        kv_scales_off += BLOCK_KV
++        logits_ptr += BLOCK_KV * stride_logits_k
++        kv_pos += BLOCK_KV
++        buf_cur = 1 - buf_cur
++
++    kv_scales = _load_kv_scales_block(
++        kv_scales_ptr, kv_scales_off, BLOCK_KV, mfma_layout, USE_BUFFER_LOAD,
++        relative_end, masked=True,
++    )
++    mfma_k = kv_loader.load_from_shared(
++        wait_count=1, target_layout=dot_b_layout, buffer_id=buf_cur
++    )
++    scores = _mqa_dot(mfma_q, mfma_k, NUM_HEADS, BLOCK_KV, mfma_layout)
++    scores = relu_f32(scores)
++    scores = _weighted_sum_fma_fold(
++        scores, w_block, NUM_HEADS, BLOCK_KV, mfma_layout, NUM_CHAINS
++    )
++    scores = scores * kv_scales
++    scores = _nan_to_num_neg_inf(scores)
++    mask = store_arange < (end_ind - kv_pos)
++    _store_logits_block(logits_ptr, store_offsets, scores, USE_BUFFER_STORE, mask=mask)
++
++    kv_scales_off += BLOCK_KV
++    logits_ptr += BLOCK_KV * stride_logits_k
++    kv_pos += BLOCK_KV
++    buf_cur = 1 - buf_cur
++
++    kv_scales = _load_kv_scales_block(
++        kv_scales_ptr, kv_scales_off, BLOCK_KV, mfma_layout, USE_BUFFER_LOAD,
++        relative_end, masked=True,
++    )
++    mfma_k = kv_loader.load_from_shared(
++        wait_count=0, target_layout=dot_b_layout, buffer_id=buf_cur
++    )
++    scores = _mqa_dot(mfma_q, mfma_k, NUM_HEADS, BLOCK_KV, mfma_layout)
++    scores = relu_f32(scores)
++    scores = _weighted_sum_fma_fold(
++        scores, w_block, NUM_HEADS, BLOCK_KV, mfma_layout, NUM_CHAINS
++    )
++    scores = scores * kv_scales
++    scores = _nan_to_num_neg_inf(scores)
++    mask = store_arange < (end_ind - kv_pos)
++    _store_logits_block(logits_ptr, store_offsets, scores, USE_BUFFER_STORE, mask=mask)
++
++
++@gluon.jit
++def _dsv4_split_fp8_mqa_logits_kernel(
++    Q_ptr,  # fp8e4m3 [rows, NUM_HEADS, HEAD_SIZE]
++    KV_ptr,  # fp8e4m3 [seq_len_kv, HEAD_SIZE]
++    kv_scales_ptr,  # fp32   [seq_len_kv]
++    weights_ptr,  # fp32   [rows, NUM_HEADS]
++    cu_start_ptr,  # int32  [rows]
++    cu_end_ptr,  # int32  [rows]
++    logits_ptr,  # fp32
++    seq_len_kv: gl.int32,
++    NUM_HEADS: gl.constexpr,
++    HEAD_SIZE: gl.constexpr,
++    stride_q_s: gl.int32,
++    stride_q_h: gl.constexpr,
++    stride_q_d: gl.constexpr,
++    stride_kv_s: gl.int32,
++    stride_kv_d: gl.constexpr,
++    stride_w_s: gl.int32,
++    stride_w_h: gl.constexpr,
++    stride_logits_s: gl.int32,
++    stride_logits_k: gl.int32,
++    CHUNK: gl.constexpr,
++    BLOCK_KV: gl.constexpr,
++    NUM_WARPS: gl.constexpr,
++    NUM_BUFFERS: gl.constexpr,
++    NUM_CHAINS: gl.constexpr,
++    USE_BUFFER_LOAD: gl.constexpr,
++    USE_BUFFER_STORE: gl.constexpr,
++    USE_PADDED_SHARED_LAYOUT: gl.constexpr,
++    NAN_TO_NEG_INF: gl.constexpr,
++):
++    # Body of aiter's _gluon_fp8_mqa_logits_kernel (gfx950); differences:
++    # row_id / chunk from a 2-D grid, and [start_ind, end_ind) is the chunk's
++    # part of the row's key range.
++    gl.static_assert(NUM_BUFFERS == 2, "NUM_BUFFERS must be 2")
++    gl.static_assert(CHUNK % BLOCK_KV == 0, "CHUNK must be a multiple of BLOCK_KV")
++
++    row_id = gl.program_id(axis=0)
++    chunk = gl.program_id(axis=1)
++
++    if not USE_BUFFER_LOAD:
++        stride_kv_s = stride_kv_s.to(gl.int64)
++    if not USE_BUFFER_STORE:
++        stride_logits_s = stride_logits_s.to(gl.int64)
++
++    row_start = gl.load(cu_start_ptr + row_id)
++    row_end = gl.load(cu_end_ptr + row_id)
++    row_start = gl.maximum(row_start, 0)
++    row_end = gl.minimum(row_end, seq_len_kv)
++    start_ind = row_start + chunk * CHUNK
++    if start_ind < row_end:
++        end_ind = gl.minimum(start_ind + CHUNK, row_end)
++
++        WARP_SIZE: gl.constexpr = 64
++        mfma_layout: gl.constexpr = gl.amd.AMDMFMALayout(
++            version=4,
++            instr_shape=[32, 32, 64],
++            transposed=False,
++            warps_per_cta=[1, NUM_WARPS],
++        )
++        K_WIDTH: gl.constexpr = 16
++        dot_a_layout: gl.constexpr = gl.DotOperandLayout(
++            operand_index=0, parent=mfma_layout, k_width=K_WIDTH
++        )
++        dot_b_layout: gl.constexpr = gl.DotOperandLayout(
++            operand_index=1, parent=mfma_layout, k_width=K_WIDTH
++        )
++        Q_INNER: gl.constexpr = HEAD_SIZE // 16
++        layout_q: gl.constexpr = gl.BlockedLayout(
++            size_per_thread=[1, 16],
++            threads_per_warp=[WARP_SIZE // Q_INNER, Q_INNER],
++            warps_per_cta=[NUM_WARPS, 1],
++            order=[1, 0],
++        )
++
++        kv_loader = MQAAsyncKVLoader.initialize(
++            KV_ptr,
++            seq_len_kv,
++            stride_kv_s,
++            stride_kv_d,
++            BLOCK_KV,
++            HEAD_SIZE,
++            NUM_WARPS,
++            WARP_SIZE,
++            NUM_BUFFERS,
++            USE_PADDED_SHARED_LAYOUT,
++        )
++
++        q = gl.amd.cdna4.buffer_load(
++            ptr=Q_ptr,
++            offsets=row_id * stride_q_s
++            + (
++                gl.arange(0, NUM_HEADS, layout=gl.SliceLayout(1, layout_q))
++                * stride_q_h
++            )[:, None]
++            + (
++                gl.arange(0, HEAD_SIZE, layout=gl.SliceLayout(0, layout_q))
++                * stride_q_d
++            )[None, :],
++            cache=".cg",
++        )
++        w_block = gl.amd.cdna4.buffer_load(
++            ptr=weights_ptr,
++            offsets=row_id * stride_w_s
++            + (
++                gl.arange(0, NUM_HEADS, layout=gl.SliceLayout(1, mfma_layout))
++                * stride_w_h
++            )[:, None],
++            cache=".cg",
++        )
++        mfma_q = gl.convert_layout(q, dot_a_layout)
++
++        num_full_tiles = (end_ind - start_ind) // BLOCK_KV
++
++        kv_scales_ptr_seg = kv_scales_ptr + start_ind
++        logits_ptr_row = (
++            logits_ptr + row_id * stride_logits_s + start_ind * stride_logits_k
++        )
++
++        if NAN_TO_NEG_INF:
++            _mqa_logits_loop_nan_to_num(
++                kv_loader,
++                mfma_q,
++                w_block,
++                kv_scales_ptr_seg,
++                logits_ptr_row,
++                start_ind,
++                end_ind,
++                num_full_tiles,
++                NUM_HEADS,
++                BLOCK_KV,
++                stride_logits_k,
++                mfma_layout,
++                dot_b_layout,
++                NUM_BUFFERS,
++                NUM_CHAINS,
++                USE_BUFFER_LOAD,
++                USE_BUFFER_STORE,
++            )
++        else:
++            mqa_logits_loop_double_buf(
++                kv_loader,
++                mfma_q,
++                w_block,
++                kv_scales_ptr_seg,
++                logits_ptr_row,
++                start_ind,
++                end_ind,
++                num_full_tiles,
++                NUM_HEADS,
++                BLOCK_KV,
++                stride_logits_k,
++                mfma_layout,
++                dot_b_layout,
++                NUM_BUFFERS,
++                NUM_CHAINS,
++                USE_BUFFER_LOAD,
++                USE_BUFFER_STORE,
++            )

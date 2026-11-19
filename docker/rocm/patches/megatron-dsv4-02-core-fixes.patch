@@ -1,0 +1,753 @@
+# Megatron-LM patch 02/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# Megatron-Core fixes the DeepSeek-V4 ROCm runs needed: CSA CP-layout PyTorch
+# fallback, offloaded optimizer copies refreshed after a param update, FP32
+# KV-table gradient in the unfused sparse attention, restored Adam step on
+# dp_reshardable load, precision-aware Adam load template.
+#
+# Upstream: not yet proposed (planned as a separate series to NVIDIA/Megatron-LM).
+#
+# Source commits:
+#   [DSv4][ROCm] csa_utils: restore the PyTorch fallback of the CP layout kernels (B3)
+#   Refresh offloaded CPU copies in HybridDeviceOptimizer.update_fp32_param_by_new_param (B4)
+#   CSA unfused sparse attention: accumulate the KV-table gradient in FP32
+#   DistributedOptimizer: keep the restored Adam step when loading a dp_reshardable checkpoint
+#   Precision-aware Adam: build the checkpoint-load state template like FusedAdam.step()
+#
+diff --git a/megatron/core/optimizer/__init__.py b/megatron/core/optimizer/__init__.py
+index 3e1dde998..83425952c 100644
+--- a/megatron/core/optimizer/__init__.py
++++ b/megatron/core/optimizer/__init__.py
+@@ -448,6 +448,27 @@ def _get_param_groups_and_buffers(
+     return param_groups, buffers
+ 
+ 
++def _init_adam_optimizer_state(opt, config=None):
++    """Initialize missing Adam state (the template a distributed-checkpoint load fills in).
++
++    With the precision-aware TE FusedAdam this must create exactly the state FusedAdam.step()
++    creates: parameter remainders (int16) replace the FP32 master only for BF16 parameters and
++    only when the optimizer itself stores remainders. Passing the config flag for every parameter
++    gave FP32 parameters an int16 'master_param', and FusedAdam.state_dict() then asserts.
++    """
++    for group in opt.param_groups:
++        for p in group['params']:
++            if len(opt.state[p]) == 0:
++                if config is None or not config.use_precision_aware_optimizer:
++                    opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
++                    opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
++                else:
++                    store_remainders = getattr(
++                        opt, "store_param_remainders", config.store_param_remainders
++                    )
++                    opt.initialize_state(p, bool(store_remainders) and p.dtype == torch.bfloat16)
++
++
+ def _get_megatron_optimizer_based_on_param_groups(
+     config: OptimizerConfig,
+     model_chunks: List[MegatronModule],
+@@ -586,15 +607,7 @@ def _get_megatron_optimizer_based_on_param_groups(
+ 
+             optimizer = adam_cls(**kwargs)
+ 
+-            def init_state_fn(opt, config=None):
+-                for group in opt.param_groups:
+-                    for p in group['params']:
+-                        if len(opt.state[p]) == 0:
+-                            if config is None or not config.use_precision_aware_optimizer:
+-                                opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
+-                                opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
+-                            else:
+-                                opt.initialize_state(p, config.store_param_remainders)
++            init_state_fn = _init_adam_optimizer_state
+ 
+         elif config.optimizer == 'lion':
+             if not HAVE_EMERGING_OPTIMIZERS:
+diff --git a/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py b/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
+index 45bf910f8..3cfaf1317 100644
+--- a/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
++++ b/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
+@@ -382,6 +382,14 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
+         """
+         for param, fp32_param in self.param_to_fp32_param.items():
+             fp32_param.data.copy_(param)
++        # An offloaded param without a separate FP32 master (already FP32, or
++        # param_update_in_fp32=False) is updated through its CPU copy, which was
++        # cloned when this optimizer was built.  Refresh it too, or the next
++        # step's copy-back writes the values from construction time (e.g. init
++        # values from before a checkpoint load) over the reloaded params.
++        for param, cpu_copy in self.gpu_params_map_cpu_copy.items():
++            if param not in self.param_to_fp32_param:
++                cpu_copy.data.copy_(param.data)
+ 
+     def _register_load_state_dict_hooks(self):
+         def pre_load_state_dict_hook(self, state_dict):
+diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
+index 3f3bda766..fee8d0583 100644
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -2156,6 +2156,15 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                     for src_tensors, (model_param, param_range_map) in zip(
+                         bucket_state, gbuf_range_map["param_map"].items()
+                     ):
++                        # 'step' is not stored in the checkpoint: sharded_param_state_dp_reshardable()
++                        # wraps it in a LocalNonpersistentObject, so on load it is the live tensor
++                        # captured when the load sharded_state_dict was built (e.g. the
++                        # HybridDeviceOptimizer dummy_step's 1). load_state_dict() has already
++                        # restored the step from param_groups; writing the stale tensor back would
++                        # undo that and shift Adam's bias correction after every resume.
++                        src_tensors = {
++                            k: v for k, v in src_tensors.items() if k not in ("step", "padding")
++                        }
+                         # Main param & optimizer states.
+                         self._set_main_param_and_optimizer_states(model_param, src_tensors)
+ 
+diff --git a/megatron/core/transformer/experimental_attention_variant/csa.py b/megatron/core/transformer/experimental_attention_variant/csa.py
+index 746eff7a2..41b35c711 100644
+--- a/megatron/core/transformer/experimental_attention_variant/csa.py
++++ b/megatron/core/transformer/experimental_attention_variant/csa.py
+@@ -703,8 +703,11 @@ def unfused_compressed_sparse_attn(
+     # Index the flat KV table directly. Gathering from a (rows, n_kv, hn) expanded view
+     # makes the gather backward materialise that whole shape (quadratic in sequence
+     # length) before reducing the stride-0 row dimension; index_select accumulates its
+-    # gradient into the compact table instead. Same values, same gradient.
+-    kv_gathered = kv_flat.index_select(0, safe_indices.reshape(-1)).view(rows, -1, hn)  # (rows, topk, hn)
++    # gradient into the compact table instead. Index the FP32 copy of the table: every KV
++    # row is selected by up to window + top-k query rows, and index_select's backward
++    # (index_add) would otherwise sum those contributions in the table's BF16. The
++    # values are unchanged (the gathered rows are cast to FP32 below anyway).
++    kv_gathered = kv_flat.float().index_select(0, safe_indices.reshape(-1)).view(rows, -1, hn)  # (rows, topk, hn)
+ 
+     q_f = q_flat.float()
+     kv_g = kv_gathered.float()
+diff --git a/megatron/core/transformer/experimental_attention_variant/csa_utils/cp_layout_kernels.py b/megatron/core/transformer/experimental_attention_variant/csa_utils/cp_layout_kernels.py
+index 297071653..2ac12a93c 100644
+--- a/megatron/core/transformer/experimental_attention_variant/csa_utils/cp_layout_kernels.py
++++ b/megatron/core/transformer/experimental_attention_variant/csa_utils/cp_layout_kernels.py
+@@ -590,13 +590,238 @@ if _CUTE_AVAILABLE:
+ 
+ def _require_cute(message: str, *tensors: Optional[torch.Tensor]) -> None:
+     """Raise ``RuntimeError`` when a wrapper cannot use CuTeDSL kernels."""
+-    if not _CUTE_AVAILABLE or not all(tensor is None or tensor.is_cuda for tensor in tensors):
++    if not _cute_usable(*tensors):
+         raise RuntimeError(message)
+ 
+ 
++def _cute_usable(*tensors: Optional[torch.Tensor]) -> bool:
++    """Whether the CuTeDSL kernels can run on these tensors (else the PyTorch fallback runs)."""
++    return (
++        _CUTE_AVAILABLE
++        and torch.version.hip is None
++        and all(tensor is None or tensor.is_cuda for tensor in tensors)
++    )
++
++
+ _COMPILED_LAUNCH_CACHE = {}
+ 
+ 
++# =============================================================================
++# PyTorch fallback
++# =============================================================================
++# Same contracts as the CuTeDSL kernels above, written with gather/scatter and
++# searchsorted so they run wherever PyTorch runs (ROCm, CPU, CUDA without
++# CuTeDSL). Used automatically when the kernels are unavailable.
++# =============================================================================
++
++
++def _visible_group_spans(
++    cu_seqlens: torch.Tensor, global_start: int, l_local: int, ratio: int, d_comp: int
++) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Per sequence: start row, first visible compressed group, visible token count, token prefix sum.
++
++    A compressed group is visible to this rank when its tokens lie in
++    ``[global_start - d_comp, global_start + l_local)`` and inside the sequence.
++    """
++    cu = cu_seqlens.to(torch.int64)
++    seq_start, seq_end = cu[:-1], cu[1:]
++    range_start = int(global_start)
++    range_end = range_start + int(l_local)
++    local_seq_end = seq_end.clamp_max(range_end)
++    active = (seq_start < local_seq_end) & (local_seq_end > range_start)
++    first_group = ((range_start - int(d_comp) - seq_start).clamp_min(0) + int(ratio) - 1) // int(
++        ratio
++    )
++    stop_group = (local_seq_end - seq_start) // int(ratio)
++    count = torch.where(active, (stop_group - first_group).clamp_min(0), torch.zeros_like(stop_group))
++    tokens = count * int(ratio)
++    return seq_start, first_group, tokens, torch.cumsum(tokens, dim=0)
++
++
++def _compact_source_rows(
++    cu_seqlens: torch.Tensor,
++    global_start: int,
++    l_local: int,
++    ratio: int,
++    d_comp: int,
++    compact_len: int,
++) -> Tuple[torch.Tensor, torch.Tensor]:
++    """Global source row (-1 when empty) and compressed group id (-1) of every compact row."""
++    seq_start, first_group, tokens, prefix = _visible_group_spans(
++        cu_seqlens, global_start, l_local, ratio, d_comp
++    )
++    n_seq = seq_start.shape[0]
++    rows = torch.arange(int(compact_len), dtype=torch.int64, device=cu_seqlens.device)
++    seq_idx = torch.searchsorted(prefix, rows, right=True)
++    valid = seq_idx < n_seq
++    seq_idx = seq_idx.clamp_max(max(n_seq - 1, 0))
++    local_token = rows - (prefix[seq_idx] - tokens[seq_idx])
++    comp_id = first_group[seq_idx] + local_token // int(ratio)
++    src_global = seq_start[seq_idx] + comp_id * int(ratio) + local_token % int(ratio)
++    src_global = torch.where(valid, src_global, torch.full_like(src_global, -1))
++    comp_id = torch.where(valid, comp_id, torch.full_like(comp_id, -1))
++    return src_global, comp_id
++
++
++def _compressor_input_compact_torch_forward(
++    ctx,
++    hidden_local: torch.Tensor,
++    boundary_hidden: torch.Tensor,
++    cu_seqlens: torch.Tensor,
++    global_start: int,
++    ratio: int,
++    d_comp: int,
++    c_cap: int,
++) -> Tuple[torch.Tensor, torch.Tensor]:
++    """PyTorch forward of ``CompressorInputCompact``: one gather from (boundary | local | zero row)."""
++    l_local = hidden_local.shape[0]
++    d_window = boundary_hidden.shape[0]
++    range_start = int(global_start)
++    compact_len = int(c_cap) * int(ratio)
++    src_global, comp_id = _compact_source_rows(
++        cu_seqlens, global_start, l_local, ratio, d_comp, compact_len
++    )
++    # Row index into cat(boundary, local, zero): boundary rows cover
++    # [range_start - d_window, range_start), local rows [range_start, range_start + l_local).
++    gather = torch.where(
++        src_global < 0,
++        torch.full_like(src_global, d_window + l_local),
++        torch.where(
++            src_global < range_start,
++            src_global - (range_start - d_window),
++            src_global - range_start + d_window,
++        ),
++    )
++    row_width = hidden_local[0].numel() if l_local else boundary_hidden[0].numel()
++    source = torch.cat(
++        (
++            boundary_hidden.reshape(d_window, row_width),
++            hidden_local.reshape(l_local, row_width),
++            hidden_local.new_zeros((1, row_width)),
++        ),
++        dim=0,
++    )
++    hidden_compact = source.index_select(0, gather).reshape(
++        (compact_len,) + tuple(hidden_local.shape[1:])
++    )
++    ctx.save_for_backward(gather)
++    ctx.torch_shapes = (tuple(hidden_local.shape), tuple(boundary_hidden.shape))
++    # One group id per compact group (the kernel writes it from each group's first row).
++    return hidden_compact, comp_id[:: int(ratio)].to(torch.int32)
++
++
++def _compressor_input_compact_torch_backward(ctx, grad_hidden_compact: torch.Tensor):
++    """PyTorch backward of ``CompressorInputCompact``: scatter-add back through the same gather."""
++    (gather,) = ctx.saved_tensors
++    hidden_shape, boundary_shape = ctx.torch_shapes
++    l_local, d_window = hidden_shape[0], boundary_shape[0]
++    grad = grad_hidden_compact.reshape(grad_hidden_compact.shape[0], -1)
++    grad_source = grad.new_zeros((d_window + l_local + 1, grad.shape[1]))
++    grad_source.index_add_(0, gather, grad)
++    grad_hidden = grad_source[d_window : d_window + l_local].reshape(hidden_shape)
++    grad_boundary = grad_source[:d_window].reshape(boundary_shape)
++    return (grad_hidden, grad_boundary, *([None] * 5))
++
++
++def _build_attention_indices_torch(
++    cu_seqlens: torch.Tensor,
++    global_start: int,
++    l_local: int,
++    d_window: int,
++    window_size: int,
++    ratio: int,
++    compressed_width: int,
++    compressed_topk: Optional[torch.Tensor],
++    cu_seqlens_compressed: torch.Tensor,
++    seq_to_rank_row: torch.Tensor,
++    for_indexer_loss: bool,
++) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
++    """PyTorch version of ``build_attention_indices`` (same three modes as the kernel)."""
++    device = cu_seqlens.device
++    global_start, l_local = int(global_start), int(l_local)
++    d_window, window_size = int(d_window), int(window_size)
++    ratio, compressed_width = int(ratio), int(compressed_width)
++    total_width = window_size + compressed_width
++    compressed_base = d_window + l_local
++
++    cu = cu_seqlens.to(torch.int64)
++    n_seq = cu.shape[0] - 1
++    rows = torch.arange(l_local, dtype=torch.int64, device=device)
++    global_q = global_start + rows
++    seq_idx = torch.searchsorted(cu[1:], global_q, right=True)
++    found = seq_idx < n_seq
++    seq_idx = seq_idx.clamp_max(max(n_seq - 1, 0))
++    seq_start = cu[seq_idx]
++    found = found & (global_q >= seq_start)
++
++    use_comp = ratio > 1 and compressed_width > 0
++    if use_comp:
++        cu_comp = cu_seqlens_compressed.to(torch.int64)
++        seq_comp_start = cu_comp[seq_idx]
++        seq_comp_len = cu_comp[seq_idx + 1] - seq_comp_start
++    else:
++        seq_comp_start = torch.zeros_like(seq_start)
++        seq_comp_len = torch.zeros_like(seq_start)
++    seq_major_rows = seq_to_rank_row.shape[0]
++    rank_rows = seq_to_rank_row.to(torch.int64)
++
++    def rank_major_of(seq_major_id: torch.Tensor, ok: torch.Tensor):
++        ok = ok & (seq_major_id >= 0) & (seq_major_id < seq_major_rows)
++        if seq_major_rows == 0:
++            return torch.full_like(seq_major_id, -1), ok
++        rank_major = rank_rows[seq_major_id.clamp(0, seq_major_rows - 1)]
++        return rank_major, ok & (rank_major >= 0)
++
++    window_start = torch.maximum(global_q - window_size + 1, seq_start)
++    window_count = global_q - window_start + 1
++    window_cols = torch.arange(window_size, dtype=torch.int64, device=device)
++    window_valid = (window_cols[None, :] < window_count[:, None]) & found[:, None]
++    window_vals = window_start[:, None] + window_cols[None, :] - global_start + d_window
++    topk_idxs = torch.full((l_local, total_width), -1, dtype=torch.int64, device=device)
++
++    if for_indexer_loss:
++        comp = compressed_topk.to(torch.int64)
++        ok = (comp >= 0) & (comp < seq_comp_len[:, None]) & found[:, None]
++        rank_major, ok = rank_major_of(seq_comp_start[:, None] + comp, ok)
++        topk_idxs[:, :compressed_width] = torch.where(ok, compressed_base + rank_major, -1)
++        topk_idxs[:, compressed_width:] = torch.where(window_valid, window_vals, -1)
++        indexer_rank_major = torch.where(ok, rank_major, -1).to(torch.int32)
++        return topk_idxs.to(torch.int32), None, indexer_rank_major
++
++    topk_idxs[:, :window_size] = torch.where(window_valid, window_vals, -1)
++    length = window_count.clone()
++    if use_comp:
++        row_idx = rows[:, None].expand(l_local, compressed_width)
++        if compressed_topk is not None:
++            # Selected top-k: valid entries are packed right after the window entries.
++            comp = compressed_topk.to(torch.int64)
++            ok = (comp >= 0) & (comp < seq_comp_len[:, None]) & found[:, None]
++            rank_major, ok = rank_major_of(seq_comp_start[:, None] + comp, ok)
++            position = window_count[:, None] + torch.cumsum(ok.to(torch.int64), dim=1) - 1
++            topk_idxs[row_idx[ok], position[ok]] = compressed_base + rank_major[ok]
++            length = length + ok.sum(dim=1)
++        else:
++            # All visible compressed rows, in sequence order.
++            comp_cols = torch.arange(compressed_width, dtype=torch.int64, device=device)
++            comp_count = torch.minimum(
++                torch.minimum((global_q - seq_start + 1) // ratio, seq_comp_len),
++                torch.full_like(seq_comp_len, compressed_width),
++            )
++            visible = (comp_cols[None, :] < comp_count[:, None]) & found[:, None]
++            rank_major, ok = rank_major_of(seq_comp_start[:, None] + comp_cols[None, :], visible)
++            vals = torch.where(ok, compressed_base + rank_major, -1)
++            position = window_count[:, None] + comp_cols[None, :]
++            topk_idxs[row_idx[visible], position[visible]] = vals[visible]
++            length = length + torch.where(found, comp_count, torch.zeros_like(comp_count))
++    if total_width > 0:
++        topk_idxs[~found] = -1
++        topk_idxs[~found, 0] = 0
++        length = torch.where(found, length, torch.ones_like(length))
++    else:
++        length = torch.where(found, length, torch.zeros_like(length))
++    return topk_idxs.to(torch.int32), length.to(torch.int32), None
++
++
+ def _run_compiled_launch(
+     launch_fn,
+     tensor_args: Tuple[torch.Tensor, ...],
+@@ -674,12 +899,11 @@ class CompressorInputCompact(torch.autograd.Function):
+         c_cap: int,
+     ):
+         """Compact local and boundary hidden rows into compressor input rows."""
+-        _require_cute(
+-            "DSv4 CP compressor compaction requires CUDA tensors and CuTeDSL.",
+-            hidden_local,
+-            boundary_hidden,
+-            cu_seqlens,
+-        )
++        ctx.use_torch = not _cute_usable(hidden_local, boundary_hidden, cu_seqlens)
++        if ctx.use_torch:
++            return _compressor_input_compact_torch_forward(
++                ctx, hidden_local, boundary_hidden, cu_seqlens, global_start, ratio, d_comp, c_cap
++            )
+         l_local = hidden_local.shape[0]
+         d_window = boundary_hidden.shape[0]
+         ctx.hidden_shape = tuple(hidden_local.shape)
+@@ -717,6 +941,8 @@ class CompressorInputCompact(torch.autograd.Function):
+     @staticmethod
+     def backward(ctx, grad_hidden_compact: torch.Tensor, _grad_comp_ids: torch.Tensor):
+         """Scatter compacted compressor gradients to local and boundary rows."""
++        if ctx.use_torch:
++            return _compressor_input_compact_torch_backward(ctx, grad_hidden_compact)
+         (cu_seqlens,) = ctx.saved_tensors
+         global_start, l_local, ratio, d_comp, d_window = ctx.compact_args
+         grad_hidden_compact = grad_hidden_compact.contiguous()
+@@ -782,18 +1008,25 @@ def build_attention_indices(
+     """
+     if for_indexer_loss and compressed_topk is None:
+         raise RuntimeError("DSv4 CP indexer-loss indices require compressed_topk.")
+-    _require_cute(
+-        "DSv4 CP final indices require CUDA tensors and CuTeDSL.",
+-        cu_seqlens,
+-        compressed_topk,
+-        cu_seqlens_compressed,
+-        seq_to_rank_row,
+-    )
+     global_start, l_local = int(global_start), int(l_local)
+     if cu_seqlens_compressed is None:
+         cu_seqlens_compressed = cu_seqlens
+     if seq_to_rank_row is None:
+         seq_to_rank_row = torch.empty((1,), dtype=torch.int32, device=cu_seqlens.device)
++    if not _cute_usable(cu_seqlens, compressed_topk, cu_seqlens_compressed, seq_to_rank_row):
++        return _build_attention_indices_torch(
++            cu_seqlens,
++            global_start,
++            l_local,
++            d_window,
++            window_size,
++            ratio,
++            compressed_width,
++            compressed_topk,
++            cu_seqlens_compressed,
++            seq_to_rank_row,
++            for_indexer_loss,
++        )
+ 
+     total_width = window_size + compressed_width
+     topk_idxs = torch.empty((l_local, total_width), dtype=torch.int32, device=cu_seqlens.device)
+diff --git a/tests/unit_tests/optimizer/test_precision_aware_init_state.py b/tests/unit_tests/optimizer/test_precision_aware_init_state.py
+new file mode 100644
+index 000000000..89a0133d5
+--- /dev/null
++++ b/tests/unit_tests/optimizer/test_precision_aware_init_state.py
+@@ -0,0 +1,55 @@
++# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
++"""The checkpoint-load state template of the precision-aware optimizer must match FusedAdam.step()."""
++
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++from megatron.core.optimizer import _init_adam_optimizer_state
++
++te_optimizers = pytest.importorskip("transformer_engine.pytorch.optimizers")
++
++
++def _make(params):
++    return te_optimizers.FusedAdam(
++        params,
++        lr=1e-3,
++        master_weights=True,
++        use_decoupled_grad=True,
++        master_weight_dtype=torch.float32,
++        store_param_remainders=True,
++        exp_avg_dtype=torch.float32,
++        exp_avg_sq_dtype=torch.float32,
++    )
++
++
++def _params():
++    torch.manual_seed(0)
++    return [
++        torch.nn.Parameter(torch.randn(4, 8, device="cuda", dtype=torch.bfloat16)),
++        torch.nn.Parameter(torch.randn(8, device="cuda", dtype=torch.float32)),
++    ]
++
++
++@pytest.mark.skipif(not torch.cuda.is_available(), reason="FusedAdam needs a GPU")
++def test_init_state_matches_step_initialization_for_mixed_dtypes():
++    config = SimpleNamespace(use_precision_aware_optimizer=True, store_param_remainders=True)
++
++    template = _make(_params())
++    _init_adam_optimizer_state(template, config)
++    # Before the fix, the FP32 parameter got an int16 'master_param' and this asserted.
++    template.state_dict()
++
++    stepped_params = _params()
++    stepped = _make(stepped_params)
++    for p in stepped_params:
++        p.decoupled_grad = torch.zeros_like(p, dtype=torch.float32)
++    stepped.step()
++
++    for p_t, p_s in zip(template.param_groups[0]["params"], stepped.param_groups[0]["params"]):
++        assert set(template.state[p_t]) == set(stepped.state[p_s])
++        for name in template.state[p_t]:
++            assert template.state[p_t][name].dtype == stepped.state[p_s][name].dtype, (p_t.dtype, name)
++    assert template.state[template.param_groups[0]["params"][0]]["master_param"].dtype == torch.int16
++    assert template.state[template.param_groups[0]["params"][1]]["master_param"].dtype == torch.float32
+diff --git a/tests/unit_tests/test_optimizer_cpu_offloading.py b/tests/unit_tests/test_optimizer_cpu_offloading.py
+index 379acc9db..c5315fe2b 100644
+--- a/tests/unit_tests/test_optimizer_cpu_offloading.py
++++ b/tests/unit_tests/test_optimizer_cpu_offloading.py
+@@ -313,3 +313,33 @@ def test_overlap_cpu_optimizer_d2h_h2d_sync_correctness(
+         assert torch.allclose(
+             v, ref_params[k], atol=1e-03
+         ), f"Weight {k} value mismatch, max error: {(v - ref_params[k]).abs().max()}"
++
++
++@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
++@pytest.mark.parametrize("param_update_in_fp32", [True, False])
++def test_update_fp32_param_by_new_param_refreshes_offloaded_cpu_copies(param_update_in_fp32):
++    """Params reloaded after the optimizer is built (e.g. HF weights loaded into a model whose
++    optimizer was constructed at init) must reach the optimizer through
++    update_fp32_param_by_new_param, including offloaded params that have no separate FP32 master
++    (native FP32 params, or any param when param_update_in_fp32=False)."""
++    model = Fp32MarkedToyNet().cuda()
++    convert_module_to_dtype_except_fp32_marked(model, torch.bfloat16)
++    assert model.proj.weight.dtype == torch.bfloat16 and model.scale.dtype == torch.float32
++    optimizer = HybridDeviceOptimizer(
++        list(model.parameters()),
++        offload_fraction=1.0,
++        cpu_optimizer_cls=SGD,
++        gpu_optimizer_cls=GPUSGD,
++        param_update_in_fp32=param_update_in_fp32,
++        lr=0.0,
++    )
++    with torch.no_grad():  # "load" new weights after construction
++        model.proj.weight.fill_(0.25)
++        model.scale.fill_(3.0)
++    optimizer.update_fp32_param_by_new_param()
++
++    model(torch.ones(2, 4, device="cuda", dtype=torch.bfloat16)).float().sum().backward()
++    optimizer.step()  # lr=0: the copy-back must reproduce the loaded values exactly
++    torch.cuda.synchronize()
++    assert torch.all(model.proj.weight == 0.25)
++    assert torch.all(model.scale == 3.0)
+diff --git a/tests/unit_tests/transformer/experimental_attention_variant/test_csa_cp_layout_torch_fallback.py b/tests/unit_tests/transformer/experimental_attention_variant/test_csa_cp_layout_torch_fallback.py
+new file mode 100644
+index 000000000..2c8299bd0
+--- /dev/null
++++ b/tests/unit_tests/transformer/experimental_attention_variant/test_csa_cp_layout_torch_fallback.py
+@@ -0,0 +1,222 @@
++# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++"""The PyTorch fallback of the DSv4 CP layout kernels must follow the CuTeDSL kernels exactly.
++
++``build_attention_indices`` and ``CompressorInputCompact`` run CuTeDSL kernels on CUDA and a PyTorch fallback
++elsewhere (ROCm, CPU). The reference here is a scalar Python transliteration of each CuTe kernel, one (row, col)
++at a time, written from the kernel source, not from the fallback. Integer outputs and the compaction copy (and its
++scatter-add backward) are compared exactly on random packed batches: CP=1 and CP-rank slices (global_start > 0,
++boundary rows), ratio 1/4/128, all three index modes, invalid / out-of-range top-k ids and -1 rank rows. CPU only.
++"""
++import random
++
++import torch
++
++from megatron.core.transformer.experimental_attention_variant.csa_utils import (
++    cp_layout_kernels as img,
++)
++
++
++# ------------------------------------------------------------------ transliterations of the CuTe kernels
++def k_indices(cu, cu_c, topk, s2r, gs, l_local, d_window, W, ratio, cw, mode):
++    """_build_attention_indices_kernel; mode 0 selected, 1 all visible, 2 indexer loss."""
++    total = W + cw; n_seq = len(cu) - 1; rows_s2r = len(s2r); base = d_window + l_local
++    out = [[-1] * total for _ in range(l_local)]; length = [0] * l_local; irm = [[-1] * cw for _ in range(l_local)]
++    for row in range(l_local):
++        gq = gs + row; ssf, scs, scl = -1, 0, 0
++        for s in range(n_seq):
++            if cu[s] <= gq < cu[s + 1]:
++                ssf = cu[s]
++                if ratio > 1 and cw > 0:
++                    scs = cu_c[s]; scl = cu_c[s + 1] - scs
++        if mode != 0:
++            for col in range(total):
++                tv, rmv, ln = -1, -1, 0
++                if ssf >= 0:
++                    ws = max(gq - W + 1, ssf); wc = gq - ws + 1
++                    if mode == 2:
++                        if col < cw:
++                            cid = topk[row][col]
++                            if 0 <= cid < scl:
++                                sm = scs + cid
++                                if sm < rows_s2r:
++                                    rmv = s2r[sm]
++                                    if rmv >= 0:
++                                        tv = base + rmv
++                        else:
++                            wcol = col - cw
++                            if wcol < wc:
++                                pos = ws + wcol
++                                tv = pos - (gs - d_window) if pos < gs else d_window + pos - gs
++                    else:
++                        cc = 0
++                        if ratio > 1 and cw > 0:
++                            cc = min((gq - ssf + 1) // ratio, cw, scl)
++                        ln = wc + cc
++                        if col < wc:
++                            pos = ws + col
++                            tv = pos - (gs - d_window) if pos < gs else d_window + pos - gs
++                        elif col < ln:
++                            sm = scs + col - wc
++                            if sm < rows_s2r:
++                                r = s2r[sm]
++                                if r >= 0:
++                                    tv = base + r
++                elif total > 0 and mode != 2:
++                    ln = 1
++                    if col == 0:
++                        tv = 0
++                out[row][col] = tv
++                if mode == 2:
++                    if col < cw:
++                        irm[row][col] = rmv
++                elif col == 0:
++                    length[row] = ln
++        else:
++            if ssf >= 0:
++                wcol_out = 0; ws = max(gq - W + 1, ssf); wc = gq - ws + 1
++                for wcol in range(W):
++                    if wcol < wc:
++                        pos = ws + wcol
++                        out[row][wcol_out] = pos - (gs - d_window) if pos < gs else d_window + pos - gs
++                        wcol_out += 1
++                if ratio > 1 and cw > 0:
++                    for c in range(cw):
++                        cid = topk[row][c]
++                        if 0 <= cid < scl:
++                            sm = scs + cid
++                            if sm < rows_s2r and s2r[sm] >= 0:
++                                out[row][wcol_out] = base + s2r[sm]; wcol_out += 1
++                length[row] = wcol_out
++            elif total > 0:
++                out[row][0] = 0; length[row] = 1
++    return out, length, irm
++
++
++def k_compact_src(cu, gs, l_local, ratio, d_comp, compact_len):
++    """_compressor_input_compact_fwd_kernel: per compact row, (src_global, comp_id)."""
++    res = []
++    for row in range(compact_len):
++        src, vid, run = -1, -1, 0
++        for s in range(len(cu) - 1):
++            ss, se = cu[s], min(cu[s + 1], gs + l_local)
++            if ss < se and gs < se:
++                fg = (max(gs - d_comp - ss, 0) + ratio - 1) // ratio
++                vt = max((se - ss) // ratio - fg, 0) * ratio
++                if run <= row < run + vt:
++                    lv = row - run; cid = fg + lv // ratio
++                    src = ss + cid * ratio + lv % ratio; vid = cid
++                run += vt
++        res.append((src, vid))
++    return res
++
++
++def k_compact_bwd_rows(cu, gs, l_local, ratio, d_comp, d_window, compact_len):
++    """_compressor_input_compact_bwd_kernel: per output row (boundary rows then local rows), its compact row or -1."""
++    res = []
++    for out_row in range(d_window + l_local):
++        src = gs + (out_row - d_window); cr, run = -1, 0
++        for s in range(len(cu) - 1):
++            ss, se_full = cu[s], cu[s + 1]; se = min(se_full, gs + l_local)
++            if ss < se and gs < se:
++                fg = (max(gs - d_comp - ss, 0) + ratio - 1) // ratio
++                sg = (se - ss) // ratio
++                vt = max(sg - fg, 0) * ratio
++                if ss <= src < se_full:
++                    off = src - ss; cid = off // ratio
++                    if fg <= cid < sg:
++                        cr = run + (cid - fg) * ratio + off % ratio
++                run += vt
++        res.append(cr if 0 <= cr < compact_len else -1)
++    return res
++
++
++# ------------------------------------------------------------------ random cases
++def rand_case(rng):
++    n_seq = rng.randint(1, 5)
++    lens = [rng.choice([1, 3, rng.randint(1, 40), rng.randint(100, 700)]) for _ in range(n_seq)]
++    cu = [0]
++    for L in lens:
++        cu.append(cu[-1] + L)
++    T = cu[-1]
++    if rng.random() < 0.5:   # CP=1
++        gs, l_local = 0, T
++    else:                    # a CP rank's slice
++        gs = rng.randint(0, T - 1); l_local = rng.randint(1, T - gs)
++    ratio = rng.choice([1, 4, 128])
++    return cu, gs, l_local, ratio
++
++
++def check_indices(rng, cu, gs, l_local, ratio):
++    W = rng.choice([1, 8, 128]); d_window = 0 if gs == 0 else rng.choice([0, W - 1, W])
++    cw = 0 if ratio == 1 else rng.choice([0, 1, 7, 64, 512])
++    cl = [(cu[s + 1] - cu[s]) // ratio if ratio > 1 else 0 for s in range(len(cu) - 1)]
++    cu_c = [0]
++    for c in cl:
++        cu_c.append(cu_c[-1] + c)
++    rows = max(cu_c[-1], 1) + rng.choice([0, 0, 3])          # sometimes extra rows; sometimes truncated below
++    if rng.random() < 0.2:
++        rows = max(1, cu_c[-1] - 2)
++    s2r = [rng.choice([-1] + list(range(4 * rows))) if rng.random() < 0.1 else i * 2 for i in range(rows)]
++    ok_modes = []
++    for mode in (0, 1, 2):
++        if mode in (0, 2) and cw == 0:
++            continue
++        topk = [[rng.choice([-1, -5, rng.randint(0, 3 * max(cl + [1])), rng.randint(0, max(max(cl + [1]) - 1, 0))])
++                 for _ in range(cw)] for _ in range(l_local)] if mode in (0, 2) else None
++        t_topk = torch.tensor(topk, dtype=torch.int32).reshape(l_local, cw) if topk is not None else None
++        got = img.build_attention_indices(torch.tensor(cu, dtype=torch.int32), gs, l_local, d_window, W, ratio, cw,
++                                          t_topk, torch.tensor(cu_c, dtype=torch.int32),
++                                          torch.tensor(s2r, dtype=torch.int32), for_indexer_loss=(mode == 2))
++        ref = k_indices(cu, cu_c, topk, s2r, gs, l_local, d_window, W, ratio, cw, mode)
++        assert got[0].tolist() == ref[0], f"topk_idxs mode {mode} cu={cu} gs={gs} l={l_local} W={W} r={ratio} cw={cw}"
++        if mode == 2:
++            assert got[1] is None and got[2].tolist() == ref[2], f"indexer_rank_major mode 2 cu={cu}"
++        else:
++            assert got[1].tolist() == ref[1], f"topk_length mode {mode} cu={cu} gs={gs} r={ratio} cw={cw}"
++        ok_modes.append(mode)
++    return ok_modes
++
++
++def check_compact(rng, cu, gs, l_local, ratio):
++    d_comp = 8 if ratio == 4 else ratio
++    d_window = 0 if gs == 0 else min(gs, rng.choice([d_comp, d_comp + 5]))
++    if gs > 0 and d_window < min(gs, d_comp):
++        return False
++    H = rng.choice([4, 6])
++    hl = torch.randn(l_local, 2, H, dtype=torch.bfloat16)
++    bh = torch.randn(d_window, 2, H, dtype=torch.bfloat16)
++    cap = max(1, (l_local + d_comp) // ratio)
++    cap = cap if rng.random() < 0.8 else max(1, cap // 3)        # sometimes too small: overflow rows are dropped
++    hl_ = hl.clone().requires_grad_(True); bh_ = bh.clone().requires_grad_(True)
++    out, ids = img.CompressorInputCompact.apply(hl_, bh_, torch.tensor(cu, dtype=torch.int32), gs, ratio, d_comp, cap)
++    src = k_compact_src(cu, gs, l_local, ratio, d_comp, cap * ratio)
++    exp = torch.zeros_like(out)
++    for r, (sg, _) in enumerate(src):
++        if sg >= 0:
++            exp[r] = bh[sg - (gs - d_window)] if sg < gs else hl[sg - gs]
++    assert torch.equal(out, exp), f"compact fwd values cu={cu} gs={gs} r={ratio}"
++    assert ids.tolist() == [src[g * ratio][1] for g in range(cap)], f"comp_ids cu={cu} gs={gs} r={ratio}"
++    g = torch.randn_like(out)
++    out.backward(g)
++    rows = k_compact_bwd_rows(cu, gs, l_local, ratio, d_comp, d_window, cap * ratio)
++    eb = torch.stack([g[r] if r >= 0 else torch.zeros_like(g[0]) for r in rows]) if rows else torch.zeros(0, 2, H)
++    assert torch.equal(bh_.grad, eb[:d_window].to(bh_.grad.dtype)), f"compact bwd boundary cu={cu} gs={gs}"
++    assert torch.equal(hl_.grad, eb[d_window:].to(hl_.grad.dtype)), f"compact bwd local cu={cu} gs={gs}"
++    return True
++
++
++def test_cpu_tensors_take_the_torch_fallback():
++    assert not img._cute_usable(torch.zeros(1))
++
++
++def test_torch_fallback_matches_cute_kernel_semantics():
++    rng = random.Random(20261017)
++    n_idx = {0: 0, 1: 0, 2: 0}; n_cmp = 0; n_cp1 = 0
++    for it in range(400):
++        cu, gs, l_local, ratio = rand_case(rng)
++        n_cp1 += gs == 0 and l_local == cu[-1]
++        for m in check_indices(rng, cu, gs, l_local, ratio):
++            n_idx[m] += 1
++        if ratio > 1:
++            n_cmp += check_compact(rng, cu, gs, l_local, ratio)
++    assert min(n_idx.values()) > 50 and n_cmp > 50 and n_cp1 > 100, (n_idx, n_cmp, n_cp1)

@@ -1,0 +1,161 @@
+# Megatron-LM patch 11/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# impl=vllm on ROCm: run the dense VJPs eagerly. The compiled VJPs were not
+# run-to-run deterministic on the first call.
+#
+# Upstream: prepared (with a determinism test), not yet proposed.
+#
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/dense.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/dense.py
+index e4e21afe8..1747923f3 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/dense.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/dense.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import os
+ from collections.abc import Callable, Iterable
+ from typing import Any
+ 
+@@ -25,8 +26,84 @@ _MHC_ENTRIES = {
+ }
+ 
+ 
++# Inductor options for every compiled VJP below (ROCm only).  Without them a
++# compiled VJP's bits depend on which launch config won a timing race on the
++# first call of each shape in the process, which gave discrete per-process
++# gradient modes (first seen in the final RMSNorm VJP -> mHC head VJP):
++#   * pointwise kernels: Inductor times 2+ XBLOCK/num_warps candidates and
++#     treats the pick as numerics-neutral (even in deterministic mode), but on
++#     ROCm the candidates round FP32 differently.
++#     ``triton.autotune_pointwise=False`` keeps only the first candidate,
++#     which is the usual timing winner.
++#   * reductions: Inductor times e.g. R0_BLOCK 4096 (whole row) vs 2048 for
++#     the RMSNorm VJP's mean over hidden; the two sum in a different order.
++#     ``deterministic=True`` skips that timing and picks one candidate by a
++#     fixed rule.  Inductor's rule takes the second-largest R0_BLOCK, which is
++#     the usual timing *loser*, so ``_pin_largest_rblock`` below swaps in
++#     "largest R0_BLOCK" to keep the common (pre-fix) numerics.
++#     ``compile_threads=1`` keeps kernel loading in this process so the
++#     swapped rule is the one that applies.
++_VJP_COMPILE_OPTIONS = (
++    {
++        "triton.autotune_pointwise": False,
++        "deterministic": True,
++        "compile_threads": 1,
++    }
++    if torch.version.hip is not None
++    else None
++)
++
++
++def _pin_largest_rblock() -> None:
++    """In Inductor's deterministic mode, pick the reduction config with the
++    largest R0_BLOCK (then most warps, then largest XBLOCK) instead of the
++    second largest.  Only affects compiles with ``deterministic=True``."""
++    try:
++        from torch._inductor.runtime import triton_heuristics as heuristics
++    except ImportError:  # pragma: no cover - Inductor unavailable
++        return
++    original = heuristics.filter_reduction_configs_for_determinism
++    if getattr(original, "_dsv4_largest_rblock", False):
++        return
++
++    def filter_largest_rblock(inductor_meta, configs):
++        if not inductor_meta.get("deterministic", False):
++            return original(inductor_meta, configs)
++        configs = heuristics.unique_configs(configs)
++        if len(configs) <= 1:
++            return configs
++        top = max(c.kwargs.get("R0_BLOCK", -1) for c in configs)
++        configs = [c for c in configs if c.kwargs.get("R0_BLOCK", -1) == top]
++        return [
++            max(configs, key=lambda c: (c.num_warps, c.kwargs.get("XBLOCK", -1)))
++        ]
++
++    filter_largest_rblock._dsv4_largest_rblock = True
++    heuristics.filter_reduction_configs_for_determinism = filter_largest_rblock
++
++
++if torch.version.hip is not None:
++    _pin_largest_rblock()
++
++
++# ROCm: run every VJP below eagerly.  The compiled VJPs use
++# ``dynamic=False``, so dynamo compiles only the first
++# ``recompile_limit`` (8) distinct token counts per VJP in a process and runs
++# later ones eagerly.  Compiled and eager results differ in the last bits
++# for the same inputs, so a process's gradient bits depended on the order
++# in which it first saw each token count (resume, data order, rank).  The
++# eager functions are bitwise repeatable across processes and use no
++# per-process tuning.  MLITE_DSV4_VJP_EAGER=0 restores the compiled path.
++_VJP_EAGER = (
++    torch.version.hip is not None
++    and os.environ.get("MLITE_DSV4_VJP_EAGER", "1") != "0"
++)
++
++
+ def _compiled_vjp_or_eager(compiled, eager, *args):
+-    if not any(isinstance(arg, torch.Tensor) and arg.is_cuda for arg in args):
++    if _VJP_EAGER or not any(
++        isinstance(arg, torch.Tensor) and arg.is_cuda for arg in args
++    ):
+         return eager(*args)
+     try:
+         return compiled(*args)
+@@ -223,12 +300,14 @@ _compiled_clamped_swiglu_vjp = torch.compile(
+     _clamped_swiglu_vjp,
+     fullgraph=True,
+     dynamic=False,
++    options=_VJP_COMPILE_OPTIONS,
+ )
+ 
+ _compiled_dynamic_clamped_swiglu_vjp = torch.compile(
+     _clamped_swiglu_vjp,
+     fullgraph=True,
+     dynamic=True,
++    options=_VJP_COMPILE_OPTIONS,
+ )
+ 
+ 
+@@ -238,7 +317,7 @@ def dynamic_clamped_swiglu_vjp(
+     limit: float,
+ ) -> torch.Tensor:
+     """Evaluate the VJP for dynamic routed-token shapes without an autograd graph."""
+-    if not value.is_cuda:
++    if _VJP_EAGER or not value.is_cuda:
+         return _clamped_swiglu_vjp(grad_output, value, limit)
+     return _compiled_dynamic_clamped_swiglu_vjp(grad_output, value, limit)
+ 
+@@ -362,6 +441,7 @@ _compiled_rms_norm_vjp = torch.compile(
+     _rms_norm_vjp,
+     fullgraph=True,
+     dynamic=False,
++    options=_VJP_COMPILE_OPTIONS,
+ )
+ 
+ 
+@@ -517,6 +597,7 @@ _compiled_sinkhorn_vjp = torch.compile(
+     _sinkhorn_vjp,
+     fullgraph=True,
+     dynamic=False,
++    options=_VJP_COMPILE_OPTIONS,
+ )
+ 
+ 
+@@ -620,6 +701,7 @@ _compiled_mhc_pre_vjp = torch.compile(
+     _mhc_pre_vjp,
+     fullgraph=True,
+     dynamic=False,
++    options=_VJP_COMPILE_OPTIONS,
+ )
+ 
+ 
+@@ -885,6 +967,7 @@ _compiled_mhc_head_vjp = torch.compile(
+     _mhc_head_vjp,
+     fullgraph=True,
+     dynamic=False,
++    options=_VJP_COMPILE_OPTIONS,
+ )
+ 
+ 

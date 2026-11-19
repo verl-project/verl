@@ -1,0 +1,679 @@
+# Megatron-LM patch 01/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# DeepSeek-V4 ROCm Megatron-Core commits from PeterYang12/Megatron-LM
+# deepseek-v4-rocm-support (the branch docker/rocm/Dockerfile.rocm.deepseek-v4
+# installs), on the ISEEKYAN base. Three are identical by patch-id
+# (148c71e57, b28f292a4, 5968896c1); two are context-adapted (1159a3392,
+# 20d1955cf). The first is the same change as patches/non-leaf-fix.patch.
+#
+# Upstream: as in the PeterYang12 branch.
+#
+# Source commits:
+#   Fix non-leaf issue in distributed optimizer
+#   CSA compressor: keep the THD-path GEMMs in high precision
+#   Blockwise FP8: fp8_blockwise_act_pow2_scale config for float activation scales
+#   CSA: index the KV table directly in the unfused sparse attention
+#   Block-scaled FP8 fake quantization (QAT) driven by TransformerConfig
+#
+diff --git a/megatron/core/extensions/transformer_engine.py b/megatron/core/extensions/transformer_engine.py
+index 70770dcfd..a9d67dfcd 100644
+--- a/megatron/core/extensions/transformer_engine.py
++++ b/megatron/core/extensions/transformer_engine.py
+@@ -25,6 +25,11 @@ from megatron.core.enums import Fp4Recipe, Fp8Recipe
+ from megatron.core.extensions.transformer_engine_int4_fake_qat import (
+     maybe_fake_quantize_int4_weight_tensors,
+ )
++from megatron.core.fp8_fake_quant import (
++    fp8_fake_quant_active,
++    maybe_fake_quantize_linear_input,
++    maybe_fake_quantize_linear_weights,
++)
+ from megatron.core.model_parallel_config import ModelParallelConfig
+ from megatron.core.packed_seq_params import PackedSeqParams
+ from megatron.core.parallel_state import (
+@@ -953,6 +958,7 @@ class TELinear(te.pytorch.Linear):
+             None if self.disable_parameter_transpose_cache else self.is_first_microbatch
+         )
+         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
++        x = maybe_fake_quantize_linear_input(self, x)
+ 
+         with quant_context:
+             out = super().forward(x, is_first_microbatch=_is_first_microbatch)
+@@ -965,6 +971,12 @@ class TELinear(te.pytorch.Linear):
+             return out
+         return out, None
+ 
++    def _get_weight_tensors(self):
++        """Get the weight tensors of the module."""
++        return maybe_fake_quantize_linear_weights(
++            self, super()._get_weight_tensors(), self.config.delay_wgrad_compute
++        )
++
+     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+         """Replicate cross TP/DP."""
+ 
+@@ -1183,6 +1195,17 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
+             self.te_quant_params, self.training, is_context_quantized
+         )
+ 
++    def _get_weight_tensors(self):
++        """Get the weight tensors of the module."""
++        if fp8_fake_quant_active(self):
++            # The input of the GEMM is the layernorm output, which only exists inside TE,
++            # so the activation half of the fake quant cannot be applied here.
++            raise RuntimeError(
++                "fp8_fake_quant does not support TELayerNormColumnParallelLinear; build the "
++                "model with an unfused input layernorm."
++            )
++        return super()._get_weight_tensors()
++
+     def forward(self, x):
+         """Forward."""
+         _is_first_microbatch = (
+@@ -2306,6 +2329,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
+                 None if self.disable_parameter_transpose_cache else self.is_first_microbatch
+             )
+             quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
++            x = maybe_fake_quantize_linear_input(self, x)
+ 
+             with quant_context:
+                 out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
+@@ -2321,9 +2345,12 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
+         def _get_weight_tensors(self):
+             """Get the weight tensors of the module."""
+             weight_tensors = super()._get_weight_tensors()
+-            return maybe_fake_quantize_int4_weight_tensors(
++            weight_tensors = maybe_fake_quantize_int4_weight_tensors(
+                 self.config, self.delay_wgrad_compute, weight_tensors
+             )
++            return maybe_fake_quantize_linear_weights(
++                self, weight_tensors, self.delay_wgrad_compute
++            )
+ 
+         def _encode_extra_state(self, state):
+             # TE 2.0 changed the format of extra_state to be a byte tensor
+diff --git a/megatron/core/fp8_fake_quant.py b/megatron/core/fp8_fake_quant.py
+new file mode 100644
+index 000000000..bbb6eb781
+--- /dev/null
++++ b/megatron/core/fp8_fake_quant.py
+@@ -0,0 +1,223 @@
++# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
++
++"""Block-scaled FP8 fake quantization for BF16 training (quantization-aware training).
++
++The GEMMs of the model keep running in BF16, but their operands are rounded through
++FP8 (E4M3) the way a block-scaled FP8 inference engine rounds them, so the policy
++the optimizer sees is the policy the inference engine serves. Every rounding is
++wrapped in a straight-through estimator: the forward uses the rounded value, the
++backward passes the gradient to the unrounded tensor unchanged.
++
++The recipe is the one DeepSeek checkpoints are stored and served in:
++
++* weights: one scale per 128x128 tile, powers of two (``scale_fmt: ue8m0``);
++* activations: one scale per 128 values along the reduction axis, recomputed on
++  every forward, plain float32 (power-of-two optional, for DeepGEMM-style kernels);
++* KV cache (DeepSeek-V4): E4M3 with one power-of-two scale per 64 NoPE channels
++  of the KV latent, RoPE channels kept in BF16;
++* indexer (DeepSeek-V4): queries and keys in E4M3 with one power-of-two scale per
++  vector.
++
++Everything is driven by ``TransformerConfig`` (``fp8_fake_quant``,
++``fp8_fake_quant_kv_cache``, ``fp8_fake_quant_indexer_qk`` and their block sizes).
++The linear-layer part hooks the Transformer Engine wrappers in
++``megatron.core.extensions.transformer_engine``; the attention-side parts are called
++from the DeepSeek-V4 attention and CSA modules.
++
++Combined with FP8 training (``fp8`` set) the TE linear layers are left to Transformer
++Engine and ``fp8_fake_quant`` only rounds the DeepSeek-V4 grouped output projection, so
++the same switches give the rollout-matching forward in both training modes.
++"""
++
++from typing import List
++
++import torch
++import torch.nn.functional as F
++
++from megatron.core.model_parallel_config import ModelParallelConfig
++
++E4M3_MAX = 448.0
++
++_EXCLUDED_ATTR = "_fp8_fake_quant_excluded"
++
++
++def _scale_from_amax(
++    amax: torch.Tensor, pow2_scale: bool, amax_floor: float | None = None
++) -> torch.Tensor:
++    """Per-block scale from the block's absolute maximum.
++
++    ``amax_floor`` reproduces kernels that clamp the amax before taking the
++    exponent; the remaining ``tiny`` clamp only keeps an all-zero block (which
++    rounds to zero regardless) away from a division by zero.
++    """
++    if amax_floor is not None:
++        amax = amax.clamp(min=amax_floor)
++    scale = (amax / E4M3_MAX).clamp(min=torch.finfo(torch.float32).tiny)
++    if pow2_scale:
++        scale = torch.exp2(torch.ceil(torch.log2(scale)))
++    return scale
++
++
++def _round_to_e4m3(values: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
++    """Quantize ``values`` (float32) to E4M3 with ``scale`` and dequantize again."""
++    return (values / scale).clamp(-E4M3_MAX, E4M3_MAX).to(torch.float8_e4m3fn).float() * scale
++
++
++def _straight_through(x: torch.Tensor, rounded: torch.Tensor) -> torch.Tensor:
++    """Forward ``rounded``, backward the identity on ``x``."""
++    return x + (rounded.to(x.dtype) - x).detach()
++
++
++def fake_quant_weight_blockwise(
++    weight: torch.Tensor, block_size: int = 128, pow2_scale: bool = True
++) -> torch.Tensor:
++    """Round a 2D weight through E4M3 with one scale per ``block_size`` square tile.
++
++    Tiles start at the top-left corner, as in the checkpoint layout; a dimension
++    that is not a multiple of ``block_size`` gets a partial tile at its end.
++    """
++    if weight.dim() != 2:
++        raise ValueError(f"fake_quant_weight_blockwise expects a 2D weight, got {weight.shape}")
++    rows, cols = weight.shape
++    pad_r, pad_c = (-rows) % block_size, (-cols) % block_size
++
++    values = weight.detach().float()
++    if pad_r or pad_c:
++        values = F.pad(values, (0, pad_c, 0, pad_r))
++    tiled = values.reshape(
++        values.shape[0] // block_size, block_size, values.shape[1] // block_size, block_size
++    )
++    scale = _scale_from_amax(tiled.abs().amax(dim=(1, 3), keepdim=True), pow2_scale)
++    rounded = _round_to_e4m3(tiled, scale).reshape(values.shape)
++    if pad_r or pad_c:
++        rounded = rounded[:rows, :cols]
++    return _straight_through(weight, rounded)
++
++
++def fake_quant_activation_groupwise(
++    x: torch.Tensor, group_size: int = 128, pow2_scale: bool = False
++) -> torch.Tensor:
++    """Round an activation through E4M3 with one scale per ``group_size`` values of its last dim."""
++    last = x.shape[-1]
++    pad = (-last) % group_size
++
++    values = x.detach().float()
++    if pad:
++        values = F.pad(values, (0, pad))
++    grouped = values.reshape(*values.shape[:-1], values.shape[-1] // group_size, group_size)
++    scale = _scale_from_amax(grouped.abs().amax(dim=-1, keepdim=True), pow2_scale)
++    rounded = _round_to_e4m3(grouped, scale).reshape(values.shape)
++    if pad:
++        rounded = rounded[..., :last]
++    return _straight_through(x, rounded)
++
++
++def fake_quant_kv_latent(kv: torch.Tensor, rope_dim: int, block_size: int = 64) -> torch.Tensor:
++    """Round a KV latent ``[..., head_dim]`` the way an FP8 KV cache stores it.
++
++    The leading ``head_dim - rope_dim`` (NoPE) channels become E4M3 with one
++    power-of-two scale per ``block_size`` channels; the trailing ``rope_dim``
++    channels are returned untouched. The amax is floored at 1e-4 before the
++    exponent is taken, as the cache-write kernel does.
++    """
++    nope = kv.shape[-1] - rope_dim
++    if nope <= 0 or nope % block_size:
++        raise ValueError(
++            f"fake_quant_kv_latent: {kv.shape[-1]} channels minus {rope_dim} RoPE channels is not "
++            f"a multiple of the KV block size {block_size}"
++        )
++    head, tail = kv[..., :nope], kv[..., nope:]
++
++    grouped = head.detach().float().reshape(*head.shape[:-1], nope // block_size, block_size)
++    scale = _scale_from_amax(
++        grouped.abs().amax(dim=-1, keepdim=True), pow2_scale=True, amax_floor=1e-4
++    )
++    rounded = _round_to_e4m3(grouped, scale).reshape(head.shape)
++    return torch.cat((_straight_through(head, rounded), tail), dim=-1)
++
++
++def fake_quant_per_vector(x: torch.Tensor) -> torch.Tensor:
++    """Round ``x`` through E4M3 with one power-of-two scale over its whole last dim."""
++    values = x.detach().float()
++    scale = _scale_from_amax(
++        values.abs().amax(dim=-1, keepdim=True), pow2_scale=True, amax_floor=1e-10
++    )
++    return _straight_through(x, _round_to_e4m3(values, scale))
++
++
++def exclude_from_fp8_fake_quant(module: torch.nn.Module) -> torch.nn.Module:
++    """Keep a linear module out of ``fp8_fake_quant``.
++
++    For the projections an FP8 checkpoint stores in BF16 and the inference engine
++    therefore runs in BF16 (for DeepSeek-V4: the CSA compressor and the indexer
++    weights projection).
++    """
++    setattr(module, _EXCLUDED_ATTR, True)
++    return module
++
++
++def fp8_fake_quant_active(module: torch.nn.Module) -> bool:
++    """Whether ``module`` (a TE linear wrapper carrying ``.config``) fake-quantizes.
++
++    Under FP8 training (``config.fp8`` set) the TE linear layers already compute in FP8,
++    so they are left alone and ``fp8_fake_quant`` only covers the tensors outside the TE
++    GEMMs (the DeepSeek-V4 grouped output projection, KV cache and indexer).
++    """
++    config = getattr(module, "config", None)
++    if not getattr(config, "fp8_fake_quant", False) or getattr(config, "fp8", None):
++        return False
++    return not getattr(module, _EXCLUDED_ATTR, False)
++
++
++def _validate_fp8_fake_quant_support(
++    config: ModelParallelConfig, delay_wgrad_compute: bool, weight_tensors: List[torch.Tensor]
++) -> None:
++    """Reject paths that replace TE weights with STE tensors unsafely (as the int4 fake QAT does)."""
++    if config.gradient_accumulation_fusion:
++        raise RuntimeError(
++            "fp8_fake_quant is not supported with gradient_accumulation_fusion because TE fused "
++            "wgrad accumulation mutates Python attributes on the original weight tensors."
++        )
++    if delay_wgrad_compute:
++        raise RuntimeError(
++            "fp8_fake_quant is not supported with delayed wgrad compute because the delayed TE "
++            "path mutates Python attributes on the original weight tensors."
++        )
++    if any(
++        hasattr(weight, "__fsdp_param__") or hasattr(weight, "get_main_grad")
++        for weight in weight_tensors
++    ):
++        raise RuntimeError(
++            "fp8_fake_quant is not supported with Megatron FSDP because FSDP patches weight "
++            "tensors with main-gradient attributes and methods."
++        )
++
++
++def maybe_fake_quantize_linear_weights(
++    module: torch.nn.Module, weight_tensors: List[torch.Tensor], delay_wgrad_compute: bool
++) -> List[torch.Tensor]:
++    """Fake-quantize the weight tensors of a TE linear wrapper under ``fp8_fake_quant``."""
++    if not fp8_fake_quant_active(module):
++        return weight_tensors
++    config = module.config
++    _validate_fp8_fake_quant_support(config, delay_wgrad_compute, weight_tensors)
++
++    rounded_tensors = []
++    for weight in weight_tensors:
++        rounded = fake_quant_weight_blockwise(
++            weight, config.fp8_fake_quant_weight_block_size, config.fp8_fake_quant_weight_pow2_scale
++        )
++        if hasattr(weight, "main_grad"):
++            rounded.main_grad = weight.main_grad
++        rounded_tensors.append(rounded)
++    return rounded_tensors
++
++
++def maybe_fake_quantize_linear_input(module: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
++    """Fake-quantize the input of a TE linear wrapper under ``fp8_fake_quant``."""
++    if not fp8_fake_quant_active(module):
++        return x
++    config = module.config
++    return fake_quant_activation_groupwise(
++        x, config.fp8_fake_quant_act_group_size, config.fp8_fake_quant_act_pow2_scale
++    )
+diff --git a/megatron/core/fp8_utils.py b/megatron/core/fp8_utils.py
+index ac36d40d8..9a6e0db30 100644
+--- a/megatron/core/fp8_utils.py
++++ b/megatron/core/fp8_utils.py
+@@ -3,6 +3,7 @@
+ """Utility functions related to FP8 that are used throughout Megatron core"""
+ 
+ import importlib
++import os
+ import weakref
+ from contextlib import nullcontext
+ from functools import wraps
+@@ -769,6 +770,20 @@ if HAVE_TE:
+                 fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling(
+                     fp8_format=fp8_format
+                 )
++                if not config.fp8_blockwise_act_pow2_scale:
++                    # Plain float32 activation scales (amax / 448), as block-scaled FP8 inference
++                    # kernels without DeepGEMM compute them; weights and gradients keep the
++                    # power-of-two grid of the checkpoint. On ROCm the Transformer Engine GEMM
++                    # only selects its generic float-scale kernel through this env var.
++                    if os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES") != "1":
++                        raise RuntimeError(
++                            "fp8_blockwise_act_pow2_scale=False requires "
++                            "NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 in the environment of every rank."
++                        )
++                    QParams = transformer_engine.common.recipe.QParams
++                    fp8_recipe.fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=0.0)
++                    fp8_recipe.fp8_quant_fwd_weight = QParams(power_2_scale=True, amax_epsilon=0.0)
++                    fp8_recipe.fp8_quant_bwd_grad = QParams(power_2_scale=True, amax_epsilon=0.0)
+             elif config.fp8_recipe == Fp8Recipe.mxfp8:
+                 fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(
+                     fp8_format=fp8_format, fp8_dpa=config.fp8_dot_product_attention
+diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
+index 5f5a9c716..3f3bda766 100644
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -470,7 +470,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+ 
+                 # fp32 params.
+                 elif model_param.type() == 'torch.cuda.FloatTensor':
+-                    shard_model_param = model_param.view(-1)[param_range.start : param_range.end]
++                    # Detach so the shard is a leaf tensor: it is handed to the inner optimizer,
++                    # and torch.optim rejects non-leaf params. Detaching shares storage, so
++                    # in-place updates of the shard still land in the model param.
++                    shard_model_param = model_param.detach().view(-1)[
++                        param_range.start : param_range.end
++                    ]
+                     model_fp32_params_this_group.append(model_param)
+                     shard_fp32_params_this_group.append(shard_model_param)
+                     tensor_parallel.copy_tensor_model_parallel_attributes(
+@@ -2639,7 +2644,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+             self.model_float16_groups,
+             self.model_fp32_groups,
+             self.shard_float16_groups,  # grad empty/unused here?
+-            self.shard_fp32_groups,  # throws grad-access warning
++            self.shard_fp32_groups,
+         ]
+         if not self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
+             total_groups.append(self.shard_fp32_from_float16_groups)
+diff --git a/megatron/core/transformer/experimental_attention_variant/csa.py b/megatron/core/transformer/experimental_attention_variant/csa.py
+index 3d2b71ce9..746eff7a2 100644
+--- a/megatron/core/transformer/experimental_attention_variant/csa.py
++++ b/megatron/core/transformer/experimental_attention_variant/csa.py
+@@ -8,6 +8,11 @@ from typing import Optional, Tuple, Union
+ import torch
+ import torch.nn as nn
+ 
++from megatron.core.fp8_fake_quant import (
++    exclude_from_fp8_fake_quant,
++    fake_quant_kv_latent,
++    fake_quant_per_vector,
++)
+ from megatron.core.fp8_utils import get_fp8_disabled_context
+ from megatron.core.fusions.fused_mla_yarn_rope_apply import fused_mla_rope_inplace
+ from megatron.core.models.common.embeddings import RotaryEmbedding, apply_rotary_pos_emb
+@@ -56,6 +61,18 @@ from megatron.core.utils import nvtx_range_pop, nvtx_range_push
+ # ---------------------------------------------------------------------------
+ 
+ 
++def _rotate_indexer_activation(x: torch.Tensor, config: TransformerConfig) -> torch.Tensor:
++    """Hadamard-rotate an indexer query or key.
++
++    Under ``fp8_fake_quant_indexer_qk`` the vector is first rounded through FP8 with one
++    power-of-two scale, which is what an inference engine that runs the indexer in FP8
++    does to the unrotated vectors; the rotation is orthogonal, so the index scores agree.
++    """
++    if config.fp8_fake_quant_indexer_qk:
++        x = fake_quant_per_vector(x)
++    return rotate_activation(x)
++
++
+ @lru_cache(maxsize=8)
+ def _get_window_topk_idxs_cached(window_size: int, seqlen: int, device_str: str) -> torch.Tensor:
+     """Compute sliding-window indices for a single sequence (cached).
+@@ -683,10 +700,11 @@ def unfused_compressed_sparse_attn(
+     rows, np_, hn = q_flat.shape
+ 
+     safe_indices = global_indices.clamp(min=0).long()
+-    safe_indices_exp = safe_indices.unsqueeze(-1).expand(-1, -1, hn)
+-    kv_gathered = torch.gather(
+-        kv_flat.unsqueeze(0).expand(rows, -1, -1), dim=1, index=safe_indices_exp
+-    )  # (rows, topk, hn)
++    # Index the flat KV table directly. Gathering from a (rows, n_kv, hn) expanded view
++    # makes the gather backward materialise that whole shape (quadratic in sequence
++    # length) before reducing the stride-0 row dimension; index_select accumulates its
++    # gradient into the compact table instead. Same values, same gradient.
++    kv_gathered = kv_flat.index_select(0, safe_indices.reshape(-1)).view(rows, -1, hn)  # (rows, topk, hn)
+ 
+     q_f = q_flat.float()
+     kv_g = kv_gathered.float()
+@@ -1087,6 +1105,9 @@ class Compressor(MegatronModule):
+                 parallel_mode="duplicated",
+                 name=(name + ".linear_wgate") if name is not None else None,
+             )
++        # BF16 in the FP8 checkpoint, so an FP8 inference engine runs them in BF16 too.
++        exclude_from_fp8_fake_quant(self.linear_wkv)
++        exclude_from_fp8_fake_quant(self.linear_wgate)
+ 
+         # keep to high precision (FP32 in the reference DeepSeek V4 checkpoint)
+         _ape = torch.empty(
+@@ -1176,7 +1197,7 @@ class Compressor(MegatronModule):
+             score = self._overlap_transform(score, fill_value=float("-inf"))
+         weights = torch.softmax(score, dim=1, dtype=torch.float32).to(kv.dtype)
+         kv = (kv * weights).sum(dim=1)  # [n_compressed, b, head_dim]
+-        kv = self.norm(kv.to(x.dtype))
++        kv = self._fake_quant_compressed_kv(self.norm(kv.to(x.dtype)))
+         kv = _apply_rope(
+             kv,
+             self.head_dim - self.qk_pos_emb_head_dim,
+@@ -1189,7 +1210,19 @@ class Compressor(MegatronModule):
+         )
+ 
+         if self.rotate:
+-            kv = rotate_activation(kv)
++            kv = _rotate_indexer_activation(kv, self.config)
++        return kv
++
++    def _fake_quant_compressed_kv(self, kv: torch.Tensor) -> torch.Tensor:
++        """Round the compressed KV the way the FP8 KV cache stores it (fp8_fake_quant_kv_cache).
++
++        The indexer's own compressor (``rotate=True``) produces indexer keys instead, which
++        are rounded per vector in ``_rotate_indexer_activation``.
++        """
++        if self.config.fp8_fake_quant_kv_cache and not self.rotate:
++            kv = fake_quant_kv_latent(
++                kv, self.qk_pos_emb_head_dim, self.config.fp8_fake_quant_kv_block_size
++            )
+         return kv
+ 
+     def _forward_thd(
+@@ -1259,8 +1292,11 @@ class Compressor(MegatronModule):
+             return None, cu_seqlens_compressed
+ 
+         # Token-wise projections on the FULL flat input — no boundary issue.
+-        kv, _ = self.linear_wkv(x)  # (total, 1, coff * head_dim)
+-        score, _ = self.linear_wgate(x)  # (total, 1, coff * head_dim)
++        # Run the compressor GEMMs in high precision (BF16) even under FP8 training, as the
++        # SBHD path does: these weights are BF16 in the reference checkpoint.
++        with get_fp8_disabled_context(self.config):
++            kv, _ = self.linear_wkv(x)  # (total, 1, coff * head_dim)
++            score, _ = self.linear_wgate(x)  # (total, 1, coff * head_dim)
+ 
+         # Additive fused fast path (CuTe DSL, one kernel per direction) for the
+         # gather / overlap-window / softmax / weighted-sum region below. Returns None
+@@ -1324,7 +1360,7 @@ class Compressor(MegatronModule):
+             weights = torch.softmax(score_grouped, dim=1, dtype=torch.float32).to(kv_grouped.dtype)
+             compressed_thd = (kv_grouped * weights).sum(dim=1)
+ 
+-        compressed_thd = self.norm(compressed_thd.to(dtype))
++        compressed_thd = self._fake_quant_compressed_kv(self.norm(compressed_thd.to(dtype)))
+ 
+         if pre_grouped:
+             position_ids = compressed_group_ids[:total_comp].clamp_min(0) * ratio
+@@ -1371,7 +1407,7 @@ class Compressor(MegatronModule):
+             )
+ 
+         if self.rotate:
+-            compressed_thd = rotate_activation(compressed_thd)
++            compressed_thd = _rotate_indexer_activation(compressed_thd, self.config)
+         return compressed_thd, cu_seqlens_compressed
+ 
+     def forward(
+@@ -1505,6 +1541,7 @@ class CSAIndexer(MegatronModule):
+                 parallel_mode="duplicated",
+                 name=(name + ".linear_weights_proj") if name is not None else None,
+             )
++        exclude_from_fp8_fake_quant(self.linear_weights_proj)
+ 
+         # Own compressor (smaller head_dim, with Hadamard rotation)
+         self.compressor = build_module(
+@@ -1588,7 +1625,7 @@ class CSAIndexer(MegatronModule):
+             cu_seqlens=cu_seqlens_q,
+             max_seqlen_rope=max_seqlen_rope,
+         )
+-        q = rotate_activation(q)
++        q = _rotate_indexer_activation(q, self.config)
+ 
+         # K path: own compressor. SBHD returns ``k``; THD returns the
+         # 2-tuple ``(k_thd, cu_seqlens_compressed)``.
+@@ -2714,7 +2751,7 @@ class CompressedSparseAttention(MegatronModule):
+                         global_start,
+                         self.config,
+                     )
+-                q_indexer_cp = rotate_activation(q_indexer_cp)
++                q_indexer_cp = _rotate_indexer_activation(q_indexer_cp, self.config)
+                 weights_indexer_cp, _ = indexer.linear_weights_proj(indexer_x)
+                 weights_indexer_cp = weights_indexer_cp.squeeze(1) * (indexer.index_n_heads**-0.5)
+                 nvtx_range_pop("dsv4_cp_indexer_q_weights")
+diff --git a/megatron/core/transformer/experimental_attention_variant/deepseek_v4_hybrid_attention.py b/megatron/core/transformer/experimental_attention_variant/deepseek_v4_hybrid_attention.py
+index f4ddcc3c1..af2004c99 100644
+--- a/megatron/core/transformer/experimental_attention_variant/deepseek_v4_hybrid_attention.py
++++ b/megatron/core/transformer/experimental_attention_variant/deepseek_v4_hybrid_attention.py
+@@ -8,6 +8,7 @@ import torch
+ 
+ from megatron.core import tensor_parallel
+ from megatron.core.extensions.transformer_engine import HAVE_TE
++from megatron.core.fp8_fake_quant import fake_quant_kv_latent, fake_quant_weight_blockwise
+ from megatron.core.fusions.fused_mla_yarn_rope_apply import (
+     fused_mla_rope_inplace,
+     fused_mla_rope_out_of_place,
+@@ -462,7 +463,16 @@ class DSv4HybridAttention(Attention):
+         core_attn_out = core_attn_out.view(
+             core_attn_out.size(0), core_attn_out.size(1), self.o_local_groups, -1
+         )
+-        wo_a_weight = self.linear_o_group_proj.view(
++        _woa = self.linear_o_group_proj
++        if self.config.fp8_fake_quant:
++            # A plain parameter rather than a TE linear, so it is rounded here. Weight only:
++            # an FP8 inference engine dequantizes wo_a and runs this contraction in BF16.
++            _woa = fake_quant_weight_blockwise(
++                _woa,
++                self.config.fp8_fake_quant_weight_block_size,
++                self.config.fp8_fake_quant_weight_pow2_scale,
++            )
++        wo_a_weight = _woa.view(
+             self.o_local_groups, self.config.o_lora_rank, -1
+         )
+         core_attn_out = torch.einsum("...gd,grd->...gr", core_attn_out, wo_a_weight)
+@@ -719,6 +729,11 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
+ 
+             kv, _ = self.linear_kv_proj(kv_projection_input)
+             kv = self.kv_layernorm(kv)
++            if self.config.fp8_fake_quant_kv_cache:
++                # The FP8 KV cache rounds the latent after the norm and before RoPE.
++                kv = fake_quant_kv_latent(
++                    kv, self.config.qk_pos_emb_head_dim, self.config.fp8_fake_quant_kv_block_size
++                )
+             boundary_kv = None
+ 
+             # [num_tokens, qk_pos_emb_head_dim] -> [num_tokens, 1, qk_pos_emb_head_dim]
+diff --git a/megatron/core/transformer/transformer_config.py b/megatron/core/transformer/transformer_config.py
+index 9eaf4c117..da01693ce 100644
+--- a/megatron/core/transformer/transformer_config.py
++++ b/megatron/core/transformer/transformer_config.py
+@@ -671,6 +671,14 @@ class TransformerConfig(ModelParallelConfig):
+     uses delayed scaling recipe, 3) 'mxfp8' for Blackwell architecture only,
+     4) 'blockwise' for blockwise scaling recipe, 5) 'custom' for custom quantization recipe."""
+ 
++    fp8_blockwise_act_pow2_scale: bool = True
++    """With fp8_recipe='blockwise': round the activation scales up to powers of two (DeepGEMM
++    convention). Set False to keep plain float32 activation scales (amax / 448), which is what
++    block-scaled FP8 inference kernels without DeepGEMM use, e.g. vLLM on ROCm; weights and
++    gradients keep power-of-two scales either way. False requires
++    NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 on ROCm so that Transformer Engine selects the
++    float-scale GEMM kernel."""
++
+     fp8_param: bool = False
+     """If set, keep the parameters in fp8 precision to save memory. This option must be used
+     together with fp8 mode (i.e., TransformerConfig.fp8 is not None). Note that not all parameters
+@@ -715,6 +723,48 @@ class TransformerConfig(ModelParallelConfig):
+     fp8_multi_head_attention: bool = False
+     """When set to True, use the FP8 implementation of Multi Head Attention."""
+ 
++    ####################
++    # fp8 fake quantization (QAT) related
++    ####################
++    fp8_fake_quant: bool = False
++    """If True, round the weights and inputs of the Transformer Engine linear layers through
++    block-scaled FP8 (E4M3) with a straight-through estimator while the GEMMs keep running in
++    BF16, so that a BF16 training run optimizes the arithmetic of a block-scaled FP8 inference
++    engine (quantization-aware training). Weights get one scale per
++    fp8_fake_quant_weight_block_size square tile, inputs one scale per
++    fp8_fake_quant_act_group_size values. Together with FP8 training (fp8 set) the Transformer
++    Engine linear layers are left to TE and only the DeepSeek-V4 grouped output projection is
++    rounded. Cannot be combined with fp4 training and requires gradient_accumulation_fusion=False
++    and delay_wgrad_compute=False. See megatron/core/fp8_fake_quant.py."""
++
++    fp8_fake_quant_weight_block_size: int = 128
++    """Tile edge of the weight scales under fp8_fake_quant."""
++
++    fp8_fake_quant_weight_pow2_scale: bool = True
++    """Round the weight scales up to a power of two under fp8_fake_quant (the ue8m0 scale format
++    of DeepSeek checkpoints)."""
++
++    fp8_fake_quant_act_group_size: int = 128
++    """Values per activation scale under fp8_fake_quant."""
++
++    fp8_fake_quant_act_pow2_scale: bool = False
++    """Round the activation scales up to a power of two under fp8_fake_quant, as DeepGEMM-style
++    kernels do. False keeps plain float32 scales (vLLM's block-scaled kernels on ROCm)."""
++
++    fp8_fake_quant_kv_cache: bool = False
++    """If True, round the KV latent of DeepSeek-V4 attention (after the KV layernorm, before
++    RoPE; the compressed KV likewise) the way an FP8 KV cache stores it: E4M3 with one
++    power-of-two scale per fp8_fake_quant_kv_block_size NoPE channels, RoPE channels kept in
++    BF16. Independent of fp8_fake_quant."""
++
++    fp8_fake_quant_kv_block_size: int = 64
++    """Channels per KV-cache scale under fp8_fake_quant_kv_cache."""
++
++    fp8_fake_quant_indexer_qk: bool = False
++    """If True, round the DeepSeek-V4 indexer queries and keys through E4M3 with one
++    power-of-two scale per vector, before the Hadamard rotation, as an inference engine that
++    runs the indexer in FP8 does. Independent of fp8_fake_quant."""
++
+     tp_only_amax_red: bool = False
+     """When set to True, reduce the FP8 AMAX only in the TP or TP-CP domain"""
+ 
+@@ -2003,6 +2053,9 @@ class TransformerConfig(ModelParallelConfig):
+         if self.fp8_param and not self.fp8:
+             raise ValueError("fp8_param must be used together with fp8 mode.")
+ 
++        if not self.fp8_blockwise_act_pow2_scale and self.fp8 and self.fp8_recipe != Fp8Recipe.blockwise:
++            raise ValueError("fp8_blockwise_act_pow2_scale=False only applies to fp8_recipe='blockwise'.")
++
+         if self.fp8_output_proj:
+             if not self.fp8:
+                 raise ValueError("fp8_output_proj must be used together with fp8 mode.")
+@@ -2011,6 +2064,26 @@ class TransformerConfig(ModelParallelConfig):
+                     f"fp8_output_proj requires fp8_recipe='mxfp8', got " f"'{self.fp8_recipe}'."
+                 )
+ 
++        # FP8 fake quantization validation
++        if self.fp8_fake_quant:
++            if self.fp4:
++                raise ValueError("fp8_fake_quant cannot be combined with fp4 training.")
++            if self.gradient_accumulation_fusion and not self.fp8:
++                raise ValueError(
++                    "fp8_fake_quant requires gradient_accumulation_fusion=False: fused wgrad "
++                    "accumulation mutates attributes on the original weight tensors, which the "
++                    "fake-quantized weights replace."
++                )
++            if self.delay_wgrad_compute and not self.fp8:
++                raise ValueError("fp8_fake_quant requires delay_wgrad_compute=False.")
++            if self.fp8_fake_quant_weight_block_size <= 0 or self.fp8_fake_quant_act_group_size <= 0:
++                raise ValueError(
++                    "fp8_fake_quant_weight_block_size and fp8_fake_quant_act_group_size must be "
++                    "positive."
++                )
++        if self.fp8_fake_quant_kv_cache and self.fp8_fake_quant_kv_block_size <= 0:
++            raise ValueError("fp8_fake_quant_kv_block_size must be positive.")
++
+         # FP4 validation
+         if self.fp4_param and not self.fp4:
+             raise ValueError("fp4_param must be used together with fp4 mode.")

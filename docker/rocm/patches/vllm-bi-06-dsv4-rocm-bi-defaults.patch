@@ -1,0 +1,161 @@
+# vLLM v0.26.0 patch 06/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# DeepSeek-V4 on ROCm: sparse decode and deterministic top-k by default under BI.
+#
+# VLLM_DS4_DECODE_KERNEL gains "auto" (the new default): sparse decode when
+# VLLM_BATCH_INVARIANT=1, the paged kernel otherwise. The deterministic top-k
+# now depends only on VLLM_BATCH_INVARIANT. BI=0 behaviour is unchanged.
+#
+# Why BI needs it: VLLM_BATCH_INVARIANT=1 alone otherwise left decode on the
+# batch-dependent paged kernel and prefill top-k on the non-deterministic one.
+#
+# Upstream: not yet proposed (same DeepSeek-V4 ROCm RFC as patch 02).
+#
+# Source commits:
+#   [ROCm][DSv4][BI] Sparse decode and deterministic top-k by default under BI
+#
+diff --git a/vllm/envs.py b/vllm/envs.py
+index df22922b8e..4cf3a40f3f 100755
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -87,7 +87,7 @@ if TYPE_CHECKING:
+     VLLM_MAIN_CUDA_VERSION: str = "13.0"
+     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
+     VLLM_BATCH_INVARIANT: bool = False
+-    VLLM_DS4_DECODE_KERNEL: Literal["paged", "sparse"] = "paged"
++    VLLM_DS4_DECODE_KERNEL: Literal["auto", "paged", "sparse"] = "auto"
+     VLLM_TRITON_USE_TD: bool | None = None
+     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
+     VLLM_TRITON_ATTN_USE_TD: bool | None = None
+@@ -601,18 +601,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     # Enable batch-invariant mode: deterministic results regardless of
+     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
+     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+-    # DeepSeek-V4 decode attention kernel. ``paged`` (default) is each platform's
+-    # production decode kernel. ``sparse`` keeps decode request semantics (and
+-    # FULL CUDA/HIP graph support) but runs decode tokens through the prefill
+-    # sparse-attention kernel, the prefill indexer score kernel and the prefill
+-    # top-k selector, on fixed capacity-sized workspaces, so a decode token is
+-    # computed exactly as the same token in a prefill. Combine with
+-    # VLLM_BATCH_INVARIANT=1 for train/rollout alignment. Currently implemented
+-    # for ROCm (the CUDA FlashMLA backend has its own implementation upstream).
++    # DeepSeek-V4 decode attention kernel (ROCm). ``paged`` is the production
++    # decode kernel (split-K flash-decode over the FP8 cache). ``sparse`` keeps
++    # decode request semantics (and FULL CUDA/HIP graph support) but runs
++    # decode tokens through the prefill sparse-attention kernel, the prefill
++    # indexer score kernel and the prefill top-k selector, on fixed
++    # capacity-sized workspaces, so a decode token is computed exactly as the
++    # same token in a prefill. ``auto`` (default): ``sparse`` when
++    # VLLM_BATCH_INVARIANT=1, ``paged`` otherwise.
+     "VLLM_DS4_DECODE_KERNEL": env_with_choices(
+         "VLLM_DS4_DECODE_KERNEL",
+-        "paged",
+-        ["paged", "sparse"],
++        "auto",
++        ["auto", "paged", "sparse"],
+         case_sensitive=False,
+     ),
+     # Use tensor descriptors for Q/K/V loads and output stores in the
+diff --git a/vllm/models/deepseek_v4/amd/rocm.py b/vllm/models/deepseek_v4/amd/rocm.py
+index 96e597fc35..bfffb3eb41 100644
+--- a/vllm/models/deepseek_v4/amd/rocm.py
++++ b/vllm/models/deepseek_v4/amd/rocm.py
+@@ -635,10 +635,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
+         self.max_sparse_decode_reqs = min(max_decodes, self.max_num_batched_tokens)
+         if envs.VLLM_BATCH_INVARIANT and not self.use_sparse_decode:
+             logger.warning_once(
+-                "VLLM_BATCH_INVARIANT=1 with the ROCm DeepSeek-V4 paged decode "
+-                "kernel: decode attention uses a split-K flash-decode whose "
+-                "result depends on the batch and differs from prefill. Set "
+-                "VLLM_DS4_DECODE_KERNEL=sparse for batch-invariant decode."
++                "VLLM_BATCH_INVARIANT=1 with VLLM_DS4_DECODE_KERNEL=paged: "
++                "ROCm DeepSeek-V4 decode attention uses a split-K "
++                "flash-decode whose result depends on the batch and differs "
++                "from prefill, so decode is NOT batch invariant. Unset "
++                "VLLM_DS4_DECODE_KERNEL (auto) for batch-invariant decode."
+             )
+ 
+     @classmethod
+@@ -844,7 +845,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
+         swa_only: bool,
+         output: torch.Tensor,
+     ) -> None:
+-        """Decode tokens on the prefill kernel (VLLM_DS4_DECODE_KERNEL=sparse).
++        """Decode tokens on the prefill kernel (sparse decode, the default in
++        batch-invariant mode; VLLM_DS4_DECODE_KERNEL=sparse forces it).
+ 
+         Each decode token attends over the same index list, in the same order,
+         as the same token at the end of a prefill (combine_topk_swa_indices)
+@@ -860,7 +862,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
+         num_decode_tokens = swa_metadata.num_decode_tokens
+         if num_decodes != num_decode_tokens:
+             raise NotImplementedError(
+-                "VLLM_DS4_DECODE_KERNEL=sparse supports one token per decode "
++                "DeepSeek-V4 sparse decode (VLLM_DS4_DECODE_KERNEL=sparse, the "
++                "batch-invariant default) supports one token per decode "
+                 "request (no speculative decoding) on ROCm"
+             )
+         assert swa_metadata.seq_lens is not None
+diff --git a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+index 82f299a681..d1af204b9c 100644
+--- a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
++++ b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+@@ -801,12 +801,17 @@ def _topk_indices_torch(
+ def use_dsv4_sparse_decode() -> bool:
+     """Whether DeepSeek-V4 decode runs on the prefill kernels.
+ 
+-    ``VLLM_DS4_DECODE_KERNEL=sparse``: decode tokens keep decode metadata (and
+-    FULL CUDA/HIP graph support) but use the prefill sparse-attention kernel,
+-    the prefill indexer score kernel and the prefill top-k selector, so a
+-    decode token is computed exactly like the same token inside a prefill.
++    Sparse decode: decode tokens keep decode metadata (and FULL CUDA/HIP graph
++    support) but use the prefill sparse-attention kernel, the prefill indexer
++    score kernel and the prefill top-k selector, so a decode token is computed
++    exactly like the same token inside a prefill. It is the default in
++    batch-invariant mode (``VLLM_DS4_DECODE_KERNEL=auto``); the paged decode
++    kernel's split-K count depends on the batch.
+     """
+-    return envs.VLLM_DS4_DECODE_KERNEL.lower() == "sparse"
++    mode = envs.VLLM_DS4_DECODE_KERNEL.lower()
++    if mode == "auto":
++        return envs.VLLM_BATCH_INVARIANT
++    return mode == "sparse"
+ 
+ 
+ @triton.jit
+@@ -904,8 +909,8 @@ def dsv4_det_topk_per_row(
+     num_rows: int,
+     topk_tokens: int,
+ ) -> None:
+-    """Deterministic DSv4 indexer top-k (VLLM_BATCH_INVARIANT=1 with
+-    VLLM_DS4_DECODE_KERNEL=sparse), for prefill and decode rows alike.
++    """Deterministic DSv4 indexer top-k (VLLM_BATCH_INVARIANT=1), for
++    prefill chunks and sparse-decode rows alike.
+ 
+     Selects, per row, the ``topk_tokens`` columns of
+     ``logits[row, row_starts[row]:row_ends[row]]`` with the largest scores,
+@@ -1064,9 +1069,11 @@ def _aiter_fp8_mqa_logits_into(
+ 
+ 
+ def use_dsv4_det_topk() -> bool:
+-    """DSv4 indexer top-k on dsv4_det_topk_per_row, for prefill and decode
+-    rows: VLLM_BATCH_INVARIANT=1 with VLLM_DS4_DECODE_KERNEL=sparse."""
+-    return envs.VLLM_BATCH_INVARIANT and use_dsv4_sparse_decode()
++    """DSv4 indexer top-k on dsv4_det_topk_per_row (prefill chunks and sparse
++    decode rows) in batch-invariant mode. top_k_per_row_prefill's output order
++    is not fixed run to run, and the candidate it keeps at the cutoff depends
++    on the launch shape; sparse attention sums in index order."""
++    return envs.VLLM_BATCH_INVARIANT
+ 
+ 
+ def dsv4_sparse_decode_indexer_topk(
+@@ -1352,7 +1359,8 @@ def rocm_aiter_sparse_attn_indexer(
+             and decode_metadata.seq_lens.shape[1] != 1
+         ):
+             raise NotImplementedError(
+-                "VLLM_DS4_DECODE_KERNEL=sparse supports one token per decode "
++                "DeepSeek-V4 sparse decode (VLLM_DS4_DECODE_KERNEL=sparse, the "
++                "batch-invariant default) supports one token per decode "
+                 "request (no speculative decoding) on ROCm"
+             )
+         dsv4_sparse_decode_indexer_topk(

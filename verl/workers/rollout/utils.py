@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import os
+import zlib
 
 import numpy as np
 import ray
@@ -26,6 +27,17 @@ from verl.workers.config.rollout import PrometheusConfig
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def deterministic_request_seed(base_seed: int, request_id: str) -> int:
+    """Sampling seed of one request under ``rollout.full_determinism``.
+
+    A function of ``(base_seed, request_id)`` only: stable across processes and runs (no
+    Python ``hash()``), distinct for distinct request ids, and independent of which replica
+    serves the request, so the rollout DP size does not change the samples. Under
+    full_determinism the agent loops pass ``det-<priority>`` ids, one per sample.
+    """
+    return (int(base_seed) * 1_000_003 + zlib.crc32(str(request_id).encode("utf-8"))) % (2**31 - 1)
 
 
 def get_max_position_embeddings(hf_config) -> int:

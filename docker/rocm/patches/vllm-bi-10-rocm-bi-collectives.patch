@@ -1,0 +1,148 @@
+# vLLM v0.26.0 patch 10/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Batch-invariant all-reduce and reduce-scatter(v) on ROCm; no RCCL channel pin.
+#
+# With VLLM_BATCH_INVARIANT=1 on ROCm and world_size > 1, GroupCoordinator
+# all-reduce and reduce-scatter(v) exchange exact copies and sum them in rank
+# order in FP32, rounded once. The NCCL_MIN/MAX_NCHANNELS=1 pin is not exported
+# on ROCm: with RCCL it corrupts point-to-point transfers above 16 MiB (NaN
+# prompt logprobs for a 2100-token prompt under DP2/EP2).
+#
+# Why BI needs it: RCCL's ring reductions chunk by message size; full
+# DeepSeek-V4-Flash at TP8 had 536/553 prompt logprobs differ between a prompt
+# alone and in a batch.
+#
+# Upstream: covered on main by vllm-project/vllm#52231 (which hooks the
+# communicator instead of GroupCoordinator).
+#
+# Source commits:
+#   [ROCm][BI] Batch-invariant all-reduce and reduce-scatter(v) on ROCm
+#   [ROCm][BI] Do not pin RCCL to a single channel in batch-invariant mode
+#
+diff --git a/vllm/distributed/parallel_state.py b/vllm/distributed/parallel_state.py
+index f0647323e6..a292aca083 100644
+--- a/vllm/distributed/parallel_state.py
++++ b/vllm/distributed/parallel_state.py
+@@ -505,6 +505,17 @@ class GroupCoordinator:
+             current_platform.is_tpu() or current_platform.use_custom_op_collectives()
+         )
+ 
++        # Batch-invariant reductions on ROCm: RCCL's all-reduce and
++        # reduce-scatter chunk their reductions by message size, so a row's
++        # summation order depends on how many tokens share the call (the
++        # NCCL_* determinism settings of batch-invariant mode do not fix this
++        # on RCCL). See _batch_invariant_all_reduce.
++        self.use_batch_invariant_reductions = (
++            envs.VLLM_BATCH_INVARIANT
++            and current_platform.is_rocm()
++            and self.world_size > 1
++        )
++
+         self.use_cpu_custom_send_recv = (
+             current_platform.is_cpu()
+             and self.device_communicator
+@@ -665,8 +676,67 @@ class GroupCoordinator:
+     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
+         if self.device_communicator is None:
+             raise ValueError("No device communicator found")
++        if self.use_batch_invariant_reductions:
++            return self._batch_invariant_all_reduce(input_)
+         return self.device_communicator.all_reduce(input_)
+ 
++    def _rank_order_sum(self, parts: list[torch.Tensor] | torch.Tensor):
++        """FP32 sum of ``parts[0] + parts[1] + ...`` in rank order."""
++        acc = parts[0].float()
++        for r in range(1, self.world_size):
++            acc = acc + parts[r].float()
++        return acc
++
++    def _batch_invariant_all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
++        """All-reduce whose result does not depend on the message size: an
++        all-gather (exact copies) followed by an FP32 sum in rank order,
++        rounded once to the input dtype. Every rank computes the same sum."""
++        assert self.device_communicator is not None
++        gathered = self.device_communicator.all_gather(
++            input_.unsqueeze(0).contiguous(), 0
++        )
++        return self._rank_order_sum(gathered).to(input_.dtype)
++
++    def _batch_invariant_reduce_scatter(
++        self, input_: torch.Tensor, dim: int, sizes: list[int] | None
++    ) -> torch.Tensor:
++        """Reduce-scatter(v) with the same arithmetic as
++        _batch_invariant_all_reduce (so its slice is bitwise equal to the
++        all-reduce's), at 1/world_size of the traffic along dim 0: rank r
++        receives chunk r of every rank (all-to-all), then sums the chunks in
++        rank order in FP32."""
++        world_size = self.world_size
++        rank = self.rank_in_group
++        if dim not in (0, -input_.dim()):
++            full = self._batch_invariant_all_reduce(input_)
++            parts = (
++                full.chunk(world_size, dim=dim)
++                if sizes is None
++                else torch.split(full, list(sizes), dim=dim)
++            )
++            return parts[rank].contiguous()
++        chunks = (
++            input_.chunk(world_size, dim=0)
++            if sizes is None
++            else torch.split(input_, list(sizes), dim=0)
++        )
++        send = [c.contiguous() for c in chunks]
++        recv = [torch.empty_like(send[rank]) for _ in range(world_size)]
++        assert self.device_communicator is not None
++        pynccl_comm = getattr(self.device_communicator, "pynccl_comm", None)
++        if pynccl_comm is not None and not pynccl_comm.disabled:
++            # Grouped send/recv on the current stream (graph capturable).
++            recv[rank].copy_(send[rank])
++            pynccl_comm.group_start()
++            for peer in range(world_size):
++                if peer != rank:
++                    pynccl_comm.send(send[peer], peer)
++                    pynccl_comm.recv(recv[peer], peer)
++            pynccl_comm.group_end()
++        else:
++            torch.distributed.all_to_all(recv, send, group=self.device_group)
++        return self._rank_order_sum(recv).to(input_.dtype)
++
+     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+         world_size = self.world_size
+         # Bypass the function if we are using only 1 GPU.
+@@ -719,11 +789,15 @@ class GroupCoordinator:
+     ) -> torch.Tensor:
+         if self.device_communicator is None:
+             raise ValueError("No device communicator found")
++        if self.use_batch_invariant_reductions:
++            return self._batch_invariant_reduce_scatter(input_, dim, sizes)
+         return self.device_communicator.reduce_scatterv(input_, dim, sizes)
+ 
+     def _reduce_scatter_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
+         if self.device_communicator is None:
+             raise ValueError("No device communicator found")
++        if self.use_batch_invariant_reductions:
++            return self._batch_invariant_reduce_scatter(input_, dim, None)
+         return self.device_communicator.reduce_scatter(input_, dim)
+ 
+     def gather(
+diff --git a/vllm/model_executor/layers/batch_invariant.py b/vllm/model_executor/layers/batch_invariant.py
+index cd9adcc953..4525f3b7e3 100644
+--- a/vllm/model_executor/layers/batch_invariant.py
++++ b/vllm/model_executor/layers/batch_invariant.py
+@@ -1019,8 +1019,14 @@ def override_envs_for_invariance():
+     os.environ["NCCL_COLLNET_ENABLE"] = "0"
+     os.environ["NCCL_NVLS_ENABLE"] = "0"
+     os.environ["NCCL_P2P_NET_DISABLE"] = "1"
+-    os.environ["NCCL_MIN_NCHANNELS"] = "1"
+-    os.environ["NCCL_MAX_NCHANNELS"] = "1"
++    if not current_platform.is_rocm():
++        # Not on ROCm: RCCL pinned to one channel corrupts intra-node
++        # point-to-point transfers above 16 MiB (all_to_all with uneven
++        # chunks, as in the expert-parallel combine), and the ROCm
++        # batch-invariant reductions do not rely on RCCL's reduction order
++        # (GroupCoordinator.use_batch_invariant_reductions).
++        os.environ["NCCL_MIN_NCHANNELS"] = "1"
++        os.environ["NCCL_MAX_NCHANNELS"] = "1"
+     os.environ["NCCL_PROTO"] = "Simple"
+     os.environ["NCCL_ALGO"] = "allreduce:tree"
+     os.environ["NCCL_NTHREADS"] = "1"

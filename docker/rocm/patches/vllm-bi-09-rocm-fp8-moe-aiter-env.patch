@@ -1,0 +1,37 @@
+# vLLM v0.26.0 patch 09/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# FP8 MoE on ROCm: the AITER env switches do not force AITER under BI.
+#
+# select_fp8_moe_backend() returned the AITER backend outright when
+# VLLM_ROCM_USE_AITER and VLLM_ROCM_USE_AITER_MOE are set (the ROCm image
+# default). AiterExperts is not batch invariant, so with VLLM_BATCH_INVARIANT=1
+# the engine did not start unless moe_backend="triton" was passed. Under BI the
+# selection now falls through to the priority list (TritonExperts on ROCm).
+# BI=0 is unchanged.
+#
+# Upstream: not yet proposed; overlaps open vllm-project/vllm#60839.
+#
+# Source commits:
+#   [ROCm][BI] FP8 MoE: AITER env switches do not force AITER under BI
+#
+diff --git a/vllm/model_executor/layers/fused_moe/oracle/fp8.py b/vllm/model_executor/layers/fused_moe/oracle/fp8.py
+index c60e68232d..2ca33d34fb 100644
+--- a/vllm/model_executor/layers/fused_moe/oracle/fp8.py
++++ b/vllm/model_executor/layers/fused_moe/oracle/fp8.py
+@@ -381,6 +381,16 @@ def select_fp8_moe_backend(
+     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
+         if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
+             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
++        elif envs.VLLM_BATCH_INVARIANT:
++            # AITER fused MoE does not support batch invariance (its kernels
++            # are chosen per token count), so forcing it here would only fail
++            # the support check. Fall through to the first backend that does
++            # (Triton on ROCm). An explicit moe_backend is still honoured.
++            logger.info_once(
++                "VLLM_BATCH_INVARIANT=1: VLLM_ROCM_USE_AITER_MOE does not "
++                "force the AITER FP8 MoE backend; selecting a batch-invariant "
++                "backend instead."
++            )
+         else:
+             backend = Fp8MoeBackend.AITER
+             return _return_or_raise(

@@ -1,0 +1,343 @@
+# vLLM v0.26.0 patch 13/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Opt-in M-dependent tiles for the batch-invariant BF16 / block-FP8 GEMMs on ROCm.
+#
+# VLLM_BI_GEMM_TILES=1 (default off; the true-on-policy recipe sets it) picks the
+# tile config of matmul_persistent, bmm_batch_invariant and the BI
+# w8a8_triton_block_scaled_mm by row count. No split-K, no atomics; every listed
+# tile gives outputs bitwise identical to the default BI tile on MI355X (gfx950),
+# so it is a speed change only on that architecture.
+#
+# Upstream: not yet proposed. Main added a per-arch tuned BI matmul framework
+# (CUDA archs only) with a fixed BLOCK_K per shape; a gfx950 entry needs a
+# re-design.
+#
+# Source commits:
+#   [ROCm][BatchInvariant] Opt-in M-dependent tiles for the BI BF16 / block-FP8 GEMMs
+#
+diff --git a/vllm/model_executor/layers/batch_invariant.py b/vllm/model_executor/layers/batch_invariant.py
+index 4525f3b7e3..3fef8b99a1 100644
+--- a/vllm/model_executor/layers/batch_invariant.py
++++ b/vllm/model_executor/layers/batch_invariant.py
+@@ -38,6 +38,92 @@ def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M):
+     return pid_m, pid_n
+ 
+ 
++# ROCm tiles chosen by M for the batch-invariant BF16 GEMMs (opt-in,
++# VLLM_BI_GEMM_TILES=1). The default 128x128x64 tile leaves most CUs idle at
++# decode (e.g. N=256 -> 2 programs, each looping over all of K). Per output
++# element both kernels compute one chain of MFMAs over K in increasing K order
++# into a single FP32 accumulator; on gfx950 neither the MFMA shape Triton
++# picks for a tile (32x32x16 vs 16x16x32 bf16) nor BLOCK_SIZE_K (64/128/256/
++# 512: more chained MFMAs per loop iteration) changes the result bits. So these
++# configs give outputs bitwise identical to the default one for every M
++# (tested: ops/parity/bigemm/bench.py) and may be chosen by M. There is no
++# split-K and no atomic: every output tile is still owned by one program.
++# The equality is a property of the compiled code: re-run the bench after any
++# Triton / ROCm / GPU change before enabling this.
++_BI_GEMM_TILES = os.environ.get("VLLM_BI_GEMM_TILES", "0") == "1"
++_BI_BF16_DEFAULT = {
++    "BLOCK_SIZE_M": 128,
++    "BLOCK_SIZE_N": 128,
++    "BLOCK_SIZE_K": 64,
++    "GROUP_SIZE_M": 8,
++    "num_stages": 3,
++    "num_warps": 8,
++}
++# Rows: (max M, min N, max N, config); the first matching row wins. Measured
++# on MI355X (gfx950) at DeepSeek-V4-Flash shapes (ops/parity/bigemm/sweep.py);
++# every config here was checked bitwise equal to the default one.
++_INF = 1 << 62
++
++
++def _t(bm: int, bn: int, bk: int, nw: int) -> dict[str, int]:
++    return dict(
++        BLOCK_SIZE_M=bm, BLOCK_SIZE_N=bn, BLOCK_SIZE_K=bk, num_warps=nw, num_stages=2
++    )
++
++
++_BI_BF16_MM_TILES: list[tuple[int, int, int, dict[str, int]]] = [
++    # lm_head-like (very wide N): memory bound at decode, compute bound at prefill
++    (16, 65536, _INF, _t(16, 64, 256, 4)),
++    (32, 65536, _INF, _t(32, 64, 512, 2)),
++    (64, 65536, _INF, _t(64, 128, 256, 4)),
++    (128, 65536, _INF, _t(128, 128, 256, 8)),
++    (256, 65536, _INF, _t(128, 256, 128, 8)),
++    (_INF, 65536, _INF, _t(256, 128, 128, 8)),
++    # router gate / compressor / indexer projections (N = 64 .. 2048)
++    (32, 0, _INF, _t(16, 16, 512, 4)),
++    (64, 0, _INF, _t(32, 16, 512, 4)),
++    (256, 0, _INF, _t(64, 16, 256, 4)),
++    (_INF, 0, 512, _t(128, 64, 256, 8)),
++    (_INF, 0, 1024, _t(128, 128, 256, 8)),
++    (_INF, 0, _INF, _t(128, 256, 128, 8)),
++]
++_BI_BF16_BMM_TILES: list[tuple[int, int, int, dict[str, int]]] = [
++    # DeepSeek-V4 wo_a: (G=8, T, 4096) x (8, 4096, 1024)
++    (16, 0, _INF, _t(16, 16, 512, 4)),
++    (32, 0, _INF, _t(32, 16, 512, 4)),
++    (64, 0, _INF, _t(32, 32, 256, 2)),
++    (128, 0, _INF, _t(64, 64, 256, 4)),
++    (256, 0, _INF, _t(128, 64, 256, 8)),
++    (_INF, 0, _INF, _t(128, 256, 64, 8)),
++]
++
++
++def _bf16_tile_config(
++    M: int,
++    N: int,
++    K: int,
++    out_dtype=None,
++    enabled: bool | None = None,
++    kind: str = "mm",
++) -> dict[str, int]:
++    """Tile config for the batch-invariant BF16 persistent matmul (kind="mm",
++    with GROUP_SIZE_M) or bmm (kind="bmm")."""
++    on = _BI_GEMM_TILES if enabled is None else enabled
++    cfg = dict(_BI_BF16_DEFAULT)
++    if on and current_platform.is_rocm():
++        table = _BI_BF16_MM_TILES if kind == "mm" else _BI_BF16_BMM_TILES
++        for max_m, min_n, max_n, tile in table:
++            if max_m >= M and min_n <= N and max_n >= N:
++                # Only whole K tiles: a partial last tile would add zero-padded
++                # MFMA steps the default config does not run (-0 vs +0).
++                if K % tile["BLOCK_SIZE_K"] == 0 and K % 64 == 0:
++                    cfg.update(tile)
++                break
++    if kind == "bmm":
++        cfg.pop("GROUP_SIZE_M")
++    return cfg
++
++
+ @triton.jit(launch_metadata=_matmul_launch_metadata)
+ def matmul_kernel_persistent(
+     a_ptr,
+@@ -161,14 +247,7 @@ def matmul_persistent(
+         )
+ 
+     configs = {
+-        torch.bfloat16: {
+-            "BLOCK_SIZE_M": 128,
+-            "BLOCK_SIZE_N": 128,
+-            "BLOCK_SIZE_K": 64,
+-            "GROUP_SIZE_M": 8,
+-            "num_stages": 3,
+-            "num_warps": 8,
+-        },
++        torch.bfloat16: _bf16_tile_config(M, N, K, out_dtype),
+         torch.float16: {
+             "BLOCK_SIZE_M": 128,
+             "BLOCK_SIZE_N": _fp16_block_size_n,
+@@ -700,6 +779,8 @@ def bmm_batch_invariant(a, b, *, out=None):
+     }
+ 
+     cfg = configs[dtype]
++    if dtype == torch.bfloat16:
++        cfg = _bf16_tile_config(M, N, K, kind="bmm")
+     # grid = (B, num_tiles_per_matrix)
+     grid = (
+         B,
+diff --git a/vllm/model_executor/layers/quantization/utils/fp8_utils.py b/vllm/model_executor/layers/quantization/utils/fp8_utils.py
+index 108b867fcc..0142b4254d 100644
+--- a/vllm/model_executor/layers/quantization/utils/fp8_utils.py
++++ b/vllm/model_executor/layers/quantization/utils/fp8_utils.py
+@@ -851,6 +851,166 @@ def _w8a8_triton_block_scaled_mm(
+     tl.store(c_ptrs, c, mask=c_mask)
+ 
+ 
++@triton.jit
++def _w8a8_triton_block_scaled_mm_ku(
++    A,
++    B,
++    C,
++    As,
++    Bs,
++    M,
++    N,
++    K,
++    group_n,
++    group_k,
++    stride_am,
++    stride_ak,
++    stride_bk,
++    stride_bn,
++    stride_cm,
++    stride_cn,
++    stride_As_m,
++    stride_As_k,
++    stride_Bs_k,
++    stride_Bs_n,
++    BLOCK_SIZE_M: tl.constexpr,
++    BLOCK_SIZE_N: tl.constexpr,
++    BLOCK_SIZE_K: tl.constexpr,
++    GROUP_SIZE_M: tl.constexpr,
++    K_UNROLL: tl.constexpr,
++):
++    """Small-M variant of ``_w8a8_triton_block_scaled_mm`` for batch-invariant
++    mode: identical per-element arithmetic, in the same order.
++
++    Each K block of BLOCK_SIZE_K (== group_k) still does
++    ``acc += dot(a_blk, b_blk) * a_s * b_s`` with a fresh dot per block, in
++    increasing K order; the only change is that K_UNROLL consecutive blocks are
++    issued per loop iteration so a narrow tile has more loads in flight.
++    Requires K % (BLOCK_SIZE_K * K_UNROLL) == 0 (checked by the caller).
++    """
++    pid = tl.program_id(axis=0)
++    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
++    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
++    num_pid_in_group = GROUP_SIZE_M * num_pid_n
++    group_id = pid // num_pid_in_group
++    first_pid_m = group_id * GROUP_SIZE_M
++    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
++    pid_m = first_pid_m + (pid % group_size_m)
++    pid_n = (pid % num_pid_in_group) // group_size_m
++
++    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
++    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
++    offs_k = tl.arange(0, BLOCK_SIZE_K)
++    a_ptrs = A + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
++    b_ptrs = B + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
++    As_ptrs = As + offs_am * stride_As_m
++    Bs_ptrs = Bs + (offs_bn // group_n) * stride_Bs_n
++
++    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
++    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * K_UNROLL)):
++        for u in tl.static_range(K_UNROLL):
++            kb = k * K_UNROLL + u
++            a = tl.load(a_ptrs + kb * BLOCK_SIZE_K * stride_ak)
++            b = tl.load(b_ptrs + kb * BLOCK_SIZE_K * stride_bk)
++            offs_ks = (kb * BLOCK_SIZE_K) // group_k
++            a_s = tl.load(As_ptrs + offs_ks * stride_As_k)
++            b_s = tl.load(Bs_ptrs + offs_ks * stride_Bs_k)
++            accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
++
++    if C.dtype.element_ty == tl.bfloat16:
++        c = accumulator.to(tl.bfloat16)
++    elif C.dtype.element_ty == tl.float16:
++        c = accumulator.to(tl.float16)
++    else:
++        c = accumulator.to(tl.float32)
++
++    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
++    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
++    c_ptrs = C + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
++    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
++    tl.store(c_ptrs, c, mask=c_mask)
++
++
++# ROCm batch-invariant tiles for the block-FP8 GEMM, chosen by M (opt-in,
++# VLLM_BI_GEMM_TILES=1). The default BI config (64x128x128) launches only
++# N/128 programs at decode. Every tile below keeps BLOCK_SIZE_K == group_k and
++# the per-block ``acc += dot * a_s * b_s`` order (no split-K, no atomics), and
++# was measured on gfx950 to give outputs bitwise identical to the default
++# config for every M, so choosing it by the row count does not make a row's
++# result depend on its batch (tested: ops/parity/bigemm/bench.py). That
++# equality is a property of the compiled code, not of the source: re-run the
++# bench after any Triton / ROCm / GPU change before enabling this.
++_BI_FP8_TILES = os.environ.get("VLLM_BI_GEMM_TILES", "0") == "1"
++_BI_FP8_DEFAULT = {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 128,
++    "BLOCK_SIZE_K": 128,
++    "GROUP_SIZE_M": 32,
++    "num_warps": 4,
++    "num_stages": 2,
++}
++# Measured on MI355X (gfx950) at DeepSeek-V4-Flash shapes
++# (ops/parity/bigemm/sweep.py). NOT every tile is safe: BLOCK_SIZE_N=16 with
++# >= 64 rows per warp (e.g. 64x16 with 1 warp, 128x16 with 2 warps) uses the
++# same 16x16x128 MFMA and the same FMA epilogue but gives different bits; only
++# tiles checked bitwise equal to the default config are listed.
++# Rows: (max M, min N, max N, config, K_UNROLL); the first row whose M range
++# matches decides (N outside its range -> default config); no match keeps the
++# default config (e.g. wq_b N=32768 at M=64..256, where the
++# default already fills the GPU, or N=1536 at prefill sizes).
++_INF = 1 << 62
++_BI_FP8_TILES_BY_M: list[tuple[int, int, int, dict[str, int], int]] = [
++    (16, 0, _INF, dict(BLOCK_SIZE_M=16, BLOCK_SIZE_N=16, num_warps=2, num_stages=3), 4),
++    (32, 0, _INF, dict(BLOCK_SIZE_M=32, BLOCK_SIZE_N=16, num_warps=2, num_stages=2), 4),
++    (
++        64,
++        0,
++        16384,
++        dict(BLOCK_SIZE_M=32, BLOCK_SIZE_N=16, num_warps=2, num_stages=2),
++        4,
++    ),
++    (
++        128,
++        0,
++        16384,
++        dict(BLOCK_SIZE_M=64, BLOCK_SIZE_N=16, num_warps=4, num_stages=2),
++        2,
++    ),
++    (
++        256,
++        0,
++        16384,
++        dict(BLOCK_SIZE_M=64, BLOCK_SIZE_N=32, num_warps=2, num_stages=2),
++        2,
++    ),
++    (
++        _INF,
++        4096,
++        _INF,
++        dict(BLOCK_SIZE_M=128, BLOCK_SIZE_N=256, num_warps=8, num_stages=2),
++        0,
++    ),
++]
++
++
++def _fp8_bi_tile_config(
++    M: int, N: int, K: int, enabled: bool | None = None
++) -> tuple[dict[str, Any], int]:
++    """(config, K_UNROLL) for the batch-invariant block-FP8 GEMM; K_UNROLL 0
++    means the default kernel."""
++    on = _BI_FP8_TILES if enabled is None else enabled
++    if on and current_platform.is_rocm():
++        for max_m, min_n, max_n, cfg, ku in _BI_FP8_TILES_BY_M:
++            if max_m >= M and min_n <= N and max_n >= N:
++                full = dict(_BI_FP8_DEFAULT, GROUP_SIZE_M=8, **cfg)
++                if ku and K % (full["BLOCK_SIZE_K"] * ku) != 0:
++                    ku = 0
++                return full, ku
++            if max_m >= M and max_m < _INF and max_n < N:
++                break
++    return dict(_BI_FP8_DEFAULT), 0
++
++
+ @functools.lru_cache
+ def get_w8a8_block_fp8_configs(
+     N: int, K: int, block_n: int, block_k: int
+@@ -945,7 +1105,14 @@ def w8a8_triton_block_scaled_mm(
+         if envs.VLLM_BATCH_INVARIANT
+         else get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
+     )
+-    if configs:
++    kernel = _w8a8_triton_block_scaled_mm
++    extra: dict[str, Any] = {}
++    if envs.VLLM_BATCH_INVARIANT and list(block_size) == [128, 128]:
++        config, k_unroll = _fp8_bi_tile_config(M, N, K)
++        if k_unroll:
++            kernel = _w8a8_triton_block_scaled_mm_ku
++            extra["K_UNROLL"] = k_unroll
++    elif configs:
+         # Get the optimal config if there is one
+         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+     else:
+@@ -966,7 +1133,7 @@ def w8a8_triton_block_scaled_mm(
+             triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+         )
+ 
+-    _w8a8_triton_block_scaled_mm[grid](
++    kernel[grid](
+         A,
+         B,
+         C,
+@@ -988,6 +1155,7 @@ def w8a8_triton_block_scaled_mm(
+         Bs.stride(1),
+         Bs.stride(0),
+         **config,
++        **extra,
+     )
+ 
+     return C

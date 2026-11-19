@@ -1,0 +1,866 @@
+# vLLM v0.26.0 patch 02/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# DeepSeek-V4 on ROCm: batch-invariant, graph-safe sparse decode.
+#
+# Decode tokens keep the decode metadata (full graph capture) but run the
+# prefill sparse-attention kernel, the prefill indexer score kernel and the
+# prefill top-k selector on capacity-sized per-request workspaces, with
+# context-independent KV rows and linear indexer logits. Adds
+# VLLM_DS4_DECODE_KERNEL.
+#
+# Why BI needs it: the paged split-K flash-decode picks its split count from the
+# batch, so a decode token differed from the same token computed in a prefill
+# (and from the trainer, which runs the prefill kernels).
+#
+# Upstream: not yet proposed. vLLM main rewrote the ROCm DeepSeek-V4 attention
+# after v0.26.0 with no batch-invariant gating; this needs an RFC with the
+# DeepSeek-V4 ROCm owners.
+#
+# Source commits:
+#   [ROCm][DSv4] Batch-invariant, graph-safe sparse decode (VLLM_DS4_DECODE_KERNEL=sparse)
+#   [ROCm][DSv4] Sparse decode: context-independent KV rows, linear indexer logits
+#
+diff --git a/vllm/envs.py b/vllm/envs.py
+index 67d8fa5a2c..df22922b8e 100755
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -87,6 +87,7 @@ if TYPE_CHECKING:
+     VLLM_MAIN_CUDA_VERSION: str = "13.0"
+     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
+     VLLM_BATCH_INVARIANT: bool = False
++    VLLM_DS4_DECODE_KERNEL: Literal["paged", "sparse"] = "paged"
+     VLLM_TRITON_USE_TD: bool | None = None
+     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
+     VLLM_TRITON_ATTN_USE_TD: bool | None = None
+@@ -600,6 +601,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     # Enable batch-invariant mode: deterministic results regardless of
+     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
+     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
++    # DeepSeek-V4 decode attention kernel. ``paged`` (default) is each platform's
++    # production decode kernel. ``sparse`` keeps decode request semantics (and
++    # FULL CUDA/HIP graph support) but runs decode tokens through the prefill
++    # sparse-attention kernel, the prefill indexer score kernel and the prefill
++    # top-k selector, on fixed capacity-sized workspaces, so a decode token is
++    # computed exactly as the same token in a prefill. Combine with
++    # VLLM_BATCH_INVARIANT=1 for train/rollout alignment. Currently implemented
++    # for ROCm (the CUDA FlashMLA backend has its own implementation upstream).
++    "VLLM_DS4_DECODE_KERNEL": env_with_choices(
++        "VLLM_DS4_DECODE_KERNEL",
++        "paged",
++        ["paged", "sparse"],
++        case_sensitive=False,
++    ),
+     # Use tensor descriptors for Q/K/V loads and output stores in the
+     # Triton unified-attention kernel.  Enables HW 2D block reads on
+     # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
+diff --git a/vllm/models/deepseek_v4/amd/rocm.py b/vllm/models/deepseek_v4/amd/rocm.py
+index d4aef6ec9e..85d3d79d31 100644
+--- a/vllm/models/deepseek_v4/amd/rocm.py
++++ b/vllm/models/deepseek_v4/amd/rocm.py
+@@ -6,7 +6,10 @@ from typing import cast
+ 
+ import torch
+ 
++from vllm import envs
++from vllm.config import get_current_vllm_config
+ from vllm.forward_context import get_forward_context
++from vllm.logger import init_logger
+ from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+ from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
+ from vllm.models.deepseek_v4.sparse_mla import (
+@@ -16,6 +19,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
+ )
+ from vllm.platforms import current_platform
+ from vllm.triton_utils import tl, triton
++from vllm.utils.math_utils import cdiv
+ from vllm.v1.attention.backend import (
+     CommonAttentionMetadata,
+ )
+@@ -24,13 +28,18 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
+     DeepseekSparseSWAMetadataBuilder,
+ )
+ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
++    _rocm_sparse_attn_prefill_ragged_triton,
+     build_ragged_indices_from_dense,
++    dsv4_sparse_decode_indexer_workspace,
+     rocm_inv_rope_einsum,
+     rocm_sparse_attn_decode,
+     rocm_sparse_attn_prefill,
++    use_dsv4_sparse_decode,
+ )
+ from vllm.v1.worker.workspace import current_workspace_manager
+ 
++logger = init_logger(__name__)
++
+ 
+ def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
+     lengths = lengths.to(dtype=torch.int32).contiguous()
+@@ -160,6 +169,146 @@ def combine_topk_swa_indices(
+     return combined_indices, combined_lens
+ 
+ 
++
++@triton.jit
++def _dsv4_dequant_token(
++    out_row_ptr,
++    k_cache_ptr,
++    block_table_row_ptr,
++    pos,
++    block_stride,
++    CACHE_BLOCK_SIZE: tl.constexpr,
++    USE_FNUZ: tl.constexpr,
++):
++    # One token of the fp8_ds_mla paged cache -> 512 bf16, with exactly the
++    # arithmetic of _dequantize_and_gather_k_kernel (UE8M0 scale per 64 fp8
++    # values, then the 64 bf16 rope values copied).
++    block = tl.load(block_table_row_ptr + pos // CACHE_BLOCK_SIZE)
++    pos_in_block = pos % CACHE_BLOCK_SIZE
++    block_ptr = k_cache_ptr + block.to(tl.int64) * block_stride
++    token_ptr = block_ptr + pos_in_block * 576
++    scale_ptr = block_ptr + CACHE_BLOCK_SIZE * 576 + pos_in_block * 8
++    for qb in tl.static_range(7):
++        offs = qb * 64 + tl.arange(0, 64)
++        x_uint8 = tl.load(token_ptr + offs)
++        if USE_FNUZ:
++            x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
++        else:
++            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
++        x_float = x_fp8.to(tl.float32)
++        encoded_scale = tl.load(scale_ptr + qb)
++        scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
++        tl.store(out_row_ptr + offs, (x_float * scale).to(tl.bfloat16))
++    rope = tl.arange(0, 64)
++    bf16_ptr = (token_ptr + 448).to(tl.pointer_type(tl.bfloat16))
++    tl.store(out_row_ptr + 448 + rope, tl.load(bf16_ptr + rope))
++
++
++@triton.jit
++def _dsv4_sparse_decode_prep_kernel(
++    kv_ptr,
++    kv_stride0,
++    kv_stride1,
++    indices_ptr,
++    indptr_ptr,
++    seq_lens_ptr,
++    topk_ptr,
++    topk_stride,
++    comp_cache_ptr,
++    comp_block_table_ptr,
++    comp_block_table_stride,
++    comp_block_stride,
++    swa_cache_ptr,
++    swa_block_table_ptr,
++    swa_block_table_stride,
++    swa_block_stride,
++    N,
++    COMPRESS_RATIO: tl.constexpr,
++    TOPK_MODE: tl.constexpr,
++    TOP_K: tl.constexpr,
++    TOPW: tl.constexpr,
++    WINDOW_SIZE: tl.constexpr,
++    COMP_BLOCK_SIZE: tl.constexpr,
++    SWA_BLOCK_SIZE: tl.constexpr,
++    SWA_FNUZ: tl.constexpr,
++    BLOCK_R: tl.constexpr,
++):
++    """Gather + index build for one-token decode requests (sparse decode).
++
++    Request b's attention list is the one combine_topk_swa_indices builds for
++    the last token of a prefill (top-k part of length min(n, TOP_K) with -1
++    for invalid entries, then the SWA window), but the KV rows are packed:
++    list entry j of the top-k part reads row b * (TOPW + WINDOW_SIZE) + j and
++    SWA entry s reads row b * (TOPW + WINDOW_SIZE) + TOPW + s. Only the rows
++    the list references are dequantized. The ragged indptr is the prefix sum
++    of the list lengths, computed from seq_lens on the device.
++    TOPK_MODE: 0 = SWA only, 1 = request-local top-k indices (C4A),
++    2 = all compressed tokens in order (C128A, the prefill local indices).
++    """
++    b = tl.program_id(0)
++    worker = tl.program_id(1)
++    num_workers = tl.num_programs(1)
++
++    seq_len = tl.load(seq_lens_ptr + b)
++    if TOPK_MODE == 0:
++        n_comp = seq_len * 0
++        topk_len = seq_len * 0
++    else:
++        n_comp = seq_len // COMPRESS_RATIO
++        topk_len = tl.minimum(n_comp, TOP_K)
++    swa_len = tl.minimum(seq_len, WINDOW_SIZE)
++
++    start = tl.zeros((), dtype=tl.int32)
++    for r0 in range(0, b, BLOCK_R):
++        r = r0 + tl.arange(0, BLOCK_R)
++        sl = tl.load(seq_lens_ptr + r, mask=r < b, other=0)
++        if TOPK_MODE == 0:
++            lens = tl.minimum(sl, WINDOW_SIZE)
++        else:
++            lens = tl.minimum(sl // COMPRESS_RATIO, TOP_K) + tl.minimum(
++                sl, WINDOW_SIZE
++            )
++        start += tl.sum(lens, axis=0)
++    if worker == 0:
++        tl.store(indptr_ptr + b + 1, start + topk_len + swa_len)
++        if b == 0:
++            tl.store(indptr_ptr, 0)
++
++    row_base = b * (TOPW + WINDOW_SIZE)
++    kv_req_ptr = kv_ptr + b.to(tl.int64) * kv_stride0
++    if TOPK_MODE != 0:
++        comp_bt_row = comp_block_table_ptr + b * comp_block_table_stride
++        for j in range(worker, topk_len, num_workers):
++            if TOPK_MODE == 1:
++                t = tl.load(topk_ptr + b * topk_stride + j)
++            else:
++                t = j
++            valid = (t >= 0) & (t < N)
++            tl.store(indices_ptr + start + j, tl.where(valid, row_base + j, -1))
++            if valid & (t < n_comp):
++                _dsv4_dequant_token(
++                    kv_req_ptr + j * kv_stride1,
++                    comp_cache_ptr,
++                    comp_bt_row,
++                    t,
++                    comp_block_stride,
++                    COMP_BLOCK_SIZE,
++                    False,
++                )
++    swa_bt_row = swa_block_table_ptr + b * swa_block_table_stride
++    for s in range(worker, swa_len, num_workers):
++        tl.store(indices_ptr + start + topk_len + s, row_base + TOPW + s)
++        _dsv4_dequant_token(
++            kv_req_ptr + (TOPW + s) * kv_stride1,
++            swa_cache_ptr,
++            swa_bt_row,
++            seq_len - swa_len + s,
++            swa_block_stride,
++            SWA_BLOCK_SIZE,
++            SWA_FNUZ,
++        )
++
++
+ @triton.jit
+ def _compute_topk_lens_kernel(
+     topk_lens_ptr,
+@@ -315,7 +464,9 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4FlashMLAMetadataBuil
+         super().__init__(*args, **kwargs)
+         self.c128a_decode_topk_ragged_indices_buffer: torch.Tensor | None = None
+         self.c128a_decode_topk_ragged_indptr_buffer: torch.Tensor | None = None
+-        if self.compress_ratio == 128:
++        # The sparse decode path builds its attention lists in the kernel.
++        self.use_sparse_decode = use_dsv4_sparse_decode()
++        if self.compress_ratio == 128 and not self.use_sparse_decode:
+             max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+             self.c128a_decode_topk_ragged_indices_buffer = torch.empty(
+                 max_tokens * self.c128a_max_compressed,
+@@ -344,7 +495,11 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4FlashMLAMetadataBuil
+         ragged_indptr = None
+         dense_decode = base.c128a_global_decode_topk_indices
+         decode_lens = base.c128a_decode_topk_lens
+-        if dense_decode is not None and decode_lens is not None:
++        if (
++            not self.use_sparse_decode
++            and dense_decode is not None
++            and decode_lens is not None
++        ):
+             ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
+                 dense_decode.reshape(dense_decode.shape[0], -1),
+                 decode_lens,
+@@ -375,6 +530,9 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
+         # to ``noncausal_index_width`` (>= window_size), so size the persistent
+         # ragged buffer to the wider bound to cover both causal and non-causal.
+         swa_index_width = max(self.window_size, self.noncausal_index_width)
++        if use_dsv4_sparse_decode():
++            # Unused: the sparse decode path builds its own attention lists.
++            max_tokens = swa_index_width = 0
+         self.decode_swa_ragged_indices_buffer = torch.empty(
+             max_tokens * swa_index_width,
+             dtype=torch.int32,
+@@ -401,7 +559,8 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
+         ragged_indices = None
+         ragged_indptr = None
+         if (
+-            base.num_decode_tokens > 0
++            not use_dsv4_sparse_decode()
++            and base.num_decode_tokens > 0
+             and base.decode_swa_indices is not None
+             and base.decode_swa_lens is not None
+         ):
+@@ -442,10 +601,42 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
+ 
+     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
+ 
++    def __init__(self, *args, **kwargs) -> None:
++        super().__init__(*args, **kwargs)
++        self.use_sparse_decode = use_dsv4_sparse_decode()
++        # Upper bound on decode requests per step (eager or graph-padded), used
++        # to reserve the sparse-decode gather workspace before graph capture.
++        vllm_config = get_current_vllm_config()
++        max_decodes = vllm_config.scheduler_config.max_num_seqs
++        capture = vllm_config.compilation_config.max_cudagraph_capture_size
++        if capture:
++            max_decodes = max(max_decodes, capture)
++        self.max_sparse_decode_reqs = min(max_decodes, self.max_num_batched_tokens)
++        if envs.VLLM_BATCH_INVARIANT and not self.use_sparse_decode:
++            logger.warning_once(
++                "VLLM_BATCH_INVARIANT=1 with the ROCm DeepSeek-V4 paged decode "
++                "kernel: decode attention uses a split-K flash-decode whose "
++                "result depends on the batch and differs from prefill. Set "
++                "VLLM_DS4_DECODE_KERNEL=sparse for batch-invariant decode."
++            )
++
+     @classmethod
+     def get_padded_num_q_heads(cls, num_heads: int) -> int:
+         return num_heads
+ 
++    def _sparse_decode_widths(self) -> tuple[int, int]:
++        """(TOPW, row width) of the packed sparse-decode KV rows: TOPW slots
++        for the top-k part of the attention list, then the SWA window. Fixed
++        by the model config, independent of the context length."""
++        if self.compress_ratio <= 1:
++            topw = 0
++        else:
++            topw = cdiv(self.max_model_len, self.compress_ratio)
++            if self.compress_ratio == 4:
++                assert self.topk_indices_buffer is not None
++                topw = min(topw, self.topk_indices_buffer.shape[-1])
++        return topw, topw + self.window_size
++
+     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
+         z = rocm_inv_rope_einsum(
+@@ -491,6 +682,24 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
+             current_workspace_manager().get_simultaneous(
+                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+             )
++            if self.use_sparse_decode:
++                # Reserve the largest sparse-decode buffers now: the workspace
++                # is locked after graph capture and must not move during it.
++                _, row_width = self._sparse_decode_widths()
++                current_workspace_manager().get_simultaneous(
++                    (
++                        (self.max_sparse_decode_reqs, row_width, q.shape[-1]),
++                        torch.bfloat16,
++                    ),
++                )
++                if self.compress_ratio == 4:
++                    # The C4A indexer's decode K / logits buffers, at capacity
++                    # (used as is inside FULL graphs).
++                    dsv4_sparse_decode_indexer_workspace(
++                        self.max_sparse_decode_reqs,
++                        cdiv(self.max_model_len, self.compress_ratio),
++                        self.indexer.head_dim,
++                    )
+             output.zero_()
+             return
+ 
+@@ -542,6 +751,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
+         swa_only: bool,
+         output: torch.Tensor,
+     ) -> None:
++        if self.use_sparse_decode:
++            self._forward_decode_sparse(
++                q=q,
++                compressed_k_cache=kv_cache,
++                swa_metadata=swa_metadata,
++                attn_metadata=attn_metadata,
++                swa_only=swa_only,
++                output=output,
++            )
++            return
++
+         num_decodes = swa_metadata.num_decodes
+         num_decode_tokens = swa_metadata.num_decode_tokens
+ 
+@@ -594,6 +814,108 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
+             output=output,
+         )
+ 
++    def _forward_decode_sparse(
++        self,
++        q: torch.Tensor,
++        compressed_k_cache: torch.Tensor | None,
++        swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
++        attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
++        swa_only: bool,
++        output: torch.Tensor,
++    ) -> None:
++        """Decode tokens on the prefill kernel (VLLM_DS4_DECODE_KERNEL=sparse).
++
++        Each decode token attends over the same index list, in the same order,
++        as the same token at the end of a prefill (combine_topk_swa_indices)
++        and through the same _sparse_attn_prefill_ragged_kernel, so its output
++        is bitwise that of the prefill. Only the KV layout differs: one packed
++        row of ``TOPW + window_size`` BF16 tokens per request holding just the
++        tokens the list references (see _dsv4_sparse_decode_prep_kernel), so
++        the workspace is independent of the context length. Every input is a
++        device tensor sized by the decode batch, so the path is capturable in
++        FULL graphs. Graph padding requests have ``seq_len == 0``.
++        """
++        num_decodes = swa_metadata.num_decodes
++        num_decode_tokens = swa_metadata.num_decode_tokens
++        if num_decodes != num_decode_tokens:
++            raise NotImplementedError(
++                "VLLM_DS4_DECODE_KERNEL=sparse supports one token per decode "
++                "request (no speculative decoding) on ROCm"
++            )
++        assert swa_metadata.seq_lens is not None
++        seq_lens = swa_metadata.seq_lens[:num_decodes]
++
++        topw, row_width = self._sparse_decode_widths()
++        n_compressed = 0
++        if swa_only:
++            topk_mode, top_k, topk_indices = 0, 0, seq_lens
++            compressed_k_cache = self.swa_cache_layer.kv_cache
++            comp_block_table = swa_metadata.block_table
++            comp_block_size = swa_metadata.block_size
++        else:
++            assert attn_metadata is not None
++            assert compressed_k_cache is not None
++            n_compressed = cdiv(self.max_model_len, self.compress_ratio)
++            comp_block_table = attn_metadata.block_table
++            comp_block_size = attn_metadata.block_size // self.compress_ratio
++            if self.compress_ratio == 4:
++                assert self.topk_indices_buffer is not None
++                topk_indices = self.topk_indices_buffer
++                topk_mode, top_k = 1, topk_indices.shape[-1]
++            else:
++                # C128A attends to every compressed token, in order.
++                topk_mode, top_k, topk_indices = 2, topw, seq_lens
++
++        kv = current_workspace_manager().get_simultaneous(
++            ((num_decodes, row_width, q.shape[-1]), torch.bfloat16),
++        )[0]
++        indices = torch.empty(
++            num_decodes * row_width, dtype=torch.int32, device=q.device
++        )
++        indptr = torch.empty(num_decodes + 1, dtype=torch.int32, device=q.device)
++        swa_block_table = swa_metadata.block_table
++        _dsv4_sparse_decode_prep_kernel[(num_decodes, 128)](
++            kv,
++            kv.stride(0),
++            kv.stride(1),
++            indices,
++            indptr,
++            seq_lens,
++            topk_indices,
++            topk_indices.stride(0),
++            compressed_k_cache,
++            comp_block_table,
++            comp_block_table.stride(0),
++            compressed_k_cache.stride(0),
++            self.swa_cache_layer.kv_cache,
++            swa_block_table,
++            swa_block_table.stride(0),
++            self.swa_cache_layer.kv_cache.stride(0),
++            n_compressed,
++            COMPRESS_RATIO=max(self.compress_ratio, 1),
++            TOPK_MODE=topk_mode,
++            TOP_K=top_k,
++            TOPW=topw,
++            WINDOW_SIZE=self.window_size,
++            COMP_BLOCK_SIZE=comp_block_size,
++            SWA_BLOCK_SIZE=swa_metadata.block_size,
++            SWA_FNUZ=current_platform.is_fp8_fnuz(),
++            BLOCK_R=128,
++        )
++        _rocm_sparse_attn_prefill_ragged_triton(
++            q=q[:num_decode_tokens],
++            kv=kv.view(-1, q.shape[-1]),
++            indices=indices,
++            indptr=indptr,
++            scale=self.scale,
++            attn_sink=None
++            if self.attn_sink is None
++            else self.attn_sink[: q.shape[1]],
++            nope_head_dim=self.nope_head_dim,
++            rope_head_dim=self.rope_head_dim,
++            out=output[:num_decode_tokens],
++        )
++
+     def _forward_prefill(
+         self,
+         q: torch.Tensor,
+diff --git a/vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py b/vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py
+index a2085cd220..83c4da40eb 100644
+--- a/vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py
++++ b/vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py
+@@ -24,6 +24,7 @@ from typing import Any
+ 
+ import torch
+ 
++import vllm.envs as envs
+ from vllm.triton_utils import tl, triton
+ 
+ from .fused_indexer_q import _fp32x2_to_fp4x2
+@@ -321,6 +322,12 @@ def _pick_compress_num_splits(
+     #CU, capped by head tiling at a 32-wide min tile, as a power-of-2 divisor of
+     head_dim.
+     """
++    if envs.VLLM_BATCH_INVARIANT:
++        # The split sets the [COMPRESS_RATIO, head_dim / num_splits] tile of the
++        # per-column softmax / weighted sum; picking it from the step's token
++        # count makes a compressed block depend on its batch. Use one fixed
++        # 64-wide tile.
++        return max(1, head_dim // 64)
+     max_splits = head_dim // 32
+     est_compute = max(1, num_actual // compress_ratio)
+     target = -(-_n_cu() // est_compute)  # ceil(#CU / est_compute)
+diff --git a/vllm/models/deepseek_v4/compressor.py b/vllm/models/deepseek_v4/compressor.py
+index 13f327f6bc..bb9027952e 100644
+--- a/vllm/models/deepseek_v4/compressor.py
++++ b/vllm/models/deepseek_v4/compressor.py
+@@ -7,6 +7,7 @@ from typing import Any, ClassVar, cast
+ import torch
+ from torch import nn
+ 
++import vllm.envs as envs
+ from vllm.config import VllmConfig, get_current_vllm_config
+ from vllm.forward_context import get_forward_context
+ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+@@ -118,9 +119,17 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
+         )
+         num_decode_tokens = None
+         if _prefer_two_stage_compressor():
+-            _, _, num_decode_tokens, _ = split_decodes_and_prefills(
+-                common_attn_metadata, decode_threshold=1
+-            )
++            if envs.VLLM_BATCH_INVARIANT:
++                # Batch-invariant mode: decode tokens take the same two-stage
++                # kernel as prefill tokens (the single-pass decode kernel
++                # reduces the 128-row softmax in a different layout), so a
++                # compressed block is identical whether it was produced by a
++                # decode step or by a prefill.
++                num_decode_tokens = 0
++            else:
++                _, _, num_decode_tokens, _ = split_decodes_and_prefills(
++                    common_attn_metadata, decode_threshold=1
++                )
+         return CompressorMetadata(
+             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
+             slot_mapping=common_attn_metadata.slot_mapping,
+diff --git a/vllm/v1/attention/backends/mla/indexer.py b/vllm/v1/attention/backends/mla/indexer.py
+index bf76cbeda8..7a6176eaa4 100644
+--- a/vllm/v1/attention/backends/mla/indexer.py
++++ b/vllm/v1/attention/backends/mla/indexer.py
+@@ -207,6 +207,8 @@ class DeepSeekV32IndexerDecodeMetadata:
+     requires_padding: bool
+     schedule_metadata: torch.Tensor
+     global_seq_lens: torch.Tensor | None = None
++    # Host upper bound of seq_lens (indexer-cache tokens).
++    max_seq_len: int | None = None
+ 
+ 
+ @dataclass
+@@ -756,6 +758,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
+                 requires_padding=requires_padding,
+                 schedule_metadata=self.scheduler_metadata_buffer,
+                 global_seq_lens=global_seq_lens_for_decode,
++                max_seq_len=common_attn_metadata.max_seq_len
++                // max(self.compress_ratio, 1),
+             )
+ 
+         attn_metadata = DeepseekV32IndexerMetadata(
+diff --git a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+index ed7f607a9d..cdc02a328a 100644
+--- a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
++++ b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+@@ -797,6 +797,236 @@ def _topk_indices_torch(
+     return padded
+ 
+ 
++def use_dsv4_sparse_decode() -> bool:
++    """Whether DeepSeek-V4 decode runs on the prefill kernels.
++
++    ``VLLM_DS4_DECODE_KERNEL=sparse``: decode tokens keep decode metadata (and
++    FULL CUDA/HIP graph support) but use the prefill sparse-attention kernel,
++    the prefill indexer score kernel and the prefill top-k selector, so a
++    decode token is computed exactly like the same token inside a prefill.
++    """
++    return envs.VLLM_DS4_DECODE_KERNEL.lower() == "sparse"
++
++
++def dsv4_sparse_decode_indexer_workspace(
++    num_reqs: int, capacity: int, head_dim: int
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Workspace views (K fp8, K scales, logits) for the sparse decode indexer:
++    ``capacity`` indexer-cache tokens per request, laid out request-major."""
++    n = num_reqs * capacity
++    return current_workspace_manager().get_simultaneous(
++        ((n, head_dim), current_platform.fp8_dtype()),
++        ((n,), torch.float32),
++        ((n,), torch.float32),
++    )
++
++
++@triton.jit
++def _dsv4_decode_indexer_k_gather_kernel(
++    k_cache_ptr,
++    block_table_ptr,
++    block_table_stride,
++    seq_lens_ptr,
++    k_out_ptr,
++    scale_out_ptr,
++    row_bounds_ptr,
++    num_reqs,
++    capacity,
++    cache_block_stride,
++    CACHE_BLOCK_SIZE: tl.constexpr,
++    HEAD_DIM: tl.constexpr,
++    BLOCK_T: tl.constexpr,
++):
++    # Copies the first seq_len[b] tokens (fp8 bytes + fp32 scale bits) of
++    # request b from the NORMAL-layout indexer cache to rows
++    # [b * capacity, b * capacity + seq_len[b]), the bytes
++    # _cp_gather_indexer_quant_cache_kernel copies for a prefill, and writes
++    # row_bounds = [starts (b * capacity) | ends | zeros] for the logits and
++    # top-k kernels.
++    b = tl.program_id(0)
++    seq_len = tl.load(seq_lens_ptr + b)
++    if tl.program_id(1) == 0:
++        tl.store(row_bounds_ptr + b, b * capacity)
++        tl.store(row_bounds_ptr + num_reqs + b, b * capacity + seq_len)
++        tl.store(row_bounds_ptr + 2 * num_reqs + b, 0)
++    t = tl.program_id(1) * BLOCK_T + tl.arange(0, BLOCK_T)
++    mask = t < seq_len
++    block = tl.load(
++        block_table_ptr + b * block_table_stride + t // CACHE_BLOCK_SIZE,
++        mask=mask,
++        other=0,
++    ).to(tl.int64)
++    off = t % CACHE_BLOCK_SIZE
++    src = k_cache_ptr + block * cache_block_stride
++    d = tl.arange(0, HEAD_DIM)
++    vals = tl.load(src[:, None] + off[:, None] * HEAD_DIM + d[None, :], mask=mask[:, None])
++    row = b.to(tl.int64) * capacity + t
++    tl.store(k_out_ptr + row[:, None] * HEAD_DIM + d[None, :], vals, mask=mask[:, None])
++    scale_src = (src + CACHE_BLOCK_SIZE * HEAD_DIM).to(tl.pointer_type(tl.int32))
++    scale = tl.load(scale_src + off, mask=mask)
++    tl.store(scale_out_ptr + row, scale, mask=mask)
++
++
++def _aiter_fp8_mqa_logits_into(
++    q: torch.Tensor,
++    k: torch.Tensor,
++    k_scale: torch.Tensor,
++    weights: torch.Tensor,
++    ks: torch.Tensor,
++    ke: torch.Tensor,
++    logits: torch.Tensor,
++    stride_logits_s: int,
++) -> bool:
++    """Launch AITER's gfx950 gluon fp8_mqa_logits kernel (the kernel and launch
++    configuration of its ``fp8_mqa_logits`` wrapper, used by the prefill
++    indexer) into a caller-provided logits buffer with row stride
++    ``stride_logits_s``. Row i writes only columns [ks[i], ke[i]), each
++    computed independently of the others, so the scores equal those of the
++    wrapper. Returns False when that kernel is not the one the wrapper uses.
++    """
++    import sys
++
++    from vllm._aiter_ops import rocm_aiter_ops
++
++    if not (_ON_GFX950 and rocm_aiter_ops.is_enabled()):
++        return False
++    module = mqa_logits_module()
++    if module is None or not hasattr(module, "fp8_mqa_logits"):
++        return False
++    m = sys.modules[module.fp8_mqa_logits.__module__]
++    kernel = getattr(m, "_gluon_fp8_mqa_logits_kernel", None)
++    if (
++        kernel is None
++        or not getattr(m, "TRITON_GE_36", False)
++        or getattr(m, "arch", None) != "gfx950"
++        or not hasattr(m, "FOLDED_REDUCTED_SUPPORT")
++        or not hasattr(m, "ASYNC_COPY_SUPPORTS_DISTRIBUTED")
++    ):
++        return False
++    seq_len, num_heads, _ = q.shape
++    use_folded = m.FOLDED_REDUCTED_SUPPORT and num_heads > 16
++    limit = 2 * 1024 * 1024 * 1024
++    kernel[(seq_len,)](
++        Q_ptr=q,
++        KV_ptr=k,
++        kv_scales_ptr=k_scale,
++        weights_ptr=weights,
++        cu_start_ptr=ks,
++        cu_end_ptr=ke,
++        logits_ptr=logits,
++        seq_len=seq_len,
++        seq_len_kv=k.shape[0],
++        NUM_HEADS=num_heads,
++        HEAD_SIZE=q.shape[2],
++        stride_q_s=q.stride(0),
++        stride_q_h=q.stride(1),
++        stride_q_d=q.stride(2),
++        stride_kv_s=k.stride(0),
++        stride_kv_d=k.stride(1),
++        stride_w_s=weights.stride(0),
++        stride_w_h=weights.stride(1),
++        stride_logits_s=stride_logits_s,
++        stride_logits_k=1,
++        BLOCK_KV=32,
++        NUM_WARPS=1,
++        NUM_BUFFERS=2,
++        NUM_CHAINS=4 if use_folded else 0,
++        USE_BUFFER_LOAD=k.numel() * k.element_size() < limit,
++        USE_BUFFER_STORE=logits.numel() * logits.element_size() < limit,
++        num_warps=1,
++        waves_per_eu=3,
++        USE_PADDED_SHARED_LAYOUT=m.ASYNC_COPY_SUPPORTS_DISTRIBUTED,
++    )
++    return True
++
++
++def dsv4_sparse_decode_indexer_topk(
++    kv_cache: torch.Tensor,
++    q_fp8: torch.Tensor,
++    weights: torch.Tensor,
++    seq_lens: torch.Tensor,
++    block_table: torch.Tensor,
++    topk_indices: torch.Tensor,
++    max_model_len: int,
++    topk_tokens: int,
++    max_seq_len: int | None = None,
++) -> None:
++    """DeepSeek-V4 decode indexer on the prefill score + top-k kernels.
++
++    Graph-safe (no host sync, every shape fixed by the decode batch size and
++    ``C``) and batch invariant: request b's K occupies rows
++    ``[b * C, b * C + seq_len_b)`` of a request-major workspace, its logits
++    are written to the same positions of a ``[B * C]`` buffer (AITER's
++    prefill logits kernel with row stride 0, so no ``B x B * C`` matrix), and
++    ``top_k_per_row_prefill`` selects on the ``[B, C]`` view with row-local
++    columns. Scores and selection are elementwise / row-local, so the indices
++    equal those of the same token scored in a prefill.
++
++    Args:
++        kv_cache: DSv4 indexer cache ``[num_blocks, block_size, head_dim + 4]``
++            uint8, block-flat NORMAL layout (written by the compressor).
++        q_fp8: ``[B, H, D]`` fp8 decode queries (one token per request).
++        weights: ``[B, H]`` fp32 head weights.
++        seq_lens: ``[B]`` int32 compressed context length of each decode token.
++        block_table: ``[B, max_blocks]`` indexer-cache block table.
++        topk_indices: ``[B, topk_tokens]`` int32 output (request-local indices,
++            -1 padded).
++        max_model_len: compressed-token capacity per request.
++        max_seq_len: host upper bound of ``seq_lens``. Used for ``C`` outside
++            graph capture, so eager / piecewise steps size the workspace by
++            the batch's context; ``None`` (and any capture) uses capacity.
++    """
++    num_reqs, _, head_dim = q_fp8.shape
++    seq_lens = seq_lens.reshape(-1)[:num_reqs]
++    capacity = max_model_len
++    if max_seq_len is not None and not torch.cuda.is_current_stream_capturing():
++        capacity = max(1, min(capacity, max_seq_len))
++    k_fp8, k_scale, logits = dsv4_sparse_decode_indexer_workspace(
++        num_reqs, capacity, head_dim
++    )
++    row_bounds = torch.empty(3 * num_reqs, dtype=torch.int32, device=q_fp8.device)
++    ks, ke, row_starts = row_bounds.view(3, num_reqs)
++    block_t = 32
++    _dsv4_decode_indexer_k_gather_kernel[(num_reqs, triton.cdiv(capacity, block_t))](
++        kv_cache,
++        block_table,
++        block_table.stride(0),
++        seq_lens,
++        k_fp8.view(torch.uint8),
++        k_scale.view(torch.int32),
++        row_bounds,
++        num_reqs,
++        capacity,
++        kv_cache.stride(0),
++        CACHE_BLOCK_SIZE=kv_cache.shape[1],
++        HEAD_DIM=head_dim,
++        BLOCK_T=block_t,
++    )
++    if _aiter_fp8_mqa_logits_into(
++        q_fp8, k_fp8, k_scale, weights, ks, ke, logits, stride_logits_s=0
++    ):
++        logits.nan_to_num_(float("-inf"))
++        logits_2d = logits.view(num_reqs, capacity)
++    else:
++        # Reference / other-arch kernels: full [B, B * C] logits, diagonal view.
++        full = rocm_fp8_mqa_logits(q_fp8, (k_fp8, k_scale), weights, ks, ke)
++        logits_2d = full.as_strided(
++            (num_reqs, capacity),
++            (full.stride(0) + capacity * full.stride(1), full.stride(1)),
++            full.storage_offset(),
++        )
++    torch.ops._C.top_k_per_row_prefill(
++        logits_2d,
++        row_starts,
++        seq_lens,
++        topk_indices,
++        num_reqs,
++        logits_2d.stride(0),
++        logits_2d.stride(1),
++        topk_tokens,
++    )
++
++
+ def rocm_aiter_sparse_attn_indexer_fake(
+     hidden_states: torch.Tensor,
+     k_cache_prefix: LayerNameType,
+@@ -857,7 +1087,10 @@ def rocm_aiter_sparse_attn_indexer(
+ 
+         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
+         # batch_size * next_n <= hidden_states.shape[0] == max_num_batched_tokens
+-        if _ON_GFX942 or _ON_GFX950:
++        # (The sparse decode path reserves its own, smaller buffers.)
++        if skip_k_cache_insert and use_dsv4_sparse_decode():
++            pass
++        elif _ON_GFX942 or _ON_GFX950:
+             workspace_manager.get_simultaneous(
+                 ((hidden_states.shape[0], max_model_len), torch.float32),
+             )
+@@ -966,7 +1199,29 @@ def rocm_aiter_sparse_attn_indexer(
+                 topk_tokens,
+             )
+ 
+-    if has_decode:
++    if has_decode and skip_k_cache_insert and use_dsv4_sparse_decode():
++        decode_metadata = layer_attn_metadata.decode
++        assert decode_metadata is not None
++        if decode_metadata.requires_padding or (
++            decode_metadata.seq_lens.dim() == 2
++            and decode_metadata.seq_lens.shape[1] != 1
++        ):
++            raise NotImplementedError(
++                "VLLM_DS4_DECODE_KERNEL=sparse supports one token per decode "
++                "request (no speculative decoding) on ROCm"
++            )
++        dsv4_sparse_decode_indexer_topk(
++            kv_cache,
++            q_fp8[:num_decode_tokens],
++            weights[:num_decode_tokens],
++            decode_metadata.seq_lens,
++            decode_metadata.block_table,
++            topk_indices_buffer[:num_decode_tokens, :topk_tokens],
++            max_model_len,
++            topk_tokens,
++            max_seq_len=decode_metadata.max_seq_len,
++        )
++    elif has_decode:
+         decode_metadata = layer_attn_metadata.decode
+         assert decode_metadata is not None
+         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
+@@ -2018,6 +2273,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
+     attn_sink: torch.Tensor | None,
+     nope_head_dim: int,
+     rope_head_dim: int,
++    out: torch.Tensor | None = None,
+ ) -> torch.Tensor:
+     assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
+     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
+@@ -2048,7 +2304,9 @@ def _rocm_sparse_attn_prefill_ragged_triton(
+     block_d = triton.next_power_of_2(head_dim)
+     block_k = 16 if head_dim >= 256 else 32
+     num_warps = 4
+-    out = torch.empty_like(q, dtype=torch.bfloat16)
++    if out is None:
++        out = torch.empty_like(q, dtype=torch.bfloat16)
++    assert out.shape == q.shape and out.dtype == torch.bfloat16
+     _sparse_attn_prefill_ragged_kernel[(num_queries, triton.cdiv(num_heads, block_h))](
+         q,
+         kv,

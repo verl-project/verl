@@ -1,0 +1,97 @@
+# vLLM v0.26.0 patch 17/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Batch-invariant fused-MoE tiles on gfx950 with BLOCK_SIZE_K=128.
+#
+# Under VLLM_BATCH_INVARIANT=1 the Triton fused-MoE kernel used one tile for
+# every batch size (M64/N64/K32). On gfx950 with block-FP8 128x128 weights, pick
+# the M/N tile by token count with BLOCK_SIZE_K=128 (one K tile per quant
+# block), SPLIT_K=1. All adopted tiles are bitwise equal to each other for every
+# row embedded in batches of M = 1..16384 (EP8 and EP1).
+#
+# Numerics: K128 rounds differently from the generic K32 BI tile (about 1e-4 of
+# bf16 MoE output elements). The trainer calls the same config function, so
+# rollout and trainer stay equal.
+#
+# Upstream: prepared as a separate vLLM change, not yet proposed; overlaps open
+# vllm-project/vllm#63627.
+#
+# Source commits:
+#   [ROCm][BI][MoE] Per-batch-size fused-MoE tiles in batch-invariant mode
+#   [ROCm][BI][MoE] Test that batch-invariant MoE tiles change no output bit
+#   [ROCm][BI][MoE] Candidate: BLOCK_SIZE_K=128 batch-invariant MoE tiles
+#
+diff --git a/vllm/model_executor/layers/fused_moe/fused_moe.py b/vllm/model_executor/layers/fused_moe/fused_moe.py
+index 62cf12ea24..65402a9c10 100644
+--- a/vllm/model_executor/layers/fused_moe/fused_moe.py
++++ b/vllm/model_executor/layers/fused_moe/fused_moe.py
+@@ -1236,6 +1236,55 @@ def should_moe_wna16_use_cuda(
+     )
+ 
+ 
++_BATCH_INVARIANT_CONFIG = {
++    "BLOCK_SIZE_M": 64,
++    "BLOCK_SIZE_N": 64,
++    "BLOCK_SIZE_K": 32,
++    "GROUP_SIZE_M": 8,
++    "SPLIT_K": 1,
++}
++
++# Batch-invariant tiles for block-FP8 (128x128) MoE on gfx950, by the largest M
++# (tokens) they serve. Every row uses BLOCK_SIZE_K=128 (one K tile per quant
++# block) and SPLIT_K=1, so each output element is the same sequence of 128-wide
++# FP8 dots, each scaled and added in K order; only the M/N tiling, warps and the
++# M-block order change. Each entry was measured bitwise equal to the others (for
++# both the 16x16x128 and 32x32x64 FP8 MFMA it selects) for M = 1..16384, with
++# and without expert parallelism, so the choice per M does not change any output
++# bit. Note: this rounds differently from the generic M64/N64/K32 BI tile.
++_BATCH_INVARIANT_ROCM_FP8_BLOCK_CONFIGS: list[tuple[int, dict[str, int]]] = [
++    (256, dict(BLOCK_SIZE_M=16, BLOCK_SIZE_N=64, num_warps=4)),
++    (1024, dict(BLOCK_SIZE_M=32, BLOCK_SIZE_N=128, num_warps=4)),
++    (1 << 62, dict(BLOCK_SIZE_M=128, BLOCK_SIZE_N=256, num_warps=8)),
++]
++
++
++def get_batch_invariant_config(
++    M: int, dtype: str | None, block_shape: list[int] | None
++) -> dict[str, int]:
++    if not (
++        current_platform.is_rocm()
++        and dtype == "fp8_w8a8"
++        and block_shape is not None
++        and list(block_shape) == [128, 128]
++    ):
++        return dict(_BATCH_INVARIANT_CONFIG)
++    from vllm.platforms.rocm import on_gfx950
++
++    if not on_gfx950():
++        return dict(_BATCH_INVARIANT_CONFIG)
++    for max_m, tile in _BATCH_INVARIANT_ROCM_FP8_BLOCK_CONFIGS:
++        if M <= max_m:
++            break
++    return {
++        **tile,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "SPLIT_K": 1,
++        "num_stages": 2,
++    }
++
++
+ def get_default_config(
+     M: int,
+     E: int,
+@@ -1246,13 +1295,7 @@ def get_default_config(
+     block_shape: list[int] | None = None,
+ ) -> dict[str, int]:
+     if envs.VLLM_BATCH_INVARIANT:
+-        return {
+-            "BLOCK_SIZE_M": 64,
+-            "BLOCK_SIZE_N": 64,
+-            "BLOCK_SIZE_K": 32,
+-            "GROUP_SIZE_M": 8,
+-            "SPLIT_K": 1,
+-        }
++        return get_batch_invariant_config(M, dtype, block_shape)
+ 
+     # num_stages can cause triton.runtime.errors.OutOfResources on ROCm.
+     num_stages_rocm = 2

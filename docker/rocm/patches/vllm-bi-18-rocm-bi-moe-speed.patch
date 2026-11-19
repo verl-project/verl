@@ -1,0 +1,605 @@
+# vLLM v0.26.0 patch 18/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Faster batch-invariant Triton MoE on gfx950 without changing output bits.
+#
+# Wider K load step with the same 128-wide scaled dots in K order, a separate
+# tile table for the down GEMM, and under EP local-slot alignment through
+# moe_align_block_size over the local experts only (other ranks' slots are
+# skipped instead of computed as zeros). Every output bit unchanged.
+#
+# Upstream: not yet proposed; needs a re-port onto main's reworked
+# TritonExperts.
+#
+# Source commits:
+#   [ROCm][BI][MoE] Faster batch-invariant Triton MoE without changing output bits
+#   [ROCm][BI][MoE] Align local slots with moe_align_block_size, not one program
+#
+diff --git a/vllm/model_executor/layers/fused_moe/experts/triton_moe.py b/vllm/model_executor/layers/fused_moe/experts/triton_moe.py
+index d07e2e7b87..dc01526491 100644
+--- a/vllm/model_executor/layers/fused_moe/experts/triton_moe.py
++++ b/vllm/model_executor/layers/fused_moe/experts/triton_moe.py
+@@ -4,6 +4,7 @@
+ 
+ import torch
+ 
++import vllm.envs as envs
+ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+ from vllm import _custom_ops as ops
+ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+@@ -17,8 +18,11 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
+ )
+ from vllm.model_executor.layers.fused_moe.fused_moe import (
+     _prepare_expert_assignment,
++    batch_invariant_gemm2_config,
+     invoke_fused_moe_triton_kernel,
+     invoke_fused_moe_wna16_triton_kernel,
++    prepare_local_expert_assignment,
++    swiglu_limit_group_quant_fp8,
+     try_get_optimal_moe_config,
+ )
+ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+@@ -290,19 +294,36 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
+         )
+         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+ 
+-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+-            _prepare_expert_assignment(
+-                topk_ids,
+-                config,
+-                num_tokens,
+-                top_k_num,
+-                global_num_experts,
+-                expert_map,
+-                use_int8_w8a16=self.quant_config.use_int8_w8a16,
+-                use_int4_w4a16=self.quant_config.use_int4_w4a16,
+-                block_shape=self.block_shape,
+-            )
++        # Batch-invariant EP: align only the slots of local experts. The GEMMs
++        # then skip (leave unwritten) the rows of other ranks' slots instead of
++        # running zero-writing programs for them, and moe_sum skips those rows
++        # (adding the exact zeros it used to read never changes the FP32 sum).
++        local_only = (
++            envs.VLLM_BATCH_INVARIANT
++            and expert_map is not None
++            and self._lora_context is None
++            and not self.quant_config.use_int8_w8a16
++            and not self.quant_config.use_int4_w4a16
+         )
++        local_ids: torch.Tensor | None = None
++        if local_only:
++            sorted_token_ids, expert_ids, num_tokens_post_padded, local_ids = (
++                prepare_local_expert_assignment(topk_ids, config, expert_map, E)
++            )
++        else:
++            sorted_token_ids, expert_ids, num_tokens_post_padded = (
++                _prepare_expert_assignment(
++                    topk_ids,
++                    config,
++                    num_tokens,
++                    top_k_num,
++                    global_num_experts,
++                    expert_map,
++                    use_int8_w8a16=self.quant_config.use_int8_w8a16,
++                    use_int4_w4a16=self.quant_config.use_int4_w4a16,
++                    block_shape=self.block_shape,
++                )
++            )
+ 
+         # LoRA w13: applied to intermediate_cache1 before activation. When
+         # the LoRA layer requested a dual-stream schedule, we run base w13
+@@ -431,6 +452,30 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
+         # when conditions permit (gated SiLU, fp8 block quant with
+         # group_size=128, no LoRA requiring the BF16 intermediate).
+         if (
++            envs.VLLM_BATCH_INVARIANT
++            and activation == MoEActivation.SILU
++            and self.quant_config.use_fp8_w8a8
++            and self.block_shape == [128, 128]
++            and lora_context is None
++            and not is_deep_gemm_e8m0_used()
++            and a2_scale is None
++            and not self.quantization_emulation
++            and not self.per_act_token_quant
++            and intermediate_cache1.dtype == torch.bfloat16
++            # replicates swiglu_limit_func (the clamped path) only
++            and self.quant_config.gemm1_clamp_limit is not None
++            and float(self.quant_config.gemm1_clamp_limit) > 0
++        ):
++            # Batch invariance: swiglu_limit_func + per-128-group FP8 quant in
++            # one kernel with the same output bits (see
++            # swiglu_limit_group_quant_fp8); rows of other ranks' slots are
++            # skipped when only local slots were aligned.
++            qintermediate_cache2, a2q_scale = swiglu_limit_group_quant_fp8(
++                intermediate_cache1.view(-1, N),
++                self.quant_config.gemm1_clamp_limit,
++                local_ids,
++            )
++        elif (
+             activation == MoEActivation.SILU
+             and self.quant_config.use_fp8_w8a8
+             and self.block_shape == [128, 128]
+@@ -477,7 +522,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
+                 num_tokens_post_padded,
+                 not apply_router_weight_on_input,
+                 1,
+-                config,
++                batch_invariant_gemm2_config(config),
+                 compute_type=compute_type,
+                 use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
+                 use_int8_w8a8=self.quant_config.use_int8_w8a8,
+@@ -536,7 +581,10 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
+                 )
+ 
+         # separate function is required for MoE + LoRA
+-        self.moe_sum(intermediate_cache3, output)
++        if local_only:
++            ops.moe_sum(intermediate_cache3, output, topk_ids, expert_map)
++        else:
++            self.moe_sum(intermediate_cache3, output)
+ 
+     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+         ops.moe_sum(input, output)
+diff --git a/vllm/model_executor/layers/fused_moe/fused_moe.py b/vllm/model_executor/layers/fused_moe/fused_moe.py
+index 65402a9c10..dc6fa086d6 100644
+--- a/vllm/model_executor/layers/fused_moe/fused_moe.py
++++ b/vllm/model_executor/layers/fused_moe/fused_moe.py
+@@ -30,12 +30,17 @@ from vllm.model_executor.layers.fused_moe.utils import (
+     moe_kernel_quantize_input,
+ )
+ from vllm.platforms import current_platform
+-from vllm.triton_utils import tl, triton
++from vllm.triton_utils import HAS_TRITON, tl, triton
+ from vllm.utils.platform_utils import get_device_name_as_file_name
+ from vllm.utils.torch_utils import direct_register_custom_op
+ 
+ logger = init_logger(__name__)
+ 
++if HAS_TRITON:
++    # The libdevice binding torch.compile's generated kernels use, so the fused
++    # SwiGLU below calls the same exp as the compiled _swiglu_limit_torch.
++    from torch._inductor.runtime.triton_helpers import libdevice
++
+ 
+ @triton.jit
+ def write_zeros_to_output(
+@@ -346,6 +351,7 @@ def fused_moe_kernel(
+     per_channel_quant: tl.constexpr,
+     HAS_BIAS: tl.constexpr,
+     SWAP_AB: tl.constexpr,
++    BLOCK_SIZE_KD: tl.constexpr = 0,
+ ):
+     """
+     Implements the fused computation for a Mixture of Experts (MOE) using
+@@ -494,50 +500,99 @@ def fused_moe_kernel(
+         accumulator = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+     else:
+         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+-        # Load the next block of A and B, generate a mask by checking the
+-        # K dimension.
+-        if SWAP_AB:
+-            a_mask = (offs_k[:, None] < K - k * BLOCK_SIZE_K) & token_mask[None, :]
+-            b_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
+-        else:
+-            a_mask = token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K)
+-            b_mask = offs_k[:, None] < K - k * BLOCK_SIZE_K
+-        a = tl.load(
+-            a_ptrs,
+-            mask=a_mask,
+-            other=0.0,
++    if (
++        BLOCK_SIZE_KD > 0
++        and BLOCK_SIZE_KD < BLOCK_SIZE_K
++        and (use_fp8_w8a8 or use_int8_w8a8)
++        and group_k > 0
++        and group_n > 0
++        and not SWAP_AB
++    ):
++        # Block-quantized path with a K step (BLOCK_SIZE_K) wider than the dot
++        # (BLOCK_SIZE_KD): each iteration loads BLOCK_SIZE_K // BLOCK_SIZE_KD
++        # consecutive BLOCK_SIZE_KD slices and adds their scaled dots to the
++        # accumulator in K order -- the same operations, in the same order, as
++        # BLOCK_SIZE_K=BLOCK_SIZE_KD, so every output bit is unchanged; only
++        # more bytes are in flight per iteration.
++        offs_kd = tl.arange(0, BLOCK_SIZE_KD)
++        a_ptrs = a_ptr + (
++            offs_token[:, None] // top_k * stride_am + offs_kd[None, :] * stride_ak
+         )
+-        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+-        # We accumulate along the K dimension.
+-        if use_int8_w8a16:
+-            accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
+-        elif use_fp8_w8a8 or use_int8_w8a8:
+-            if group_k > 0 and group_n > 0:
+-                k_start = k * BLOCK_SIZE_K
++        b_ptrs = (
++            b_ptr
++            + off_experts * stride_be
++            + (offs_kd[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
++        )
++        for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
++            for j in tl.static_range(BLOCK_SIZE_K // BLOCK_SIZE_KD):
++                k_start = k * BLOCK_SIZE_K + j * BLOCK_SIZE_KD
++                a = tl.load(
++                    a_ptrs + j * BLOCK_SIZE_KD * stride_ak,
++                    mask=token_mask[:, None] & (offs_kd[None, :] < K - k_start),
++                    other=0.0,
++                )
++                b = tl.load(
++                    b_ptrs + j * BLOCK_SIZE_KD * stride_bk,
++                    mask=offs_kd[:, None] < K - k_start,
++                    other=0.0,
++                )
+                 offs_ks = k_start // group_k
+                 a_scale = tl.load(
+                     a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
+                 )
+                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
+-                if SWAP_AB:
+-                    accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
+-                else:
+-                    accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
++                accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
++            a_ptrs += BLOCK_SIZE_K * stride_ak
++            b_ptrs += BLOCK_SIZE_K * stride_bk
++    else:
++        for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
++            # Load the next block of A and B, generate a mask by checking the
++            # K dimension.
++            if SWAP_AB:
++                a_mask = (offs_k[:, None] < K - k * BLOCK_SIZE_K) & token_mask[None, :]
++                b_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
+             else:
+-                if use_fp8_w8a8:
+-                    # acc used to enable fp8_fast_accum
++                a_mask = token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K)
++                b_mask = offs_k[:, None] < K - k * BLOCK_SIZE_K
++            a = tl.load(
++                a_ptrs,
++                mask=a_mask,
++                other=0.0,
++            )
++            b = tl.load(b_ptrs, mask=b_mask, other=0.0)
++            # We accumulate along the K dimension.
++            if use_int8_w8a16:
++                accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
++            elif use_fp8_w8a8 or use_int8_w8a8:
++                if group_k > 0 and group_n > 0:
++                    k_start = k * BLOCK_SIZE_K
++                    offs_ks = k_start // group_k
++                    a_scale = tl.load(
++                        a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
++                    )
++                    b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
+                     if SWAP_AB:
+-                        accumulator = tl.dot(b, a, acc=accumulator)
++                        accumulator += (
++                            tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
++                        )
+                     else:
+-                        accumulator = tl.dot(a, b, acc=accumulator)
++                        accumulator += (
++                            tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
++                        )
+                 else:
+-                    accumulator += tl.dot(a, b)
+-        else:
+-            accumulator += tl.dot(a, b)
+-        # Advance the ptrs to the next K block.
+-        a_ptrs += BLOCK_SIZE_K * stride_ak
+-        b_ptrs += BLOCK_SIZE_K * stride_bk
++                    if use_fp8_w8a8:
++                        # acc used to enable fp8_fast_accum
++                        if SWAP_AB:
++                            accumulator = tl.dot(b, a, acc=accumulator)
++                        else:
++                            accumulator = tl.dot(a, b, acc=accumulator)
++                    else:
++                        accumulator += tl.dot(a, b)
++            else:
++                accumulator += tl.dot(a, b)
++            # Advance the ptrs to the next K block.
++            a_ptrs += BLOCK_SIZE_K * stride_ak
++            b_ptrs += BLOCK_SIZE_K * stride_bk
+ 
+     if SWAP_AB:
+         accumulator = tl.trans(accumulator, (1, 0))
+@@ -800,10 +855,23 @@ def invoke_fused_moe_triton_kernel(
+     HAS_BIAS = B_bias is not None
+ 
+     config = config.copy()
++    config.pop("gemm2", None)
++    k_step = config.pop("BLOCK_SIZE_K_STEP", 0)
+     config["SPLIT_K"] = 1
+     BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
+     if block_shape is not None:
+         BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
++    BLOCK_SIZE_KD = 0
++    if (
++        k_step > BLOCK_SIZE_K
++        and use_fp8_w8a8
++        and block_shape is not None
++        and not SWAP_AB
++    ):
++        # Load BLOCK_SIZE_K_STEP of K per iteration but keep BLOCK_SIZE_K-wide
++        # dots (BLOCK_SIZE_KD in the kernel): same output bits.
++        assert k_step % BLOCK_SIZE_K == 0
++        BLOCK_SIZE_KD, BLOCK_SIZE_K = BLOCK_SIZE_K, k_step
+     fused_moe_kernel[grid](
+         A,
+         B,
+@@ -845,6 +913,7 @@ def invoke_fused_moe_triton_kernel(
+         naive_block_assignment=(sorted_token_ids is None),
+         HAS_BIAS=HAS_BIAS,
+         BLOCK_SIZE_K=BLOCK_SIZE_K,
++        BLOCK_SIZE_KD=BLOCK_SIZE_KD,
+         SWAP_AB=SWAP_AB,
+         **config,
+     )
+@@ -1244,24 +1313,59 @@ _BATCH_INVARIANT_CONFIG = {
+     "SPLIT_K": 1,
+ }
+ 
+-# Batch-invariant tiles for block-FP8 (128x128) MoE on gfx950, by the largest M
+-# (tokens) they serve. Every row uses BLOCK_SIZE_K=128 (one K tile per quant
+-# block) and SPLIT_K=1, so each output element is the same sequence of 128-wide
+-# FP8 dots, each scaled and added in K order; only the M/N tiling, warps and the
+-# M-block order change. Each entry was measured bitwise equal to the others (for
+-# both the 16x16x128 and 32x32x64 FP8 MFMA it selects) for M = 1..16384, with
+-# and without expert parallelism, so the choice per M does not change any output
+-# bit. Note: this rounds differently from the generic M64/N64/K32 BI tile.
+-_BATCH_INVARIANT_ROCM_FP8_BLOCK_CONFIGS: list[tuple[int, dict[str, int]]] = [
+-    (256, dict(BLOCK_SIZE_M=16, BLOCK_SIZE_N=64, num_warps=4)),
+-    (1024, dict(BLOCK_SIZE_M=32, BLOCK_SIZE_N=128, num_warps=4)),
+-    (1 << 62, dict(BLOCK_SIZE_M=128, BLOCK_SIZE_N=256, num_warps=8)),
+-]
++# Batch-invariant block-FP8 (128x128) MoE on gfx950: the width of each FP8 dot
++# whose FP32 result is scaled and added to the accumulator, in K order. It is
++# the only tile parameter that changes output bits: 128 = one dot per quant
++# block; 32 = four dots per quant block (the rounding of the generic
++# M64/N64/K32 BI tile).
++_BATCH_INVARIANT_ROCM_FP8_DOT_K = 128
++
++# Per-M tiles, by the largest M (tokens) they serve. A row is
++# (max M, BLOCK_SIZE_M, GEMM1 tile, GEMM2 tile), a GEMM tile being
++# (BLOCK_SIZE_N, K step, num_warps, num_stages). The K step is a multiple of the
++# dot width: each iteration loads K step / dot width slices and adds their dots
++# in K order, exactly as a K step equal to the dot width would. SPLIT_K is 1
++# and the M-block order (GROUP_SIZE_M) does not touch values, so every entry
++# gives the same bits; all were measured bitwise equal for M = 1..4096 with and
++# without expert parallelism. Tuned on MI355X for DeepSeek-V4-Flash shapes
++# (hidden 4096, expert intermediate 2048, top-6, EP8).
++_GemmTile = tuple[int, int, int, int]
++_BatchInvariantTile = tuple[int, int, _GemmTile, _GemmTile]
++_BATCH_INVARIANT_ROCM_FP8_TILES: dict[int, list[_BatchInvariantTile]] = {
++    128: [
++        (8, 16, (32, 256, 2, 2), (32, 256, 2, 2)),
++        (24, 16, (32, 128, 2, 3), (32, 128, 2, 3)),
++        (48, 16, (32, 256, 2, 2), (128, 128, 2, 2)),
++        (96, 16, (64, 256, 4, 2), (128, 128, 2, 2)),
++        (512, 16, (64, 256, 4, 2), (32, 256, 2, 2)),
++        (1024, 32, (128, 256, 4, 2), (128, 128, 2, 2)),
++        (2048, 64, (128, 128, 4, 2), (128, 128, 4, 2)),
++        (8192, 32, (128, 128, 2, 2), (128, 128, 2, 2)),
++        (1 << 62, 128, (256, 128, 8, 2), (256, 128, 8, 2)),
++    ],
++    32: [
++        (24, 16, (32, 128, 2, 3), (32, 128, 2, 3)),
++        (48, 16, (64, 128, 2, 2), (64, 128, 2, 2)),
++        (96, 16, (128, 128, 2, 2), (64, 128, 2, 2)),
++        (384, 16, (256, 128, 4, 2), (128, 32, 2, 2)),
++        (1024, 32, (256, 64, 4, 2), (128, 64, 2, 2)),
++        (2048, 64, (256, 32, 4, 2), (256, 32, 4, 2)),
++        (8192, 32, (128, 64, 2, 2), (128, 64, 2, 2)),
++        (1 << 62, 64, (256, 32, 4, 2), (256, 32, 4, 2)),
++    ],
++}
+ 
+ 
+ def get_batch_invariant_config(
+     M: int, dtype: str | None, block_shape: list[int] | None
+-) -> dict[str, int]:
++) -> dict[str, Any]:
++    """The batch-invariant fused-MoE config for M tokens.
++
++    On gfx950 block-FP8, BLOCK_SIZE_K is the dot width, BLOCK_SIZE_K_STEP the
++    K loaded per iteration (invoke_fused_moe_triton_kernel), and "gemm2" holds
++    tile overrides for the second (down) GEMM, which TritonExperts applies; any
++    other caller may run both GEMMs with the first GEMM's tile (same bits).
++    """
+     if not (
+         current_platform.is_rocm()
+         and dtype == "fp8_w8a8"
+@@ -1273,18 +1377,39 @@ def get_batch_invariant_config(
+ 
+     if not on_gfx950():
+         return dict(_BATCH_INVARIANT_CONFIG)
+-    for max_m, tile in _BATCH_INVARIANT_ROCM_FP8_BLOCK_CONFIGS:
++    dot_k = _BATCH_INVARIANT_ROCM_FP8_DOT_K
++    for max_m, block_m, g1, g2 in _BATCH_INVARIANT_ROCM_FP8_TILES[dot_k]:
+         if M <= max_m:
+             break
++
++    def tile(t: tuple[int, int, int, int]) -> dict[str, int]:
++        n, k_step, warps, stages = t
++        return {
++            "BLOCK_SIZE_N": n,
++            "BLOCK_SIZE_K_STEP": k_step,
++            "num_warps": warps,
++            "num_stages": stages,
++        }
++
+     return {
+-        **tile,
+-        "BLOCK_SIZE_K": 128,
++        "BLOCK_SIZE_M": block_m,
++        "BLOCK_SIZE_K": dot_k,
++        **tile(g1),
+         "GROUP_SIZE_M": 1,
+         "SPLIT_K": 1,
+-        "num_stages": 2,
++        "gemm2": tile(g2),
+     }
+ 
+ 
++def batch_invariant_gemm2_config(config: dict[str, Any]) -> dict[str, Any]:
++    """The second GEMM's config: ``config`` with its "gemm2" overrides."""
++    if "gemm2" not in config:
++        return config
++    cfg = {k: v for k, v in config.items() if k != "gemm2"}
++    cfg.update(config["gemm2"])
++    return cfg
++
++
+ def get_default_config(
+     M: int,
+     E: int,
+@@ -1569,6 +1694,148 @@ def _prepare_expert_assignment(
+     )
+ 
+ 
++@triton.jit
++def _local_expert_ids_kernel(
++    ids_ptr, map_ptr, out_ptr, n, num_experts, BLOCK: tl.constexpr
++):
++    # global expert id -> local id (-1: other rank's expert, or an invalid id)
++    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
++    mask = offs < n
++    e = tl.load(ids_ptr + offs, mask=mask, other=-1).to(tl.int32)
++    ok = mask & (e >= 0) & (e < num_experts)
++    loc = tl.load(map_ptr + e, mask=ok, other=-1)
++    tl.store(out_ptr + offs, loc, mask=mask)
++
++
++@triton.jit
++def _swiglu_limit_group_quant_kernel(
++    in_ptr,
++    q_ptr,
++    s_ptr,
++    local_ids_ptr,
++    stride_in,
++    limit,
++    eps,
++    fp8_min,
++    fp8_max,
++    D: tl.constexpr,
++    GROUP: tl.constexpr,
++    HAS_LIMIT: tl.constexpr,
++    SKIP_NON_LOCAL: tl.constexpr,
++):
++    # One row: out = silu(clamp(gate, max=limit)) * clamp(up, -limit, limit),
++    # rounded to bf16 -- the exact ops (and order) of the torch.compile'd
++    # _swiglu_limit_torch kernel -- then per-128-group FP8 quantization with
++    # the exact ops of per_token_group_quant_8bit_kernel (scale = max(eps,
++    # amax) / fp8_max, q = clamp(x / scale)). Same output bits, one launch, no
++    # BF16 intermediate round trip.
++    row = tl.program_id(0)
++    if SKIP_NON_LOCAL:
++        if tl.load(local_ids_ptr + row) < 0:
++            return
++    NG: tl.constexpr = D // GROUP
++    cols = tl.arange(0, D)
++    base = in_ptr + row.to(tl.int64) * stride_in
++    g = tl.load(base + cols).to(tl.float32)
++    u = tl.load(base + D + cols).to(tl.float32)
++    if HAS_LIMIT:
++        g = tl.minimum(g, limit, tl.PropagateNan.ALL)
++    act = g / (libdevice.exp(-g) + 1.0)
++    if HAS_LIMIT:
++        u = tl.maximum(u, -limit, tl.PropagateNan.ALL)
++        u = tl.minimum(u, limit, tl.PropagateNan.ALL)
++    y = (act * u).to(tl.bfloat16).to(tl.float32)
++    y2 = tl.reshape(y, (NG, GROUP))
++    amax = tl.maximum(tl.max(tl.abs(y2), axis=1), eps)
++    scale = amax / fp8_max
++    q = tl.minimum(tl.maximum(y2 / scale[:, None], fp8_min), fp8_max)
++    out_row = row.to(tl.int64) * D
++    q_offs = out_row + tl.reshape(cols, (NG, GROUP))
++    tl.store(q_ptr + q_offs, q.to(q_ptr.dtype.element_ty))
++    tl.store(s_ptr + row.to(tl.int64) * NG + tl.arange(0, NG), scale)
++
++
++def swiglu_limit_group_quant_fp8(
++    input: torch.Tensor,
++    swiglu_limit: float | None,
++    local_ids: torch.Tensor | None = None,
++    group_size: int = 128,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """Fused ``swiglu_limit_func`` + ``per_token_group_quant_fp8`` (bitwise).
++
++    ``input`` is [R, 2D] (gate | up), returns (q [R, D] fp8, scales [R, D/128]
++    fp32, row-major). With ``local_ids`` ([R], -1 = slot of another rank's
++    expert), such rows are skipped and their outputs left unwritten.
++    """
++    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
++        get_fp8_min_max,
++    )
++
++    assert input.dim() == 2 and input.stride(1) == 1
++    assert input.dtype == torch.bfloat16
++    rows, d2 = input.shape
++    d = d2 // 2
++    assert d % group_size == 0 and triton.next_power_of_2(d) == d
++    fp8_min, fp8_max = get_fp8_min_max()
++    q = torch.empty((rows, d), dtype=current_platform.fp8_dtype(), device=input.device)
++    sc = torch.empty((rows, d // group_size), dtype=torch.float32, device=input.device)
++    if rows == 0:
++        return q, sc
++    has_limit = swiglu_limit is not None and swiglu_limit > 0
++    _swiglu_limit_group_quant_kernel[(rows,)](
++        input,
++        q,
++        sc,
++        local_ids if local_ids is not None else input,
++        input.stride(0),
++        float(swiglu_limit) if has_limit else 0.0,
++        1e-10,
++        fp8_min,
++        fp8_max,
++        D=d,
++        GROUP=group_size,
++        HAS_LIMIT=has_limit,
++        SKIP_NON_LOCAL=local_ids is not None,
++        num_warps=4,
++    )
++    return q, sc
++
++
++def prepare_local_expert_assignment(
++    topk_ids: torch.Tensor,
++    config: dict[str, Any],
++    expert_map: torch.Tensor,
++    num_local_experts: int,
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Align only the token slots routed to this rank's experts.
++
++    Unlike ``_prepare_expert_assignment(..., expert_map)``, slots of experts
++    owned by other ranks get no M block at all (instead of a block with expert
++    id -1 whose programs write zeros), and the sorted ids are sized by the local
++    expert count, so the GEMM grids shrink. The GEMMs then leave the rows of
++    non-local slots unwritten: the caller must not read them (``moe_sum`` with
++    ``topk_ids``/``expert_map`` skips them). Each local slot row is computed
++    exactly as before (rows are independent), so its bits do not change.
++
++    Returns (sorted_token_ids, expert_ids, num_tokens_post_padded, local_ids),
++    local_ids = the local expert of every slot (-1 if not local).
++    """
++    assert expert_map.dtype == torch.int32 and expert_map.is_contiguous()
++    ids = topk_ids.contiguous()
++    n = ids.numel()
++    local_ids = torch.empty(ids.shape, dtype=torch.int32, device=ids.device)
++    if n > 0:
++        _local_expert_ids_kernel[(triton.cdiv(n, 1024),)](
++            ids, expert_map, local_ids, n, expert_map.numel(), BLOCK=1024
++        )
++    # num_experts = the local count: small batches take moe_align_block_size's
++    # one-kernel path; slots with local id -1 are not counted.
++    sorted_ids, expert_ids, ntp = moe_align_block_size(
++        local_ids, config["BLOCK_SIZE_M"], num_local_experts, None
++    )
++    return sorted_ids, expert_ids, ntp, local_ids
++
++
+ def fused_experts(
+     hidden_states: torch.Tensor,
+     w1: torch.Tensor,

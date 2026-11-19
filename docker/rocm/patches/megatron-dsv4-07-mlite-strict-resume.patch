@@ -1,0 +1,44 @@
+# Megatron-LM patch 07/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# Strict resume: fail if the RNG sidecar or the LR scheduler state is missing.
+#
+# Upstream: prepared (with patch 13's content) as one change, not yet proposed.
+#
+# Source commits:
+#   [mLite] strict resume: fail if the RNG sidecar or LR scheduler state is missing
+#
+diff --git a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+index 27b4c70ad..2c07e4230 100644
+--- a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
++++ b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+@@ -701,7 +701,13 @@ class MegatronLiteEngine(BaseEngine):
+             if callable(post_update_hook):
+                 post_update_hook()
+             scheduler_path = os.path.join(local_path, _LR_SCHEDULER_STATE)
+-            if self.handle._lr_scheduler is not None and os.path.exists(scheduler_path):
++            if self.handle._lr_scheduler is not None:
++                # Every rank reads the file rank 0 wrote; a rank that cannot see it (e.g. node-local
++                # checkpoint dirs) must fail instead of silently keeping its fresh schedule.
++                if not os.path.exists(scheduler_path):
++                    raise FileNotFoundError(
++                        f"LR scheduler state not found at {scheduler_path}; refusing a partial restore."
++                    )
+                 state = torch.load(
+                     scheduler_path, map_location="cpu", weights_only=False
+                 )
+diff --git a/experimental/lite/megatron/lite/primitive/ckpt/dcp.py b/experimental/lite/megatron/lite/primitive/ckpt/dcp.py
+index 9e8b25abe..741c1cbeb 100644
+--- a/experimental/lite/megatron/lite/primitive/ckpt/dcp.py
++++ b/experimental/lite/megatron/lite/primitive/ckpt/dcp.py
+@@ -489,8 +489,9 @@ def _save_rng_sidecar(path: str | os.PathLike[str]) -> None:
+ def _load_rng_sidecar(path: str | os.PathLike[str]) -> None:
+     rng_file = _rng_sidecar_file(path)
+     if not rng_file.exists():
+-        log_rank0(f"RNG sidecar not found at {rng_file}; skipping RNG restore.")
+-        return
++        # A requested restore with a missing file must fail, not continue with this process's fresh RNG
++        # (checkpoint-resume contract: missing state raises; callers that do not want RNG pass load_rng=False).
++        raise FileNotFoundError(f"RNG sidecar not found at {rng_file}; refusing a partial restore.")
+     _restore_rng_state(torch.load(rng_file, map_location="cpu", weights_only=False))
+ 
+ 

@@ -1,0 +1,242 @@
+# Megatron-LM patch 13/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# verl_mlite engine: exact resume under expert parallelism (EP-rank keys for
+# expert DTensor params in the distributed checkpoint, optimizer state re-wrapped
+# as DTensor on load, optimizer state offloaded back to CPU after the load).
+#
+# Upstream: prepared (as a cleaner change in primitive/ckpt and optimizers/fsdp2), not yet proposed.
+#
+diff --git a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+index e188e7325..61a46aef7 100644
+--- a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
++++ b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+@@ -589,6 +589,7 @@ class MegatronLiteEngine(BaseEngine):
+ 
+         os.makedirs(local_path, exist_ok=True)
+         placement_fn, expert_classifier = self._checkpoint_hooks()
++        _rd_digest(self, "save", global_step)
+         reload_params_for_save = self.is_param_offload_enabled
+         if reload_params_for_save:
+             self.to(device="cuda", model=True, optimizer=False, grad=False)
+@@ -596,7 +597,7 @@ class MegatronLiteEngine(BaseEngine):
+         try:
+             if save_model or save_optimizer:
+                 save_training_checkpoint(
+-                    self.module,
++                    _ep_keyed_module(self, expert_classifier),
+                     self.handle._optimizer,
+                     global_step,
+                     local_path,
+@@ -607,6 +608,7 @@ class MegatronLiteEngine(BaseEngine):
+                     save_model=save_model,
+                     save_optimizer=save_optimizer,
+                 )
++                _rd_dcp_metadata(os.path.join(local_path, f"step_{int(global_step)}"), "save", self._rank)
+             if self.handle._lr_scheduler is not None and self._rank == 0:
+                 torch.save(
+                     self.handle._lr_scheduler.state_dict(),
+@@ -687,7 +689,7 @@ class MegatronLiteEngine(BaseEngine):
+             torch.cuda.synchronize()
+         try:
+             load_training_checkpoint(
+-                self.module,
++                _ep_keyed_module(self, expert_classifier),
+                 self.handle._optimizer,
+                 local_path,
+                 self.handle._config.parallel,
+@@ -697,9 +699,11 @@ class MegatronLiteEngine(BaseEngine):
+                 load_model=True,
+                 load_optimizer=True,
+             )
++            _resume_rewrap_optimizer_dtensor_state(self.handle._optimizer, self._rank)
+             post_update_hook = self.handle._extras.get("post_optimizer_step_hook")
+             if callable(post_update_hook):
+                 post_update_hook()
++            _rd_digest(self, "load", -1)
+             scheduler_path = os.path.join(local_path, _LR_SCHEDULER_STATE)
+             if self.handle._lr_scheduler is not None:
+                 # Every rank reads the file rank 0 wrote; a rank that cannot see it (e.g. node-local
+@@ -717,6 +721,12 @@ class MegatronLiteEngine(BaseEngine):
+         finally:
+             if reload_params_for_load:
+                 self.to(device="cpu", model=True, optimizer=False, grad=False)
++            # [resume fix 2026-10-28] load_training_checkpoint restores the optimizer state on the GPU; with
++            # optimizer_offload it must go back to CPU before the colocated rollout wakes up (else wake_up OOM).
++            if self.is_optimizer_offload_enabled:
++                self.to(device="cpu", model=False, optimizer=True, grad=False)
++                torch.cuda.synchronize()
++                torch.cuda.empty_cache()
+ 
+     def is_mp_src_rank_with_outputs(self):
+         if self.handle is None:
+@@ -1254,3 +1264,170 @@ class MegatronLiteEngine(BaseEngine):
+             proto, "EXPERT_CLASSIFIER", default_expert_classifier
+         )
+         return placement_fn, expert_classifier
++
++
++def _resume_rewrap_optimizer_dtensor_state(optimizer, rank: int = 0) -> None:
++    """[resume fix 2 2026-10-28] Give restored Adam state the type a fresh run's state has.
++
++    With optimizer_offload the per-step offload (FSDP2Optimizer.offload_state_to_cpu ->
++    move_optimizer_state_to_cpu) stores each DTensor state entry as its plain CPU *local* shard and
++    remembers mesh/placements in FSDP2Optimizer._cpu_offloaded_state.  save_checkpoint runs while
++    the state is offloaded, so optimizer_rank_<r>.pt holds plain local tensors.  On resume
++    torch.optim.Optimizer.load_state_dict casts them to param.device/dtype but keeps them plain
++    torch.Tensor, and the (new process) _cpu_offloaded_state is empty, so nothing re-wraps them:
++    the next AdamW step mixes DTensor params/grads with Tensor exp_avg -> aten.lerp_ error.
++    Re-wrap every plain floating state tensor of a DTensor param with the param's own
++    device_mesh/placements/global shape/stride -- exactly what move_offloaded_optimizer_state_to_device
++    builds in a fresh run.  Values are not touched (from_local shares the local storage)."""
++    from megatron.lite.primitive.optimizers.fsdp2.adamw import (
++        dtensor_from_local,
++        is_dtensor_like,
++        iter_torch_optimizers,
++        to_local_tensor,
++    )
++
++    inner = getattr(optimizer, "optimizer", optimizer)
++    n_wrap = n_dt = n_plain = 0
++    for child in iter_torch_optimizers(inner):
++        state = getattr(child, "state", None)
++        if not isinstance(state, dict) or not isinstance(child, torch.optim.Optimizer):
++            continue
++        for param, param_state in state.items():
++            if not isinstance(param_state, dict) or not is_dtensor_like(param):
++                continue
++            local_param = to_local_tensor(param)
++            for key, value in list(param_state.items()):
++                if key == "step" or not isinstance(value, torch.Tensor):
++                    continue
++                if is_dtensor_like(value):
++                    n_dt += 1
++                    continue
++                if not value.is_floating_point():
++                    n_plain += 1
++                    continue
++                if tuple(value.shape) != tuple(local_param.shape):
++                    raise RuntimeError(
++                        f"resume: optimizer state {key!r} local shape {tuple(value.shape)} != param local "
++                        f"shard {tuple(local_param.shape)}; refusing to wrap"
++                    )
++                param_state[key] = dtensor_from_local(
++                    value.to(device=local_param.device),
++                    param.device_mesh,
++                    param.placements,
++                    shape=tuple(param.shape),
++                    stride=tuple(param.stride()),
++                )
++                n_wrap += 1
++    if rank == 0:
++        print(
++            f"[resume-fix2] optimizer state re-wrapped as DTensor: {n_wrap} "
++            f"(already DTensor {n_dt}, non-float plain {n_plain})",
++            flush=True,
++        )
++
++
++# ---------------------------------------------------------------------------------------------------------------
++# [restore-debug 2026-10-29] per-parameter checkpoint digests (inert unless RD_DIGEST_DIR is set).
++# Writes $RD_DIGEST_DIR/<tag>_rank<r>.jsonl: one record per parameter/buffer with the sha256 of the LOCAL shard bytes,
++# global/local shape, local offset, DTensor mesh ranks + placements, expert flag and the rank's EP/EDP/DP/CP coords.
++# ---------------------------------------------------------------------------------------------------------------
++def _rd_local_offset(t):
++    try:
++        from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
++        _, off = compute_local_shape_and_global_offset(t.shape, t.device_mesh, t.placements)
++        return [int(x) for x in off]
++    except Exception as exc:  # noqa: BLE001
++        return f"err:{type(exc).__name__}"
++
++
++def _rd_digest(engine, tag, step):
++    out_dir = os.environ.get("RD_DIGEST_DIR")
++    if not out_dir:
++        return
++    os.makedirs(out_dir, exist_ok=True)
++    rank = dist.get_rank() if dist.is_initialized() else 0
++    ps = engine.handle._parallel_state
++    coords = {k: int(getattr(ps, k)) for k in ("ep_rank", "ep_size", "edp_rank", "edp_size", "dp_rank",
++                                               "dp_size", "cp_rank", "cp_size", "tp_rank", "pp_rank")
++              if isinstance(getattr(ps, k, None), int)}
++    _, is_expert = engine._checkpoint_hooks()
++    torch.cuda.synchronize()
++    path = os.path.join(out_dir, f"{tag}{int(step) if int(step) >= 0 else ''}_rank{rank}.jsonl")
++    n = 0
++    with open(path, "w", encoding="utf-8") as f:
++        f.write(json.dumps({"meta": True, "tag": tag, "step": int(step), "rank": rank, "coords": coords}) + "\n")
++        items = [("param", n_, p) for n_, p in engine.module.named_parameters()]
++        items += [("buffer", n_, b) for n_, b in engine.module.named_buffers()]
++        for kind, name, t in items:
++            is_dt = callable(getattr(t, "to_local", None)) and hasattr(t, "device_mesh")
++            local = t.to_local() if is_dt else t
++            local = local.detach()
++            cpu = local.contiguous().cpu()
++            try:
++                digest = hashlib.sha256(cpu.view(torch.uint8).numpy().tobytes()).hexdigest() if cpu.numel() else "empty"
++            except Exception:  # noqa: BLE001
++                digest = hashlib.sha256(cpu.float().numpy().tobytes()).hexdigest()
++            rec = {"kind": kind, "name": name, "expert": bool(is_expert(name)), "dtype": str(t.dtype),
++                   "global_shape": list(t.shape), "local_shape": list(local.shape), "sha256": digest,
++                   "fsum": float(cpu.double().sum()) if cpu.is_floating_point() else None}
++            if is_dt:
++                rec["mesh"] = t.device_mesh.mesh.tolist()
++                rec["placements"] = [str(p) for p in t.placements]
++                rec["offset"] = _rd_local_offset(t)
++            f.write(json.dumps(rec) + "\n")
++            n += 1
++    if rank == 0:
++        print(f"[restore-debug] digest {tag} step={step}: {n} tensors -> {out_dir}", flush=True)
++
++
++def _rd_dcp_metadata(ckpt_path, tag, rank):
++    out_dir = os.environ.get("RD_DIGEST_DIR")
++    if not out_dir or rank != 0:
++        return
++    try:
++        import torch.distributed.checkpoint as _dcp
++        md = _dcp.FileSystemReader(ckpt_path).read_metadata()
++        with open(os.path.join(out_dir, f"{tag}_{os.path.basename(ckpt_path)}_dcp_metadata.jsonl"), "w", encoding="utf-8") as f:
++            for key, tmd in md.state_dict_metadata.items():
++                chunks = getattr(tmd, "chunks", None)
++                rec = {"key": key}
++                if chunks is not None:
++                    rec["size"] = list(tmd.size)
++                    rec["chunks"] = [[list(c.offsets), list(c.sizes)] for c in chunks]
++                f.write(json.dumps(rec) + "\n")
++        print(f"[restore-debug] dcp metadata of {ckpt_path}: {len(md.state_dict_metadata)} keys", flush=True)
++    except Exception as exc:  # noqa: BLE001
++        print(f"[restore-debug] dcp metadata read failed: {exc!r}", flush=True)
++
++
++# ---------------------------------------------------------------------------------------------------------------
++# [restore fix 2026-10-29] EP-rank-keyed DCP keys for EP-local expert parameters.
++# Under FSDP2 every parameter is a DTensor, so megatron.lite.primitive.ckpt.dcp keys it with the PARAM's own
++# mesh/placements (_dtensor_from_dtensor_like_param) and ignores PLACEMENT_FN/expert mesh.  EP-local experts are
++# FSDP-sharded over expert-DP only, so their DTensor global shape covers ONE EP rank's experts and every EP rank
++# writes the same FQN with the same offsets.  DCP's save planner de-duplicates them as replicas -> only one EP rank's
++# experts reach disk, and on load every EP rank reads that copy.  Fix: put the EP coordinate into the FQN of expert
++# params, both at save and at load.  An EP-size change makes the keys missing -> dcp.load raises (no silent reshard).
++# Checkpoints written without this fix (colliding keys) are refused for the same reason.
++# ---------------------------------------------------------------------------------------------------------------
++class _EPKeyedModule(torch.nn.Module):
++    def __init__(self, inner, ep_rank, ep_size, is_expert):
++        super().__init__()
++        object.__setattr__(self, "_rd_inner", inner)
++        object.__setattr__(self, "_rd_prefix", f"ep{int(ep_rank)}of{int(ep_size)}.")
++        object.__setattr__(self, "_rd_is_expert", is_expert)
++
++    def named_parameters(self, *args, **kwargs):
++        for name, param in self._rd_inner.named_parameters(*args, **kwargs):
++            yield ((self._rd_prefix + name) if self._rd_is_expert(name) else name), param
++
++
++def _ep_keyed_module(engine, is_expert):
++    ps = engine.handle._parallel_state
++    ep_size = int(getattr(ps, "ep_size", 1) or 1)
++    if ep_size <= 1:
++        return engine.module
++    ep_rank = int(getattr(ps, "ep_rank", 0))
++    if engine._rank == 0:
++        print(f"[restore-fix] DCP expert keys prefixed with ep<rank>of{ep_size}.", flush=True)
++    return _EPKeyedModule(engine.module, ep_rank, ep_size, is_expert)

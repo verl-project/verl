@@ -1,0 +1,48 @@
+# vLLM v0.26.0 patch 12/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Look up global -> local expert ids on the host.
+#
+# ExpertMapManager.map_global_to_local() indexed the device-resident expert map
+# and called .item(), so every MoE weight_loader call synchronized the device.
+# Reloading DeepSeek-V4 weights under EP32 took several minutes, long enough for
+# a concurrent step to hit VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS during RL weight
+# sync. Keeps a host copy of the map.
+#
+# Not a numerics change. Upstream: not yet proposed (main still calls .item()).
+#
+# Source commits:
+#   [Perf][MoE] Look up global->local expert ids on the host
+#
+diff --git a/vllm/model_executor/layers/fused_moe/expert_map_manager.py b/vllm/model_executor/layers/fused_moe/expert_map_manager.py
+index 71f2186ea4..255191eeca 100644
+--- a/vllm/model_executor/layers/fused_moe/expert_map_manager.py
++++ b/vllm/model_executor/layers/fused_moe/expert_map_manager.py
+@@ -349,13 +349,16 @@ class ExpertMapManager:
+         if self._expert_map is None:
+             return global_id
+ 
+-        return self._expert_map[global_id].item()
++        # Host-side lookup: weight loading calls this once per expert tensor, and
++        # indexing a device-resident map with .item() would synchronize the device
++        # on every call.
++        return self._expert_map_list[global_id]
+ 
+     def is_local_expert(self, global_id: int) -> bool:
+         """Check if expert is assigned to this rank."""
+         if self._expert_map is None:
+             return True
+-        return self._expert_map[global_id] != -1
++        return self._expert_map_list[global_id] != -1
+ 
+     def get_local_expert_ids(self) -> list[int]:
+         """Get list of global IDs for experts on this rank."""
+@@ -453,6 +456,9 @@ class ExpertMapManager:
+         )
+ 
+         self._local_num_experts += self.num_fused_shared_experts
++        self._expert_map_list: list[int] | None = (
++            None if self._expert_map is None else self._expert_map.tolist()
++        )
+ 
+     def _init_routing_tables(
+         self,

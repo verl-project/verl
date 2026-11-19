@@ -1,0 +1,106 @@
+# Megatron-LM patch 12/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# impl=vllm on ROCm: segment-sum VJP for the sparse-attention KV gather
+# (index_put_ accumulate replaced by a sorted segment sum: deterministic and
+# faster).
+#
+# Upstream: prepared, not yet proposed.
+#
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/rocm.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/rocm.py
+index 6eb27af38..3e64416f1 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/rocm.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/rocm.py
+@@ -253,14 +253,70 @@ def indexer_topk_request(
+     )
+ 
+ 
++# --- Segment-sum VJP of the row gather -----------------------------------------------------------------------------
++# Bitwise-exact, faster VJP for the row gather. The current VJP, zeros(rows).index_put_((index,), g, accumulate=True),
++# stable-sorts the indices and, per destination row, adds that row's contributions SERIALLY in sorted (= original)
++# order in FP32, starting from +0. Its cost is the hot row: every masked top-k/SWA slot is redirected to row 0
++# (``safe = where(valid, idx, 0)``) with an all-zero gradient row, so row 0 gets up to hundreds of thousands of
++# dependent adds per call (on the CP rank holding the first quarter of a sequence, most top-k slots are masked).
++# This VJP computes the same per-row sequential FP32 sums in the same order, but
++#   1. drops contributions whose gradient row is entirely +-0 (exact: the accumulator starts at +0 and can never become
++#      -0, and x + (+-0) == x bitwise for every x != -0, NaN included);
++#   2. stable-sorts the remaining indices (same relative order as index_put_'s stable sort);
++#   3. one Triton program per (destination row, column block) sums that row's segment sequentially from +0.
++# => bitwise identical to index_put_(accumulate=True) for FP32 (gate: torch.equal), deterministic run-to-run.
++# MLITE_DSV4_GATHER_BWD=index_put restores the original backward. Non-FP32 gradients always use index_put_.
++import os as _os
++
++
++@functools.lru_cache(maxsize=1)
++def _segsum_kernels():
++    import triton
++    import triton.language as tl
++
++    @triton.jit
++    def _row_segment_sum(grad_ptr, perm_ptr, bounds_ptr, out_ptr, D, stride_g, BD: tl.constexpr):
++        r = tl.program_id(0)
++        cols = tl.program_id(1) * BD + tl.arange(0, BD)
++        m = cols < D
++        s = tl.load(bounds_ptr + r)
++        e = tl.load(bounds_ptr + r + 1)
++        acc = tl.zeros([BD], dtype=tl.float32)
++        for j in range(s, e):
++            src = tl.load(perm_ptr + j)
++            acc += tl.load(grad_ptr + src * stride_g + cols, mask=m, other=0.0)
++        tl.store(out_ptr + r.to(tl.int64) * D + cols, acc, mask=m)
++
++    return triton, _row_segment_sum
++
++
++def segmented_row_scatter_add(grad_output: torch.Tensor, index: torch.Tensor, rows: int) -> torch.Tensor:
++    """Bitwise ``zeros(rows, ...).index_put_((index,), grad_output, accumulate=True)`` for FP32 ``grad_output``."""
++    tail = grad_output.shape[1:]
++    n = index.numel()
++    g = grad_output.reshape(n, -1)
++    if g.stride(-1) != 1:
++        g = g.contiguous()
++    d = g.shape[1]
++    out = torch.empty((rows, d), dtype=torch.float32, device=g.device)
++    if n == 0 or d == 0:
++        return out.zero_().view(rows, *tail)
++    idx = index.reshape(-1).long()
++    keep = torch.nonzero((g != 0).any(dim=1)).squeeze(1)       # original order
++    sorted_idx, p = torch.sort(idx.index_select(0, keep), stable=True)
++    perm = keep.index_select(0, p)
++    bounds = torch.searchsorted(sorted_idx, torch.arange(rows + 1, device=idx.device, dtype=sorted_idx.dtype))
++    triton, row_segment_sum = _segsum_kernels()
++    bd = 128 if d >= 128 else triton.next_power_of_2(d)
++    row_segment_sum[(rows, triton.cdiv(d, bd))](g, perm, bounds, out, d, g.stride(0), BD=bd, num_warps=2)
++    return out.view(rows, *tail)
++
++
+ class _DeterministicRowGather(torch.autograd.Function):
+     """``source.index_select(0, index)`` with a run-to-run deterministic VJP.
+ 
+-    ``index_select``'s backward is ``index_add_``, whose CUDA/HIP kernel adds
+-    repeated rows with atomics (nondeterministic order unless the global
+-    deterministic mode is on).  ``index_put_(accumulate=True)`` sorts the
+-    indices and sums each row's contributions sequentially, in index order:
+-    the same FP32 sums, in a fixed order, independent of any global flag.
++    The VJP is :func:`segmented_row_scatter_add` (fixed-order segmented sum, rows in parallel) instead of
++    ``index_put_(accumulate=True)`` (sorted, serial per row).
+     """
+ 
+     @staticmethod
+@@ -272,6 +328,9 @@ class _DeterministicRowGather(torch.autograd.Function):
+     @staticmethod
+     def backward(ctx, grad_output: torch.Tensor):
+         (index,) = ctx.saved_tensors
++        if (grad_output.dtype == torch.float32 and grad_output.is_cuda
++                and _os.environ.get("MLITE_DSV4_GATHER_BWD", "segsum") == "segsum"):
++            return segmented_row_scatter_add(grad_output, index, ctx.source_rows), None
+         grad_source = grad_output.new_zeros(
+             (ctx.source_rows, *grad_output.shape[1:])
+         )
+@@ -518,6 +577,7 @@ __all__: Sequence[str] = (
+     "block_fp8_gemm",
+     "dequantize_block_fp8_bf16",
+     "deterministic_row_gather",
++    "segmented_row_scatter_add",
+     "inverse_rope",
+     "is_rocm",
+     "mhc_pre_then_norm",

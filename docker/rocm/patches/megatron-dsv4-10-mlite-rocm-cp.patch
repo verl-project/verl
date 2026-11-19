@@ -1,0 +1,578 @@
+# Megatron-LM patch 10/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# impl=vllm on ROCm: context parallelism as request-local prefill chunks.
+#
+# Upstream: prepared for ISEEKYAN/Megatron-LM ds4_vllm_align_preview, not yet proposed.
+#
+# Source commits:
+#   [mLite][DSv4] impl=vllm on ROCm: context parallelism as request-local prefill chunks
+#
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py
+index b051240e3..0ae81c316 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py
+@@ -407,6 +407,9 @@ class DeepseekV4Model(LiteDeepseekV4Model):
+             )
+             denominator = mask.sum()
+             if not bool(denominator > 0):
+-                raise ValueError("loss_mask must select at least one token")
++                # Under CP a rank's contiguous rows may all be prompt.
++                if self.ps.cp_size <= 1:
++                    raise ValueError("loss_mask must select at least one token")
++                denominator = torch.ones_like(denominator)
+             result["loss"] = (token_loss * mask).sum() / denominator
+         return result
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/host_geometry.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/host_geometry.py
+index 839bab036..3c83d82ce 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/host_geometry.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/host_geometry.py
+@@ -2,6 +2,8 @@
+ 
+ from __future__ import annotations
+ 
++from dataclasses import dataclass
++
+ 
+ def _round_up(value: int, alignment: int) -> int:
+     return (value + alignment - 1) // alignment * alignment
+@@ -37,3 +39,72 @@ def compressed_sequence_boundaries(
+             raise ValueError("sequence boundaries must be strictly increasing")
+         compressed.append(compressed[-1] + (end - start) // ratio)
+     return tuple(compressed)
++
++
++@dataclass(frozen=True)
++class CPRequestSlices:
++    """One contiguous-CP rank's view of the packed requests (ROCm impl=vllm).
++
++    The packed THD buffer (each request padded to ``2 * cp``) is split
++    contiguously; this rank owns global rows ``[local_start, local_start +
++    local_rows)``.  ``requests`` are the requests with at least one *real* row
++    there.  For each: its real ``lengths``, global ``padded_starts``, and the
++    owned positions ``[query_starts, query_stops)``.  ``boundaries`` packs the
++    selected requests' real rows back to back -- the CP=1 layout of exactly
++    those requests -- which is where the key side (SWA rows, compressors,
++    indexer keys) is evaluated.
++    """
++
++    local_start: int
++    local_rows: int
++    requests: tuple[int, ...]
++    lengths: tuple[int, ...]
++    padded_starts: tuple[int, ...]
++    query_starts: tuple[int, ...]
++    query_stops: tuple[int, ...]
++    boundaries: tuple[int, ...]
++
++
++def cp_request_slices(
++    seq_lens: tuple[int, ...],
++    sequence_boundaries: tuple[int, ...],
++    *,
++    cp_rank: int,
++    cp_size: int,
++) -> CPRequestSlices:
++    """Map this rank's contiguous CP rows to request-local query chunks."""
++    if cp_size < 1 or not 0 <= cp_rank < cp_size:
++        raise ValueError("cp_rank must lie in [0, cp_size)")
++    if len(sequence_boundaries) != len(seq_lens) + 1 or sequence_boundaries[0] != 0:
++        raise ValueError("sequence boundaries do not match the request count")
++    total = sequence_boundaries[-1]
++    if total % cp_size:
++        raise ValueError("padded token count must be divisible by cp_size")
++    local_rows = total // cp_size
++    local_start = cp_rank * local_rows
++    local_stop = local_start + local_rows
++    requests, lengths, starts, q_starts, q_stops, bounds = [], [], [], [], [], [0]
++    for index, length in enumerate(seq_lens):
++        start, stop = sequence_boundaries[index], sequence_boundaries[index + 1]
++        if length <= 0 or start + length > stop:
++            raise ValueError("real request length exceeds its padded slot")
++        owned_start = max(local_start, start)
++        owned_stop = min(local_stop, start + length)
++        if owned_stop <= owned_start:
++            continue
++        requests.append(index)
++        lengths.append(length)
++        starts.append(start)
++        q_starts.append(owned_start - start)
++        q_stops.append(owned_stop - start)
++        bounds.append(bounds[-1] + length)
++    return CPRequestSlices(
++        local_start=local_start,
++        local_rows=local_rows,
++        requests=tuple(requests),
++        lengths=tuple(lengths),
++        padded_starts=tuple(starts),
++        query_starts=tuple(q_starts),
++        query_stops=tuple(q_stops),
++        boundaries=tuple(bounds),
++    )
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/module.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/module.py
+index b6377b47c..337a6689c 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/module.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/module.py
+@@ -47,6 +47,7 @@ from megatron.lite.model.deepseek_v4.vllm.primitive.attention.runtime import (
+     c128_all_visible_topk,
+     compressed_width,
+     compressor_operation,
++    cp_gather_request_rows,
+     gather_cp_compressed_rows,
+     official_compact_compressed_visible,
+     official_indexer_topk,
+@@ -1222,8 +1223,6 @@ class VLLMAttention(CompressedSparseAttention):
+         attention over the same index lists, and the o-projection VJP.
+         """
+         config = self.config
+-        if self.ps is not None and self.ps.cp_size > 1:
+-            raise NotImplementedError("DS4 impl=vllm on ROCm supports CP=1 only")
+         if self.indexer_loss_coeff:
+             raise NotImplementedError(
+                 "DS4 impl=vllm on ROCm does not implement the indexer auxiliary loss"
+@@ -1271,8 +1270,14 @@ class VLLMAttention(CompressedSparseAttention):
+         sequence_boundaries = metadata.sequence_boundaries
+         compressed_boundaries = metadata.compressed_boundaries
+         positions = metadata.positions.reshape(-1).to(torch.int64)
+-        if sequence_boundaries[-1] != hidden_states.shape[0]:
++        cp_size = 1 if self.ps is None else self.ps.cp_size
++        layout = metadata.rocm_cp
++        if cp_size > 1 and layout is None:
++            raise RuntimeError("DS4 impl=vllm ROCm CP requires a ROCm CP layout")
++        if layout is None and sequence_boundaries[-1] != hidden_states.shape[0]:
+             raise RuntimeError("DS4 host sequence terminal does not match local rows")
++        if layout is not None and layout.slices.local_rows != hidden_states.shape[0]:
++            raise RuntimeError("DS4 CP layout does not match the local rows")
+         cos_sin_cache = metadata.cos_sin_cache
+         q_visible, kv_visible = official_local_qk_visible(
+             q.contiguous(),
+@@ -1286,13 +1291,60 @@ class VLLMAttention(CompressedSparseAttention):
+         )
+ 
+         ratio = max(1, self.compress_ratio)
++        has_compressor = self.compressor is not None and ratio > 1
++        # Key side: the requests' SWA rows and compressor inputs in the CP=1
++        # layout.  Under CP each rank gathers the real rows of the requests its
++        # queries belong to (whole requests, as CP=1 sees them) and evaluates
++        # their keys with the same calls; its queries then attend as a
++        # chunked prefill (query_len = owned rows, seq_len = owned end).
++        if layout is None:
++            key_rows = kv_visible
++            key_hidden = hidden_states
++            key_cu_seqlens = cu_seqlens
++            key_compressed_boundaries = compressed_boundaries
++            # (key row start, length, local query start/stop, first position)
++            chunks = [
++                (start, stop - start, start, stop, 0)
++                for start, stop in zip(sequence_boundaries, sequence_boundaries[1:])
++            ]
++        else:
++            slices = layout.slices
++            key_rows = cp_gather_request_rows(
++                kv_visible, layout, cp_group=self.ps.cp_group
++            )
++            key_hidden = (
++                cp_gather_request_rows(
++                    hidden_states, layout, cp_group=self.ps.cp_group
++                )
++                if has_compressor
++                else None
++            )
++            key_cu_seqlens = layout.cu_seqlens
++            key_compressed_boundaries = metadata.rocm_cp_compressed_boundaries
++            chunks = [
++                (
++                    key_start,
++                    length,
++                    padded_start + query_start - slices.local_start,
++                    padded_start + query_stop - slices.local_start,
++                    query_start,
++                )
++                for key_start, length, padded_start, query_start, query_stop in zip(
++                    slices.boundaries,
++                    slices.lengths,
++                    slices.padded_starts,
++                    slices.query_starts,
++                    slices.query_stops,
++                )
++            ]
++
+         compressed = None
+         index_k = None
+-        if self.compressor is not None and ratio > 1:
++        if has_compressor and chunks:
+             geometry = prepare_cp_compression_geometry(
+-                hidden_states,
+-                hidden_states[:0],
+-                cu_seqlens,
++                key_hidden,
++                key_hidden[:0],
++                key_cu_seqlens,
+                 global_start=0,
+                 cp_size=1,
+                 ratio=ratio,
+@@ -1325,7 +1377,7 @@ class VLLMAttention(CompressedSparseAttention):
+                 runtime_metadata=metadata.compressor_metadata,
+                 ratio=ratio,
+                 head_dim=config.head_dim,
+-                compressed_boundaries=compressed_boundaries,
++                compressed_boundaries=key_compressed_boundaries,
+             )
+             if self.indexer is not None:
+                 with torch.no_grad():
+@@ -1356,7 +1408,7 @@ class VLLMAttention(CompressedSparseAttention):
+                         runtime_metadata=metadata.indexer_compressor_metadata,
+                         ratio=ratio,
+                         head_dim=config.index_head_dim,
+-                        compressed_boundaries=compressed_boundaries,
++                        compressed_boundaries=key_compressed_boundaries,
+                         indexer_cache_rows=index_rows,
+                     )
+                     index_k = (
+@@ -1384,14 +1436,20 @@ class VLLMAttention(CompressedSparseAttention):
+         sink = self.sinks.float().contiguous()
+         nope_dim = config.head_dim - config.qk_rope_head_dim
+         outputs = []
+-        for seq_idx in range(len(sequence_boundaries) - 1):
+-            start = sequence_boundaries[seq_idx]
+-            stop = sequence_boundaries[seq_idx + 1]
+-            length = stop - start
++        cursor = 0
++        for seq_idx, (key_start, length, start, stop, first_position) in enumerate(
++            chunks
++        ):
++            if start > cursor:
++                # Padding rows of the CP layout: no request owns them.
++                outputs.append(q_visible.new_zeros((start - cursor,) + q_visible.shape[1:]))
++            cursor = stop
++            query_len = stop - start
++            seq_len = first_position + query_len
+             seq_positions = positions[start:stop]
+             if compressed is not None:
+-                k_start = compressed_boundaries[seq_idx]
+-                k_stop = compressed_boundaries[seq_idx + 1]
++                k_start = key_compressed_boundaries[seq_idx]
++                k_stop = key_compressed_boundaries[seq_idx + 1]
+                 rows = compressed[k_start:k_stop]
+             else:
+                 k_start = k_stop = 0
+@@ -1400,12 +1458,12 @@ class VLLMAttention(CompressedSparseAttention):
+             if ratio == 1:
+                 top_k = 0
+                 topk = torch.full(
+-                    (length, 1), -1, dtype=torch.int32, device=q.device
++                    (query_len, 1), -1, dtype=torch.int32, device=q.device
+                 )
+             elif self.indexer is not None:
+                 top_k = config.index_topk
+                 topk = torch.full(
+-                    (length, top_k), -1, dtype=torch.int32, device=q.device
++                    (query_len, top_k), -1, dtype=torch.int32, device=q.device
+                 )
+                 if n_compressed > 0:
+                     assert index_k is not None
+@@ -1422,21 +1480,23 @@ class VLLMAttention(CompressedSparseAttention):
+             else:
+                 top_k = compressed_width(length, ratio, config.index_topk)
+                 topk = c128_all_visible_topk(seq_positions, width=top_k, ratio=ratio)
+-            workspace = torch.cat((rows, kv_visible[start:stop]), dim=0)
++            workspace = torch.cat(
++                (rows, key_rows[key_start : key_start + length]), dim=0
++            )
+             q_seq = q_visible[start:stop]
+             lists: dict[str, torch.Tensor] = {}
+ 
+             def visible_attention(
+                 q_value, workspace_value, sink_value,
+-                topk=topk, length=length, top_k=top_k, n_compressed=n_compressed,
+-                lists=lists,
++                topk=topk, seq_len=seq_len, query_len=query_len, top_k=top_k,
++                n_compressed=n_compressed, lists=lists,
+             ):
+                 output, combined, combined_lens = rocm.sparse_prefill_request(
+                     q_value,
+                     workspace_value,
+                     topk,
+-                    seq_len=length,
+-                    query_len=length,
++                    seq_len=seq_len,
++                    query_len=query_len,
+                     window_size=config.sliding_window,
+                     compress_ratio=ratio,
+                     top_k=top_k,
+@@ -1467,7 +1527,18 @@ class VLLMAttention(CompressedSparseAttention):
+                     (q_seq, workspace, sink),
+                 )
+             )
++        if cursor < q_visible.shape[0]:
++            outputs.append(
++                q_visible.new_zeros((q_visible.shape[0] - cursor,) + q_visible.shape[1:])
++            )
+         result = torch.cat(outputs, dim=0)
++        if layout is not None and not chunks and torch.is_grad_enabled():
++            # A rank owning only padding still joins the gathers' reduce-scatter
++            # in backward: keep them on the graph (an empty sum adds 0).
++            anchor = key_rows[:0].sum()
++            if key_hidden is not None:
++                anchor = anchor + key_hidden[:0].sum()
++            result = result + anchor.to(result.dtype)
+         return self._output_projection_rocm(result, positions, cos_sin_cache)
+ 
+     def _output_projection_rocm(
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/runtime.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/runtime.py
+index ab927b035..40fe22f14 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/runtime.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/runtime.py
+@@ -22,6 +22,7 @@ from megatron.lite.model.deepseek_v4.vllm.primitive.attention.backward import (
+     _rope_and_qnorm,
+ )
+ from megatron.lite.model.deepseek_v4.vllm.primitive.attention.host_geometry import (
++    CPRequestSlices,
+     compressed_sequence_boundaries,
+     padded_sequence_boundaries,
+ )
+@@ -141,6 +142,87 @@ class AttentionKernelMetadata:
+     cp_size: int
+     compressor_metadata: DS4CompressorMetadata | None
+     indexer_compressor_metadata: DS4CompressorMetadata | None
++    # ROCm CP>1 only: this rank's request chunks and the compressed boundaries
++    # of their key-side (CP=1 layout) buffer.
++    rocm_cp: ROCmCPLayout | None = None
++    rocm_cp_compressed_boundaries: tuple[int, ...] = ()
++
++
++@dataclass(frozen=True)
++class ROCmCPLayout:
++    """Host request chunks of one CP rank plus their device row maps.
++
++    ``gather_index`` selects, from the CP all-gather of the padded packed rows,
++    the real rows of ``slices.requests`` back to back; ``cu_seqlens`` are that
++    buffer's request boundaries.  Built once per forward step.
++    """
++
++    slices: CPRequestSlices
++    gather_index: torch.Tensor
++    cu_seqlens: torch.Tensor
++
++
++def build_rocm_cp_layout(
++    seq_lens: tuple[int, ...],
++    sequence_boundaries: tuple[int, ...],
++    *,
++    cp_rank: int,
++    cp_size: int,
++    device: torch.device,
++) -> ROCmCPLayout:
++    from megatron.lite.model.deepseek_v4.vllm.primitive.attention.host_geometry import (
++        cp_request_slices,
++    )
++
++    slices = cp_request_slices(
++        seq_lens, sequence_boundaries, cp_rank=cp_rank, cp_size=cp_size
++    )
++    rows = [
++        index
++        for start, length in zip(slices.padded_starts, slices.lengths)
++        for index in range(start, start + length)
++    ]
++    return ROCmCPLayout(
++        slices=slices,
++        gather_index=torch.tensor(rows, dtype=torch.int64).to(device),
++        cu_seqlens=torch.tensor(slices.boundaries, dtype=torch.int32).to(device),
++    )
++
++
++class _CPAllGatherRows(torch.autograd.Function):
++    """All-gather CP-local rows; the VJP reduce-scatters in FP32.
++
++    Rank partials of a row's gradient (one per CP rank whose queries read it)
++    are added in FP32 and rounded once to the input dtype.
++    """
++
++    @staticmethod
++    def forward(ctx, value: torch.Tensor, group) -> torch.Tensor:
++        import torch.distributed as dist
++
++        ctx.group = group
++        size = dist.get_world_size(group)
++        output = value.new_empty((size * value.shape[0], *value.shape[1:]))
++        dist.all_gather_into_tensor(output, value.contiguous(), group=group)
++        return output
++
++    @staticmethod
++    def backward(ctx, grad_output: torch.Tensor):
++        import torch.distributed as dist
++
++        size = dist.get_world_size(ctx.group)
++        grad = grad_output.float().contiguous()
++        output = grad.new_empty((grad.shape[0] // size, *grad.shape[1:]))
++        dist.reduce_scatter_tensor(output, grad, group=ctx.group)
++        return output.to(grad_output.dtype), None
++
++
++def cp_gather_request_rows(
++    local_rows: torch.Tensor, layout: ROCmCPLayout, *, cp_group
++) -> torch.Tensor:
++    """The real rows of this rank's requests, gathered across CP (CP=1 layout)."""
++    gathered = _CPAllGatherRows.apply(local_rows, cp_group)
++    return gathered.index_select(0, layout.gather_index)
+ 
+ 
+ def _allocate_k_cache(
+@@ -325,6 +407,7 @@ class AttentionMetadataBuilder:
+         sequence_boundaries: tuple[int, ...],
+         *,
+         cp_size: int,
++        rocm_cp: ROCmCPLayout | None = None,
+     ):
+         if cp_size < 1:
+             raise ValueError("cp_size must be positive")
+@@ -362,6 +445,20 @@ class AttentionMetadataBuilder:
+             if self.ratio > 1
+             else (0,) * len(sequence_boundaries)
+         )
++        # The compressors run over the local rows, or under ROCm CP over the
++        # key-side buffer of this rank's requests.
++        compressor_rows = positions.numel()
++        rocm_cp_compressed_boundaries: tuple[int, ...] = ()
++        if rocm_cp is not None:
++            if cp_size <= 1:
++                raise ValueError("a ROCm CP layout requires cp_size > 1")
++            key_boundaries = rocm_cp.slices.boundaries
++            compressor_rows = max(1, key_boundaries[-1])
++            rocm_cp_compressed_boundaries = (
++                compressed_sequence_boundaries(key_boundaries, ratio=self.ratio)
++                if self.ratio > 1 and len(key_boundaries) > 1
++                else (0,) * len(key_boundaries)
++            )
+         return AttentionKernelMetadata(
+             positions=positions,
+             cos_sin_cache=self.cos_sin_cache,
+@@ -372,20 +469,22 @@ class AttentionMetadataBuilder:
+             compressor_metadata=_build_compressor_metadata(
+                 self.config,
+                 ratio=self.ratio,
+-                rows=positions.numel(),
++                rows=compressor_rows,
+                 cos_sin_cache=self.cos_sin_cache,
+             ),
+             indexer_compressor_metadata=(
+                 _build_compressor_metadata(
+                     self.config,
+                     ratio=self.ratio,
+-                    rows=positions.numel(),
++                    rows=compressor_rows,
+                     cos_sin_cache=self.cos_sin_cache,
+                     head_dim=self.config.index_head_dim,
+                 )
+                 if self.ratio == 4
+                 else None
+             ),
++            rocm_cp=rocm_cp,
++            rocm_cp_compressed_boundaries=rocm_cp_compressed_boundaries,
+         )
+ 
+ 
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/protocol.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/protocol.py
+index e9f7c33d6..552e810a8 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/protocol.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/protocol.py
+@@ -29,6 +29,7 @@ from megatron.lite.model.deepseek_v4.lite.protocol import (
+ )
+ from megatron.lite.model.deepseek_v4.vllm.primitive.attention.runtime import (
+     build_attention_metadata_builders,
++    build_rocm_cp_layout,
+     padded_sequence_boundaries,
+ )
+ from megatron.lite.model.protocol_utils import add_loss_context_kwargs
+@@ -159,8 +160,6 @@ def _validate_platform(impl_cfg: ImplConfig) -> None:
+             "DeepSeek V4 impl='vllm' on ROCm follows the batch-invariant rollout; "
+             "set VLLM_BATCH_INVARIANT=1"
+         )
+-    if impl_cfg.parallel.cp > 1:
+-        raise NotImplementedError("DeepSeek V4 impl='vllm' on ROCm supports CP=1")
+     if impl_cfg.dsa_indexer_loss_coeff:
+         raise NotImplementedError(
+             "DeepSeek V4 impl='vllm' on ROCm does not implement the indexer loss"
+@@ -359,12 +358,26 @@ def build_model(model_cfg: DeepseekV4Config, *, impl_cfg: ImplConfig) -> ModelBu
+         )
+         forward_inputs, packed_seq_params = _prepare_cp_forward_inputs(model, batch)
+         current_attention_builders = ensure_runtime_assets()
++        # ROCm CP: the same contiguous split; each rank attends its rows as
++        # request-local prefill chunks over gathered whole-request keys.
++        rocm_cp = (
++            build_rocm_cp_layout(
++                host_seq_lens,
++                sequence_boundaries,
++                cp_rank=model_ps.cp_rank,
++                cp_size=model_ps.cp_size,
++                device=forward_inputs["position_ids"].device,
++            )
++            if torch.version.hip is not None and model_ps.cp_size > 1
++            else None
++        )
+         attention_metadata = {
+             layer_idx: current_attention_builders[layer_idx].build(
+                 forward_inputs["position_ids"],
+                 packed_seq_params,
+                 sequence_boundaries,
+                 cp_size=model_ps.cp_size,
++                rocm_cp=rocm_cp,
+             )
+             for layer_idx in selected_layers
+         }
+diff --git a/experimental/lite/tests/unit/model/deepseek_v4/vllm/test_attention_host_geometry.py b/experimental/lite/tests/unit/model/deepseek_v4/vllm/test_attention_host_geometry.py
+index 5f93a88d5..201d0dae0 100644
+--- a/experimental/lite/tests/unit/model/deepseek_v4/vllm/test_attention_host_geometry.py
++++ b/experimental/lite/tests/unit/model/deepseek_v4/vllm/test_attention_host_geometry.py
+@@ -4,6 +4,7 @@ import pytest
+ 
+ from megatron.lite.model.deepseek_v4.vllm.primitive.attention.host_geometry import (
+     compressed_sequence_boundaries,
++    cp_request_slices,
+     padded_sequence_boundaries,
+ )
+ 
+@@ -41,3 +42,43 @@ def test_invalid_host_geometry_fails_closed() -> None:
+         padded_sequence_boundaries((4, 0), cp_size=2)
+     with pytest.raises(ValueError, match="strictly increasing"):
+         compressed_sequence_boundaries((0, 8, 8), ratio=4)
++
++
++def test_cp_request_slices_follow_contiguous_rows() -> None:
++    # (10, 3) at CP2 pads to (12, 4): rank 0 owns rows [0, 8), rank 1 [8, 16).
++    seq_lens = (10, 3)
++    bounds = padded_sequence_boundaries(seq_lens, cp_size=2)
++    rank0 = cp_request_slices(seq_lens, bounds, cp_rank=0, cp_size=2)
++    assert (rank0.local_start, rank0.local_rows) == (0, 8)
++    assert rank0.requests == (0,)
++    assert (rank0.query_starts, rank0.query_stops) == ((0,), (8,))
++    assert rank0.boundaries == (0, 10)
++    rank1 = cp_request_slices(seq_lens, bounds, cp_rank=1, cp_size=2)
++    assert rank1.local_start == 8
++    assert rank1.requests == (0, 1)
++    assert rank1.padded_starts == (0, 12)
++    assert (rank1.query_starts, rank1.query_stops) == ((8, 0), (10, 3))
++    assert rank1.boundaries == (0, 10, 13)
++
++
++def test_cp_request_slices_skip_padding_only_intersections() -> None:
++    # (5,) at CP4 pads to 8: rank 3 owns padded rows 6, 7 only.
++    bounds = padded_sequence_boundaries((5,), cp_size=4)
++    owned = [
++        cp_request_slices((5,), bounds, cp_rank=rank, cp_size=4) for rank in range(4)
++    ]
++    assert [s.requests for s in owned] == [(0,), (0,), (0,), ()]
++    assert [(s.query_starts, s.query_stops) for s in owned[:3]] == [
++        ((0,), (2,)),
++        ((2,), (4,)),
++        ((4,), (5,)),
++    ]
++    assert owned[3].boundaries == (0,)
++    # Every real position is owned exactly once.
++    positions = [
++        p
++        for s in owned
++        for start, stop in zip(s.query_starts, s.query_stops)
++        for p in range(start, stop)
++    ]
++    assert positions == list(range(5))
