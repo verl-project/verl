@@ -374,6 +374,9 @@ actor_rollout_ref:
       finish_hook_all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_all_ranks,false}
       finish_hook_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_ranks,[]}
       tool_config:
+        nsys:
+          _target_: verl.utils.profiler.config.NsightToolConfig
+          discrete: false
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
           contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.contents,[]}
