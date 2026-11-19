@@ -278,8 +278,8 @@ def _patch_adapters_for_routing(capture_model_kwargs: dict[str, Any]):
     def fake_linear_ce(hidden_states, vocab_weights, input_ids, temperature, reduction, *_args, **kwargs):
         captured["hidden_shape"] = tuple(hidden_states.shape)
         captured["labels"] = input_ids.detach().clone()
-        # Real Triton linear_cross_entropy returns 1D (K,)
-        vals = input_ids.squeeze(0).to(torch.float32) + 0.5
+        # Real Triton linear_cross_entropy flattens batched inputs and returns 1D (B * K,)
+        vals = (hidden_states.sum(dim=-1).reshape(-1) * 0.0) + input_ids.reshape(-1).to(torch.float32) + 0.5
         return vals, vals * 0.1
 
     def fake_vlm_body(self, input_ids, **kwargs):
@@ -336,6 +336,46 @@ def test_all_adapters_slice_response_tokens_and_do_not_leak_kwarg(forward_fn):
     assert torch.all(ent_flat[outside_mask] == 0)
 
 
+def test_triton_adapter_batched_inputs_restore_batch_before_scatter():
+    batch_size, seq_len = 2, 8
+    input_ids = torch.randint(0, VOCAB_SIZE, (batch_size, seq_len))
+    position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
+    shift_labels = torch.arange(10, 10 + batch_size * seq_len, dtype=torch.long).reshape(batch_size, seq_len)
+    logprob_index = torch.tensor([1, 4], dtype=torch.long)
+
+    model_kwargs_seen: dict[str, Any] = {}
+    model = _make_fake_lm(capture_model_kwargs=model_kwargs_seen)
+    model.train()
+
+    with _patch_adapters_for_routing(model_kwargs_seen) as captured:
+        out = dense_common.forward_with_triton_backend(
+            model,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            shift_labels=shift_labels,
+            logprob_index=logprob_index,
+            temperature=1.0,
+            return_dict=True,
+        )
+
+    assert captured["hidden_shape"] == (batch_size, logprob_index.numel(), HIDDEN_SIZE)
+    assert out.log_probs.shape == (batch_size * seq_len,)
+    assert out.entropy.shape == (batch_size * seq_len,)
+
+    lp_2d = out.log_probs.reshape(batch_size, seq_len)
+    ent_2d = out.entropy.reshape(batch_size, seq_len)
+    expected_sel = shift_labels[:, logprob_index].to(torch.float32) + 0.5
+    torch.testing.assert_close(lp_2d[:, logprob_index], expected_sel)
+    torch.testing.assert_close(ent_2d[:, logprob_index], expected_sel * 0.1)
+
+    outside_cols = [c for c in range(seq_len) if c not in (1, 4)]
+    assert torch.all(lp_2d[:, outside_cols] == 0)
+    assert torch.all(ent_2d[:, outside_cols] == 0)
+
+    (out.log_probs.sum() + out.entropy.sum()).backward()
+    assert model.model.embed.weight.grad is not None
+
+
 @pytest.mark.parametrize("forward_fn", ALL_ADAPTERS, ids=lambda f: f"{f.__module__.split('.')[-1]}.{f.__name__}")
 def test_all_adapters_handle_empty_logprob_index(forward_fn):
     total_nnz = 12
@@ -365,7 +405,9 @@ def test_all_adapters_handle_empty_logprob_index(forward_fn):
     assert out.log_probs.requires_grad
 
 
-def test_torch_fused_ppo_forward_backward_numerical_equivalence():
+def test_torch_fused_ppo_forward_backward_numerical_equivalence(monkeypatch):
+    monkeypatch.setattr("verl.utils.experimental.torch_functional._LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY", None)
+    monkeypatch.setattr("verl.utils.experimental.torch_functional._FLASH_ATTN_CROSS_ENTROPY_AVAILABLE", False)
     prompt_lens = [11, 7, 15]
     response_lens = [5, 8, 4]
     td = _make_nested_ppo_micro_batch(prompt_lens, response_lens, calculate_entropy=True)

@@ -139,6 +139,7 @@ def _forward_fused_ppo_triton(
         zero_lp, zero_ent = _empty_indexed_outputs(hidden_states, vocab_weights)
         return zero_lp.reshape(-1), zero_ent.reshape(-1).to(torch.float32)
     seq_len = hidden_states.shape[-2]
+    leading_shape = hidden_states.shape[:-2]
     sel_lp, sel_ent = linear_cross_entropy_fn(
         hidden_states.index_select(-2, index),
         vocab_weights,
@@ -147,10 +148,15 @@ def _forward_fused_ppo_triton(
         "none",
         impl_backend=impl_backend,
     )
-    return (
-        _scatter_indexed_output(sel_lp, index, seq_len),
-        _scatter_indexed_output(sel_ent, index, seq_len),
-    )
+    if sel_lp.ndim == 1:
+        sel_lp = _scatter_indexed_output(sel_lp.reshape(*leading_shape, index.numel()), index, seq_len).reshape(-1)
+    else:
+        sel_lp = _scatter_indexed_output(sel_lp, index, seq_len)
+    if sel_ent.ndim == 1:
+        sel_ent = _scatter_indexed_output(sel_ent.reshape(*leading_shape, index.numel()), index, seq_len).reshape(-1)
+    else:
+        sel_ent = _scatter_indexed_output(sel_ent, index, seq_len)
+    return sel_lp, sel_ent
 
 
 def forward_with_torch_backend(
