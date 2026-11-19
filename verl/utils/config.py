@@ -222,6 +222,10 @@ def validate_config(
         critic_config = omega_conf_to_dataclass(config.critic)
         critic_config.validate(n_gpus, config.data.train_batch_size)
 
+    from verl.trainer.ppo.utils import validate_minibatching_config
+
+    validate_minibatching_config(config, use_critic)
+
     if config.data.get("val_batch_size", None) is not None:
         print(
             "WARNING: val_batch_size is deprecated."

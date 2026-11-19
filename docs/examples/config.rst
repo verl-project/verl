@@ -315,12 +315,27 @@ Actor/Rollout/Reference Policy
 
 **Actor model**
 
+PPO exposes two optimizer mini-batch split modes. The default ``fixed_trajectory``
+uses trajectory boundaries; ``fixed_sample`` keeps source-prompt/UID
+sample groups intact for variable-output rollouts.
+
+.. code-block:: yaml
+
+    trainer:
+      v1:
+        mini_batch_mode: fixed_trajectory  # fixed_trajectory | fixed_sample
+
 - ``actor_rollout_ref.actor.strategy``: fsdp or megatron. In this
   example, we use fsdp backend.
 
-- ``actor_rollout_ref.actor.ppo_mini_batch_size``: One sample is split
-  into multiple sub-batches with batch_size=ppo_mini_batch_size for PPO
-  updates. The ppo_mini_batch_size is a global num across all workers/gpus
+- ``actor_rollout_ref.actor.ppo_mini_batch_size``: Base global PPO optimizer
+  mini-batch size. With ``fixed_trajectory``, each full mini-batch targets
+  ``ppo_mini_batch_size * actor_rollout_ref.rollout.n`` trajectories, and
+  one UID may cross a boundary. The shared trajectory batch is padded to the least
+  common multiple of the DP size and active actor/critic trajectory mini-batch sizes. With ``fixed_sample``, the value is the number of
+  source-prompt/UID samples: all trajectories from one UID stay together, so trajectory counts
+  vary while the configured sample count controls the number of optimizer
+  updates.
 
 - ``actor_rollout_ref.actor.ppo_micro_batch_size``: [Will be deprecated, use ppo_micro_batch_size_per_gpu] 
   Similar to gradient accumulation, the micro_batch_size_per_gpu for one forward pass,
@@ -348,8 +363,13 @@ Actor/Rollout/Reference Policy
   between cp ranks and cause misalignment between data on these ranks, so we shall manually set the seed to avoid hanging
   issue. if ``actor_rollout_ref.actor.shuffle`` is not null, this must be set.
 
-- ``actor_rollout_ref.actor.shuffle``: Whether to shuffle data when
-  there are multiple epochs
+- ``actor_rollout_ref.actor.shuffle``: Whether to shuffle training data.
+  ``fixed_sample`` shuffles UID groups once on the trainer and rejects
+  ``shuffle=true`` with ``ppo_epochs > 1`` because trajectory reshuffling would split
+  UID groups. ``fixed_trajectory`` balances each trajectory mini-batch when
+  boundaries can be preserved; with ``shuffle=true`` and multiple epochs it
+  falls back to whole-batch DP balancing and reshuffles trajectories independently
+  within each DP rank every epoch.
 
 - ``actor_rollout_ref.actor.optim``: Actor's optimizer parameters
 
