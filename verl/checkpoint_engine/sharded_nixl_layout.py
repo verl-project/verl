@@ -75,6 +75,7 @@ __all__ = [
 
 
 def align_up(x: int, align: int) -> int:
+    """Round ``x`` up to the next multiple of ``align``."""
     return (x + align - 1) // align * align
 
 
@@ -204,6 +205,7 @@ def _dtype_from_str(s: str) -> torch.dtype:
 
 
 def layout_digest(entries: Iterable[ParamEntry], bucket_size: int, align: int) -> str:
+    """SHA-256 over the bucket geometry and every entry key, to detect trainer/rollout layout drift."""
     h = hashlib.sha256()
     h.update(f"{bucket_size}:{align}".encode())
     for e in entries:
@@ -524,6 +526,7 @@ def full_box(shape: tuple[int, ...]) -> Box:
 
 
 def box_local_shape(box: Box) -> tuple[int, ...]:
+    """Shape of the local region described by ``box`` (the extent of each dimension)."""
     return tuple(int(n) for _s, n in box)
 
 
@@ -543,6 +546,7 @@ def normalize_slices(slices: Optional[dict]) -> dict[str, tuple[tuple[int, ...],
 
 
 def slices_digest(slices: Optional[dict]) -> str:
+    """SHA-256 of the normalized slice table; empty string when there are no slices."""
     if not slices:
         return ""
     norm = normalize_slices(slices)
