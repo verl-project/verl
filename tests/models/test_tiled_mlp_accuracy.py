@@ -22,12 +22,14 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
+
 
 def setup_distributed():
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend=get_nccl_backend())
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    torch.cuda.set_device(rank)
+    get_torch_device().set_device(rank)
     return rank, world_size
 
 
@@ -118,7 +120,7 @@ def compare_results(logits1, grads1, logits2, grads2, rank):
 
 def main():
     rank, world_size = setup_distributed()
-    device_mesh = init_device_mesh("cuda", (world_size,))
+    device_mesh = init_device_mesh(get_device_name(), (world_size,))
 
     model_name = "Qwen/Qwen3-1.7B"
     num_layers = 2
@@ -137,13 +139,13 @@ def main():
 
     model1 = create_model(model_name, num_layers)
     model1 = apply_fsdp2(model1, device_mesh)
-    model1 = model1.cuda()
+    model1 = model1.to(get_device_name())
 
     # Create deterministic input
     torch.manual_seed(42)
     batch_size, seq_len = 2, 256
     vocab_size = model1.config.vocab_size
-    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device="cuda")
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=get_device_name())
     labels = input_ids.clone()
 
     # ========== Run Model 1: WITHOUT TiledMLP ==========
@@ -158,7 +160,7 @@ def main():
 
     # Free model1 memory before creating model2
     del model1
-    torch.cuda.empty_cache()
+    get_torch_device().empty_cache()
 
     dist.barrier()
 
@@ -179,7 +181,7 @@ def main():
     apply_tiled_mlp_monkey_patch(num_shards=4, model_type="qwen3")
 
     model2 = apply_fsdp2(model2, device_mesh)
-    model2 = model2.cuda()
+    model2 = model2.to(get_device_name())
 
     dist.barrier()
 
@@ -209,7 +211,7 @@ def main():
 
     # Cleanup
     del model2
-    torch.cuda.empty_cache()
+    get_torch_device().empty_cache()
 
     dist.destroy_process_group()
 

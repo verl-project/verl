@@ -114,6 +114,7 @@ _MODEL_TYPE_TO_FAMILY: dict[str, ContinuousTokenModelFamily] = {
     "qwen2": ContinuousTokenModelFamily.QWEN,
     "qwen3": ContinuousTokenModelFamily.QWEN3,
     "qwen3_moe": ContinuousTokenModelFamily.QWEN3,
+    "qwen3_next": ContinuousTokenModelFamily.QWEN3,
     "qwen3_5": ContinuousTokenModelFamily.QWEN35,
     "qwen3_5_moe": ContinuousTokenModelFamily.QWEN35,
     "minimax": ContinuousTokenModelFamily.MINIMAX,
@@ -123,6 +124,8 @@ _MODEL_TYPE_TO_FAMILY: dict[str, ContinuousTokenModelFamily] = {
     # version from the repository path.
     "minimax_m2": ContinuousTokenModelFamily.MINIMAX_M2,
     "glm4_moe": ContinuousTokenModelFamily.GLM47,
+    # GLM-4.7-Flash shares GLM-4.7's chat template under its own root model_type.
+    "glm4_moe_lite": ContinuousTokenModelFamily.GLM47,
     "glm_moe_dsa": ContinuousTokenModelFamily.GLM5,
     "gemma4": ContinuousTokenModelFamily.GEMMA4,
     "gpt_oss": ContinuousTokenModelFamily.GPTOSS,

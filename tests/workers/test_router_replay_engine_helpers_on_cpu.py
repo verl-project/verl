@@ -39,7 +39,7 @@ multi-rank SP slice/all-gather, end-to-end forward through the patched
 """
 
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -107,6 +107,38 @@ def _make_engine(controller: VeOmniRouterReplay | None, mode: str = "R2") -> VeO
     engine._router_replay_mode = mode
     engine.use_ulysses_sp = False
     return engine
+
+
+@pytest.mark.parametrize("use_remove_padding", [True, False])
+def test_prepare_model_inputs_preserves_common_topk_labels(use_remove_padding):
+    engine = _make_engine(controller=None)
+    engine._apply_veomni_input_transforms = MagicMock()
+    model_inputs = {
+        "input_ids": torch.tensor([[1, 2, 3]]),
+        "topk_labels": torch.tensor([[[4, 4], [5, 6], [7, 7]]]),
+    }
+    output_args = {"input_ids_rmpad_rolled": torch.tensor([2, 3, 1])}
+    micro_batch = TensorDict({}, batch_size=[])
+    micro_batch.set_non_tensor("use_fused_kernels", True)
+    micro_batch.set_non_tensor("use_remove_padding", use_remove_padding)
+
+    with patch.object(
+        FSDPEngineWithLMHead,
+        "prepare_model_inputs",
+        return_value=(model_inputs, output_args),
+    ):
+        actual_inputs, actual_output_args = engine.prepare_model_inputs(micro_batch)
+
+    assert actual_inputs["topk_labels"] is model_inputs["topk_labels"]
+    assert actual_inputs["labels"] is model_inputs["input_ids"]
+    if use_remove_padding:
+        assert actual_inputs["shift_labels"].shape == (1, 3)
+    else:
+        assert "shift_labels" not in actual_inputs
+    assert actual_inputs["return_log_probs"] is True
+    assert "teacher_topk_ids" not in actual_inputs
+    assert "teacher_topk_log_probs" not in actual_inputs
+    assert actual_output_args is output_args
 
 
 @pytest.fixture

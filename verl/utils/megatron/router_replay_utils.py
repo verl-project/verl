@@ -36,6 +36,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
 from verl.models.mcore.util import (
+    get_thd_quant_align_size,
     postprocess_packed_seqs,
     postprocess_thd_engine,
     preprocess_packed_seqs,
@@ -241,6 +242,7 @@ def merge_router_topk_indices(
     vp_rank=None,
     local_cp_size=None,
     model=None,
+    pad_to_length_bucket=None,
 ):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
@@ -256,8 +258,10 @@ def merge_router_topk_indices(
             the current micro-batch.
         vp_rank (Optional[int]): Virtual pipeline stage rank override. If None, the current VP rank from
             Megatron parallel state will be used.
+        local_cp_size: Dynamic context-parallel group size for the current micro-batch.
         model: The forwarded model chunk. When given, routes are collected from its own routers instead
             of inferring their location in the process-global router registry.
+        pad_to_length_bucket: Static THD bucket alignment used by the model forward.
 
     Returns:
         None: The function has side effects only; it appends a tensor of shape
@@ -332,8 +336,8 @@ def merge_router_topk_indices(
             .contiguous()
         )
 
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        # RECORD and REPLAY must pack exactly like the model forward
+        quant_align_size = get_thd_quant_align_size(tf_config)
         cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
@@ -346,9 +350,10 @@ def merge_router_topk_indices(
             _, packed_seq_params, _ = preprocess_thd_engine(
                 input_ids,
                 pre_process=True,
-                use_fp8_padding=use_fp8_padding,
+                quant_align_size=quant_align_size,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
             )
             layers_topk_idx = postprocess_thd_engine(
@@ -368,7 +373,7 @@ def merge_router_topk_indices(
         else:
             batch_size, seq_len = attention_mask.shape[:2]
             _, packed_seq_params = preprocess_packed_seqs(
-                input_ids, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+                input_ids, attention_mask, pre_process=True, quant_align_size=quant_align_size
             )
             layers_topk_idx = postprocess_packed_seqs(
                 layers_topk_idx, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
@@ -439,6 +444,7 @@ def set_router_replay_data(
     replay_mask=None,
     local_cp_size=None,
     model=None,
+    pad_to_length_bucket=None,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -456,8 +462,10 @@ def set_router_replay_data(
             Megatron parallel state will be used.
         replay_mask (Optional[torch.Tensor]): Optional per-token mask. Masked tokens use replayed routes;
             unmasked tokens keep native Megatron routes.
+        local_cp_size: Dynamic context-parallel group size for the current micro-batch.
         model: The forwarded model (or list of VPP chunks). When given, targets are written to its own
             routers instead of a positional slice of the global RouterReplay.router_instances list.
+        pad_to_length_bucket: Static THD bucket alignment used by the model forward.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -467,8 +475,8 @@ def set_router_replay_data(
 
     with torch.no_grad():
         vp_rank = 0 if vp_rank is None else vp_rank
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        # RECORD and REPLAY must pack exactly like the model forward
+        quant_align_size = get_thd_quant_align_size(tf_config)
         cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
@@ -481,25 +489,27 @@ def set_router_replay_data(
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
                 layers_topk_idx,
                 pre_process=True,
-                use_fp8_padding=use_fp8_padding,
+                quant_align_size=quant_align_size,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
             )
             if replay_mask is not None:
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
                     replay_mask,
                     pre_process=True,
-                    use_fp8_padding=use_fp8_padding,
+                    quant_align_size=quant_align_size,
                     min_local_rows=min_local_rows,
                     local_cp_size=local_cp_size,
+                    pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                 )
         else:
             if attention_mask is None:
                 raise RuntimeError("router replay REPLAY requires attention_mask for non-nested BSHD inputs.")
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
-                layers_topk_idx, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+                layers_topk_idx, attention_mask, pre_process=True, quant_align_size=quant_align_size
             )
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 

@@ -31,7 +31,7 @@ import types
 import pytest
 
 
-def _install_stub_megatron(optimizer_config_fields):
+def _install_stub_megatron(monkeypatch, optimizer_config_fields):
     """Register stub ``megatron.core`` optimizer modules exposing ``optimizer_config_fields``.
 
     Returns the freshly (re)imported ``verl.utils.megatron.optimizer`` module bound to the stubs.
@@ -70,12 +70,12 @@ def _install_stub_megatron(optimizer_config_fields):
     core_mod = types.ModuleType("megatron.core")
     root_mod = types.ModuleType("megatron")
 
-    sys.modules["megatron"] = root_mod
-    sys.modules["megatron.core"] = core_mod
-    sys.modules["megatron.core.optimizer"] = opt_mod
-    sys.modules["megatron.core.optimizer_param_scheduler"] = sched_mod
+    monkeypatch.setitem(sys.modules, "megatron", root_mod)
+    monkeypatch.setitem(sys.modules, "megatron.core", core_mod)
+    monkeypatch.setitem(sys.modules, "megatron.core.optimizer", opt_mod)
+    monkeypatch.setitem(sys.modules, "megatron.core.optimizer_param_scheduler", sched_mod)
 
-    sys.modules.pop("verl.utils.megatron.optimizer", None)
+    monkeypatch.delitem(sys.modules, "verl.utils.megatron.optimizer", raising=False)
     return importlib.import_module("verl.utils.megatron.optimizer")
 
 
@@ -109,8 +109,8 @@ def muon_config():
     )
 
 
-def test_muon_fields_forwarded(muon_config):
-    mod = _install_stub_megatron(_ALL_MUON_FIELDS)
+def test_muon_fields_forwarded(monkeypatch, muon_config):
+    mod = _install_stub_megatron(monkeypatch, _ALL_MUON_FIELDS)
     cfg = mod.init_megatron_optim_config(muon_config, use_distributed_optimizer=True, fp16=False)
     assert cfg.optimizer == "muon"
     assert cfg.muon_momentum == 0.9
@@ -122,19 +122,19 @@ def test_muon_fields_forwarded(muon_config):
     assert cfg.muon_split_qkv is True
 
 
-def test_only_supported_muon_fields_forwarded(muon_config):
+def test_only_supported_muon_fields_forwarded(monkeypatch, muon_config):
     # Stub Megatron only knows a subset of the muon knobs; the rest must be dropped, not crash.
-    mod = _install_stub_megatron(("muon_momentum", "muon_num_ns_steps"))
+    mod = _install_stub_megatron(monkeypatch, ("muon_momentum", "muon_num_ns_steps"))
     cfg = mod.init_megatron_optim_config(muon_config, use_distributed_optimizer=True, fp16=False)
     assert cfg.muon_momentum == 0.9
     assert cfg.muon_num_ns_steps == 6
     assert not hasattr(cfg, "muon_tp_mode")
 
 
-def test_adam_path_does_not_forward_muon(muon_config):
+def test_adam_path_does_not_forward_muon(monkeypatch, muon_config):
     from verl.workers.config.optimizer import McoreOptimizerConfig
 
-    mod = _install_stub_megatron(_ALL_MUON_FIELDS)
+    mod = _install_stub_megatron(monkeypatch, _ALL_MUON_FIELDS)
     adam_config = McoreOptimizerConfig(lr=1e-3, optimizer="adam", muon_momentum=0.42)
     cfg = mod.init_megatron_optim_config(adam_config, use_distributed_optimizer=True, fp16=False)
     assert cfg.optimizer == "adam"
@@ -142,8 +142,8 @@ def test_adam_path_does_not_forward_muon(muon_config):
     assert cfg.muon_momentum is None
 
 
-def test_muon_without_megatron_support_fails_loud(muon_config):
+def test_muon_without_megatron_support_fails_loud(monkeypatch, muon_config):
     # Installed Megatron exposes no muon fields -> must raise instead of silently building Adam.
-    mod = _install_stub_megatron(())
+    mod = _install_stub_megatron(monkeypatch, ())
     with pytest.raises(ValueError, match="emerging_optimizers"):
         mod.init_megatron_optim_config(muon_config, use_distributed_optimizer=True, fp16=False)

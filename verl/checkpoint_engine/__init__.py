@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from verl.utils.device import is_torch_npu_available
+
 from .base import (
     CheckpointEngine,
     CheckpointEngineManager,
@@ -44,9 +46,10 @@ except ImportError as e:
     NCCLCheckpointEngine = None
 
 try:
-    from .hccl_checkpoint_engine import HCCLCheckpointEngine
+    if is_torch_npu_available(check_device=False):
+        from .hccl_checkpoint_engine import HCCLCheckpointEngine
 
-    __all__ += ["HCCLCheckpointEngine"]
+        __all__ += ["HCCLCheckpointEngine"]
 except ImportError as e:
     CheckpointEngineRegistry.record_import_error("hccl_checkpoint_engine", e)
     HCCLCheckpointEngine = None
@@ -82,3 +85,14 @@ try:
 except ImportError as e:
     CheckpointEngineRegistry.record_import_error("delta_checkpoint_engine", e)
     DeltaShardedCheckpointEngine = None
+
+# Ascend-only HCCL transport subclass; registers the same "delta_sharded" backend
+# name on NPU, where the CUDA engine above skips its own registration.
+try:
+    if is_torch_npu_available(check_device=False):
+        from .delta_checkpoint_engine import HCCLDeltaShardedCheckpointEngine
+
+        __all__ += ["HCCLDeltaShardedCheckpointEngine"]
+except ImportError as e:
+    CheckpointEngineRegistry.record_import_error("delta_checkpoint_engine_npu", e)
+    HCCLDeltaShardedCheckpointEngine = None

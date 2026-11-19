@@ -35,6 +35,8 @@ import typing
 import torch
 import torch.distributed as dist
 
+from verl.plugin.platform import get_platform
+
 _LIGER_FUNCTION = None
 
 
@@ -163,7 +165,7 @@ class LinearCrossEntropy(torch.autograd.Function):
 
         assert isinstance(temperature, float), f"temperature must be a float, but got {type(temperature)}"
         assert isinstance(reduction, str), f"reduction must be a str, but got {type(reduction)}"
-        with torch.cuda.nvtx.range("LinearCrossEntropy-forward"):
+        with get_platform().nvtx_range("LinearCrossEntropy-forward"):
             from . import kernels
 
             REDUCTION = kernels.get_entropy_reduction_enum_number(reduction.lower())
@@ -190,7 +192,7 @@ class LinearCrossEntropy(torch.autograd.Function):
     def backward(ctx, dlogprobs: torch.Tensor, dentropy: torch.Tensor) -> list[torch.Tensor]:
         from . import kernels
 
-        with torch.cuda.nvtx.range("LinearCrossEntropy-backward"):
+        with get_platform().nvtx_range("LinearCrossEntropy-backward"):
             (hidden, weight, labels, _maximum, _accumulate, _entropy_b) = ctx.saved_tensors
             REDUCTION = ctx.REDUCTION
             dist_process_group = ctx.dist_process_group
@@ -240,6 +242,9 @@ def linear_cross_entropy(
         temperature = 1.0
     if reduction is None:
         reduction = "none"
+    num_tokens = hidden.numel() // hidden.shape[-1]
+    if impl_backend in ("triton", "liger") and labels.numel() != num_tokens:
+        raise ValueError(f"The {impl_backend} linear cross entropy backend only supports one label per token")
     if impl_backend == "triton":
         if hidden.device.type == "npu":
             from verl.utils.kernel.npu.cann_linear_ce import CannLinearCrossEntropy, should_use_cann_linear_ce
@@ -266,4 +271,21 @@ def linear_cross_entropy(
             reduction,
             dist_process_group,
         )
-    raise ValueError(f"Unsupported linear cross entropy backend {impl_backend!r}; choose 'triton' or 'liger'")
+    if impl_backend == "tilelang":
+        if hidden.device.type != "cuda":
+            raise RuntimeError("The TileLang linear cross entropy backend is CUDA-only")
+        if reduction != "none":
+            raise ValueError("The TileLang linear cross entropy backend only supports reduction='none'")
+
+        from verl.utils.kernel.tilelang.linear_cross_entropy import linear_cross_entropy as tilelang_lce
+
+        return tilelang_lce(
+            hidden,
+            weight,
+            labels,
+            float(temperature),
+            dist_process_group,
+        )
+    raise ValueError(
+        f"Unsupported linear cross entropy backend {impl_backend!r}; choose 'triton', 'liger', or 'tilelang'"
+    )

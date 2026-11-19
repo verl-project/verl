@@ -10,8 +10,9 @@ permissions:
 
 env:
   SUBMITTER_URL: http://rayjob-submitter.ci-system.svc.cluster.local
-  IMAGE: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+  IMAGE: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
   WORKER_REPLICAS: "2"
+  ASCEND_RECIPE_BASELINE_URL: "https://raw.githubusercontent.com/verl-project/verl-ascend-recipe/main/baseline"
 
 jobs:
   ascend-rayjob-e2e:
@@ -20,7 +21,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-0
     timeout-minutes: 360
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -364,22 +365,38 @@ jobs:
           echo "==== [2/2] Testing network connectivity via healthz ===="
           curl -sS --fail "${SUBMITTER_URL}/healthz"
 
-      - name: Run multinode E2E RayJob
+      - name: Print system memory before tests
         run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
+      - name: Run multinode E2E RayJob
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOG_DIR=/root/.cache/temp
+          mkdir -p "$LOG_DIR"
           /root/.cache/verl_ci/submit_and_wait_rayjob.sh \
             multinode-e2e \
             /root/.cache/verl_ci/run_multinode_testing.sh \
             '["--script-path","/verl/tests/special_npu/nightly_ci_ascend/run_grpo_glm52_top16_megatron_npu_multinode.sh"]' \
-            '{}' \
+            '{"HCCL_INTER_HCCS_DISABLE":"TRUE"}' \
             '[
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/cpu","value":"64"},
-              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/memory","value":"512Gi"},
+              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/memory","value":"1536Gi"},
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/huawei.com~1ascend-1980","value":"16"},
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/limits/cpu","value":"64"},
-              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/limits/memory","value":"512Gi"},
+              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/limits/memory","value":"1536Gi"},
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/limits/huawei.com~1ascend-1980","value":"16"},
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/volumes/1/emptyDir/sizeLimit","value":"128Gi"}
-            ]'
+            ]' 2>&1 | tee "$LOG_DIR/run_grpo_glm52_top16_megatron_npu_multinode.log"
+
+      - name: Check GLM5.2 multinode baseline
+        run: |
+          cd /root/.cache/temp
+          curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
+          curl --fail --location --retry 3 --output baseline.txt "${ASCEND_RECIPE_BASELINE_URL}/a3/nightly_log/run_grpo_glm52_top16_megatron_npu_multinode/baseline_grpo_glm52_top16_megatron_npu_multinode.txt"
+          python check_npu.py --log run_grpo_glm52_top16_megatron_npu_multinode.log --base baseline.txt
 
       - name: Cleanup RayJobs
         if: always()

@@ -218,7 +218,7 @@ class PrecisionDebuggerToolConfig(BaseConfig):
 
 @dataclass
 class NPUToolConfig(NsightToolConfig):
-    """NPU profiler too; config."""
+    """NPU profiler tool config."""
 
     # options: npu, cpu, memory, shapes, module, stack
     # CPU activity is collected either way (the per-stage mstx markers are CPU-side events),
@@ -236,6 +236,9 @@ class NPUToolConfig(NsightToolConfig):
     # Stop collecting profiler data at this response-token index (exclusive).
     # None means collect until the end.
     profile_token_end: Optional[int] = None
+    # Optional torch_npu.profiler.schedule (wait/warmup/active/repeat/skip_first).
+    # When set with active > 0, DistProfiler.step() drives the schedule per mini-batch.
+    schedule: Optional[TorchProfilerScheduleConfig] = None
 
     name: str = "npu"
 

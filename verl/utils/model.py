@@ -673,4 +673,5 @@ def get_lora_rank_from_adapter(adapter_path: str | os.PathLike) -> int:
 @dataclass
 class CausalLMOutputForPPO(CausalLMOutputWithPast):
     log_probs: Optional[torch.FloatTensor] = None
+    topk_log_probs: Optional[torch.FloatTensor] = None
     entropy: Optional[torch.FloatTensor] = None
