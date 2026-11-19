@@ -248,8 +248,6 @@ class vLLMPDReplica(vLLMReplica):
         self._decode_server_addresses = [
             self._format_server_address(host, port) for host, port in addresses[len(self._prefill_servers) :]
         ]
-        self._server_address = self._prefill_server_addresses[0]
-
         logger.info(
             "vLLMPDReplica rank=%s launched: prefills=%s, decodes=%s",
             self.replica_rank,

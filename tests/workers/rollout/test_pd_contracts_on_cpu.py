@@ -141,7 +141,7 @@ def test_launch_discovers_every_pd_metrics_endpoint_without_changing_request_ent
         "[::1]:8031",
         "[::1]:8032",
     ]
-    assert replica._server_address == "[::1]:8030"
+    assert replica.get_request_server_endpoints() == [("[::1]:8030", spawned[0][1])]
     assert replica._server_handle is spawned[0][1]
     assert [options["kv_transfer_config"]["kv_connector"] for options, _ in spawned] == [connector] * 3
     spawned[0][1].set_pd_peer.remote.assert_awaited_once()
