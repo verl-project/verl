@@ -1,0 +1,77 @@
+# Builds the TPU CI image from examples/tpu/grpo/Dockerfile into TPU_CI_IMAGE_REPO (tests/special_tpu/gke/tpu-ci.env),
+# tagged df-<first 16 hex digits of the Dockerfile's sha256>, and skips the build when that image already exists.
+#
+# The TPU test workflows build the image themselves for code that is already in this repository (pushes, schedules,
+# manual runs, pull requests from branches of this repository). Pull requests from forks never build images: a
+# maintainer reviews the Dockerfile change and runs this workflow with ref `refs/pull/<number>/head`; the waiting TPU
+# jobs of the pull request then pick the image up. The build uses the scripts of the branch this workflow runs on and
+# only the Dockerfile of `ref`.
+
+name: docker-build-tpu
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref whose examples/tpu/grpo/Dockerfile to build, e.g. refs/pull/<number>/head (review it first). Empty: the branch this runs on."
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Select the TPU CI runners
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.runner.outputs.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          sparse-checkout: tests/special_tpu/gke/tpu-ci.env
+          sparse-checkout-cone-mode: false
+      - name: Read TPU_CI_RUNNER (repository variable, else tests/special_tpu/gke/tpu-ci.env)
+        id: runner
+        env:
+          TPU_CI_RUNNER: ${{ vars.TPU_CI_RUNNER }}
+        run: |
+          source tests/special_tpu/gke/tpu-ci.env
+          echo "runner=${TPU_CI_RUNNER}" >> "${GITHUB_OUTPUT}"
+          echo "TPU CI runner label: ${TPU_CI_RUNNER:-none, so the TPU jobs are skipped}"
+
+  docker_build_tpu:
+    needs: setup
+    if: needs.setup.outputs.runner != ''
+    name: Build the TPU CI image (examples/tpu/grpo/Dockerfile)
+    # TPU_CI_BUILD_RUNNER: optional runner group whose service account may push images (see tests/special_tpu/README.md).
+    runs-on: ${{ vars.TPU_CI_BUILD_RUNNER || needs.setup.outputs.runner }}
+    timeout-minutes: 150
+    env:
+      # The self-hosted runners run as root.
+      PIP_ROOT_USER_ACTION: ignore
+      DOCKERFILE_REF: ${{ inputs.ref }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Fetch examples/tpu/grpo/Dockerfile of the requested ref
+        if: inputs.ref != ''
+        run: |
+          git fetch --no-tags --depth 1 origin "${DOCKERFILE_REF}"
+          git show FETCH_HEAD:examples/tpu/grpo/Dockerfile > "${RUNNER_TEMP}/Dockerfile"
+          echo "TPU_CI_DOCKERFILE=${RUNNER_TEMP}/Dockerfile" >> "${GITHUB_ENV}"
+      - name: Build the image (skipped if it is already in the registry)
+        run: |
+          bash tests/special_tpu/run_tpu_e2e_ci.sh build_image

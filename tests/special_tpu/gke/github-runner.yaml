@@ -1,0 +1,152 @@
+# Self-hosted GitHub Actions runners of the verl TPU CI, with least-privilege access to the CI cluster.
+#
+# The runners only orchestrate: they create a Kueue-queued RayCluster per test, submit Ray jobs to it and delete it, all
+# in TPU_CI_NAMESPACE (tests/special_tpu/gke/tpu-ci.env). They run on the CPU node pool; the TPU work runs in the
+# RayClusters. Each runner takes one job and then re-registers in a fresh container (EPHEMERAL), so nothing a job
+# leaves behind reaches the next one. The TPU workflows run on the label below once TPU_CI_RUNNER (repository variable,
+# or tests/special_tpu/gke/tpu-ci.env for pull requests from forks) is set to it.
+#
+# Creating a RayCluster or a Job lets a job run pods as any service account of the namespace, so use a namespace that
+# only holds service accounts that are safe for pull request code (this one and the Ray pods' one), and replace
+# `default` below with it (TPU_CI_NAMESPACE in tests/special_tpu/gke/tpu-ci.env).
+#
+# Setup (cluster admin):
+#   1. The runners' Google service account (Workload Identity annotation below) needs roles/artifactregistry.reader on
+#      TPU_CI_IMAGE_REPO to look up the image, and roles/artifactregistry.writer if these runners also build images
+#      (docker-build-tpu.yml, test runs on pushes). For pull request jobs from forks, a separate runner group without
+#      image builds (drop the batch/configmaps/secrets rule and use reader only) is the safer split; point
+#      TPU_CI_BUILD_RUNNER at the runners that build.
+#   2. kubectl create secret generic github-runner-secret --from-literal=ACCESS_TOKEN=<PAT or registration token>
+#   3. Set REPO_URL and the Workload Identity annotation, then: kubectl apply -f tests/special_tpu/gke/github-runner.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: verl-tpu-ci-runner
+  namespace: default
+  annotations:
+    iam.gke.io/gcp-service-account: <GSA_EMAIL>
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: verl-tpu-ci-runner
+  namespace: default
+rules:
+  # One RayCluster per test: create, watch, delete (and reap leaked ones).
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["localqueues"]
+    verbs: ["get", "list"]
+  # Ray CLI calls on the head pod, the torchrun SFT test and the environment printout use `kubectl exec`.
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Image builds (gke/image-build-job.yaml). Not needed by runners that never build images.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: verl-tpu-ci-runner
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: verl-tpu-ci-runner
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: verl-tpu-ci-runner
+---
+# Read-only access to nodes, to tell a spot preemption (TPU node gone or NotReady) from a test failure.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: verl-tpu-ci-node-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: verl-tpu-ci-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: verl-tpu-ci-runner
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: verl-tpu-ci-node-reader
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: verl-tpu-ci-runner
+  namespace: default
+  labels:
+    app: verl-tpu-ci-runner
+spec:
+  # A runner stays busy while its job waits in Kueue, so keep a few more runners than TPU jobs that can run at once.
+  replicas: 6
+  selector:
+    matchLabels:
+      app: verl-tpu-ci-runner
+  template:
+    metadata:
+      labels:
+        app: verl-tpu-ci-runner
+      annotations:
+        # The CPU node pool's autoscaler would otherwise drain an under-used node and kill a runner mid-job.
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      serviceAccountName: verl-tpu-ci-runner
+      nodeSelector:
+        cloud.google.com/gke-nodepool: default-pool
+      containers:
+        - name: runner
+          image: myoung34/github-runner:2.338.2-ubuntu-noble
+          env:
+            - name: REPO_URL
+              value: "https://github.com/verl-project/verl"
+            - name: RUNNER_SCOPE
+              value: "repo"
+            - name: RUNNER_NAME_PREFIX
+              value: "verl-tpu-ci"
+            - name: RANDOM_RUNNER_SUFFIX
+              value: "true"
+            - name: LABELS
+              value: "verl-tpu-ci"
+            - name: EPHEMERAL
+              value: "true"
+            - name: DISABLE_AUTO_UPDATE
+              value: "true"
+            - name: ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-runner-secret
+                  key: ACCESS_TOKEN
+          resources:
+            # The runners only run kubectl and the Ray job CLI.
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              cpu: "8"
+              memory: 32Gi

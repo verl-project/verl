@@ -1,0 +1,77 @@
+# Kubernetes Job that builds the TPU CI image from examples/tpu/grpo/Dockerfile. Rendered and created by
+# tests/special_tpu/run_tpu_e2e_ci.sh when ${IMAGE} is not in the registry yet and the run may build images
+# (docker-build-tpu.yml, or a test run for code that is already in the repository).
+#
+# BuildKit runs daemonless in the pod, the builder of `docker buildx build`, so the Dockerfile's heredocs,
+# `RUN --mount=type=cache` and `ADD <git url>#<ref>` work unchanged. The Dockerfile is the whole build context (every
+# source comes from a public URL) and comes in through the ConfigMap ${NAME}; the registry credentials of the run come
+# in through the Secret ${NAME}. The pod needs no Kubernetes or Google Cloud identity of its own. The build state lives
+# on a per-pod persistent disk, so the build does not fill the CPU node's boot disk.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    verl-ci/managed-image: "true"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: ${TIMEOUT_SECONDS}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        verl-ci/managed-image: "true"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      nodeSelector:
+        cloud.google.com/gke-nodepool: default-pool
+      containers:
+        - name: buildkit
+          image: ${BUILDKIT_IMAGE}
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_CONFIG
+              value: /docker-config
+          command: ["sh", "-c"]
+          args:
+            - >-
+              mkdir -p /workspace && cp -L /dockerfile/Dockerfile /workspace/Dockerfile &&
+              exec buildctl-daemonless.sh build --progress=plain --frontend dockerfile.v0
+              --local context=/workspace --local dockerfile=/workspace
+              --output type=image,name=${IMAGE},push=true
+          resources:
+            requests:
+              cpu: "6"
+              memory: 24Gi
+            limits:
+              memory: 48Gi
+          volumeMounts:
+            - name: dockerfile
+              mountPath: /dockerfile
+            - name: docker-config
+              mountPath: /docker-config
+              readOnly: true
+            - name: buildkit-state
+              mountPath: /var/lib/buildkit
+      volumes:
+        - name: dockerfile
+          configMap:
+            name: ${NAME}
+        - name: docker-config
+          secret:
+            secretName: ${NAME}
+            items:
+              - key: config.json
+                path: config.json
+        - name: buildkit-state
+          ephemeral:
+            volumeClaimTemplate:
+              spec:
+                accessModes: ["ReadWriteOnce"]
+                storageClassName: standard-rwo
+                resources:
+                  requests:
+                    storage: 200Gi

@@ -59,6 +59,8 @@ cd /
 pip install accelerate codetiming datasets dill hydra-core peft "pyarrow>=19.0.0" pybind11 pylatexenc \
     "${tensordict}" orjson torchdata "${transformers}" wandb "packaging>=20.0" uvicorn "fastapi<0.137" \
     latex2sympy2_extended math_verify tensorboard TransferQueue==0.1.8
+# verl's unit tests (tests/special_tpu, tpu_unit_tests.yml); the versions of uv.lock.
+pip install pytest==9.1.0 pytest-asyncio==1.4.0
 
 # Later installs may replace these, so reinstall the pinned builds last.
 pip install --no-deps "torch==${torch}+cpu" "torchvision==${torchvision}+cpu" --index-url "${torch_index}"

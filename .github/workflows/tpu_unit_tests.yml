@@ -1,0 +1,136 @@
+# TPU platform test and the verl unit tests that run on TPU, on 1 Cloud TPU v6e chip (the TPU counterpart of
+# gpu_unit_tests.yml and npu_unit_tests.yml; the test list is TPU_UNIT_TESTS in tests/special_tpu/run_tpu_e2e_ci.sh).
+#
+# How the TPU workflows run (details in tests/special_tpu/README.md): self-hosted runners in a GKE cluster with TPU v6e
+# node pools create a Kueue-queued RayCluster for each test with tests/special_tpu/run_tpu_e2e_ci.sh, run the test on
+# it the way examples/tpu/grpo/README.md runs jobs (this checkout and verl-hardware-plugin through the Ray runtime env,
+# the image of examples/tpu/grpo/Dockerfile), and delete the RayCluster. TPU support comes from verl-hardware-plugin, at
+# the commit that examples/tpu/grpo/README.md checks out.
+#
+# Where they run: the `setup` job (a GitHub-hosted runner, like the `setup` jobs of the GPU workflows) reads the label
+# of the TPU CI runners from the repository variable TPU_CI_RUNNER, else from tests/special_tpu/gke/tpu-ci.env (GitHub
+# does not pass variables to pull requests from forks). Without a label the TPU jobs are skipped.
+
+name: tpu_unit_tests
+
+on:
+  push:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "verl/**/*.py"
+      - "examples/tpu/grpo/Dockerfile"
+      # Checks out the verl-hardware-plugin commit under test
+      - "examples/tpu/grpo/README.md"
+      - "tests/special_tpu/**"
+      - "!tests/special_tpu/README.md"
+      # TPU_UNIT_TESTS
+      - "tests/single_controller/test_data_transfer.py"
+      - "tests/trainer/ppo/test_rollout_corr.py"
+      - "tests/trainer/ppo/test_rollout_corr_integration.py"
+      - "tests/utils/test_flops_counter.py"
+      - ".github/workflows/tpu_unit_tests.yml"
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "verl/**/*.py"
+      - "examples/tpu/grpo/Dockerfile"
+      # Checks out the verl-hardware-plugin commit under test
+      - "examples/tpu/grpo/README.md"
+      - "tests/special_tpu/**"
+      - "!tests/special_tpu/README.md"
+      # TPU_UNIT_TESTS
+      - "tests/single_controller/test_data_transfer.py"
+      - "tests/trainer/ppo/test_rollout_corr.py"
+      - "tests/trainer/ppo/test_rollout_corr_integration.py"
+      - "tests/utils/test_flops_counter.py"
+      - ".github/workflows/tpu_unit_tests.yml"
+  workflow_dispatch:
+    inputs:
+      plugin_repo:
+        description: "verl-hardware-plugin repository, e.g. a fork (empty: the one examples/tpu/grpo/README.md clones)"
+        required: false
+        default: ""
+        type: string
+      plugin_commit:
+        description: "verl-hardware-plugin full commit id, branch or tag (empty: the commit examples/tpu/grpo/README.md checks out)"
+        required: false
+        default: ""
+        type: string
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+env:
+  # The self-hosted runners run as root.
+  PIP_ROOT_USER_ACTION: ignore
+  # Give up after waiting this long for TPU quota in the Kueue queue, and for the pods of the admitted RayCluster.
+  QUEUE_TIMEOUT_MINS: "90"
+  POD_READY_TIMEOUT_MINS: "60"
+  # The image of examples/tpu/grpo/Dockerfile is only built (privileged, pushes to the registry) for code that is
+  # already in this repository. Pull requests from forks wait for docker-build-tpu.yml instead.
+  TPU_CI_ALLOW_IMAGE_BUILD: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+  IMAGE_WAIT_MINS: "30"
+  # Empty unless set by hand: the plugin repository and commit that examples/tpu/grpo/README.md checks out.
+  VERL_HARDWARE_PLUGIN_REPO: ${{ inputs.plugin_repo }}
+  VERL_HARDWARE_PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
+
+jobs:
+  setup:
+    name: Select the TPU CI runners
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.runner.outputs.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          sparse-checkout: tests/special_tpu/gke/tpu-ci.env
+          sparse-checkout-cone-mode: false
+      - name: Read TPU_CI_RUNNER (repository variable, else tests/special_tpu/gke/tpu-ci.env)
+        id: runner
+        env:
+          TPU_CI_RUNNER: ${{ vars.TPU_CI_RUNNER }}
+        run: |
+          source tests/special_tpu/gke/tpu-ci.env
+          echo "runner=${TPU_CI_RUNNER}" >> "${GITHUB_OUTPUT}"
+          echo "TPU CI runner label: ${TPU_CI_RUNNER:-none, so the TPU jobs are skipped}"
+
+  tpu_unit_tests:
+    needs: setup
+    if: needs.setup.outputs.runner != ''
+    name: TPU platform and verl unit tests on 1 x TPU v6e-1 (torch_tpu, verl-hardware-plugin)
+    runs-on: ${{ needs.setup.outputs.runner }}
+    timeout-minutes: 180 # Includes waiting for TPU quota (Kueue) and TPU hosts.
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Running tests/special_tpu/tpu_smoke_test.py and the verl unit tests of TPU_UNIT_TESTS on 1 TPU v6e chip
+        run: |
+          bash tests/special_tpu/run_tpu_e2e_ci.sh tpu_platform
+      - name: Clean up the RayCluster
+        if: always()
+        run: |
+          bash tests/special_tpu/run_tpu_e2e_ci.sh teardown tpu_platform
+      - name: Upload the TPU job logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tpu-logs-tpu_platform-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verl-tpu-ci-${{ github.run_id }}/*.log
+          if-no-files-found: ignore
+          retention-days: 14
