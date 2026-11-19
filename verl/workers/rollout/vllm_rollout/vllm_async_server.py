@@ -349,7 +349,7 @@ class vLLMHttpServer:
             ]
             router_config_path = (self.config.custom or {}).get("pd_router_config_path")
         self._pd_decode_peer_ids = decode_peer_ids
-        if router_config_path and get_device_name() == "npu":
+        if router_config_path:
             try:
                 from verl.workers.rollout.router import get_router_handle
 

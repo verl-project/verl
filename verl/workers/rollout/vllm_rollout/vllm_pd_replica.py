@@ -266,27 +266,27 @@ class vLLMPDReplica(vLLMReplica):
             raise RuntimeError("PD prefill metrics endpoints are not ready")
         if len(self._decode_server_addresses) != len(self._decode_servers):
             raise RuntimeError("PD decode metrics endpoints are not ready")
-        return [
-            *[
+        endpoints = []
+        for index, address in enumerate(self._prefill_server_addresses):
+            if len(self._prefill_servers) == 1:
+                replica_label = f"{self.replica_rank}-prefill"
+            else:
+                replica_label = f"{self.replica_rank}-prefill{index}"
+            endpoints.append(
                 (
                     address,
                     {
-                        "replica": (
-                            f"{self.replica_rank}-prefill"
-                            if len(self._prefill_servers) == 1
-                            else f"{self.replica_rank}-prefill{index}"
-                        ),
+                        "replica": replica_label,
                         "pd_role": "prefill",
                         "pd_index": index,
                     },
                 )
-                for index, address in enumerate(self._prefill_server_addresses)
-            ],
-            *[
+            )
+        for index, address in enumerate(self._decode_server_addresses):
+            endpoints.append(
                 (address, {"replica": f"{self.replica_rank}-decode{index}", "pd_role": "decode", "pd_index": index})
-                for index, address in enumerate(self._decode_server_addresses)
-            ],
-        ]
+            )
+        return endpoints
 
     async def resume_generation(self):
         """Resume every independent P/D engine before opening any admission gate."""

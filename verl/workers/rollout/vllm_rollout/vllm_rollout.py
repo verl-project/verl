@@ -152,11 +152,10 @@ class ServerAdapter(BaseRollout):
         if self.server_handle is None:
             prefix = self._get_server_name_prefix()
             if self._pd_role == "prefill":
-                actor_name = (
-                    f"{prefix}server_{self.replica_rank}_0"
-                    if self.config.disaggregation.prefill_replicas == 1
-                    else f"{prefix}server_prefill_{self.replica_rank}_{self._pd_server_index}_0"
-                )
+                if self.config.disaggregation.prefill_replicas == 1:
+                    actor_name = f"{prefix}server_{self.replica_rank}_0"
+                else:
+                    actor_name = f"{prefix}server_prefill_{self.replica_rank}_{self._pd_server_index}_0"
             elif self._pd_role == "decode":
                 actor_name = f"{prefix}server_decode_{self.replica_rank}_{self._pd_server_index}"
             else:
