@@ -1,7 +1,7 @@
 Ascend Installation Guide
 ==========================
 
-Last updated: 11/11/2026.
+Last updated: 11/13/2026.
 
 .. contents:: Table of Contents
    :local:
@@ -39,22 +39,20 @@ Key Updates
 Hardware Support
 -----------------
 
-Atlas 200T A2 Box16
+Atlas A2 training products
 
-Atlas 900 A2 PoD
-
-Atlas 800T A3
+Atlas A3 training products
 
 ..
 
    [Note] For software installation on Ascend 950PR&950DT products,
-   refer to :doc:`Installation Guide (Ascend 950PR&950DT products) <install_guidance_950>`.
+   refer to `Installation Guide (Ascend 950PR&950DT products) <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/install_guidance_950.html>`_.
 
 
 Framework Backend Support
 --------------------------
 
-Currently, the following common training and inference backends are supported for deployment on NPU. You can directly obtain published images from our :doc:`Ascend Image Guide <dockerfile_build_guidance>` or perform a custom installation according to the instructions below.
+Currently, the following common training and inference backends are supported for deployment on NPU. You can directly obtain published images from our `Ascend Image Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/dockerfile_build_guidance.html>`_ or perform a custom installation according to the instructions below.
 
 .. list-table::
    :header-rows: 1
@@ -75,7 +73,7 @@ Deployment Guide
 We recommend using the prebuilt images available from
 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ to reduce environment setup and dependency installation work.
 If you need a custom environment, you can build an image from the Dockerfile. For details on obtaining, building, and using images, refer to the
-:doc:`Ascend Image Guide <dockerfile_build_guidance>`.
+`Ascend Image Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/dockerfile_build_guidance.html>`_.
 
 
 2. Custom Installation - vLLM + FSDP/Megatron
@@ -160,6 +158,11 @@ We provide a conda-based one-stop `Installation Script <https://github.com/verl-
    registration errors when importing Megatron-Bridge. Keep the patch file in
    the cloned verl repository when running the installation script.
 
+   The script also installs the FLA NPU backend required by vLLM-Ascend (version ``26.9.1``).
+   Set ``FLA_NPU_DEVICE`` before running it: ``a2`` for A2 or ``a3`` for A3,
+   selecting ``flash-linear-attention-npu-a2`` or ``flash-linear-attention-npu-a3`` respectively.
+   This dependency is installed for both FSDP and Megatron.
+
 .. code:: bash
 
    # Note: On x86 platforms, pip requires an additional source. The command is as follows:
@@ -170,6 +173,8 @@ We provide a conda-based one-stop `Installation Script <https://github.com/verl-
    conda create -n verl-vllm-npu python=3.12 -y
    conda activate verl-vllm-npu
    git clone --recursive https://github.com/verl-project/verl.git
+   # Select a2 or a3 for your hardware; this example uses A3.
+   export FLA_NPU_DEVICE=a3
    bash verl/scripts/install_vllm_mcore_npu.sh
    # If you only need the FSDP backend
    # USE_MEGATRON=0 bash verl/scripts/install_vllm_mcore_npu.sh

@@ -21,7 +21,8 @@ import pytest
 from hydra import compose, initialize_config_dir
 
 from verl.utils import omega_conf_to_dataclass
-from verl.utils.profiler.config import ProfilerConfig
+from verl.utils.profiler.config import NsightToolConfig, ProfilerConfig
+from verl.utils.profiler.profile import build_rollout_dist_profiler
 
 
 def test_finish_hook_field_defaults_and_validation():
@@ -145,3 +146,23 @@ def test_frozen_config():
         config["all_ranks"] = True
     with pytest.raises(TypeError):
         config["ranks"] = [1, 2, 3]
+
+
+def test_rollout_nsys_defaults_initialize_profiler():
+    with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config"), version_base=None):
+        cfg = compose(
+            config_name="ppo_trainer",
+            overrides=[
+                "global_profiler.tool=nsys",
+                "actor_rollout_ref.rollout.profiler.enable=True",
+                "actor_rollout_ref.rollout.profiler.ranks=[0]",
+            ],
+        )
+    profiler_config = omega_conf_to_dataclass(cfg.actor_rollout_ref.rollout.profiler)
+    tool_config = omega_conf_to_dataclass(profiler_config.tool_config.get(profiler_config.tool))
+    profiler = build_rollout_dist_profiler(0, 1, config=profiler_config, tool_config=tool_config)
+
+    assert isinstance(profiler.tool_config, NsightToolConfig)
+    assert profiler.check_enable()
+    assert profiler.check_this_rank()
+    assert not profiler.is_discrete_mode()

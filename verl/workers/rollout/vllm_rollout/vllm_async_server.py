@@ -56,10 +56,11 @@ from verl.utils.profiler.nsight import _build_rollout_ray_actor_nsight_launch_op
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, prefix_cache_salt
 from verl.workers.rollout.utils import (
     extract_response_topk_logprobs_with_coverage,
     get_max_position_embeddings,
+    get_node_visible_devices,
     get_vision_placeholder_token_ids,
     qwen2_5_vl_dedup_image_tokens,
     run_uvicorn,
@@ -721,6 +722,10 @@ class vLLMHttpServer:
         if rejected is not None:
             return rejected
 
+        cache_salt = prefix_cache_salt(self.config, self.global_steps)
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
+
         with RLInsightLogger.trace_state(
             "vllm_generate",
             state_lane_id=ray.get_runtime_context().get_actor_name(),
@@ -803,7 +808,7 @@ class vLLMHttpServer:
         finish_reason = final_res.outputs[0].finish_reason
         if finish_reason == "abort":
             stop_reason = "aborted"
-        elif finish_reason in ("stop", "length"):
+        elif finish_reason == "stop":
             stop_reason = "completed"
         else:
             stop_reason = finish_reason  # for more stop reason in the future
@@ -935,15 +940,11 @@ class vLLMHttpServer:
             # processes across all DP shards (unlike collective_rpc which only reaches
             # TP workers within a single shard).
             await self.engine.wake_up(tags=tags or self._get_wake_up_tags())
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
-            # reset_connector=True drops any attached external KV store
-            # (e.g. MooncakeStoreConnector) whose entries were computed
-            # against the previous weights. No-op success when no connector
-            # is configured (vLLM scheduler treats it as such).
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
@@ -957,20 +958,38 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            await self._engine_sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
+
+    async def _engine_sleep(self, level: int):
+        # Sleep discards the KV cache and, by default, resets the KV connector, which for a shared store
+        # (e.g. MooncakeStoreConnector) deletes entries other replicas still use. Under "salt" that is never
+        # needed: unchanged weights keep the current salt, and new weights get a new one.
+        if self.config.external_kv_cache_invalidation == "salt":
+            if "reset_connector" in inspect.signature(self.engine.sleep).parameters:
+                await self.engine.sleep(level=level, reset_connector=False)
+                return
+            logger.warning(
+                "external_kv_cache_invalidation='salt': this vLLM's sleep() cannot keep the KV connector's cache "
+                "(needs vllm-project/vllm#57810), so the external KV store is reset on sleep."
+            )
+        await self.engine.sleep(level=level)
+
+    async def _reset_prefix_cache(self):
+        # Under "reset", reset_connector=True also drops any attached external KV store
+        # (e.g. MooncakeStoreConnector) whose entries were computed against the previous
+        # weights; with no connector it is a no-op success. Under "salt" those entries
+        # are unreachable through their old salt, so the store, which other replicas may
+        # still be reading and writing, is left intact.
+        await self.engine.reset_prefix_cache(reset_connector=self.config.external_kv_cache_invalidation == "reset")
 
     @RLInsightLogger.trace_state_decorator(
         "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
     )
     async def clear_kv_cache(self):
         if self.node_rank == 0:
-            # reset_connector=True drops any attached external KV store
-            # (e.g. MooncakeStoreConnector) whose entries were computed
-            # against the previous model weights. With no connector it
-            # is a no-op success, so we can pass it unconditionally.
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
 
             await self.engine.reset_mm_cache()
             await self.engine.reset_encoder_cache()
@@ -985,7 +1004,7 @@ class vLLMHttpServer:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self._engine_sleep(level=self._resolve_sleep_level())
         await self.engine.wake_up(tags=["weights"])
 
     @RLInsightLogger.trace_state_decorator(
@@ -998,7 +1017,7 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
         await self.engine.wake_up(tags=["kv_cache"])
-        await self.engine.reset_prefix_cache(reset_connector=True)
+        await self._reset_prefix_cache()
 
     async def snapshot(self) -> dict[str, Any]:
         """Return live KV-cache and scheduler queue observations.
@@ -1179,6 +1198,12 @@ class vLLMHttpServer:
             deadline = time.monotonic() + _GATE_BARRIER_TIMEOUT_S
             while self._admitting > 0:
                 if time.monotonic() > deadline:
+                    if self.config.external_kv_cache_invalidation == "salt":
+                        # A straggler would run on the new weights under its old salt and write
+                        # into the kept KV store, so do not proceed with the weight update.
+                        raise RuntimeError(
+                            f"Submission gate barrier timed out with {self._admitting} admission(s) in flight"
+                        )
                     logger.warning(
                         "Submission gate barrier timed out with %d admission(s) in flight, proceeding",
                         self._admitting,
@@ -1198,14 +1223,20 @@ class vLLMHttpServer:
             #    on this path, so any attached external KV store (e.g.
             #    MooncakeStoreConnector) is invalidated along with the
             #    local prefix cache — RL-correct hard-reset at every
-            #    weight update boundary, no extra kwargs needed.
+            #    weight update boundary. pause_generation cannot keep the
+            #    connector, so "salt" pauses without clearing and then
+            #    clears only the local caches via clear_kv_cache().
+            reset_connector = self.config.external_kv_cache_invalidation == "reset"
+            clear_cache = reset_prefix_cache and reset_connector
             if _VLLM_VERSION >= version.parse("0.32.0"):
-                await self.engine.pause_generation(mode="abort", clear_cache=reset_prefix_cache)
+                await self.engine.pause_generation(mode="abort", clear_cache=clear_cache)
             else:
                 await self.engine.pause_generation(
                     wait_for_inflight_requests=False,
-                    clear_cache=reset_prefix_cache,
+                    clear_cache=clear_cache,
                 )
+            if reset_prefix_cache and not reset_connector:
+                await self.clear_kv_cache()
 
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
@@ -1566,7 +1597,7 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self._engine_sleep(level=self._resolve_sleep_level())
         await self.engine.reset_encoder_cache()
 
 
@@ -1586,12 +1617,11 @@ class vLLMReplica(RolloutReplica):
         )
         self.server_class = ray.remote(vLLMHttpServer)
 
-    def _build_server_runtime_env(self, node_rank: int, cuda_visible_devices: str) -> dict:
+    def _build_server_runtime_env(self, node_rank: int, cuda_visible_devices: str, node_ids: list[str]) -> dict:
         """Bind assigned devices and Nsight options before the server starts."""
         runtime_env = {
             "env_vars": {
-                **{var: "1" for var in get_platform().ray_noset_envvars()},
-                **get_platform().rollout_env_vars(),
+                **self._get_server_env_vars(node_ids),
                 # Nsight can initialize CUDA before the server constructor runs.
                 get_visible_devices_keyword(): cuda_visible_devices,
             }
@@ -1606,33 +1636,45 @@ class vLLMReplica(RolloutReplica):
             runtime_env["nsight"] = nsight_options
         return runtime_env
 
+    def _get_server_env_vars(self, node_ids: list[str]) -> dict[str, str]:
+        """Environment variables of this replica's server actors (one per node, ``node_ids`` in node-rank order).
+
+        Platforms whose engine needs per-replica settings (e.g. the device topology of the replica's hosts) can
+        override this instead of ``launch_servers``.
+        """
+        return {
+            **{var: "1" for var in get_platform().ray_noset_envvars()},
+            **get_platform().rollout_env_vars(),
+        }
+
     async def launch_servers(self):
         """Launch http server in each node."""
         assert len(self.workers) == self.world_size, (
             f"worker number {len(self.workers)} not equal to world size {self.world_size}"
         )
 
-        # get (node_id, CUDA_VISIBLE_DEVICES) of all workers
+        # get (node_id, accelerator ids) of all workers; a worker that holds no accelerator has no ids
         worker_infos = await asyncio.gather(
             *[
                 worker.__ray_call__.remote(
                     lambda self: (
                         ray.get_runtime_context().get_node_id(),
-                        ray.get_runtime_context().get_accelerator_ids()[get_resource_name()][0],
+                        ray.get_runtime_context().get_accelerator_ids().get(get_resource_name(), []),
                     )
                 )
                 for worker in self.workers
             ]
         )
-        worker_cuda_visible_devices = [worker_info[1] for worker_info in worker_infos]
+        worker_accelerator_ids = [worker_info[1] for worker_info in worker_infos]
         worker_node_ids = [worker_info[0] for worker_info in worker_infos]
 
         # create server actor in each node with node affinity and cuda visible devices
         nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
+        node_ids = worker_node_ids[::gpus_per_replica_node]
         for node_rank in range(nnodes):
             workers = self.workers[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
-            node_cuda_visible_devices = ",".join(
-                worker_cuda_visible_devices[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
+            node_cuda_visible_devices = get_node_visible_devices(
+                worker_accelerator_ids[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             )
             node_id = worker_node_ids[node_rank * gpus_per_replica_node]
             prefix = self._get_server_name_prefix()
@@ -1647,7 +1689,7 @@ class vLLMReplica(RolloutReplica):
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env=self._build_server_runtime_env(node_rank, node_cuda_visible_devices),
+                runtime_env=self._build_server_runtime_env(node_rank, node_cuda_visible_devices, node_ids),
                 name=name,
                 max_concurrency=self.config.ray_actor_max_concurrency,
             ).remote(

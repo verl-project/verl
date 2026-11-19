@@ -18,6 +18,7 @@
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
 
 from .config import NsightToolConfig, ProfilerConfig
@@ -95,7 +96,10 @@ def create_gpu_metrics_profiler(config) -> _GpuMetricsProfilerManager | None:
 
     actor = _GpuMetricsProfilerActor.options(
         num_cpus=0,
-        runtime_env={"nsight": nsight_options},
+        runtime_env={
+            "nsight": nsight_options,
+            "env_vars": {name: "1" for name in get_platform().ray_noset_envvars()},
+        },
         scheduling_strategy=NodeAffinitySchedulingStrategy(
             node_id=ray.get_runtime_context().get_node_id(),
             soft=False,

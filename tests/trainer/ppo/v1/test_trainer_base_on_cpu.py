@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -96,6 +97,85 @@ def test_custom_sampler_skips_builtin_filter_groups_validation():
     assert "gen_batch_size" not in sampler.kwargs
     assert "max_inflight_gen_batches" not in sampler.kwargs
     assert "sync_refill_failed_groups" not in sampler.kwargs
+
+
+@pytest.mark.parametrize("trainer_mode", ["sync", "colocate_async", "separate_async"])
+def test_builtin_sampler_poll_interval_defaults_to_two_seconds(trainer_mode):
+    sampler = _trainer_with_filter_groups({"enable": False}, trainer_mode=trainer_mode)._build_replay_buffer()
+
+    assert sampler.poll_interval == 2.0
+
+
+@pytest.mark.parametrize("trainer_mode", ["sync", "colocate_async", "separate_async"])
+def test_builtin_sampler_uses_configured_poll_interval(trainer_mode):
+    trainer = _trainer_with_filter_groups({"enable": False}, trainer_mode=trainer_mode)
+    trainer.config.trainer.v1.sampler.poll_interval = 0.1
+
+    assert trainer._build_replay_buffer().poll_interval == 0.1
+
+
+@pytest.mark.parametrize("trainer_mode", ["sync", "separate_async"])
+@pytest.mark.parametrize(
+    "poll_interval", [0, 0.0, -1.0, -math.inf, math.inf, math.nan, "inf", "nan"], ids=lambda v: f"{v!r}"
+)
+def test_builtin_sampler_rejects_invalid_poll_interval(poll_interval, trainer_mode):
+    """0, negative, infinite and nan intervals fail before the replay buffer is constructed."""
+    trainer = _trainer_with_filter_groups({"enable": False}, trainer_mode=trainer_mode)
+    trainer.config.trainer.v1.sampler.poll_interval = poll_interval
+    buffer_cls = "ReplayBuffer" if trainer_mode == "sync" else "ReplayBufferAsync"
+
+    with (
+        patch(f"verl.trainer.ppo.v1.trainer_base.{buffer_cls}") as constructor,
+        pytest.raises(ValueError, match=r"poll_interval must be a finite number of seconds > 0"),
+    ):
+        trainer._build_replay_buffer()
+
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("poll_interval", [1e-3, 0.5, 30, "0.25"], ids=lambda v: f"{v!r}")
+def test_builtin_sampler_accepts_finite_positive_poll_interval(poll_interval):
+    trainer = _trainer_with_filter_groups({"enable": False}, trainer_mode="separate_async")
+    trainer.config.trainer.v1.sampler.poll_interval = poll_interval
+
+    sampler = trainer._build_replay_buffer()
+
+    assert type(sampler) is ReplayBufferAsync
+    assert sampler.poll_interval == float(poll_interval)
+    assert isinstance(sampler.poll_interval, float)
+
+
+def test_custom_sampler_does_not_receive_poll_interval():
+    trainer = _trainer_with_filter_groups({"enable": False})
+    trainer.config.trainer.v1.sampler.custom_sampler = {"path": "custom.py", "name": "CustomSampler"}
+    trainer.config.trainer.v1.sampler.poll_interval = 0.1
+
+    with patch("verl.trainer.ppo.v1.trainer_base.load_extern_type", return_value=_CustomSampler):
+        sampler = trainer._build_replay_buffer()
+
+    assert "poll_interval" not in sampler.kwargs
+
+
+def test_configured_poll_interval_matches_a_custom_subclass_that_sets_it():
+    """poll_interval=0.1 builds the same async replay buffer as a ReplayBufferAsync subclass passing 0.1."""
+
+    class _FastPollReplayBufferAsync(ReplayBufferAsync):
+        def __init__(self, *args, poll_interval: float = 0.1, **kwargs):
+            super().__init__(*args, poll_interval=poll_interval, **kwargs)
+
+    configured = _trainer_with_filter_groups({"enable": False}, trainer_mode="separate_async")
+    configured.config.trainer.v1.sampler.poll_interval = 0.1
+    custom = _trainer_with_filter_groups({"enable": False}, trainer_mode="separate_async")
+    custom.config.trainer.v1.sampler.custom_sampler = {"path": "custom.py", "name": "FastPoll"}
+
+    built_in = configured._build_replay_buffer()
+    with patch("verl.trainer.ppo.v1.trainer_base.load_extern_type", return_value=_FastPollReplayBufferAsync):
+        subclass = custom._build_replay_buffer()
+
+    assert type(built_in) is ReplayBufferAsync
+    assert built_in.poll_interval == subclass.poll_interval == 0.1
+    state = {k: v for k, v in vars(built_in).items() if k != "refill_fn"}
+    assert state == {k: v for k, v in vars(subclass).items() if k != "refill_fn"}
 
 
 def test_builtin_filter_groups_uses_default_inflight_limit():

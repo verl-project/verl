@@ -61,8 +61,8 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
-from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
+from verl.trainer.ppo.trainer_utils import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.utils import (
     Role,
     create_rl_dataset,
@@ -174,9 +174,16 @@ class PPOTrainer(ABC):
         if not has_custom_sampler:
             filter_groups_metric = self._resolve_filter_groups_metric()
             sync_refill_failed_groups = bool(sampler_config.get("sync_refill_failed_groups", False))
+            poll_interval = float(sampler_config.get("poll_interval", 2.0))
+            # Fail here rather than in the poll loop, where time.sleep() raises on inf (OverflowError) and nan.
+            if not (math.isfinite(poll_interval) and poll_interval > 0):
+                raise ValueError(
+                    f"trainer.v1.sampler.poll_interval must be a finite number of seconds > 0, got {poll_interval}"
+                )
             replay_buffer_kwargs.update(
                 filter_groups_metric=filter_groups_metric,
                 sync_refill_failed_groups=sync_refill_failed_groups,
+                poll_interval=poll_interval,
             )
             if sampler_cls is ReplayBuffer:
                 filter_groups = self.config.algorithm.get("filter_groups", None)
@@ -1739,11 +1746,11 @@ class PPOTrainer(ABC):
         # get actor dp size
         role, worker_group = "actor", self.actor_rollout_wg
         if role not in worker_group._dispatch_info:
-            dp_rank_mapping = worker_group._query_dispatch_info(role)
-            worker_group._dispatch_info[role] = dp_rank_mapping
+            dispatch_infos = worker_group._query_dispatch_info(role)
+            worker_group._dispatch_info[role] = dispatch_infos
         else:
-            dp_rank_mapping = worker_group._dispatch_info[role]
-        dp_size = max(dp_rank_mapping) + 1
+            dispatch_infos = worker_group._dispatch_info[role]
+        dp_size = max(info.dp_rank for info in dispatch_infos) + 1
 
         # Upsampling the batch with padding sequences
         batch_multiple = self._get_required_batch_multiple(dp_size)
@@ -2010,9 +2017,10 @@ class PPOTrainer(ABC):
             "advantages",
             "returns",
             "rm_scores",
-            "token_level_rewards",
             "num_turns",
         ]
+        if self.config.algorithm.use_kl_in_reward:
+            fields.append("token_level_rewards")
         if self.use_critic:
             fields.append("values")
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
@@ -2098,7 +2106,7 @@ class PPOTrainer(ABC):
         )
 
         # 4. per-request speculative-decoding aggregation (same metrics async PPO logs;
-        # see compute_spec_decode_metrics in verl/trainer/ppo/ray_trainer.py).
+        # see compute_spec_decode_metrics in verl/trainer/ppo/trainer_utils.py).
         metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
 
         # 5. off-policy staleness metrics

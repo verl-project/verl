@@ -98,6 +98,8 @@ class RewardConfig(BaseConfig):
     # reward manager args
     num_workers: int = 8
     profiler: Optional[ProfilerConfig] = None
+    preset: Optional[str] = None
+    custom_reward_function: dict[str, object] = field(default_factory=lambda: {"path": None, "name": "compute_score"})
     reward_manager: RewardManagerConfig = field(default_factory=RewardManagerConfig)
 
     # reward model args
@@ -105,3 +107,9 @@ class RewardConfig(BaseConfig):
 
     # sandbox fusion args
     sandbox_fusion: SandboxFusionConfig = field(default_factory=SandboxFusionConfig)
+
+    def __post_init__(self):
+        from verl.utils.reward_score import validate_reward_preset
+
+        if self.preset is not None:
+            validate_reward_preset(self.preset)
