@@ -107,6 +107,7 @@ jobs:
           uv pip install mlflow pytest-asyncio "nvidia-modelopt==0.44.0"
           # Match GPU CI's PEFT for GPT-OSS target_parameters LoRA coverage.
           uv pip install "peft==0.19.1"
+          pip uninstall -y nvidia-resiliency-ext
       - name: Check final pip list
         run: |
           uv pip list
@@ -155,6 +156,10 @@ jobs:
       - name: Running NPU checkpoint_engine unit tests
         run: |
           pytest -s -x tests/checkpoint_engine/test_correctness_on_npu.py
+      - name: Test checkpoint publishing and synchronization
+        env:
+          VERL_TEST_DEVICE: npu
+        run: pytest -s -x tests/checkpoint_engine/test_d2h_checkpoint_engine.py
       - name: Running CPU checkpoint_engine unit tests
         run: |
           pytest -s -x \
