@@ -60,6 +60,7 @@ from verl.workers.config import (
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
+from verl.workers.utils.padding import whiten_advantages
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -293,6 +294,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         epochs = tu.pop(data, key="epochs", default=1)
         seed = tu.pop(data, key="seed", default=42)
         dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
+        should_whiten_advantages = tu.pop(data, key="whiten_advantages", default=False)
 
         assert mini_batch_size is not None or num_mini_batch is not None
 
@@ -324,6 +326,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
                 maybe_fix_3d_position_ids(mini_batch_td)
+                if should_whiten_advantages:
+                    dp_group = (
+                        self.engine.get_data_parallel_group() if self.engine.get_data_parallel_size() > 1 else None
+                    )
+                    whiten_advantages(mini_batch_td, dp_group=dp_group)
                 # add global token num
                 if "input_ids" in mini_batch_td:
                     global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
