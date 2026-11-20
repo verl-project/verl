@@ -22,6 +22,7 @@ VALID_CONFIG_TYPE = {
     "llama",
     "qwen2",
     "qwen3",
+    "qwen2_moe",
     "qwen3_moe",
     "qwen3_5",
     "qwen3_5_moe",
@@ -98,6 +99,28 @@ CONFIG = {
         # 6*(151936*4096*2+36*(4096*(128*32+128*8*2+128*32)+4096*12288*3))*(4096+4096+4096) +
         # 6*(4096*4096+4096*4096+4096*4096)*36*128*32
         "expected_flops_tuple": (180997438046208 / 1e12, 648394032807936 / 1e12),
+    },
+    "qwen2_moe": {
+        "config": {  # Qwen/Qwen1.5-MoE-A2.7B
+            "model_type": "qwen2_moe",
+            "hidden_size": 2048,
+            "vocab_size": 151936,
+            "num_hidden_layers": 24,
+            "num_key_value_heads": 16,
+            "num_attention_heads": 16,
+            "moe_intermediate_size": 1408,
+            "num_experts_per_tok": 4,
+            "num_experts": 60,
+            "shared_expert_intermediate_size": 5632,
+        },
+        "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
+        # routed experts + router as in qwen3_moe, plus the shared expert every token runs
+        # (gate/up/down: hidden*shared_inter*3) and its sigmoid gate (hidden*1):
+        # 6*(151936*2048*2+24*(2048*(128*16+128*16*2+128*16)+2048*1408*4*3+2048*60+2048*5632*3+2048))*(512+1024+2048)
+        # + 6*(512*512+1024*1024+2048*2048)*24*128*16
+        # 6*(151936*2048*2+24*(2048*(128*16+128*16*2+128*16)+2048*1408*4*3+2048*60+2048*5632*3+2048))*(4096+4096+4096)
+        # + 6*(4096*4096+4096*4096+4096*4096)*24*128*16
+        "expected_flops_tuple": (59446155804672 / 1e12, 213092520689664 / 1e12),
     },
     "qwen3_moe": {
         "config": {  # Qwen/Qwen3-30B-A3B-Base
@@ -531,6 +554,7 @@ CONFIG = {
         "llama",
         "qwen2",
         "qwen3",
+        "qwen2_moe",
         "qwen3_moe",
         "deepseek_v3",
         "mistral",
