@@ -21,12 +21,14 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
+from verl import DataProto
 from verl.trainer.ppo.metric_utils import (
     bootstrap_metric,
     calc_maj_val,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    compute_variance_proxy_metrics,
     process_validation_metrics,
 )
 from verl.utils.metric import (
@@ -605,6 +607,22 @@ class TestProcessValidationMetrics(unittest.TestCase):
         self.assertAlmostEqual(result["acc_source"]["acc_success_only"]["mean@1"], 1.0)
         self.assertNotIn("acc", result["reward_source"])
         self.assertNotIn("acc_success_only", result["reward_source"])
+
+
+class TestComputeVarianceProxyMetrics(unittest.TestCase):
+    """Tests for the compute_variance_proxy_metrics function."""
+
+    def test_variance_proxy_metrics_nonnegative_on_confident_tokens(self):
+        batch = DataProto.from_dict(
+            tensors={
+                "old_log_probs": torch.zeros((2, 1), dtype=torch.float32),
+                "sum_pi_squared": torch.full((2, 1), float.fromhex("0x1.ffff00p-1"), dtype=torch.float32),
+                "advantages": torch.ones((2, 1), dtype=torch.float32),
+                "response_mask": torch.ones((2, 1), dtype=torch.float32),
+            }
+        )
+        metrics = compute_variance_proxy_metrics(batch)
+        self.assertGreaterEqual(metrics["variance_proxy/expected_w"], 0.0)
 
 
 if __name__ == "__main__":
