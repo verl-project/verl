@@ -99,6 +99,10 @@ class CheckpointHandler:
         # Get max checkpoints to keep
         max_ckpt_to_keep = self.max_ckpt_to_keep
 
+        lora_meta_path = os.path.join(local_global_step_folder, "lora_train_meta.json")
+        if self.rank == 0 and self.lora_train_meta is not None and os.path.isfile(lora_meta_path):
+            os.remove(lora_meta_path)
+
         # Use checkpoint manager to save
         self.engine.save_checkpoint(
             local_path=local_global_step_folder, global_step=step, max_ckpt_to_keep=max_ckpt_to_keep
@@ -108,9 +112,18 @@ class CheckpointHandler:
         # So it's identical in each dp rank.
         if self.rank == 0 and self.lora_train_meta is not None:
             local_mkdir_safe(local_global_step_folder)
-            lora_meta_path = os.path.join(local_global_step_folder, "lora_train_meta.json")
+            merged_lora_meta = dict(self.lora_train_meta)
+            # Any lora_train_meta.json present now was written by self.engine.save_checkpoint during this save
+            if os.path.isfile(lora_meta_path):
+                try:
+                    with open(lora_meta_path, encoding="utf-8") as f:
+                        existing_meta = json.load(f)
+                    if isinstance(existing_meta, dict):
+                        merged_lora_meta = {**self.lora_train_meta, **existing_meta}
+                except Exception:
+                    pass
             with open(lora_meta_path, "w", encoding="utf-8") as f:
-                json.dump(self.lora_train_meta, f, ensure_ascii=False, indent=4)
+                json.dump(merged_lora_meta, f, ensure_ascii=False, indent=4)
             print(f"Saved LoRA rank/alpha metadata to: {lora_meta_path}")
 
         if self.is_mp_src_rank_with_outputs:
