@@ -1507,6 +1507,9 @@ class vLLMHttpServer:
                     f"but got {weight_transfer_backend!r}"
                 )
             engine_kwargs["weight_transfer_config"] = {"backend": VERL_DELTA_WEIGHT_TRANSFER_BACKEND}
+        if not is_torch_npu_available(check_device=False):
+            # refits update the weights in place (direct reload), never layerwise
+            os.environ.setdefault("VLLM_RELOAD_MODE", "direct")
 
     def _get_override_generation_config(self) -> dict:
         """Return the override_generation_config dict."""

@@ -13,52 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Entry point for refitting a quantized vLLM engine during RL rollout.
+"""Quantized vLLM rollout support: startup patches, backend defaults and refit helpers.
 
-Everything the rollout worker calls lives here: startup patching
-(``apply_vllm_quant_patches``), the load itself (``load_quanted_weights``), and
-the prepare/finalize pair that brackets a bucketed transfer
-(``prepare_quanted_weights_for_loading`` / ``process_quanted_weights_after_loading``).
-
-The layout surgery each quantization scheme needs is delegated to a sibling
-module: ``vllm_fp8_utils`` for ``Fp8LinearMethod`` / ``Fp8MoEMethod``, and
-``vllm_fp4_utils`` for ``Mxfp4MoEMethod``. Each exposes a stage/process pair
-that returns an empty result when the model has no layer it owns, so the
-dispatch below stays unconditional.
+vLLM's reload (``start_reload`` / ``finish_reload``) restores the checkpoint
+layout of every quantization scheme for a refit; this module only keeps the
+quantization features verl adds on top of vLLM.
 """
 
-import importlib.metadata
 import logging
 import os
 from collections.abc import Mapping
-from contextlib import nullcontext
-from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any
 from unittest.mock import patch
 
 import torch
-from packaging import version
 
 from verl.utils.vllm.vllm_fp4_utils import (
     install_mxfp4_mxfp8_compressed_tensors_patch,
     is_deepseek_v4_model,
-    process_mxfp4_moe_weights_after_loading,
-    process_nvfp4_moe_weights_after_loading,
-    stage_mxfp4_moe_params_for_loading,
-    stage_nvfp4_moe_params_for_loading,
-)
-from verl.utils.vllm.vllm_fp8_utils import (
-    build_fp8_method_patchers,
-    process_fp8_weights_after_loading,
-    stage_fp8_params_for_loading,
 )
 from verl.utils.vllm.vllm_nvfp4_per_token_utils import install_nvfp4_per_token_compressed_tensors_patch
-from verl.utils.vllm.vllm_unquant_utils import (
-    fold_unquantized_moe_params,
-    stage_unquantized_moe_params,
-    unquantized_moe_modules,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -119,17 +94,7 @@ def set_default_vllm_quantization_backends(
         os.environ["VLLM_USE_DEEP_GEMM_E8M0"] = "0"
 
 
-def _get_vllm_version():
-    return version.parse(importlib.metadata.version("vllm"))
-
-
-# Ref: https://github.com/NVIDIA-NeMo/RL/commit/bc24887c72a6e1b2699a228bc87c588546dfe6b7
-@dataclass()
-class FP8State:
-    vllm_patches: list = field(default_factory=lambda: [])
-
-
-fp8_state: FP8State = FP8State()
+_vllm_patches: list = []
 
 
 def is_quantized_model(vllm_config):
@@ -185,8 +150,7 @@ def refresh_rocm_attention_weight_caches(model):
     a fresh allocation would leave it reading freed memory. Rebuild into the
     original storage instead.
 
-    Must run after the live FP8 parameters have been reinstated, otherwise the
-    dequantization reads the staging buffers.
+    Must run after ``finish_reload``, which re-applies the inference layout.
 
     Only ROCm DeepSeek-V4 builds this cache, hence the guard below.
     """
@@ -208,44 +172,6 @@ def refresh_rocm_attention_weight_caches(model):
             if rebuilt.data_ptr() != live.data_ptr():
                 live.copy_(rebuilt)
             module._dsv4_wo_a_bf16 = live
-
-
-def prepare_quanted_weights_for_loading(model):
-    """Restore quantized params to the layout their ``weight_loader`` expects.
-
-    Must run once before the first bucket, and pairs with
-    ``process_quanted_weights_after_loading``, which re-applies the inference
-    layout once the last bucket has landed. Each backend selects its own work
-    by inspecting the model and returns an empty result when it finds nothing,
-    so this is safe to call for any quantization scheme. The returned value is
-    opaque reload state for the paired call.
-    """
-    reload_state: dict[str, Any] = {
-        "fp8_layers": stage_fp8_params_for_loading(model),
-        "mxfp4_moe_modules": stage_mxfp4_moe_params_for_loading(model),
-        "nvfp4_moe_modules": stage_nvfp4_moe_params_for_loading(model),
-        # Routed experts a quantized model keeps in BF16 (e.g. its first and last layers).
-        "unquantized_moe_modules": unquantized_moe_modules(model),
-        "staged_unquantized_moe_modules": stage_unquantized_moe_params(model),
-    }
-    return reload_state
-
-
-def process_quanted_weights_after_loading(model, reload_state):
-    """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
-    reload_state = reload_state or {}
-    process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
-    process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
-    process_nvfp4_moe_weights_after_loading(reload_state.get("nvfp4_moe_modules") or [])
-    # Every BF16 expert layer, staged or not: a kernel prep that keeps the shape can still
-    # reorder the weights (FlashInfer CUTLASS swaps gate and up).
-    with fold_unquantized_moe_params(reload_state.get("staged_unquantized_moe_modules") or []):
-        for module in reload_state.get("unquantized_moe_modules") or []:
-            module.quant_method.process_weights_after_loading(module)
-    reset_uncalibrated_kv_cache_scales(model)
-    # Last: the rebuild reads ``wo_a``, which is only back in its inference
-    # layout once the staged FP8 params above have been reinstated.
-    refresh_rocm_attention_weight_caches(model)
 
 
 def reset_uncalibrated_kv_cache_scales(model):
@@ -322,73 +248,14 @@ def _build_compressed_tensors_kv_cache_scale_patcher():
     )
 
 
-def load_quanted_weights(weights, model_runner, is_drafter=False):
-    if is_drafter:
-        model = None
-        for attr in ("drafter", "speculator"):
-            owner = getattr(model_runner, attr, None)
-            model = getattr(owner, "model", None)
-            if model is not None:
-                break
-        assert model is not None, (
-            "load_quanted_weights(is_drafter=True) requires model_runner.drafter.model or "
-            "model_runner.speculator.model "
-            "to be present and non-None for FP8 weight loading."
-        )
-    else:
-        model = model_runner.model
-    weights = list(weights)
-
-    # Monkey patch the param class to their subclass, as certain models
-    # will check the param type to call the proper weightloader
-    for name, param in model.named_parameters():
-        # Stable handle on the qualified name so the loaders below can name the
-        # offending parameter when a shape check fails.
-        param._verl_qualname = name
-        if hasattr(param, "subclass_type"):
-            param.orig_type = param.__class__
-            param.__class__ = param.subclass_type
-    # Finally load the weights into vllm.
-    # MTP completeness check assumes a single full-checkpoint load; in RL refit
-    # weights arrive bucketed, so disable it (like vLLM's own NCCL/IPC engines).
-    # ``nullcontext`` covers older vLLM without the guard.
-    try:
-        from vllm.model_executor.model_loader.mtp_validation import disable_mtp_completeness_check
-    except ImportError:
-        disable_mtp_completeness_check = nullcontext
-    try:
-        with disable_mtp_completeness_check():
-            loaded_params = model.load_weights(weights)
-    finally:
-        # Undo the type change above to the original type
-        for name, param in model.named_parameters():
-            if hasattr(param, "orig_type"):
-                param.__class__ = param.orig_type
-                del param.orig_type
-
-    return loaded_params
-
-
 def apply_vllm_quant_patches():
-    """Install the vLLM patches the refit path depends on. Must run pre-engine.
-
-    These have to be in place before the engine builds, because recording each
-    layer's checkpoint layout happens inside the patched hook during the
-    initial load. The MXFP4 refit path derives the checkpoint layout from the
-    quant method; its startup patch only makes compressed-tensors honor MXFP8
-    activations.
-    """
+    """Install verl's quantization patches. Must run before the engine builds."""
     install_mxfp4_mxfp8_compressed_tensors_patch()
     install_nvfp4_per_token_compressed_tensors_patch()
-    if fp8_state.vllm_patches:
+    if _vllm_patches:
         logger.debug("vLLM quantization patches already applied")
         return
-
-    patchers = build_fp8_method_patchers(_get_vllm_version())
     kv_cache_scale_patcher = _build_compressed_tensors_kv_cache_scale_patcher()
     if kv_cache_scale_patcher is not None:
-        patchers.append(kv_cache_scale_patcher)
-
-    for patcher in patchers:
-        patcher.start()
-        fp8_state.vllm_patches.append(patcher)
+        kv_cache_scale_patcher.start()
+        _vllm_patches.append(kv_cache_scale_patcher)
