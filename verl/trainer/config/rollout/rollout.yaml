@@ -528,13 +528,16 @@ disaggregation:
   # Decode TP override; null = same as tensor_model_parallel_size.
   decode_tensor_model_parallel_size: null
 
-  # vLLM role-specific memory fractions; null inherits rollout.gpu_memory_utilization.
+  # vLLM prefill memory fraction; null inherits common rollout settings.
   prefill_gpu_memory_utilization: null
+
+  # vLLM decode memory fraction; null inherits common rollout settings.
   decode_gpu_memory_utilization: null
 
-  # vLLM role-specific engine arguments, overlaid on engine_kwargs.vllm.
-  # Empty mappings inherit the same engine settings for P and D.
+  # vLLM prefill engine arguments, overlaid on engine_kwargs.vllm; empty inherits common settings.
   prefill_engine_kwargs: {}
+
+  # vLLM decode engine arguments, overlaid on engine_kwargs.vllm; empty inherits common settings.
   decode_engine_kwargs: {}
 
   # KV cache transport: nixl | mooncake | ascend | mori | fake.
