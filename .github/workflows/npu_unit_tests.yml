@@ -74,6 +74,8 @@ jobs:
       options: >-
         --shm-size 16g
     env:
+      HCCL_HOST_SOCKET_PORT_RANGE: "auto"
+      HCCL_NPU_SOCKET_PORT_RANGE: "auto"
       # Keep fault handling enabled during interpreter shutdown after pytest exits.
       PYTHONFAULTHANDLER: "1"
       HF_ENDPOINT: "https://hf-mirror.com"
