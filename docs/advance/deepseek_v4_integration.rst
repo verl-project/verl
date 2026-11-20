@@ -50,8 +50,8 @@ bucket and finalize it only after the last bucket.
 
 vLLM's reload does both: ``start_reload`` before the first bucket restores the
 checkpoint layout the loaders expect, and ``finish_reload`` after the last
-bucket re-applies the kernel layout in place (direct reload by default with
-runtime weight updates). The bucket-level orchestration is in
+bucket re-applies the kernel layout in place (``VLLM_RELOAD_MODE=direct``,
+which the rollout sets). The bucket-level orchestration is in
 ``verl/workers/rollout/vllm_rollout/utils.py``.
 
 Incorrect synchronization can fail immediately with an expert shape mismatch

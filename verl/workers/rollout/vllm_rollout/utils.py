@@ -284,7 +284,7 @@ class vLLMColocateWorkerExtension:
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
         elif not is_npu_available:
-            # vLLM restores the checkpoint layout the loaders expect (direct or layerwise reload)
+            # vLLM views the live tensors back to the checkpoint layout the loaders expect (direct reload)
             from vllm.model_executor.model_loader.reload import start_reload
 
             for model in self._iter_all_models():
