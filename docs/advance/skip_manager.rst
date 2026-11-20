@@ -1,7 +1,7 @@
 SkipManager: Cache and Replay Rollouts
 =====================================
 
-Last updated: 11/10/2026.
+Last updated: 2026-11-15
 
 ``skip.rollout_tq`` caches sampled training trajectories from TransferQueue and replays
 them in place of regular training-batch generation. It is integrated into all V1 trainer modes: ``sync``,
@@ -101,10 +101,16 @@ Replay behavior
 ---------------
 
 Replay loads and merges the inner batches, groups trajectories by their original
-prompt UID, and maps those groups onto the fresh prompt UIDs. If fewer groups or
-responses are cached than requested, they are reused cyclically; excess groups
-are omitted. Trajectory step tags are updated to the current training step, and
-prompt keys are marked ``finished`` so the replay buffer can sample them.
+prompt UID, and maps those groups onto the fresh prompt UIDs one-to-one: each new
+prompt gets at most one cached group, and every cached trajectory of that group is
+replayed with the session id and output index it was saved with (a session can emit
+several trajectories, so the replayed row count follows the cache, not ``rollout.n``).
+The row ``uid`` column is rewritten to the new prompt uid so both GRPO grouping paths
+agree. If fewer groups are cached than requested, the cache covers a prefix of the
+batch: ``maybe_load_and_inject`` returns the number of covered prompts, the caller
+submits the uncovered trailing prompts for real rollout, and only the replayed prompt
+keys are marked ``finished``. Excess cached groups are omitted. Trajectory step tags
+are updated to the current training step.
 
 Implementation
 --------------
