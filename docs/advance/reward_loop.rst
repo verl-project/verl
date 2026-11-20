@@ -5,7 +5,7 @@ Reward Loop
 
 Author: `Yuyang Ding <https://yyding1.github.io>`_
 
-Last updated: 2/10/2026.
+Last updated: 10/26/2026.
 
 Introduction
 ------------
@@ -272,6 +272,12 @@ We support multiple execution modes for reward models during:
 The standalone mode can enable the streaming manner stated above.
 
 By default, the system runs in colocate mode. Users can enable standalone mode by setting ``reward.reward_model.enable_resource_pool=True`` and allocating the corresponding resources via ``reward.reward_model.nnodes`` and ``reward.reward_model.n_gpus_per_node``.
+
+In colocate mode, scalar outcome scores are placed on the last generated, non-padding
+response token when ``response_mask`` is available. Masked observations and chat-template
+suffixes remain visible to the reward scorer but do not receive the outcome score.
+If the generation mask is absent or a row contains no generated tokens, the score
+retains its placement on the last valid response token.
 
 .. image:: https://github.com/yyDing1/verl-materials/blob/main/reward_loop.svg?raw=true
 
