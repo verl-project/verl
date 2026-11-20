@@ -1134,32 +1134,37 @@ def fsdp1_sharded_load_from_cpu(model: torch.nn.Module, cpu_sharded_state: dict[
     dist.barrier()
 
 
+def _reshard_fsdp2_for_snapshot(model: torch.nn.Module) -> None:
+    """Expose local shards after inference with ``reshard_after_forward=False``."""
+    for module in model.modules():
+        if fsdp_version(module) == 2:
+            module.reshard()
+
+
 def fsdp2_sharded_save_to_cpu(
     model: torch.nn.Module,
-) -> tuple[dict[str, tuple[torch.Tensor, DTensorSpec]], DTensorSpec]:
+) -> tuple[dict[str, tuple[torch.Tensor, Optional[DTensorSpec]]], DTensorSpec]:
     """
-    Sharded Save: Each process only saves the local DTensor shard from its own GPU to CPU memory.
+    Reshard the model and copy each process's local DTensor shards to CPU memory.
 
     Args:
-        model: FSDP2-wrapped model whose parameters are of DTensor type.
+        model: FSDP2-wrapped model, including modules retaining full parameters after inference.
 
     Returns:
         cpu_sharded_state: Dictionary of CPU shards for the current process.
-                          Key = parameter name, Value = (CPU shard tensor, original DTensorSpec)
-        global_spec: DTensorSpec of the first parameter (used to verify global rules during loading)
+                          Each parameter maps to its CPU tensor and its DTensorSpec, or None for a plain tensor.
+        global_spec: Reference spec of the first DTensor. Other parameters may have different layouts.
     """
+    _reshard_fsdp2_for_snapshot(model)
     cpu_sharded_state = {}
-    global_spec = None  # Record global sharding rules (all parameters follow the same spec)
+    global_spec = None
 
     for param_name, param in model.named_parameters():
-        # Only process sharded parameters of DTensor type (core parameters of FSDP2)
         if not isinstance(param, DTensor):
-            # Save non-sharded parameters (e.g., running_mean of BatchNorm) as local data
             cpu_tensor = param.detach().to("cpu", copy=True)
             cpu_sharded_state[param_name] = (cpu_tensor, None)
             continue
 
-        # Record global sharding rules (take spec of the first DTensor to ensure consistency)
         if global_spec is None:
             global_spec = param._spec
             assert hasattr(global_spec, "device_mesh"), "DTensorSpec must contain 'device_mesh' attribute"
@@ -1182,53 +1187,46 @@ def fsdp2_sharded_load_from_cpu(
     target_spec: DTensorSpec,
 ) -> None:
     """
-    Sharded Load: Each process only loads the CPU shard it is responsible for to the GPU,
-                  keeping sharding rules unchanged.
+    Reshard the model and restore each process's CPU shards, keeping sharding rules unchanged.
 
     Args:
         model: FSDP2 model to be restored (must have the same structure as when saved)
         cpu_sharded_state: Shard data read from CPU memory by the current process
                           (from fsdp2_sharded_save_to_cpu)
-        target_spec: Global DTensorSpec from saving (used to verify sharding rule consistency)
+        target_spec: Reference spec returned by :func:`fsdp2_sharded_save_to_cpu`.
     """
-    # Verify device_mesh consistency (core: ensure loaded shards map to original GPUs)
-    current_device_mesh = None
-    for param in model.parameters():
-        if isinstance(param, DTensor):
-            current_device_mesh = param._spec.device_mesh
-            break
-    assert current_device_mesh is not None, "DTensor parameters not initialized in the model to be loaded"
-    assert current_device_mesh == target_spec.device_mesh, (
-        f"device_mesh mismatch during loading! Original: {target_spec.device_mesh}, Current: {current_device_mesh}"
-    )
-
+    _reshard_fsdp2_for_snapshot(model)
+    copies = []
     for param_name, param in model.named_parameters():
-        # Skip parameters not in the saved state (e.g., newly added parameters)
         if param_name not in cpu_sharded_state:
             continue
 
-        # Extract CPU shard data and original Spec
         local_cpu_tensor, saved_spec = cpu_sharded_state[param_name]
-
-        # Handle different parameter types: DTensor sharded parameters vs. regular parameters
         if isinstance(param, DTensor):
-            # 1. Verify sharding rule consistency (placements must match original Spec)
             assert saved_spec is not None, f"DTensorSpec missing in saved state for parameter {param_name}"
-            assert saved_spec.placements == target_spec.placements, (
-                f"Sharding strategy mismatch for parameter {param_name} (conflicts with global rules)!"
+            assert saved_spec.device_mesh == param.device_mesh, (
+                f"device_mesh mismatch for parameter {param_name}: "
+                f"saved {saved_spec.device_mesh}, live {param.device_mesh}"
             )
-
-            # 2. Move CPU shard data to the current GPU (device of param._local_tensor)
-            target_device = param._local_tensor.device
-            local_gpu_tensor = local_cpu_tensor.to(target_device)
-
-            # 3. Restore to DTensor's local shard (directly copy to _local_tensor, keep spec unchanged)
-            param._local_tensor.copy_(local_gpu_tensor)
-
+            assert saved_spec.placements == param.placements, (
+                f"Sharding strategy mismatch for parameter {param_name}: saved {saved_spec.placements}, "
+                f"live {param.placements}"
+            )
+            target = param._local_tensor
         else:
-            # Regular parameters: load directly to original device
-            target_device = param.device
-            param.data.copy_(local_cpu_tensor.to(target_device))
+            assert saved_spec is None, f"Expected a DTensor for saved shard {param_name}"
+            target = param.data
+        copies.append((target, local_cpu_tensor))
+
+    reference_layout = (target_spec.device_mesh, target_spec.placements)
+    assert any(
+        isinstance(param, DTensor) and (param.device_mesh, param.placements) == reference_layout
+        for param in model.parameters()
+    ), "No DTensor matches the snapshot's reference mesh and placements"
+
+    # A layout mismatch in a later parameter must leave earlier weights intact.
+    for target, local_cpu_tensor in copies:
+        target.copy_(local_cpu_tensor.to(target.device))
 
     # Process synchronization: ensure all processes complete loading before proceeding
     dist.barrier()
