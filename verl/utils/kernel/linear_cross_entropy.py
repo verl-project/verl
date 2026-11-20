@@ -176,11 +176,11 @@ class LinearCrossEntropy(torch.autograd.Function):
             if len(labels.shape) != 1:
                 labels = labels.view(-1)
 
-            logprobs, entropy, _maximum, _accumulate, _entropy_b = kernels.efficient_entropy_forward(
+            logprobs, entropy, _maximum, _accumulate, _entropy_b, _one_minus_p = kernels.efficient_entropy_forward(
                 hidden, weight, labels, REDUCTION, temperature, dist_process_group
             )
 
-            ctx.save_for_backward(hidden, weight, labels, _maximum, _accumulate, _entropy_b)
+            ctx.save_for_backward(hidden, weight, labels, _maximum, _accumulate, _entropy_b, _one_minus_p)
             ctx.original_hidden_shape = original_hidden_shape
             ctx.REDUCTION = REDUCTION
             ctx.dist_process_group = dist_process_group
@@ -193,7 +193,7 @@ class LinearCrossEntropy(torch.autograd.Function):
         from . import kernels
 
         with get_platform().nvtx_range("LinearCrossEntropy-backward"):
-            (hidden, weight, labels, _maximum, _accumulate, _entropy_b) = ctx.saved_tensors
+            (hidden, weight, labels, _maximum, _accumulate, _entropy_b, _one_minus_p) = ctx.saved_tensors
             REDUCTION = ctx.REDUCTION
             dist_process_group = ctx.dist_process_group
             should_return_fp32_grad = ctx.should_return_fp32_grad
@@ -208,6 +208,7 @@ class LinearCrossEntropy(torch.autograd.Function):
                 _maximum,
                 _accumulate,
                 _entropy_b,
+                _one_minus_p,
                 REDUCTION,
                 should_return_fp32_grad,
                 temperature,
