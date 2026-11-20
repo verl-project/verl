@@ -113,22 +113,34 @@ class GroupCommitFunction(torch.autograd.Function):
     However, it is necessary for marking a timepoint for offload handler to
     accomplish all synchronizations. Implementing it as a function is necessary
     because we need to actions in both forward and backward.
+
+    All differentiable outputs of a layer go through the same node, so autograd
+    runs ``backward`` (and reloads the group) before a gradient entering through
+    any of them reaches the layer's saved activations.
+
+    The helper returns a tuple even for a single input. The offload handlers
+    consume saved tensors and group state during backward; repeated backward
+    passes through a retained graph are not supported by this mechanism.
     """
 
     @staticmethod
-    def forward(ctx, tensor, cpu_offload_handler):
+    def forward(ctx, cpu_offload_handler, *tensors):
         # pylint: disable=missing-function-docstring
         cpu_offload_handler.on_group_commit_forward()
         ctx.cpu_offload_handler = cpu_offload_handler
-        # return the identical tensor
-        return tensor
+        # A detached input must remain detached even when another input requires grad.
+        non_differentiable = tuple(tensor for tensor in tensors if not tensor.requires_grad)
+        if non_differentiable:
+            ctx.mark_non_differentiable(*non_differentiable)
+        # return the identical tensors
+        return tensors
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, *grad_outputs):
         # pylint: disable=missing-function-docstring
         cpu_offload_handler = ctx.cpu_offload_handler
         cpu_offload_handler.on_group_commit_backward()
-        return grad_output, None
+        return (None, *grad_outputs)
 
 
 group_prefetch_offload_commit = GroupCommitFunction.apply
@@ -292,7 +304,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
         # the tensor should have been copied back in on_group_commit_backward()
         # which invokes bulk_reload_group.
-        assert not isinstance(tensor, tuple)
+        assert not isinstance(tensor, tuple), (
+            f"saved activation {tensor_tag} was requested before its group was reloaded; "
+            "a gradient reached the layer without passing through its group commit node"
+        )
         return tensor
 
     def bulk_offload_group(self, group_to_offload):
@@ -404,8 +419,8 @@ def get_activation_offload_context(
         tensor_need_offloading_checker=tensor_need_offloading_checker,
     )
 
-    def group_prefetch_offload_commit_async(tensor):
-        return group_prefetch_offload_commit(tensor, cpu_offload_handler)
+    def group_prefetch_offload_commit_async(*tensors):
+        return group_prefetch_offload_commit(cpu_offload_handler, *tensors)
 
     return (
         CpuOffloadHookWithOffloadHandler(offload_handler=cpu_offload_handler),
@@ -473,14 +488,19 @@ class ActivationHandler:
             ret = forward_method(*args, **kwargs)
         else:
             ret = self._ckpt_forward(forward_method, *args, **kwargs)
-        binded_tensor = ret
-        if isinstance(ret, tuple):
-            binded_tensor = ret[0]
-        binded_tensor = self._sync_func(binded_tensor)
-        final_ret = binded_tensor
-        if isinstance(ret, tuple):
-            final_ret = (final_ret,) + ret[1:]
-        return final_ret
+        if not isinstance(ret, tuple):
+            return self._sync_func(ret)[0]
+        # Bind every differentiable output, not only the first one. A gradient that
+        # enters through a secondary output (e.g. a recurrent state) would otherwise
+        # reach the saved activations before the group commit node reloads them.
+        bound_indices = [0] + [
+            i for i, out in enumerate(ret[1:], start=1) if isinstance(out, torch.Tensor) and out.requires_grad
+        ]
+        bound_tensors = self._sync_func(*(ret[i] for i in bound_indices))
+        final_ret = list(ret)
+        for i, tensor in zip(bound_indices, bound_tensors, strict=True):
+            final_ret[i] = tensor
+        return tuple(final_ret)
 
     def wrap_module_forward_method(self, module):
         orig_method = module.forward
