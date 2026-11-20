@@ -131,6 +131,9 @@ jobs:
       - name: Check final pip list
         run: |
           $UV_RUN uv pip list
+      - name: Test SGLang weight-update session compatibility
+        run: |
+          $UV_RUN pytest -q tests/workers/rollout/rollout_sglang/test_weight_update_session_on_cpu.py
       - name: Prepare gsm8k dataset
         run: |
           $UV_RUN ray stop --force
