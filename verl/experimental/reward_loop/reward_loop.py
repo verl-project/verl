@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import math
 import os
 
 import aiohttp
@@ -156,11 +157,14 @@ class RewardLoopWorker:
 
     async def _post_request(self, payload: dict, endpoint: str, max_retries: int = 16):
         url = f"http://{self.reward_router_address}/{endpoint}"
+        request_timeout = self.config.reward.reward_model.get("request_timeout", 300.0)
+        if not math.isfinite(request_timeout) or request_timeout <= 0:
+            raise ValueError("reward.reward_model.request_timeout must be finite and positive")
         last_exception = None
         for attempt in range(max_retries):
             try:
                 # It's safer to have a timeout instead of None, which can hang indefinitely.
-                timeout = aiohttp.ClientTimeout(total=None)
+                timeout = aiohttp.ClientTimeout(total=request_timeout)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(url, json=payload) as resp:
                         resp.raise_for_status()
