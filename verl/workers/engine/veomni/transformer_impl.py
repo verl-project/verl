@@ -31,6 +31,7 @@ from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
 import verl.utils.torch_functional as verl_F
+from verl.models.transformers.monkey_patch import patch_veomni_forward_with_backends
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -225,6 +226,7 @@ class VeOmniEngine(FSDPEngine):
 
         self.pad_to_length: bool = self.engine_config.pad_to_length
         self.pad_to_length_bucket: int = self.engine_config.pad_to_length_bucket
+        self._rollout_weight_quantizer = None
 
     def initialize(self):
         """
@@ -273,7 +275,7 @@ class VeOmniEngine(FSDPEngine):
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
             trust_remote_code=self.model_config.trust_remote_code,
-            per_tensor_param_fn=self.get_per_tensor_param,
+            per_tensor_param_fn=self._get_hf_export_per_tensor_param,
             hf_export_dtype=hf_export_dtype,
         )
 
@@ -287,13 +289,21 @@ class VeOmniEngine(FSDPEngine):
         log_gpu_memory_usage("After offload model/optimizer/grad during init", logger=logger)
 
     def _build_optimizer(self, module):
-        optimizer = build_optimizer(
-            module,
-            lr=self.optimizer_config.lr,
-            betas=self.optimizer_config.betas,
-            weight_decay=self.optimizer_config.weight_decay,
-            optimizer_type=self.optimizer_config.optimizer,
-        )
+        optim_config = self.optimizer_config
+        # override_optimizer_config wins over the base arguments, as in the FSDP engine's builder.
+        optimizer_kwargs = {
+            "lr": optim_config.lr,
+            "betas": optim_config.betas,
+            "weight_decay": optim_config.weight_decay,
+            "optimizer_type": optim_config.optimizer,
+            **(optim_config.override_optimizer_config or {}),
+        }
+        if self.engine_config.enable_fsdp_offload:
+            # FSDP2 CPU offload keeps the sharded parameters, gradients and optimizer states on the
+            # host, where foreach AdamW materializes a temporary as large as the local fp32
+            # parameters at every step; the fused CPU kernel computes the same update in place.
+            optimizer_kwargs.setdefault("fused", True)
+        optimizer = build_optimizer(module, **optimizer_kwargs)
         get_optimizer_pre_hook = getattr(module, "get_optimizer_pre_hook", None)
         if get_optimizer_pre_hook is not None:
             optimizer_pre_hook = get_optimizer_pre_hook(module, module.config, self.data_parallel_mode)
@@ -306,7 +316,7 @@ class VeOmniEngine(FSDPEngine):
         lr_scheduler = build_lr_scheduler(
             optimizer,
             train_steps=optim_config.total_training_steps,
-            lr=optim_config.lr,
+            lr=(optim_config.override_optimizer_config or {}).get("lr", optim_config.lr),
             lr_min=optim_config.lr_min,
             lr_decay_style=optim_config.lr_scheduler_type,
             lr_decay_ratio=optim_config.lr_decay_ratio,
@@ -363,6 +373,15 @@ class VeOmniEngine(FSDPEngine):
             ops_implementation=ops_implementation,
             init_device=self.engine_config.init_device,
         )
+        fused_kernel_options = self.model_config.fused_kernel_options
+        fused_kernels_backend = (
+            fused_kernel_options.get("impl_backend", None) if fused_kernel_options is not None else None
+        )
+        patch_veomni_forward_with_backends(
+            model=module,
+            use_fused_kernels=self.model_config.use_fused_kernels,
+            fused_kernels_backend=fused_kernels_backend,
+        )
         log_gpu_memory_usage("After load base model", logger=logger)
 
         self._maybe_apply_async_activation_offload(module)
@@ -375,6 +394,7 @@ class VeOmniEngine(FSDPEngine):
             weights_path=self.model_config.local_path,
             enable_reshard_after_forward=self.engine_config.enable_full_shard,
             mixed_precision=veomni_mixed_precision_config,
+            low_precision_reduce_scatter_comm=self.engine_config.low_precision_reduce_scatter_comm,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,
             basic_modules=list(
@@ -382,7 +402,8 @@ class VeOmniEngine(FSDPEngine):
             ),
             enable_reentrant=self.engine_config.enable_reentrant,
             enable_forward_prefetch=self.engine_config.forward_prefetch,
-            broadcast_model_weights_from_rank0=True,
+            broadcast_model_weights_from_rank0=self.engine_config.broadcast_model_weights_from_rank0,
+            ep_sharded_stream_load=self.engine_config.ep_sharded_stream_load,
             fqn_to_index_mapping=load_safetensors_index(self.model_config.local_path),
         )
         log_gpu_memory_usage("After parallelize model", logger=logger)
@@ -642,6 +663,11 @@ class VeOmniEngine(FSDPEngine):
     # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
+        per_tensor_param, peft_config = self._get_hf_export_per_tensor_param()
+        return self._quantize_for_rollout(per_tensor_param), peft_config
+
+    def _get_hf_export_per_tensor_param(self):
+        """Full HF-format weights without the rollout weight quantizer: the checkpoint 'hf_model' export."""
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
         # per-DTensor .to(device).full_tensor() in param_generator() below stages each
@@ -691,6 +717,16 @@ class VeOmniEngine(FSDPEngine):
 
         # TODO: support VeOmni LoRA
         return param_generator(), None
+
+    def set_rollout_weight_quantizer(self, quantizer) -> None:
+        self._rollout_weight_quantizer = quantizer
+
+    def _quantize_for_rollout(self, per_tensor_param):
+        # A converter that exports the checkpoint's own quantized layout (DeepSeek-V4's FP8 / FP4
+        # experts) meets a pass-through quantizer for that model type, as with Megatron-Bridge.
+        if self._rollout_weight_quantizer is None:
+            return per_tensor_param
+        return self._rollout_weight_quantizer(per_tensor_param)
 
 
 class EngineEvalModeCtx(BaseEngineCtx):
@@ -854,47 +890,19 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
     def prepare_model_inputs(self, micro_batch: TensorDict):
+        use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
         self._apply_veomni_input_transforms(model_inputs, micro_batch)
 
-        # Activate VeOmni's chunk_logprobs path: ForCausalLMLoss short-circuits
-        # to per-token log_probs/entropy on return_log_probs=True. Pass the
-        # already-rolled labels as shift_labels so chunk_logprobs skips its
-        # internal causal shift and the output seq length matches the input —
-        # prepare_model_outputs().squeeze(0) then lands at (total_nnz,).
+        # Activate verl's fused-linear loss hook. Pass the already-rolled labels
+        # as shift_labels so the kernel output stays aligned with the packed
+        # input sequence.
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
-        use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
-        if use_fused_kernels and use_remove_padding:
-            input_ids_rmpad = model_inputs["input_ids"]
-            shift_labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
-            model_inputs["labels"] = input_ids_rmpad
-            model_inputs["shift_labels"] = shift_labels
+        if use_fused_kernels:
+            model_inputs["labels"] = model_inputs["input_ids"]
             model_inputs["return_log_probs"] = True
-
-            # Pass teacher top-K tensors so ForCausalLMLoss routes to
-            # chunk_topk_distill_function for fused distillation. TD keys
-            # teacher_ids / teacher_logprobs are populated by verl's native
-            # distillation pipeline (see verl/trainer/distillation/losses.py).
-            distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
-            if distillation_use_topk and "teacher_ids" in micro_batch.keys():
-                if "teacher_logprobs" not in micro_batch.keys():
-                    raise ValueError(
-                        "teacher_ids present without teacher_logprobs; "
-                        "both must be provided together for fused top-K distillation."
-                    )
-                # Kernel kwarg names follow veomni's chunk_topk_distill_function API.
-                teacher_topk_ids = micro_batch["teacher_ids"].values().unsqueeze(0)
-                teacher_topk_log_probs = micro_batch["teacher_logprobs"].values().unsqueeze(0)
-                # SP-slice along seqlen (dim=1); teacher tensors are 3D
-                # (1, total_nnz, K) so use slice_input_tensor directly —
-                # ulysses_pad_and_slice_inputs hardcodes 2D.
-                if self.use_ulysses_sp:
-                    from verl.utils.ulysses import slice_input_tensor
-
-                    teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1, padding=True)
-                    teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1, padding=True)
-                model_inputs["teacher_topk_ids"] = teacher_topk_ids
-                model_inputs["teacher_topk_log_probs"] = teacher_topk_log_probs
+            if use_remove_padding:
+                model_inputs["shift_labels"] = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
 
         # Arm router replay for this micro-batch. In REPLAY mode this also
         # reshapes routed_experts with the same pad + Ulysses rule that

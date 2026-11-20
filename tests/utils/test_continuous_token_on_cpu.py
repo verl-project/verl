@@ -528,6 +528,7 @@ def test_builtin_family_class_mapping(family, builder_cls):
     ("model_type", "expected"),
     [
         ("glm4_moe", ContinuousTokenModelFamily.GLM47),
+        ("glm4_moe_lite", ContinuousTokenModelFamily.GLM47),
         ("glm_moe_dsa", ContinuousTokenModelFamily.GLM5),
         ("gemma4", ContinuousTokenModelFamily.GEMMA4),
         ("gpt_oss", ContinuousTokenModelFamily.GPTOSS),
@@ -537,6 +538,7 @@ def test_builtin_family_class_mapping(family, builder_cls):
         ("qwen3_5_moe", ContinuousTokenModelFamily.QWEN35),
         ("qwen3", ContinuousTokenModelFamily.QWEN3),
         ("qwen3_moe", ContinuousTokenModelFamily.QWEN3),
+        ("qwen3_next", ContinuousTokenModelFamily.QWEN3),
         ("qwen2", ContinuousTokenModelFamily.QWEN),
         ("deepseek_v2", ContinuousTokenModelFamily.DEEPSEEK),
         ("deepseek_v3", ContinuousTokenModelFamily.DEEPSEEK),

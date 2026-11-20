@@ -16,6 +16,10 @@ expert_parallel_size: 1
 
 mixed_precision: true
 
+# Opt in to node-local BF16 gradient transport with FP32 accumulation and output.
+# Requires CUDA FSDP2 with mixed_precision; affects backward gradient communication only.
+low_precision_reduce_scatter_comm: false
+
 # Random seed for reproducibility.
 seed: 42
 
@@ -52,6 +56,13 @@ forward_only: false
 enable_fsdp_offload: false
 
 enable_reentrant: false
+
+# Rank 0 reads the checkpoint and broadcasts it; set false to have every rank read it
+# (avoids sending the whole model through a slow inter-node network).
+broadcast_model_weights_from_rank0: true
+
+# With broadcast_model_weights_from_rank0=false, each rank reads only its expert-parallel slice.
+ep_sharded_stream_load: false
 
 # support eager, sdpa, flash_attention_2, flash_attention_3, veomni_flash_attention_2_with_sp,
 # veomni_flash_attention_3_with_sp and native-sparse

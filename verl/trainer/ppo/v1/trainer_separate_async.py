@@ -244,10 +244,14 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     def on_train_begin(self):
         self._add_async_warmup_batches(self.config.trainer.v1.separate_async.num_warmup_batches)
 
+    def on_train_end(self):
+        self.standalone_checkpoint_manager.wait_for_weight_update()
+
     def on_validate_begin(self):
         if self.current_mode == HybridEngineMode.TRAINER:
             logger.info("Switching hybrid engine to rollout mode for validation")
             self.switch_to_rollout()
+        self.standalone_checkpoint_manager.wait_for_weight_update()
 
     def on_step_begin(self):
         self._step_sample_wait_seconds = 0.0

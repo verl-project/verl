@@ -31,7 +31,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "your vemlp image" # e.g. "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev4"
+  IMAGE: "your vemlp image" # e.g. "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev5"
   DYNAMIC_RUNNER_URL: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner" # public veFaas api
 
 jobs:
@@ -125,8 +125,6 @@ works when run by hand, and drive the Ray workers through it via
 | `run_ppo_trainer_veomni.sh` | `vllm` + `veomni` + `math`, with Transformers 5.16.1 |
 | `run_ppo_trainer_torchtitan.sh` | `vllm` + `fsdp` + `torchtitan` + `math` |
 | `ppo_trainer/run_function_reward.sh` | `$ENGINE` + `fsdp`\|`megatron` (from `STRATEGY`) |
-| `run_one_step_off_policy.sh` | `vllm` + `fsdp`\|`megatron` (from `ACTOR_STRATEGY`) |
-| `run_fully_async_policy_opd.sh` | `vllm` + `megatron` |
 | `run_v1_colocate_async_disrm.sh` | `$ROLLOUT_NAME` + `fsdp` |
 
 `fsdp2` rides the `fsdp` extra — only the trainer strategy differs. Set

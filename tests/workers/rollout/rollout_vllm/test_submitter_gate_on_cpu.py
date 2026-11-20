@@ -48,23 +48,44 @@ class _FakeEngine:
         self.output_processor = SimpleNamespace(request_states={}, parent_requests={})
         self.server = None
         self.pause_calls = 0
+        self.pause_kwargs = []
         self.resume_calls = 0
         self.admitting_at_pause = None
         self.abort_calls = []
         self.drain_calls = 0
         self.reset_prefix_calls = 0
+        self.reset_connector_args = []
+        self.pause_kwargs = []
         self.outputs = []
         self.sampling_params = []
+        self.closed = 0
+        self.prompts = []
 
-    async def generate(
-        self, prompt, sampling_params, request_id, lora_request=None, priority=0, data_parallel_rank=None
-    ):
-        self.sampling_params.append(sampling_params)
-        for output in self.outputs:
-            yield output
+    async def add_request(self, request_id, prompt, params, lora_request=None, priority=0, data_parallel_rank=None):
+        """Like AsyncLLM.add_request(): returns a collector that yields ``outputs``, the last one finished."""
+        self.sampling_params.append(params)
+        self.prompts.append(prompt)
+        pending = list(self.outputs)
+        for i, output in enumerate(pending):
+            output.finished = i == len(pending) - 1
+
+        engine = self
+
+        class _Collector:
+            def get_nowait(self_inner):
+                return pending.pop(0) if pending else None
+
+            async def get(self_inner):
+                return pending.pop(0)
+
+            def close(self_inner):
+                engine.closed += 1
+
+        return _Collector()
 
     async def pause_generation(self, **kwargs):
         self.pause_calls += 1
+        self.pause_kwargs.append(kwargs)
         self.admitting_at_pause = self.server._admitting
 
     async def resume_generation(self):
@@ -78,10 +99,18 @@ class _FakeEngine:
 
     async def reset_prefix_cache(self, reset_connector=True):
         self.reset_prefix_calls += 1
+        self.reset_connector_args.append(reset_connector)
+
+    async def reset_mm_cache(self):
+        pass
+
+    async def reset_encoder_cache(self):
+        pass
 
 
 def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
     server = object.__new__(cls)
+    server.config = RolloutConfig(name="vllm")
     server.node_rank = node_rank
     server.global_steps = 7
     server.engine = _FakeEngine()
@@ -112,6 +141,25 @@ def test_abort_does_not_pause_until_inflight_admissions_land():
 
         assert server.engine.pause_calls == 1
         assert server.engine.admitting_at_pause == 0
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    ("vllm_version", "expected_kwargs"),
+    [
+        ("0.29.0", {"wait_for_inflight_requests": False, "clear_cache": False}),
+        ("0.32.0", {"mode": "abort", "clear_cache": False}),
+    ],
+)
+def test_abort_uses_compatible_vllm_pause_api(monkeypatch, vllm_version, expected_kwargs):
+    async def main():
+        server = _make_server()
+        monkeypatch.setattr(vllm_async_server, "_VLLM_VERSION", vllm_async_server.version.parse(vllm_version))
+
+        await server.abort_all_requests(reset_prefix_cache=False)
+
+        assert server.engine.pause_kwargs == [expected_kwargs]
 
     asyncio.run(main())
 
@@ -320,22 +368,121 @@ def _make_generating_server(monkeypatch, cls, outputs):
     return server
 
 
-def _request_output(token_ids, rows=None):
+def _request_output(token_ids, rows=None, *, finish_reason="stop"):
     completion = SimpleNamespace(
-        token_ids=token_ids, logprobs=rows, finish_reason="stop", routed_experts=None, num_preempted=0
+        token_ids=token_ids, logprobs=rows, finish_reason=finish_reason, routed_experts=None, num_preempted=0
     )
     return SimpleNamespace(outputs=[completion], num_cached_tokens=0, prompt_logprobs=None)
 
 
-def test_default_request_hooks_leave_generate_output_unchanged(monkeypatch):
+@pytest.mark.parametrize(("finish_reason", "stop_reason"), [("stop", "completed"), ("length", "length")])
+def test_default_request_hooks_leave_generate_output_unchanged(monkeypatch, finish_reason, stop_reason):
     async def main():
-        server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [_request_output([5, 9])])
+        request_output = _request_output([5, 9], finish_reason=finish_reason)
+        server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [request_output])
 
-        output = await server.generate([1, 2, 3], {"temperature": 1.0}, "r")
+        output = await server.generate([1, 2, 3], {"temperature": 1.0, "max_tokens": 2}, "r")
 
         assert server.engine.sampling_params[0].logprob_token_ids is None
-        assert output.token_ids == [5, 9] and output.stop_reason == "completed"
+        assert output.token_ids == [5, 9] and output.stop_reason == stop_reason
         assert output.extra_fields == {"global_steps": 7, "num_cached_tokens": 0}
+        assert server.engine.closed == 1
+        assert server._admitting == 0
+
+    asyncio.run(main())
+
+
+class _QueuedEngine(_FakeEngine):
+    """Engine whose requests land in the (fake) scheduler but are never scheduled.
+
+    Models a request stuck in vLLM's WAITING queue because the batch is larger than
+    max_num_seqs: add_request() returns immediately, but no output is ever produced
+    until pause_generation(abort) finishes the request.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.queues: dict[str, asyncio.Queue] = {}
+        self.aborted: list[str] = []
+        self.engine_aborts: list[tuple[str, bool]] = []
+
+    async def add_request(self, request_id, prompt, params, **kwargs):
+        q = asyncio.Queue()
+        self.queues[request_id] = q
+        self.output_processor.request_states[request_id] = object()
+
+        engine = self
+        internal_id = f"{request_id}-internal"  # vLLM's internal request id, which differs from the caller's
+
+        class _Collector:
+            request_id = internal_id
+
+            def get_nowait(self_inner):
+                try:
+                    return q.get_nowait()
+                except asyncio.QueueEmpty:
+                    return None
+
+            async def get(self_inner):
+                return await q.get()
+
+            def close(self_inner):
+                engine.closed += 1
+
+        return _Collector()
+
+    async def pause_generation(self, **kwargs):
+        await super().pause_generation(**kwargs)
+        # abort mode: every in-flight request finishes with an empty output.
+        for rid, q in self.queues.items():
+            self.aborted.append(rid)
+            q.put_nowait(SimpleNamespace(finished=True, outputs=[]))
+        self.output_processor.request_states.clear()
+
+    async def abort(self, request_id, internal=False):
+        self.engine_aborts.append((request_id, internal))
+
+
+def _make_queued_server():
+    server = _make_server()
+    server.engine = _QueuedEngine()
+    server.engine.server = server
+    return server
+
+
+def test_abort_is_not_blocked_by_requests_waiting_for_their_first_token():
+    # Regression: the barrier used to be released on the first *token*, so requests parked
+    # in the scheduler's WAITING queue held _admitting > 0 and abort_all_requests() could
+    # not pause the engine until every one of them had been scheduled and prefilled.
+    async def main():
+        server = _make_queued_server()
+
+        async def submit(rid):
+            assert await server._park_until_admitted(rid) is None
+            return await server._generate_admitted(
+                prompt={"prompt_token_ids": [1]},
+                sampling_params=SimpleNamespace(),
+                request_id=rid,
+                lora_request=None,
+                priority=0,
+            )
+
+        tasks = [asyncio.create_task(submit(f"r{i}")) for i in range(8)]
+        await asyncio.sleep(0.05)
+
+        assert server._admitting == 0, "barrier must be released once add_request returns"
+        assert len(server.engine.queues) == 8, "all requests reached the engine"
+        assert not any(t.done() for t in tasks), "requests are still waiting for tokens"
+
+        await asyncio.wait_for(server.abort_all_requests(), timeout=1)
+
+        assert server.engine.pause_calls == 1
+        assert server.engine.admitting_at_pause == 0
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+        assert all(r.finished and r.outputs == [] for r in results), "aborted requests return empty"
+        assert sorted(server.engine.aborted) == sorted(f"r{i}" for i in range(8))
+        # Requests that finish normally close their collectors and are not aborted again.
+        assert server.engine.closed == 8 and server.engine.engine_aborts == []
         assert server._admitting == 0
 
     asyncio.run(main())
@@ -379,5 +526,152 @@ def test_output_hook_runs_for_requests_aborted_with_empty_outputs(monkeypatch):
         assert output.stop_reason == "aborted" and output.token_ids == []
         assert output.extra_fields["selected_logprobs"] == []
         assert server._admitting == 0
+
+    asyncio.run(main())
+
+
+def test_cancelled_request_releases_barrier_and_aborts_in_engine():
+    async def main():
+        server = _make_queued_server()
+        assert await server._park_until_admitted("r1") is None
+        task = asyncio.create_task(
+            server._generate_admitted(
+                prompt={"prompt_token_ids": [1]},
+                sampling_params=SimpleNamespace(),
+                request_id="r1",
+                lora_request=None,
+                priority=0,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert server._admitting == 0
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Aborted by vLLM's internal id, as AsyncLLM.generate() does, and the collector is closed.
+        assert server.engine.engine_aborts == [("r1-internal", True)], "cancellation must drop the request"
+        assert server.engine.closed == 1
+        assert server._admitting == 0
+
+    asyncio.run(main())
+
+
+def _salted(server):
+    server.config = RolloutConfig(
+        name="vllm",
+        max_model_len=64,
+        prompt_length=32,
+        response_length=16,
+        external_kv_cache_invalidation="salt",
+        prefix_cache_namespace="run",
+    )
+    return server
+
+
+def test_salt_request_parked_across_weight_update_uses_new_version(monkeypatch):
+    async def main():
+        server = _salted(_make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [_request_output([5])]))
+        await server.abort_all_requests()
+
+        task = asyncio.create_task(server.generate([1, 2, 3], {}, "parked"))
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        await server.set_global_steps(8)
+        await server.resume_generation()
+        await asyncio.wait_for(task, timeout=5)
+
+        assert server.engine.prompts[0]["cache_salt"] == "run:8"
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("mode,clear_cache,reset_connector", [("reset", True, []), ("salt", False, [False])])
+def test_abort_keeps_external_kv_store_only_when_salted(mode, clear_cache, reset_connector):
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(name="vllm", external_kv_cache_invalidation=mode)
+
+        await server.abort_all_requests()
+
+        assert server.engine.pause_kwargs[0]["clear_cache"] is clear_cache
+        assert server.engine.reset_connector_args == reset_connector
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("mode,reset_connector", [("reset", True), ("salt", False)])
+def test_clear_kv_cache_resets_connector_only_in_reset_mode(mode, reset_connector):
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(name="vllm", external_kv_cache_invalidation=mode)
+
+        await server.clear_kv_cache()
+
+        assert server.engine.reset_connector_args == [reset_connector]
+
+    asyncio.run(main())
+
+
+def test_salt_barrier_timeout_fails_closed(monkeypatch):
+    # Under "salt" a straggling admission would run on the new weights with its old salt.
+    monkeypatch.setattr(vllm_async_server, "_GATE_BARRIER_TIMEOUT_S", 0.05)
+
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(name="vllm", external_kv_cache_invalidation="salt")
+        server._admitting = 1
+
+        with pytest.raises(RuntimeError, match="barrier timed out"):
+            await server.abort_all_requests()
+        assert server.engine.pause_calls == 0
+
+    asyncio.run(main())
+
+
+class _SleepEngine:
+    def __init__(self):
+        self.sleep_calls = []
+
+    async def sleep(self, level=1, mode="abort"):
+        self.sleep_calls.append({"level": level})
+
+    async def wake_up(self, tags=None):
+        pass
+
+    async def reset_encoder_cache(self):
+        pass
+
+
+class _SleepEngineKeepsConnector(_SleepEngine):
+    async def sleep(self, level=1, mode="abort", reset_connector=True):
+        self.sleep_calls.append({"level": level, "reset_connector": reset_connector})
+
+
+@pytest.mark.parametrize(
+    "rollout_mode,method", [("COLOCATED", "sleep"), ("HYBRID", "sleep"), ("STANDALONE", "release")]
+)
+@pytest.mark.parametrize(
+    "mode,engine_cls,expected_reset",
+    [
+        ("salt", _SleepEngineKeepsConnector, False),  # vLLM with reset_connector: keep the store
+        ("reset", _SleepEngineKeepsConnector, True),  # reset mode keeps vLLM's default
+        ("salt", _SleepEngine, "unsupported"),  # older vLLM: plain sleep, warned
+    ],
+)
+def test_sleep_keeps_external_kv_store_only_when_salted(rollout_mode, method, mode, engine_cls, expected_reset):
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(name="vllm", free_cache_engine=True, external_kv_cache_invalidation=mode)
+        server.rollout_mode = vllm_async_server.RolloutMode[rollout_mode]
+        server.model_config = SimpleNamespace(lora_rank=0, lora={})
+        server.engine = engine_cls()
+
+        await (server.release_kv_cache() if method == "release" else server.sleep())
+
+        (call,) = server.engine.sleep_calls
+        assert call.get("reset_connector", "unsupported") == expected_reset
 
     asyncio.run(main())

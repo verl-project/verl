@@ -19,10 +19,12 @@ import unittest
 from unittest import mock
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import pytest
 import torch
 from omegaconf import OmegaConf
 
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.device import is_npu_available
 from verl.utils.profiler.config import (
     DEVICE_ACTIVITIES,
     DEVICE_CONTENTS,
@@ -36,6 +38,17 @@ from verl.utils.profiler.torch_profile import (
     build_trace_basename,
     get_torch_profiler,
 )
+
+
+@pytest.fixture
+def restore_cuda_activity():
+    """Restore the CUDA enum for selected NPU tests and undo the patch on any exit."""
+    if not is_npu_available:
+        yield
+        return
+    # transfer_to_npu rebinds CUDA while the activity map retains the original enum.
+    with patch.object(torch.profiler.ProfilerActivity, "CUDA", DEVICE_ACTIVITIES["cuda"]):
+        yield
 
 
 def _cuda_platform():
@@ -69,6 +82,7 @@ class TestTorchProfile(unittest.TestCase):
 
     @patch("verl.utils.profiler.torch_profile.get_platform", new=_cuda_platform)
     @patch("torch.profiler.profile")
+    @pytest.mark.usefixtures("restore_cuda_activity")
     def test_get_torch_profiler(self, mock_profile):
         # Test wrapper function
         get_torch_profiler(contents=["cpu", "cuda", "stack"], save_path="/tmp/test", rank=0)
@@ -652,6 +666,7 @@ class TestCpuActivityAlwaysCollected(unittest.TestCase):
 
     @patch("verl.utils.profiler.torch_profile.get_platform", new=_cuda_platform)
     @patch("torch.profiler.profile")
+    @pytest.mark.usefixtures("restore_cuda_activity")
     def test_cpu_activity_added_for_device_only_contents(self, mock_profile):
         for contents in (["cuda"], ["cuda", "memory"], []):
             with self.subTest(contents=contents):
@@ -685,6 +700,7 @@ class TestDeviceActivityFromPlatform(unittest.TestCase):
     @_requires_other_device
     @patch("verl.utils.profiler.torch_profile.get_platform")
     @patch("torch.profiler.profile")
+    @pytest.mark.usefixtures("restore_cuda_activity")
     def test_non_cuda_device_recorded(self, mock_profile, mock_get_platform):
         mock_get_platform.return_value = self._platform(_OTHER_DEVICE)
         for contents in ([], [_OTHER_DEVICE], [_OTHER_DEVICE, "memory"]):
@@ -699,6 +715,7 @@ class TestDeviceActivityFromPlatform(unittest.TestCase):
 
     @patch("verl.utils.profiler.torch_profile.get_platform")
     @patch("torch.profiler.profile")
+    @pytest.mark.usefixtures("restore_cuda_activity")
     def test_cuda_platform_unchanged(self, mock_profile, mock_get_platform):
         # Regression guard for every in-tree CUDA/ROCm user: same activities as before.
         mock_get_platform.return_value = self._platform("cuda")
@@ -722,9 +739,8 @@ class TestDeviceActivityFromPlatform(unittest.TestCase):
     @patch("verl.utils.profiler.torch_profile.get_platform")
     @patch("torch.profiler.profile")
     def test_device_without_profiler_activity_warns(self, mock_profile, mock_get_platform):
-        # torch has no ProfilerActivity.NPU: same CPU-only trace as before, but the warning
-        # explaining it is now verl's instead of torch's misleading CUDA one.
-        mock_get_platform.return_value = self._platform("npu")
+        # On NPU, use an explicitly unsupported device rather than assuming NPU is absent.
+        mock_get_platform.return_value = self._platform("unsupported_device" if is_npu_available else "npu")
         with self.assertLogs("verl.utils.profiler.torch_profile", level="WARNING"):
             get_torch_profiler(contents=[], save_path="/tmp/test", rank=0)
         self.assertEqual(self._activities(mock_profile), [torch.profiler.ProfilerActivity.CPU])
@@ -895,3 +911,58 @@ class TestCriticWorkerProfilerConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPlatformTorchProfilerHooks:
+    """``get_torch_profiler`` takes the device activity and extra profiler kwargs from the platform."""
+
+    def test_platform_base_defaults(self):
+        from verl.plugin.platform.platform_base import PlatformBase
+
+        platform = MagicMock(spec=PlatformBase)
+        assert PlatformBase.torch_profiler_activity(platform) is None
+        assert PlatformBase.torch_profiler_kwargs(platform, save_path="/tmp/x", rank=3) == {}
+
+    @patch("verl.utils.profiler.torch_profile.get_platform")
+    @patch("torch.profiler.profile")
+    def test_platform_without_hooks_keeps_the_device_lookup(self, mock_profile, mock_get_platform, tmp_path):
+        """Duck-typed platforms (bare mocks, plugins' fakes) still resolve torch's activity for the device."""
+        platform = MagicMock()
+        type(platform).device_name = PropertyMock(return_value="cuda")
+        mock_get_platform.return_value = platform
+
+        get_torch_profiler(contents=[], save_path=str(tmp_path), rank=0)
+
+        kwargs = mock_profile.call_args[1]
+        assert DEVICE_ACTIVITIES["cuda"] in kwargs["activities"]
+        assert "experimental_config" not in kwargs
+
+    @patch("verl.utils.profiler.torch_profile.get_platform")
+    @patch("torch.profiler.profile")
+    def test_out_of_tree_platform_activity_and_kwargs(self, mock_profile, mock_get_platform, tmp_path):
+        marker = object()
+        platform = MagicMock()
+        type(platform).device_name = PropertyMock(return_value="oot")
+        platform.torch_profiler_activity.return_value = torch.profiler.ProfilerActivity.PrivateUse1
+        platform.torch_profiler_kwargs.return_value = {"experimental_config": marker}
+        mock_get_platform.return_value = platform
+
+        get_torch_profiler(contents=[], save_path=str(tmp_path), rank=5)
+
+        kwargs = mock_profile.call_args[1]
+        assert torch.profiler.ProfilerActivity.PrivateUse1 in kwargs["activities"]
+        assert kwargs["experimental_config"] is marker
+        platform.torch_profiler_kwargs.assert_called_once_with(save_path=str(tmp_path), rank=5)
+
+    @patch("verl.utils.profiler.torch_profile.get_platform")
+    @patch("torch.profiler.profile")
+    def test_platform_kwargs_skipped_without_device_activity(self, mock_profile, mock_get_platform, tmp_path):
+        platform = MagicMock()
+        type(platform).device_name = PropertyMock(return_value="oot")
+        platform.torch_profiler_activity.return_value = None
+        mock_get_platform.return_value = platform
+
+        get_torch_profiler(contents=[], save_path=str(tmp_path), rank=0)
+
+        platform.torch_profiler_kwargs.assert_not_called()
+        assert "experimental_config" not in mock_profile.call_args[1]

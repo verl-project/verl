@@ -3,10 +3,8 @@
 #
 # VeOmni engine variant of the FSDP OPD script. Key difference:
 #   - model_engine=veomni for FSDP2-based training
-#   - use_fused_kernels=True enables veomni's chunk_topk_distill kernel,
-#     which computes the top-K forward-KL distillation loss without
-#     materializing the full [B, L, V] logits tensor — saving significant
-#     GPU memory for large-vocabulary models.
+#   - use_fused_kernels=True with impl_backend=tilelang returns teacher-token
+#     log-probabilities without materializing the full [B, L, V] logits tensor.
 
 set -xeuo pipefail
 
@@ -78,6 +76,7 @@ MODEL=(
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
     actor_rollout_ref.model.use_fused_kernels=True
+    actor_rollout_ref.model.fused_kernel_options.impl_backend=tilelang
 )
 
 ACTOR=(

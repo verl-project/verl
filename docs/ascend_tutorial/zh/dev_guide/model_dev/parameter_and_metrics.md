@@ -1,6 +1,6 @@
 # 训练配置参数与指标说明
 
-Last updated: 07/02/2026.
+Last updated: 11/02/2026.
 
 如需查看 NPU 相关特性，请访问：[NPU 高级特性指南](../../feature_support/npu_advance_features.md) 。
 
@@ -608,18 +608,7 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `checkpoint.load_contents` | 引用自 `checkpoint.save_contents` | Checkpoint 加载内容 |
 | `checkpoint.async_save` | `false` | 是否异步保存 Checkpoint |
 
-#### 1.4.5 QAT 配置
-
-| 参数名 | 默认值 | 说明 |
-|--------|--------|------|
-| `qat.enable` | `false` | 是否启用量化感知训练（QAT） |
-| `qat.mode` | `w4a16` | 量化模式 |
-| `qat.group_size` | `16` | 量化分组大小 |
-| `qat.ignore_patterns` | `[lm_head, embed_tokens, re:.*mlp.gate$]` | 量化忽略的模式列表 |
-| `qat.activation_observer` | `static_minmax` | 激活值观察器类型 |
-| `qat.quantization_config_path` | `null` | 量化配置文件路径 |
-
-#### 1.4.6 MTP 配置
+#### 1.4.5 MTP 配置
 
 | 参数名 | 默认值 | 说明 |
 |--------|--------|------|

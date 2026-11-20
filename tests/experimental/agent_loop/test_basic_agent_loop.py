@@ -49,6 +49,8 @@ def init_config() -> DictConfig:
             ],
         )
 
+    config.trainer.n_gpus_per_node = int(os.getenv("VERL_TEST_N_GPUS_PER_NODE", config.trainer.n_gpus_per_node))
+    config.trainer.nnodes = int(os.getenv("VERL_TEST_NNODES", config.trainer.nnodes))
     model_path = os.path.expanduser("~/models/Qwen/Qwen3-0.6B")
     config.actor_rollout_ref.model.path = model_path
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
@@ -56,7 +58,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.enforce_eager = True
     config.actor_rollout_ref.rollout.prompt_length = 4096
     config.actor_rollout_ref.rollout.response_length = 4096
-    config.actor_rollout_ref.rollout.n = 4
+    config.actor_rollout_ref.rollout.n = int(os.getenv("VERL_TEST_ROLLOUT_N", "4"))
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
 
@@ -218,7 +220,7 @@ def test_tool_agent(init_config):
     with open(tool_config_path, "w") as f:
         json.dump(tool_config, f)
 
-    n = 2
+    n = int(os.getenv("VERL_TEST_ROLLOUT_N", "2"))
     init_config.actor_rollout_ref.rollout.n = n
     init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
@@ -322,7 +324,7 @@ def test_function_tool_agent(init_config):
 
     function_tool_path = os.path.join(os.path.dirname(__file__), "function_tool_examples.py")
 
-    n = 2
+    n = int(os.getenv("VERL_TEST_ROLLOUT_N", "2"))
     init_config.actor_rollout_ref.rollout.n = n
     init_config.actor_rollout_ref.rollout.multi_turn.function_tool_path = function_tool_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2

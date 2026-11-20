@@ -8,14 +8,14 @@ Trainers drive the training loop. Introducing new trainer classes in case of new
 .. autosummary::
    :nosignatures:
 
-   verl.trainer.ppo.ray_trainer.RayPPOTrainer
+   verl.trainer.ppo.v1.trainer_base.PPOTrainer
 
 
 Core APIs
 ~~~~~~~~~~~~~~~~~
 
-.. autoclass:: verl.trainer.ppo.ray_trainer.RayPPOTrainer
-   :members: __init__, init_workers, fit
+.. autoclass:: verl.trainer.ppo.v1.trainer_base.PPOTrainer
+   :members: __init__, init, fit
 
 .. automodule:: verl.utils.tokenizer
    :members: hf_tokenizer

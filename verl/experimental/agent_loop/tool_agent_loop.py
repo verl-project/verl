@@ -113,6 +113,8 @@ def _align_generated_turn_spans(agent_data: AgentData, merge_result: MergeResult
 
 @register("tool_agent")
 class ToolAgentLoop(AgentLoopBase):
+    merges_context_messages = True
+
     def __init__(self, *args, tools: Optional[ToolListWrap] = None, **kwargs):
         """Initialize the tool agent loop.
 

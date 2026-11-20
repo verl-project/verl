@@ -1,6 +1,6 @@
 # Training Configuration Parameters and Metrics
 
-Last updated: 07/02/2026.
+Last updated: 11/02/2026.
 
 For NPU-related features, visit: [NPU Advanced Features Guide](../../feature_support/npu_advance_features.md).
 
@@ -608,18 +608,7 @@ Same structure as the Actor Megatron engine configuration. The main differences:
 | `checkpoint.load_contents` | references `checkpoint.save_contents` | Checkpoint load contents |
 | `checkpoint.async_save` | `false` | Whether to save checkpoints asynchronously |
 
-#### 1.4.5 QAT Configuration
-
-| Parameter | Default | Description |
-|--------|--------|------|
-| `qat.enable` | `false` | Whether to enable quantization-aware training (QAT) |
-| `qat.mode` | `w4a16` | Quantization mode |
-| `qat.group_size` | `16` | Quantization group size |
-| `qat.ignore_patterns` | `[lm_head, embed_tokens, re:.*mlp.gate$]` | List of quantization-ignored patterns |
-| `qat.activation_observer` | `static_minmax` | Activation observer type |
-| `qat.quantization_config_path` | `null` | Quantization configuration file path |
-
-#### 1.4.6 MTP Configuration
+#### 1.4.5 MTP Configuration
 
 | Parameter | Default | Description |
 |--------|--------|------|

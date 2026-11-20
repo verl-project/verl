@@ -1,3 +1,8 @@
+---
+myst:
+  heading_anchors: 6
+---
+
 # NPU 高级特性指南
 
 > 本文档介绍昇腾 NPU 在 verl 生态中的高级特性与优化能力，供开发者参考。

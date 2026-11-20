@@ -31,10 +31,11 @@
 
 import os
 
+import pytest
 import torch
 
 import verl.utils.torch_functional as verl_F
-from verl.utils.device import is_torch_npu_available
+from verl.utils.device import get_device_name, get_torch_device, is_device_available
 from verl.utils.experimental.torch_functional import FusedLinearForPPO
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.torch_functional import logprobs_from_logits
@@ -103,12 +104,12 @@ class TestLinearCrossEntropy:
         self.temperature = temperature
 
     def cleanup(self):
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+        get_torch_device().empty_cache()
+        get_torch_device().reset_peak_memory_stats()
         import gc
 
         gc.collect()
-        torch.cuda.synchronize()
+        get_torch_device().synchronize()
 
     def generate_hyper(self):
         global MAX_TEST_CASES
@@ -145,21 +146,23 @@ class TestLinearCrossEntropy:
 
     def generate_forward_inputs(self):
         hidden = (
-            torch.empty((self.batch_size, self.num_tokens, self.hidden_size), dtype=self.dtype, device="cuda")
+            torch.empty(
+                (self.batch_size, self.num_tokens, self.hidden_size), dtype=self.dtype, device=get_device_name()
+            )
             .uniform_(-0.5, 0.5)
             .requires_grad_()
         )
         weight = (
-            torch.empty((self.vocab_size, self.hidden_size), dtype=self.dtype, device="cuda")
+            torch.empty((self.vocab_size, self.hidden_size), dtype=self.dtype, device=get_device_name())
             .uniform_(-0.5, 0.5)
             .requires_grad_()
         )
-        labels = torch.randint(0, self.vocab_size, (self.batch_size, self.num_tokens), device="cuda")
+        labels = torch.randint(0, self.vocab_size, (self.batch_size, self.num_tokens), device=get_device_name())
         return hidden, weight, labels
 
     def generate_backward_inputs(self):
-        g_entropy = torch.empty((self.num_tokens,), dtype=self.dtype, device="cuda").uniform_(-0.5, 0.5)
-        g_logprobs = torch.empty((self.num_tokens,), dtype=self.dtype, device="cuda").uniform_(-1, 1)
+        g_entropy = torch.empty((self.num_tokens,), dtype=self.dtype, device=get_device_name()).uniform_(-0.5, 0.5)
+        g_logprobs = torch.empty((self.num_tokens,), dtype=self.dtype, device=get_device_name()).uniform_(-1, 1)
         return g_entropy, g_logprobs
 
     def verify_correctness(self, iterations=5):
@@ -175,8 +178,8 @@ class TestLinearCrossEntropy:
         kernel_forward_latency = list()
         kernel_backward_latency = list()
 
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
+        start_event = get_torch_device().Event(enable_timing=True)
+        end_event = get_torch_device().Event(enable_timing=True)
 
         for i in range(iterations):
             print(f"[INFO]: Iteration {i + 1} / {iterations}...", end="\r")
@@ -185,13 +188,13 @@ class TestLinearCrossEntropy:
             start_event.record()
             (torch_logprobs, torch_entropy) = run_torch_entropy(hidden, weight, labels, self.temperature)
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             torch_forward_latency.append(start_event.elapsed_time(end_event))
 
             start_event.record()
             (verl_logprobs, verl_entropy) = run_verl_original_entropy(hidden, weight, labels, self.temperature)
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             verl_forward_latency.append(start_event.elapsed_time(end_event))
 
             start_event.record()
@@ -199,13 +202,13 @@ class TestLinearCrossEntropy:
                 hidden, weight, labels, self.temperature
             )
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             verl_fused_forward_latency.append(start_event.elapsed_time(end_event))
 
             start_event.record()
             (kernel_logprobs, kernel_entropy) = linear_cross_entropy(hidden, weight, labels, self.temperature)
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             kernel_forward_latency.append(start_event.elapsed_time(end_event))
 
             torch.testing.assert_close(torch_logprobs, verl_logprobs, atol=1e-4, rtol=1e-4)
@@ -231,7 +234,7 @@ class TestLinearCrossEntropy:
                 (torch_entropy, torch_logprobs), (hidden, weight), (g_entropy, g_logprobs), retain_graph=False
             )
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             torch_backward_latency.append(start_event.elapsed_time(end_event))
 
             start_event.record()
@@ -239,7 +242,7 @@ class TestLinearCrossEntropy:
                 (verl_entropy, verl_logprobs), (hidden, weight), (g_entropy, g_logprobs), retain_graph=False
             )
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             verl_backward_latency.append(start_event.elapsed_time(end_event))
 
             start_event.record()
@@ -247,7 +250,7 @@ class TestLinearCrossEntropy:
                 (verl_fused_entropy, verl_fused_logprobs), (hidden, weight), (g_entropy, g_logprobs), retain_graph=False
             )
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             verl_fused_backward_latency.append(start_event.elapsed_time(end_event))
 
             start_event.record()
@@ -255,7 +258,7 @@ class TestLinearCrossEntropy:
                 (kernel_entropy, kernel_logprobs), (hidden, weight), (g_entropy, g_logprobs), retain_graph=False
             )
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             kernel_backward_latency.append(start_event.elapsed_time(end_event))
 
             torch.testing.assert_close(d_torch_hidden, d_verl_hidden, atol=1e-2, rtol=1e-4)
@@ -326,20 +329,20 @@ class TestLinearCrossEntropy:
 
         hidden, weight, labels = self.generate_forward_inputs()
 
-        torch.cuda.reset_peak_memory_stats()
+        get_torch_device().reset_peak_memory_stats()
         (logprobs, entropy) = run_forward(hidden, weight, labels, self.temperature)
-        torch.cuda.synchronize()
-        torch_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
+        get_torch_device().synchronize()
+        torch_max_memory = get_torch_device().max_memory_allocated() / 1024 / 1024
         print(f"[INFO]: {method_name} Forward pass peak memory: {torch_max_memory:.2f} MB")
 
         g_entropy, g_logprobs = self.generate_backward_inputs()
 
-        torch.cuda.reset_peak_memory_stats()
+        get_torch_device().reset_peak_memory_stats()
         (d_torch_hidden, d_torch_weight) = torch.autograd.grad(
             (entropy, logprobs), (hidden, weight), (g_entropy, g_logprobs), retain_graph=False
         )
-        torch.cuda.synchronize()
-        torch_backward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
+        get_torch_device().synchronize()
+        torch_backward_max_memory = get_torch_device().max_memory_allocated() / 1024 / 1024
         print(f"[INFO]: {method_name} Backward pass peak memory: {torch_backward_max_memory:.2f} MB")
 
     def check_storage_all(self):
@@ -361,8 +364,10 @@ def test_lce_non_divisible_vocab_padding():
     Reproducing construction: one token-logit at +3, all others at -15
     → denominator ≈ 20, phantom adds ≈ 25 → error ≈ 0.82 per token.
     """
-    if not torch.cuda.is_available() or is_torch_npu_available(check_device=False):
-        return
+    # linear_cross_entropy sends NPU tensors to the CANN backend, not this Triton kernel;
+    # CANN is covered by test_cann_linear_ce_on_npu.py.
+    if not is_device_available() or get_device_name() == "npu":
+        pytest.skip("requires a non-NPU accelerator running the Triton kernel")
 
     torch.manual_seed(0)
 
@@ -381,12 +386,12 @@ def test_lce_non_divisible_vocab_padding():
         return lp, ent
 
     for vocab_size, desc in [(V, "non-divisible vocab (mod1024=512)"), (V_div, "divisible vocab (mod1024=0)")]:
-        w = torch.zeros(vocab_size, D, dtype=torch.bfloat16, device="cuda")
+        w = torch.zeros(vocab_size, D, dtype=torch.bfloat16, device=get_device_name())
         w[:, 0] = -15.0 * T
         w[0, 0] = 3.0 * T
-        h = torch.zeros(1, N, D, dtype=torch.bfloat16, device="cuda")
+        h = torch.zeros(1, N, D, dtype=torch.bfloat16, device=get_device_name())
         h[:, :, 0] = 1.0
-        labels = torch.zeros(1, N, dtype=torch.long, device="cuda")
+        labels = torch.zeros(1, N, dtype=torch.long, device=get_device_name())
 
         ref_lp, ref_ent = reference(h, w, labels)
         ker_lp, ker_ent = linear_cross_entropy(h, w, labels, T)
