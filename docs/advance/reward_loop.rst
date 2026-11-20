@@ -5,7 +5,7 @@ Reward Loop
 
 Author: `Yuyang Ding <https://yyding1.github.io>`_
 
-Last updated: 2/10/2026.
+Last updated: 11/12/2026.
 
 Introduction
 ------------
@@ -91,6 +91,8 @@ where the reward is calculated as soon as each sample is rolled out.
       rollout_resource_pool=actor_rollout_resource_pool,
       reward_loop_worker_handles=reward_loop_worker_handles,
    )
+
+In streaming mode, ``AgentLoopWorker`` merges each trajectory's lightweight runtime ``extra_fields`` directly into a fresh per-sample ``extra_info`` dictionary before invoking the reward worker, while omitting engine transport handles (``kv_transfer_params``) and heavy per-token/multimodal payloads by default. When a custom ``RewardManagerBase`` subclass needs those heavy trajectory inputs (for example ``response_logprobs``, ``response_topk_ids``, ``response_topk_log_probs``, or ``prompt_logprobs``), it can declare ``extra_input_fields = ("response_logprobs", ...)`` (or override ``get_extra_input_fields(cls, config)``) so ``AgentLoopWorker`` includes them in ``extra_info``.
 
 Hybrid Reward Scenarios Usage
 -----------------------------

@@ -15,7 +15,8 @@
 import logging
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Callable
+from collections.abc import Collection
+from typing import Any, Callable, ClassVar
 
 import torch
 from omegaconf import DictConfig
@@ -30,9 +31,43 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 RawRewardFn = Callable[..., Any] | None
 
+# Heavy per-token / multimodal trajectory fields omitted from streaming reward RPC by default
+# so multi-megabyte training payloads (e.g. 32K top-k log-prob heads) are not serialized to CPU
+# reward workers unless requested via ``RewardManagerBase.extra_input_fields``.
+OPTIONAL_REWARD_INPUT_FIELDS: frozenset[str] = frozenset(
+    {
+        "prompt_ids",
+        "prompt_logprobs",
+        "response_logprobs",
+        "response_mask",
+        "response_topk_ids",
+        "response_topk_log_probs",
+        "response_support_complete",
+        "routed_experts",
+        "multi_modal_data",
+    }
+)
+
 
 class RewardManagerBase(ABC):
     _class_initialized = False
+    # Optional trajectory fields (from OPTIONAL_REWARD_INPUT_FIELDS) to include in extra_info
+    # on top of the default reward inputs.
+    # TODO: Add ``default_input_fields`` so default DataProto columns and ``extra_input_fields``
+    # share one declarative input contract across streaming and colocated reward paths.
+    extra_input_fields: ClassVar[Collection[str]] = ()
+
+    @classmethod
+    def get_extra_input_fields(cls, config: DictConfig) -> frozenset[str]:
+        """Return optional trajectory fields required by this reward manager beyond default inputs."""
+        fields = frozenset(cls.extra_input_fields)
+        unsupported = fields - OPTIONAL_REWARD_INPUT_FIELDS
+        if unsupported:
+            raise ValueError(
+                f"{cls.__name__} declared unsupported extra_input_fields {sorted(unsupported)}; "
+                f"supported optional fields are {sorted(OPTIONAL_REWARD_INPUT_FIELDS)}."
+            )
+        return fields
 
     def __init__(self, config: DictConfig, tokenizer: AutoTokenizer, compute_score: RawRewardFn):
         """Initialize reward manager.

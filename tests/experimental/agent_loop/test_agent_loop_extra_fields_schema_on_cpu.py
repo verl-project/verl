@@ -574,3 +574,152 @@ async def test_agent_loop_pad_token_ids_empty_with_non_zero_pad_id():
     # attention_mask should be all zeros
     expected_attention_mask = torch.zeros((1, 8), dtype=torch.long)
     torch.testing.assert_close(result["attention_mask"], expected_attention_mask)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_compute_score_merges_extra_info_and_strips_training_tensors():
+    """Verify _compute_score merges lightweight extra_fields into extra_info and strips large tensor payloads."""
+    from types import SimpleNamespace
+
+    from verl import DataProto
+    from verl.experimental.reward_loop.reward_manager.dapo import DAPORewardManager as RewardLoopDAPORewardManager
+    from verl.experimental.reward_loop.reward_manager.naive import NaiveRewardManager as RewardLoopNaiveRewardManager
+
+    captured_rpc: dict[str, DataProto] = {}
+
+    class _FakeRemoteCall:
+        async def remote(self, data: DataProto):
+            captured_rpc["data"] = data
+            return {"reward_score": 1.0, "reward_extra_info": {"acc": True}}
+
+    class _Worker:
+        _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
+        _compute_position_ids = AgentLoopWorker._compute_position_ids
+        processor = None
+        reward_loop_worker_handles = [SimpleNamespace(compute_score=_FakeRemoteCall())]
+
+        def _get_mm_processor_kwargs(self, audios):
+            return {}
+
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "session_tag": "ok",
+            "global_steps": 7,
+            "response_topk_ids": np.array([[11, 13], [12, 14]], dtype=np.int32),
+            "response_topk_log_probs": np.array([[-0.1, -2.0], [-0.2, -1.5]], dtype=np.float32),
+            "response_support_complete": np.array([True, False], dtype=np.bool_),
+            "kv_transfer_params": {"block_ids": [1, 2]},
+        },
+    )
+    prompt_extra_info = {"index": 42, "split": "train"}
+    await AgentLoopWorker._compute_score(
+        _Worker(),
+        [output],
+        kwargs={"data_source": "math_dapo", "reward_model": {"ground_truth": "4"}, "extra_info": prompt_extra_info},
+    )
+
+    sent = captured_rpc["data"]
+    assert "tool_extra_fields" not in sent.non_tensor_batch
+    assert sent.non_tensor_batch["extra_info"][0] == {
+        "index": 42,
+        "split": "train",
+        "session_tag": "ok",
+        "global_steps": 7,
+    }
+    assert prompt_extra_info == {"index": 42, "split": "train"}
+    assert output.as_dict()["rollout_topk_ids"].shape == (4, 2)
+
+    # All reward-loop managers read dynamic extra_fields directly from extra_info without tool_extra_fields glue.
+    cfg = OmegaConf.create({"reward": {"reward_kwargs": {}}})
+    tok = SimpleNamespace(eos_token="</s>", decode=lambda ids, skip_special_tokens=True: "4")
+
+    def score_fn(data_source, solution_str, ground_truth, extra_info=None, **kw):
+        return 1.0 if extra_info.get("session_tag") == "ok" and extra_info.get("index") == 42 else 0.0
+
+    for manager_cls in (RewardLoopNaiveRewardManager, RewardLoopDAPORewardManager):
+        manager = manager_cls(config=cfg, tokenizer=tok, compute_score=score_fn)
+        res = await manager.run_single(sent)
+        assert res["reward_score"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_reward_manager_extra_input_fields_opts_in_heavy_trajectory_data():
+    """Verify RewardManagerBase.extra_input_fields forwards requested heavy fields and rejects system keys."""
+    from types import SimpleNamespace
+
+    from verl import DataProto
+    from verl.experimental.reward_loop.reward_manager.naive import NaiveRewardManager as RewardLoopNaiveRewardManager
+
+    class _LogprobTopkRewardManager(RewardLoopNaiveRewardManager):
+        extra_input_fields = ("prompt_ids", "response_logprobs", "response_topk_ids", "response_topk_log_probs")
+
+    class _InvalidSystemFieldRewardManager(RewardLoopNaiveRewardManager):
+        extra_input_fields = ("kv_transfer_params",)
+
+    class _InvalidTeacherFieldRewardManager(RewardLoopNaiveRewardManager):
+        extra_input_fields = ("teacher_logprobs",)
+
+    cfg = OmegaConf.create({"reward": {"reward_kwargs": {}}})
+    with pytest.raises(ValueError, match="unsupported extra_input_fields"):
+        _InvalidSystemFieldRewardManager.get_extra_input_fields(cfg)
+    with pytest.raises(ValueError, match="unsupported extra_input_fields"):
+        _InvalidTeacherFieldRewardManager.get_extra_input_fields(cfg)
+
+    requested = _LogprobTopkRewardManager.get_extra_input_fields(cfg)
+    assert requested == frozenset({"prompt_ids", "response_logprobs", "response_topk_ids", "response_topk_log_probs"})
+
+    captured_rpc: dict[str, DataProto] = {}
+
+    class _FakeRemoteCall:
+        async def remote(self, data: DataProto):
+            captured_rpc["data"] = data
+            return {"reward_score": 0.5, "reward_extra_info": {}}
+
+    class _Worker:
+        _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
+        _compute_position_ids = AgentLoopWorker._compute_position_ids
+        processor = None
+        reward_loop_worker_handles = [SimpleNamespace(compute_score=_FakeRemoteCall())]
+        reward_extra_input_fields = requested
+
+        def _get_mm_processor_kwargs(self, audios):
+            return {}
+
+    topk_ids = np.array([[11, 13], [12, 14]], dtype=np.int32)
+    topk_lps = np.array([[-0.1, -2.0], [-0.2, -1.5]], dtype=np.float32)
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        response_logprobs=[-0.1, -0.2],
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "session_tag": "ok",
+            "response_topk_ids": topk_ids,
+            "response_topk_log_probs": topk_lps,
+            "response_support_complete": np.array([True, False], dtype=np.bool_),
+            "kv_transfer_params": {"block_ids": [1, 2]},
+        },
+    )
+    await AgentLoopWorker._compute_score(
+        _Worker(),
+        [output],
+        kwargs={"data_source": "math_dapo", "reward_model": {"ground_truth": "4"}, "extra_info": {"index": 7}},
+    )
+
+    sent_extra = captured_rpc["data"].non_tensor_batch["extra_info"][0]
+    assert sent_extra["session_tag"] == "ok"
+    assert sent_extra["prompt_ids"] == [101, 102]
+    assert sent_extra["response_logprobs"] == [-0.1, -0.2]
+    assert np.array_equal(sent_extra["response_topk_ids"], topk_ids)
+    assert np.array_equal(sent_extra["response_topk_log_probs"], topk_lps)
+    # Unrequested heavy fields and system transport handles remain excluded.
+    assert "response_support_complete" not in sent_extra
+    assert "kv_transfer_params" not in sent_extra
+    assert output.as_dict()["rollout_topk_ids"].shape == (4, 2)
