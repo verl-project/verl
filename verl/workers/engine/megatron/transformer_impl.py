@@ -774,8 +774,29 @@ class MegatronEngine(BaseEngine):
         origin_module_device = get_megatron_module_device(self.module)
         if self._is_offload_param or origin_module_device == "cpu":
             load_megatron_model_to_gpu(self.module, load_grad=True)
+        optimizer_config = getattr(self, "optimizer_config", None)
+        if hasattr(optimizer_config, "get"):
+            optimizer_overrides = optimizer_config.get("override_optimizer_config", None) or {}
+        else:
+            optimizer_overrides = getattr(optimizer_config, "override_optimizer_config", None) or {}
+        snapshot_cpu_tensors = False
+        if (
+            self.checkpoint_config is not None
+            and self.checkpoint_config.async_save
+            and (
+                getattr(self, "_is_offload_optimizer", False) or optimizer_overrides.get("optimizer_cpu_offload", False)
+            )
+        ):
+            snapshot_cpu_tensors = getattr(self.checkpoint_config, "async_save_cpu_offload_snapshot", False)
+            if type(snapshot_cpu_tensors) is not bool:
+                raise ValueError("async_save_cpu_offload_snapshot must be a boolean")
+        snapshot_kwargs = {"snapshot_cpu_tensors": True} if snapshot_cpu_tensors else {}
         self.checkpoint_mananager.save_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+            local_path=local_path,
+            hdfs_path=hdfs_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep,
+            **snapshot_kwargs,
         )
         torch.distributed.barrier()
         if self._is_offload_param:

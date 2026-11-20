@@ -33,6 +33,11 @@ class CheckpointConfig(BaseConfig):
             Options: 'model', 'optimizer', 'extra', 'hf_model'.
         load_contents (list[str]): Contents to load from checkpoint. Defaults to same as save_contents.
         async_save (bool): Whether to save checkpoints asynchronously. Only implemented for Megatron as of now.
+        async_save_coalesce_max_staging_mib (int): Maximum estimated per-rank staged payload
+            (in MiB) for coalescing Megatron per-step async save requests into one preload
+            batch; 0 preserves separate requests.
+        async_save_cpu_offload_snapshot (bool): Clone CPU-resident tensors during a coalesced
+            preload so optimizer CPU offload can resume without mutating in-flight buffers.
         strict (bool): Whether to perform strict validation during weight export
         save_lora_only (bool): When True and the model has LoRA adapters, only
             save LoRA adapter weights instead of the full model state dict.
@@ -45,6 +50,8 @@ class CheckpointConfig(BaseConfig):
     save_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     load_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     async_save: bool = False
+    async_save_coalesce_max_staging_mib: int = 0
+    async_save_cpu_offload_snapshot: bool = False
     strict: bool = True
     save_lora_only: bool = False
 

@@ -97,6 +97,8 @@ actor_rollout_ref:
       - extra
       load_contents: ${.save_contents}
       async_save: false
+      async_save_coalesce_max_staging_mib: 0
+      async_save_cpu_offload_snapshot: false
       strict: true
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
@@ -572,6 +574,8 @@ critic:
     - extra
     load_contents: ${.save_contents}
     async_save: false
+    async_save_coalesce_max_staging_mib: 0
+    async_save_cpu_offload_snapshot: false
   profiler:
     _target_: verl.utils.profiler.ProfilerConfig
     tool: ${oc.select:global_profiler.tool,null}
