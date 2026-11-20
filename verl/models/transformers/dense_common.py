@@ -69,6 +69,96 @@ def forward_base_model(
     return outputs
 
 
+def _scatter_indexed_output(selected: torch.Tensor, index: torch.Tensor, seq_len: int) -> torch.Tensor:
+    full_shape = (*selected.shape[:-1], seq_len)
+    return selected.new_zeros(full_shape).index_copy(-1, index, selected)
+
+
+def _empty_indexed_outputs(
+    hidden_states: torch.Tensor, vocab_weights: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    zero_anchor = (hidden_states[..., :0, :].sum() + vocab_weights[:0, :].sum()) * 0.0
+    out_shape = (*hidden_states.shape[:-1],)
+    return (
+        zero_anchor.to(torch.float32).expand(out_shape).clone(),
+        zero_anchor.to(hidden_states.dtype).expand(out_shape).clone(),
+    )
+
+
+def _forward_fused_ppo_torch(
+    fused_linear_for_ppo,
+    hidden_states: torch.Tensor,
+    vocab_weights: torch.Tensor,
+    rolled_labels: torch.Tensor,
+    temperature: float,
+    logprob_index: Optional[torch.LongTensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if logprob_index is None:
+        return fused_linear_for_ppo.forward(
+            hidden_states=hidden_states,
+            vocab_weights=vocab_weights,
+            input_ids=rolled_labels,
+            temperature=temperature,
+        )
+    index = logprob_index.to(device=hidden_states.device, dtype=torch.long)
+    if index.numel() == 0:
+        return _empty_indexed_outputs(hidden_states, vocab_weights)
+    seq_len = hidden_states.shape[-2]
+    sel_lp, sel_ent = fused_linear_for_ppo.forward(
+        hidden_states=hidden_states.index_select(-2, index),
+        vocab_weights=vocab_weights,
+        input_ids=rolled_labels.index_select(-1, index),
+        temperature=temperature,
+    )
+    return (
+        _scatter_indexed_output(sel_lp, index, seq_len),
+        _scatter_indexed_output(sel_ent, index, seq_len),
+    )
+
+
+def _forward_fused_ppo_triton(
+    linear_cross_entropy_fn,
+    hidden_states: torch.Tensor,
+    vocab_weights: torch.Tensor,
+    rolled_labels: torch.Tensor,
+    temperature: float,
+    impl_backend: str,
+    logprob_index: Optional[torch.LongTensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if logprob_index is None:
+        return linear_cross_entropy_fn(
+            hidden_states,
+            vocab_weights,
+            rolled_labels,
+            temperature,
+            "none",
+            impl_backend=impl_backend,
+        )
+    index = logprob_index.to(device=hidden_states.device, dtype=torch.long)
+    if index.numel() == 0:
+        zero_lp, zero_ent = _empty_indexed_outputs(hidden_states, vocab_weights)
+        return zero_lp.reshape(-1), zero_ent.reshape(-1).to(torch.float32)
+    seq_len = hidden_states.shape[-2]
+    leading_shape = hidden_states.shape[:-2]
+    sel_lp, sel_ent = linear_cross_entropy_fn(
+        hidden_states.index_select(-2, index),
+        vocab_weights,
+        rolled_labels.index_select(-1, index),
+        temperature,
+        "none",
+        impl_backend=impl_backend,
+    )
+    if sel_lp.ndim == 1:
+        sel_lp = _scatter_indexed_output(sel_lp.reshape(*leading_shape, index.numel()), index, seq_len).reshape(-1)
+    else:
+        sel_lp = _scatter_indexed_output(sel_lp, index, seq_len)
+    if sel_ent.ndim == 1:
+        sel_ent = _scatter_indexed_output(sel_ent.reshape(*leading_shape, index.numel()), index, seq_len).reshape(-1)
+    else:
+        sel_ent = _scatter_indexed_output(sel_ent, index, seq_len)
+    return sel_lp, sel_ent
+
+
 def forward_with_torch_backend(
     self,
     input_ids: torch.LongTensor = None,
@@ -86,6 +176,7 @@ def forward_with_torch_backend(
     temperature: float = 1.0,
     shift_labels: Optional[torch.LongTensor] = None,
     topk_labels: Optional[torch.LongTensor] = None,
+    logprob_index: Optional[torch.LongTensor] = None,
     **loss_kwargs,
 ) -> tuple | CausalLMOutputForPPO:
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
@@ -145,11 +236,13 @@ def forward_with_torch_backend(
         )
 
     fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
-    log_probs, entropy = fused_linear_for_ppo.forward(
+    log_probs, entropy = _forward_fused_ppo_torch(
+        fused_linear_for_ppo,
         hidden_states=hidden_states,
         vocab_weights=self.lm_head.weight,
-        input_ids=rolled_labels,
+        rolled_labels=rolled_labels,
         temperature=temperature,
+        logprob_index=logprob_index,
     )
 
     return CausalLMOutputForPPO(
@@ -178,6 +271,7 @@ def forward_with_triton_backend(
     temperature: float = 1.0,
     shift_labels: Optional[torch.LongTensor] = None,
     topk_labels: Optional[torch.LongTensor] = None,
+    logprob_index: Optional[torch.LongTensor] = None,
     **loss_kwargs,
 ) -> tuple | CausalLMOutputForPPO:
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
@@ -212,21 +306,32 @@ def forward_with_triton_backend(
     else:
         raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
 
-    kernel_labels = rolled_labels
+    impl_backend = getattr(self, "_verl_fused_kernels_backend", "triton")
     if topk_labels is not None:
         if topk_labels.shape[:-1] != rolled_labels.shape:
             raise ValueError("topk_labels must have rolled_labels.shape as its leading dimensions")
         kernel_labels = torch.cat((rolled_labels.unsqueeze(-1), topk_labels), dim=-1)
-    all_log_probs, entropy = linear_cross_entropy(
-        hidden_states,
-        self.lm_head.weight,
-        kernel_labels,
-        temperature,
-        "none",
-        impl_backend=getattr(self, "_verl_fused_kernels_backend", "triton"),
-    )
-    log_probs = all_log_probs[..., 0] if topk_labels is not None else all_log_probs
-    topk_log_probs = all_log_probs[..., 1:] if topk_labels is not None else None
+        all_log_probs, entropy = linear_cross_entropy(
+            hidden_states,
+            self.lm_head.weight,
+            kernel_labels,
+            temperature,
+            "none",
+            impl_backend=impl_backend,
+        )
+        log_probs = all_log_probs[..., 0]
+        topk_log_probs = all_log_probs[..., 1:]
+    else:
+        log_probs, entropy = _forward_fused_ppo_triton(
+            linear_cross_entropy,
+            hidden_states,
+            self.lm_head.weight,
+            rolled_labels,
+            temperature,
+            impl_backend,
+            logprob_index=logprob_index,
+        )
+        topk_log_probs = None
 
     return CausalLMOutputForPPO(
         log_probs=log_probs,
