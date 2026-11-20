@@ -57,6 +57,37 @@ def truncatefn(s, length=300):
     return s[: length // 2] + "...(truncated) ..." + s[-length // 2 :]
 
 
+def _to_builtin(value):
+    """Rebuild ``value`` from plain builtin types before it is compared with the expected output.
+
+    The generated code controls ``value``, so a subclass of ``int``, ``list``, ``str`` etc. could
+    override ``__eq__`` to always return True. Python tries a subclass's reflected ``__eq__`` first,
+    so swapping the operands is not enough.
+
+    Raises TypeError for anything that is not built from None, bool, int, float, str, tuple, list
+    and dict; the caller counts that as a failed test.
+    """
+    # Dispatch on the real type: isinstance() can be fooled by an overridden __class__.
+    # Read the underlying data through the base type's methods, since a subclass can also
+    # override __int__, __iter__, items(), ... (and an overridden __iter__ hides items from json.dumps).
+    value_type = type(value)
+    if value is None or value_type is bool:
+        return value
+    if issubclass(value_type, int):
+        return int.__int__(value)
+    if issubclass(value_type, float):
+        return float.__float__(value)
+    if issubclass(value_type, str):
+        return str.__str__(value)
+    if issubclass(value_type, tuple):
+        return tuple(_to_builtin(v) for v in tuple.__iter__(value))
+    if issubclass(value_type, list):
+        return [_to_builtin(v) for v in list.__iter__(value)]
+    if issubclass(value_type, dict):
+        return {_to_builtin(k): _to_builtin(v) for k, v in dict.items(value)}
+    raise TypeError(f"unsupported output type: {value_type.__name__}")
+
+
 class CODE_TYPE(Enum):
     call_based = 0
     standard_input = 1
@@ -274,6 +305,8 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
 
                     raw_true_output_copy = json.dumps(output)
                     raw_true_output_copy = truncatefn(raw_true_output_copy, 200)
+
+                    output = _to_builtin(output)
 
                     # ground truth sequences are not tuples
                     if isinstance(output, tuple):
