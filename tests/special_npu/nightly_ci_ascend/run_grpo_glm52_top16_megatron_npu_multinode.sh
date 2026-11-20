@@ -92,6 +92,10 @@ MODEL=(
     actor_rollout_ref.model.path=$hf_weights
     actor_rollout_ref.model.use_remove_padding=False
     actor_rollout_ref.model.use_fused_kernels=False
+    actor_rollout_ref.model.mtp.enable=True
+    actor_rollout_ref.model.mtp.enable_rollout=True
+    actor_rollout_ref.model.mtp.enable_train=False
+    actor_rollout_ref.model.mtp.num_speculative_tokens=3
 )
 
 ACTOR=(
@@ -153,7 +157,7 @@ ACTOR=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_mc2=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_shared_expert_overlap=False
-    +actor_rollout_ref.actor.megatron.override_transformer_config.pipeline_model_parallel_layout="Et*10|t*12|t*8|t*8|t*12|t*12|t*12|t*4L"
+    +actor_rollout_ref.actor.megatron.override_transformer_config.pipeline_model_parallel_layout="Et*10|t*12|t*8|t*8|t*12|t*12|t*12|t*4mL"
     actor_rollout_ref.actor.megatron.router_replay.mode=R3
 )
 
@@ -178,7 +182,7 @@ ROLLOUT=(
     ++actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding=True
     actor_rollout_ref.rollout.enforce_eager=False
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[2, 4, 8, 16, 24, 32]"
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[4,8,12,16,24,32,48,64,96,128]"
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
 )
 
