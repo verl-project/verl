@@ -74,12 +74,14 @@ ENGINE_CONFIG=(
     actor_rollout_ref.actor.veomni.enable_full_shard=True
     actor_rollout_ref.actor.veomni.ulysses_parallel_size=$usp_size
     actor_rollout_ref.actor.veomni.expert_parallel_size=$expert_size
-    actor_rollout_ref.actor.veomni.moe_implementation=fused_triton
+    actor_rollout_ref.actor.veomni.moe_implementation=qat
     actor_rollout_ref.actor.veomni.attn_implementation=eager
     actor_rollout_ref.actor.veomni.dsa_indexer_implementation=tilelang
     actor_rollout_ref.actor.veomni.dsa_attention_implementation=tilelang
     actor_rollout_ref.actor.veomni.mhc_implementation=tilelang
-    actor_rollout_ref.actor.veomni.qat_implementation=fp8_blockwise
+    actor_rollout_ref.actor.veomni.linear_implementation=qat
+    actor_rollout_ref.actor.veomni.swiglu_mlp_implementation=qat
+    actor_rollout_ref.actor.veomni.kv_round_implementation=triton
     actor_rollout_ref.actor.veomni.router_replay.mode=R3
     actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation=chunk_loss
 )
