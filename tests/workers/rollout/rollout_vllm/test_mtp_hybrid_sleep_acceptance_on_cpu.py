@@ -68,3 +68,87 @@ def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeyp
 
     assert metrics["rollout/spec_accept_rate"] > 0.0
     assert metrics["rollout/spec_accept_length"] > 1.0
+
+
+class _FakeSleepEngine:
+    """Records sleep level and collective_rpc method names."""
+
+    def __init__(self):
+        self.sleep_levels = []
+        self.rpcs = []
+
+    async def sleep(self, level: int):
+        self.sleep_levels.append(level)
+
+    async def reset_encoder_cache(self):
+        pass
+
+    async def collective_rpc(self, method, timeout=None, args=(), kwargs=None):
+        self.rpcs.append(method)
+
+
+def _hybrid_server(model_config, actor_strategy=None):
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace(mtp=None)
+    server.model_config = model_config
+    server.actor_strategy = actor_strategy
+    server.engine = _FakeSleepEngine()
+    return server
+
+
+def test_hybrid_full_param_sleep_discards_weights(monkeypatch):
+    """No LoRA: hybrid sleep stays at level 2. The full checkpoint sync refills discarded params."""
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    server = _hybrid_server(SimpleNamespace(lora_rank=0, lora={"rank": 0}), actor_strategy="fsdp")
+
+    asyncio.run(server._sleep_hybrid())
+
+    assert server.engine.sleep_levels == [2]
+    assert server.engine.rpcs == []
+
+
+@pytest.mark.parametrize("strategy", ["fsdp", "fsdp2", "fsdp_turbo"])
+def test_hybrid_fsdp_merged_lora_sleep_keeps_weights(monkeypatch, strategy):
+    """FSDP merged LoRA uses a PEFT export, which is not a full refill (#7904)."""
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    server = _hybrid_server(
+        SimpleNamespace(lora_rank=64, lora={"rank": 64, "merge": True}),
+        actor_strategy=strategy,
+    )
+
+    asyncio.run(server._sleep_hybrid())
+
+    assert server.engine.sleep_levels == [1]
+    assert server.engine.rpcs == []
+
+
+@pytest.mark.parametrize("strategy", ["megatron", "veomni", "torchtitan", None])
+def test_hybrid_megatron_merged_lora_sleep_discards_weights(monkeypatch, strategy):
+    """Megatron merged LoRA exports a full HF state dict, so level 2 stays valid.
+
+    An unset strategy also stays at level 2. Only the FSDP PEFT-export path opts into level 1.
+    """
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    server = _hybrid_server(
+        SimpleNamespace(lora_rank=0, lora={"rank": 64, "merge": True}),
+        actor_strategy=strategy,
+    )
+
+    asyncio.run(server._sleep_hybrid())
+
+    assert server.engine.sleep_levels == [2]
+    assert server.engine.rpcs == []
+
+
+def test_hybrid_lora_adapter_sleep_keeps_weights(monkeypatch):
+    """Adapter sleep stays at level 1 on every backend. Only the adapter is synced."""
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    server = _hybrid_server(
+        SimpleNamespace(lora_rank=64, lora={"rank": 64, "merge": False}),
+        actor_strategy="megatron",
+    )
+
+    asyncio.run(server._sleep_hybrid())
+
+    assert server.engine.sleep_levels == [1]
+    assert server.engine.rpcs == []
