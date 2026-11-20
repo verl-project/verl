@@ -14,13 +14,17 @@ train_files: ~/data/rlhf/gsm8k/train.parquet
 val_files: ~/data/rlhf/gsm8k/test.parquet
 
 # Maximum sample length to be used.
-# Set to -1 to use full dataset, otherwise, randomly
-# select the specified number of samples from train dataset
+# Set to -1 to use full dataset, otherwise, select the specified number of
+# samples from train dataset. When `shuffle` is set the subset is drawn at
+# random, but deterministically for a given `seed` (seed 42 is used when
+# `seed` is null); when `shuffle` is off the first N rows are taken.
 train_max_samples: -1
 
 # Maximum sample length to be used.
-# Set to -1 to use full dataset, otherwise, randomly
-# select the specified number of samples from val dataset
+# Set to -1 to use full dataset, otherwise, select the specified number of
+# samples from val dataset. When `shuffle` is set the subset is drawn at
+# random, but deterministically for a given `seed` (seed 42 is used when
+# `seed` is null); when `shuffle` is off the first N rows are taken.
 val_max_samples: -1
 
 # The field in the dataset where the prompt is located. Default is 'prompt'.
