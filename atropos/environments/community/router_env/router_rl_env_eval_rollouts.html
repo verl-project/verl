@@ -1,0 +1,1552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rendered Messages - router_rl_env_eval_rollouts.jsonl</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; margin: 20px; }
+        details { border: 1px solid #ccc; border-radius: 4px; margin-bottom: 15px; }
+        summary {
+            font-weight: bold;
+            padding: 10px;
+            background-color: #f0f0f0;
+            cursor: pointer;
+            border-radius: 4px 4px 0 0;
+            border-bottom: 1px solid #ccc;
+            outline: none; /* Remove default focus outline if needed */
+        }
+        details[open] summary { border-bottom: 1px solid #ccc; }
+        .group-content { padding: 15px; }
+        .item {
+            border: 1px solid #eee;
+            border-radius: 3px;
+            margin-bottom: 10px;
+            padding: 10px;
+            transition: background-color 0.3s ease, box-shadow 0.2s ease; /* Smooth transitions */
+            scroll-margin-top: 10px; /* Space when scrolling into view */
+        }
+        .item h4 { margin-top: 0; margin-bottom: 5px; font-size: 1.1em; }
+        .content-block { background-color: #fff; padding: 8px; border-radius: 3px; margin-bottom: 5px; overflow-x: auto; }
+        /* Use :focus-within for better accessibility on container focus */
+        .item:focus, .item.active {
+             box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.5); /* Highlight active/focused item */
+             outline: none; /* Remove default outline */
+        }
+
+        /* Score Backgrounds (Faint) */
+        .reward-positive { background-color: rgba(144, 238, 144, 0.3); } /* Faint light green */
+        .reward-zero { background-color: rgba(255, 215, 0, 0.3); }    /* Faint gold/orange */
+        .reward-negative { background-color: rgba(255, 182, 193, 0.4); } /* Faint light pink/red */
+
+        /* Markdown specific styles */
+        .content-block pre {
+            background-color: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            padding: 10px;
+            overflow-x: auto; /* Allow horizontal scrolling for long code lines */
+            white-space: pre-wrap; /* Wrap long lines within pre */
+            word-wrap: break-word; /* Break long words if necessary */
+        }
+        .content-block code {
+             background-color: #f0f0f0; /* Slightly different for inline code */
+             padding: 0.2em 0.4em;
+             border-radius: 3px;
+             font-size: 0.9em;
+        }
+        .content-block pre code {
+            background-color: transparent; /* Don't double-background code in pre blocks */
+            padding: 0;
+            border-radius: 0;
+            font-size: inherit; /* Inherit pre font size */
+        }
+        .content-block blockquote {
+            border-left: 4px solid #ccc;
+            padding-left: 10px;
+            margin-left: 0;
+            color: #555;
+        }
+        .content-block table {
+            border-collapse: collapse;
+            width: auto; /* Don't force full width */
+            margin-bottom: 1em;
+        }
+        .content-block th, .content-block td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        .content-block th {
+            background-color: #f2f2f2;
+        }
+    </style>
+</head>
+<body>
+    <h1>Rendered Messages - router_rl_env_eval_rollouts.jsonl</h1>
+    <div id="groups-container">
+                <details>
+            <summary>Group 0</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-0-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>What song is this?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-0-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> listen<br>(Expected: listen)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-0-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for the identification of a song, which typically requires a servic...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 1</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-1-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Show me a map of Tokyo.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-1-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> go<br>(Expected: go)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-1-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query specifically asks for a map of Tokyo, which falls directly under the capabili...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 2</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-2-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>What is the capital of Egypt?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-2-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> perplexity<br>(Expected: perplexity)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-2-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query asks for a specific piece of information, which is the capital of Egypt. The ...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 3</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-3-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>What is the capital of Brazil?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-3-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> perplexity<br>(Expected: perplexity)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-3-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query asks for the capital of Brazil, which is a straightforward question that fall...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 4</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-4-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Solve for x: 97x = 81</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-4-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> math<br>(Expected: math)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-4-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a straightforward mathematical equation that requires solving for the vari...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 5</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-5-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>What is the support line&#x27;s phone number?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-5-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> contact<br>(Expected: contact)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-5-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for a specific piece of contact information, which is the support l...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 6</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-6-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Search the web for quantum computing.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-6-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> perplexity<br>(Expected: perplexity)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-6-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking to search the web for information on quantum computing. The Agent c...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 7</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-7-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Find directions to the airport.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-7-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> go<br>(Expected: go)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-7-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for directions to the airport, which falls under the category of lo...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 8</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-8-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Solve for x: 61x = 43</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-8-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> math<br>(Expected: math)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-8-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a straightforward mathematical equation that requires solving for the vari...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 9</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-9-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Search my Gmail for update.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-9-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> gmail<br>(Expected: gmail)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-9-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking to search for an update in Gmail, which directly relates to managin...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 10</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-10-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>What is the square root of 1?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-10-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> math<br>(Expected: math)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-10-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query asks for the square root of 1, which is a straightforward mathematical calcul...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 11</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-11-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Find the email address for Sarah.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-11-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> contact<br>(Expected: contact)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-11-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for an email address for a specific person, Sarah. The Agent Chosen...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 12</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-12-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Search the web for AI safety.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-12-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> perplexity<br>(Expected: perplexity)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-12-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking to search the web for information on AI safety. The chosen agent, t...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 13</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-13-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>What song is this?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-13-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> listen<br>(Expected: listen)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-13-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for the identification of a song, which typically requires a servic...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 14</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-14-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Can you dial Dr. Smith?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-14-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> caller<br>(Expected: caller)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-14-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a straightforward request to dial a specific doctor, Dr. Smith. The chosen...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 15</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-15-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Find directions to the Eiffel Tower.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-15-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> go<br>(Expected: go)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-15-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for directions to the Eiffel Tower, which falls under the category ...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 16</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-16-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Find the email address for Sarah.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-16-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> contact<br>(Expected: contact)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-16-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for an email address for a specific person, Sarah. The Agent Chosen...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 17</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-17-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Do I have any events on July 4th?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-17-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> calendar<br>(Expected: calendar)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-17-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking about events on a specific date, July 4th. The chosen agent, the Ca...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 18</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-18-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Solve for x: 39x = 61</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-18-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> math<br>(Expected: math)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-18-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a straightforward mathematical equation that requires solving for the vari...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 19</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-19-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>What song is this?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-19-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> listen<br>(Expected: listen)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-19-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for the identification of a song, which typically requires a servic...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 20</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-20-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Show me a map of Tokyo.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-20-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> go<br>(Expected: go)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-20-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query specifically asks for a map of Tokyo, which falls directly under the capabili...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 21</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-21-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Create an appointment for Lunch with Team.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-21-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> calendar<br>(Expected: calendar)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-21-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is about creating an appointment for lunch with a team, which clearly falls u...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 22</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-22-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Send an email to team@example.com about Project Proposal.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-22-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> gmail<br>(Expected: gmail)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-22-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a request to send an email to a specific address regarding a project propo...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 23</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-23-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>What song is this?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-23-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> listen<br>(Expected: listen)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-23-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for the identification of a song, which typically requires a servic...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 24</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-24-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Send an email to team@example.com about Project Proposal.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-24-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> gmail<br>(Expected: gmail)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-24-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a request to send an email to a specific address regarding a project propo...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 25</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-25-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Schedule a meeting for tomorrow at 3 PM about climate change.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-25-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> calendar<br>(Expected: calendar)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-25-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is about scheduling a meeting, which directly relates to managing calendar ev...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 26</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-26-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>What is Mom&#x27;s phone number?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-26-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> contact<br>(Expected: contact)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-26-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for a specific phone number, which falls under the category of cont...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 27</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-27-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Do I have any events on next Friday?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-27-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> calendar<br>(Expected: calendar)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-27-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking about events scheduled for the upcoming Friday, which directly rela...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 28</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-28-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Play some pop music on Spotify.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-28-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> listen<br>(Expected: listen)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-28-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query specifically requests to play pop music on Spotify, which directly relates to...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 29</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-29-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Read my latest email.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-29-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> gmail<br>(Expected: gmail)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-29-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking to read the latest email, which directly relates to managing emails...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 30</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-30-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>What is the square root of 70?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-30-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> math<br>(Expected: math)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-30-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for the square root of 70, which is a mathematical calculation. The...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 31</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-31-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>What is the square root of 25?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-31-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> math<br>(Expected: math)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-31-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query asks for the square root of 25, which is a straightforward arithmetic calcula...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 32</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-32-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Read my latest email.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-32-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> gmail<br>(Expected: gmail)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-32-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking to read the latest email, which directly pertains to managing email...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 33</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-33-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Where is the nearest coffee shop?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-33-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> go<br>(Expected: go)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-33-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking for the nearest coffee shop, which requires information about locat...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 34</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-34-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Calculate 86 + 9 * 4.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-34-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> math<br>(Expected: math)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-34-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query involves a straightforward arithmetic calculation, specifically the expressio...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 35</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-35-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Create an appointment for Project Update.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-35-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> calendar<br>(Expected: calendar)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-35-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is about creating an appointment for a project update, which directly relates...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 36</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-36-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Calculate 96 + 40 * 1.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-36-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> math<br>(Expected: math)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-36-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query involves a straightforward arithmetic calculation, specifically the addition ...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 37</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-37-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Show me a map of Tokyo.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-37-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> go<br>(Expected: go)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-37-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query specifically asks for a map of Tokyo, which falls directly under the capabili...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 38</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-38-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Play some pop music on Spotify.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-38-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> listen<br>(Expected: listen)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-38-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking to play pop music on Spotify, which directly relates to music playb...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 39</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-39-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Call the support line.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-39-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> caller<br>(Expected: caller)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-39-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a straightforward request to call the support line, which directly aligns ...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 40</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-40-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Send an email to team@example.com about Meeting Follow-up.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-40-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> gmail<br>(Expected: gmail)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-40-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a request to send an email regarding a meeting follow-up, which directly i...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 41</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-41-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Explain how black holes works.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-41-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> perplexity<br>(Expected: perplexity)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-41-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query asks for an explanation of how black holes work, which falls under general kn...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 42</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-42-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Send an email to team@example.com about Quick Question.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-42-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> gmail<br>(Expected: gmail)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-42-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a request to send an email, which falls directly under the capabilities of...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 43</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-43-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Send an email to team@example.com about Quick Question.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-43-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> gmail<br>(Expected: gmail)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-43-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a request to send an email, which falls directly under the capabilities of...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 44</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-44-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Read my latest email.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-44-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> gmail<br>(Expected: gmail)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-44-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking to read the latest email, which directly pertains to managing email...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 45</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-45-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Can you dial the support line?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-45-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> caller<br>(Expected: caller)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-45-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is asking if the support line can be dialed, which directly relates to making...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 46</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-46-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Explain how photosynthesis works.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-46-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> perplexity<br>(Expected: perplexity)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-46-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query asks for an explanation of how photosynthesis works, which falls under genera...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 47</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-47-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Create an appointment for Project Update.</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-47-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> calendar<br>(Expected: calendar)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-47-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is about creating an appointment for a project update, which directly relates...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 48</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-48-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Solve for x: 99x = 59</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-48-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> math<br>(Expected: math)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-48-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a straightforward mathematical equation that requires solving for the vari...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 49</summary>
+            <div class="group-content">
+                <div class="item reward-zero" id="group-49-item-0">
+    <h4>Content 0</h4>
+    <div class="content-block">
+        <p><b>USER QUERY:</b><br>Can you dial Dr. Smith?</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-zero" id="group-49-item-1">
+    <h4>Content 1</h4>
+    <div class="content-block">
+        <p><b>ROUTER CHOSE:</b> caller<br>(Expected: caller)</p>
+    </div>
+    <p><strong>Reward:</strong> 0.0</p>
+</div>
+<div class="item reward-positive" id="group-49-item-2">
+    <h4>Content 2</h4>
+    <div class="content-block">
+        <p><b>JUDGE VERDICT:</b> Correct<br>(Raw: &lt;think&gt; The User Query is a straightforward request to dial a specific person, Dr. Smith. The chosen...)</p>
+    </div>
+    <p><strong>Reward:</strong> 1.0</p>
+</div>
+
+            </div>
+        </details>
+
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const items = document.querySelectorAll('.item');
+            let activeIndex = -1; // No item active initially
+
+            // Function to set active item
+            function setActiveItem(index) {
+                if (activeIndex >= 0 && activeIndex < items.length) {
+                    items[activeIndex].classList.remove('active');
+                    items[activeIndex].removeAttribute('tabindex'); // Remove from tab order when not active
+                }
+                if (index >= 0 && index < items.length) {
+                    items[index].classList.add('active');
+                    items[index].setAttribute('tabindex', '0'); // Make active item focusable
+                    items[index].focus(); // Focus the element
+                    // Ensure the parent <details> is open
+                    const detailsParent = items[index].closest('details');
+                    if (detailsParent && !detailsParent.open) {
+                        detailsParent.open = true;
+                    }
+                    // Scroll into view with options if needed (focus should handle this mostly)
+                    // items[index].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    activeIndex = index;
+                } else {
+                    activeIndex = -1; // Deactivate if index is out of bounds
+                }
+            }
+
+            // Add click listener to activate items
+            items.forEach((item, index) => {
+                item.addEventListener('click', () => {
+                    setActiveItem(index);
+                });
+                // Make items focusable initially only if we want tab navigation
+                // item.setAttribute('tabindex', '0');
+            });
+
+            // Add keydown listener for arrow navigation
+            document.addEventListener('keydown', (event) => {
+                let targetIndex = -1;
+                if (event.key === 'ArrowDown') {
+                    event.preventDefault(); // Prevent default page scroll
+                    targetIndex = (activeIndex === -1) ? 0 : Math.min(activeIndex + 1, items.length - 1);
+                } else if (event.key === 'ArrowUp') {
+                    event.preventDefault(); // Prevent default page scroll
+                    targetIndex = (activeIndex === -1) ? items.length - 1 : Math.max(activeIndex - 1, 0);
+                }
+
+                if (targetIndex !== -1) {
+                    setActiveItem(targetIndex);
+                }
+            });
+
+            // Make first item focusable initially if you want immediate keyboard nav
+             if (items.length > 0) {
+                 // items[0].setAttribute('tabindex', '0');
+                 // Optionally activate the first item on load:
+                 // setActiveItem(0);
+             }
+        });
+    </script>
+</body>
+</html>

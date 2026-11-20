@@ -1,0 +1,30 @@
+task:
+  name: mnist
+optimizer:
+  - name: sgd_baseline
+    learning_rate: [0.01, 0.001]
+    weight_decay: [0.1, 0.01]
+  - name: adamw_baseline
+    learning_rate: [0.01, 0.001]
+    weight_decay: [0.1, 0.01]
+engine:
+  data_dir: ./examples/data
+  output_dir: ./examples/plotting/outputs
+  seed: [1, 2]
+evaluation:
+  output_dir: ./examples/plotting
+  experiment_name: 2_adamw-vs-sgd
+  checkpoints:
+    - last
+  output_types:
+    - png
+  plot:
+    std: True
+    x_axis:
+      - optimizer.weight_decay
+    y_axis:
+      - optimizer.learning_rate
+  plotstyle:
+    tight_layout: False  # the title is a little bit squeezed with this
+    text:
+      usetex: True

@@ -1,0 +1,26 @@
+task:
+  name: classification
+optimizer:
+  - name: adamw_baseline
+    learning_rate: [1.e-2, 1.e-3, 1.e-4]
+    weight_decay: [10, 1.e-0, 1.e-1, 1.e-2]
+  - name: adamcpr_fast
+    learning_rate: [1.e-2, 1.e-3, 1.e-4]
+    kappa_init_param: [0.125, 0.25, 0.5, 1]
+engine:
+  seed: [1, 2, 3]
+  # data_dir: ./data
+  # output_dir: ./experiments
+  plot: false
+  silent: true
+  sbatch_script_template: baselines/sbatch_template.sh  # adapt the template to your needs
+  run_scheduler: slurm_array
+  sbatch_time_factor: 1.8  # increase this for slower machine
+  sbatch_args:
+    partition: single  # adapt to your cluster
+evaluation:
+  output_types: [pdf]
+  plot:
+    x_axis:
+      - optimizer.kappa_init_param
+      - optimizer.weight_decay
