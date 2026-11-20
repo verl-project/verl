@@ -91,6 +91,47 @@ def test_enable_batch_invariance_keeps_autograd_torch_bmm(monkeypatch):
     assert torch.bmm is original_bmm
 
 
+def test_enable_batch_invariance_keeps_backward_through_linear(monkeypatch):
+    # On SM80 vLLM also overrides aten::linear/aten::matmul; a backend kernel for those composite ops makes
+    # backward need aten::linear_backward, which no backend implements. The mm override must still apply.
+    mm_calls = []
+    lib = torch.library.Library("aten", "IMPL")
+
+    def mm(a, b):
+        mm_calls.append(a.shape)
+        return (a.unsqueeze(-1) * b.unsqueeze(0)).sum(1)
+
+    def install():
+        lib.impl("aten::mm", mm, "CPU")
+        lib.impl("aten::matmul", lambda a, b: mm(a, b), "CPU")
+        lib.impl("aten::linear", lambda x, w, b=None: mm(x, w.t()), "CPU")
+
+    _fake_vllm_batch_invariant(monkeypatch, install)
+    try:
+        enable_batch_invariance()
+        layer = torch.nn.Linear(4, 3, bias=False)
+        x = torch.randn(2, 4, requires_grad=True)
+        layer(x).sum().backward()
+        torch.matmul(x, layer.weight.t()).sum().backward()
+    finally:
+        lib._destroy()
+
+    assert layer.weight.grad is not None and x.grad is not None
+    assert len(mm_calls) >= 2
+
+
+def test_enable_batch_invariance_rejects_a_linear_override_installed_earlier(monkeypatch):
+    # If vLLM's install already ran in this process, its aten::linear kernel is in place and backward would fail.
+    lib = torch.library.Library("aten", "IMPL")
+    lib.impl("aten::linear", lambda x, w, b=None: x @ w.t(), "CPU")
+    _fake_vllm_batch_invariant(monkeypatch, lambda: None)
+    try:
+        with pytest.raises(RuntimeError, match="aten::linear"):
+            enable_batch_invariance()
+    finally:
+        lib._destroy()
+
+
 def test_enable_batch_invariance_rejects_a_skipped_install(monkeypatch):
     # vLLM skips the install when its cached envs read VLLM_BATCH_INVARIANT as unset.
     _fake_vllm_batch_invariant(monkeypatch, lambda: False)
