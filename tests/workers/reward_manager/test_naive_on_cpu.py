@@ -12,15 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU tests for NaiveRewardManager's per-sample compute_score timeout."""
+"""CPU tests for NaiveRewardManager's per-sample compute_score timeout and the reward-loop NaiveRewardManager."""
 
+import asyncio
+import pickle
 import time
 
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from verl import DataProto
+from verl.experimental.reward_loop.reward_manager.naive import NaiveRewardManager as RewardLoopNaiveRewardManager
 from verl.workers.reward_manager.naive import NaiveRewardManager, _score_timeout
 
 
@@ -100,3 +104,27 @@ def test_naive_reward_manager_no_timeout_by_default():
     data = _make_minimal_data()
     out = manager(data, return_dict=True)
     assert out["reward_tensor"].sum().item() == pytest.approx(0.5)
+
+
+def test_reward_loop_naive_keeps_extra_info_per_rollout():
+    """Rollouts of one prompt share an extra_info dict; concurrent run_single calls must not see each other's writes."""
+    n = 4
+    data = _make_minimal_data()
+    data.non_tensor_batch["extra_info"] = np.array([{"index": 0}], dtype=object)
+    data = data.repeat(repeat_times=n, interleave=True)
+    data.non_tensor_batch["__num_turns__"] = np.arange(n)
+    data = pickle.loads(pickle.dumps(data))  # as received by RewardLoopWorker.compute_score_batch
+    assert len({id(e) for e in data.non_tensor_batch["extra_info"]}) == 1
+
+    def compute_score(data_source, solution_str, ground_truth, extra_info=None):
+        return float(extra_info["num_turns"])
+
+    async def score_all():
+        manager = RewardLoopNaiveRewardManager(
+            config=OmegaConf.create({"reward": {}}), tokenizer=_DummyTokenizer(), compute_score=compute_score
+        )
+        return await asyncio.gather(*[manager.run_single(data[i : i + 1]) for i in range(n)])
+
+    results = asyncio.run(score_all())
+    assert [r["reward_score"] for r in results] == list(range(n))
+    assert data.non_tensor_batch["extra_info"][0] == {"index": 0}
