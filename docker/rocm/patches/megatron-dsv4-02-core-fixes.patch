@@ -1,4 +1,4 @@
-# Megatron-LM patch 02/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+# Megatron-LM patch 02/14 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
 #
 # Megatron-Core fixes the DeepSeek-V4 ROCm runs needed: CSA CP-layout PyTorch
 # fallback, offloaded optimizer copies refreshed after a param update, FP32

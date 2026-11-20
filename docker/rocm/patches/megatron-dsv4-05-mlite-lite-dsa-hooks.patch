@@ -1,4 +1,4 @@
-# Megatron-LM patch 05/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+# Megatron-LM patch 05/14 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
 #
 # impl=lite: DSA kernel-fusion config and post-optimizer hook. Not on the
 # impl=vllm path the recipe uses; kept so the tree equals the validated one.

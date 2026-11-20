@@ -1,0 +1,579 @@
+# Megatron-LM patch 14/14 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# impl=vllm on ROCm with VLLM_BATCH_INVARIANT=0 (a true BI-off trainer): build
+# instead of refusing; linear / RMSNorm call sites dispatch to native kernels
+# (hipBLASLt, vLLM rms_norm) when BI is off; the MoE EP combine sums slots per
+# rank and reduce-scatters [T, H] in FP32 (MLITE_DSV4_MOE_RS_DTYPE=bf16 opt-in)
+# instead of replaying the BI rollout's per-slot combine.  With
+# VLLM_BATCH_INVARIANT=1 every executed path is unchanged.
+#
+# Upstream: prepared, not yet proposed.
+#
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py
+index 0ae81c316..c389a8eb1 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py
+@@ -354,12 +354,8 @@ class DeepseekV4Model(LiteDeepseekV4Model):
+             self.hc_head.hc_base.float().contiguous(),
+             eps=self.config.hc_eps,
+         )
+-        from vllm.model_executor.layers.batch_invariant import (
+-            rms_norm_batch_invariant,
+-        )
+-
+         hidden_states = rms_norm(
+-            rms_norm_batch_invariant,
++            rocm.rms_norm,
+             hidden_states,
+             self.norm.weight,
+             self.config.rms_norm_eps,
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/module.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/module.py
+index 337a6689c..62b4fa5ff 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/module.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/attention/module.py
+@@ -9,7 +9,6 @@ import torch
+ import torch.nn.functional as F
+ from torch import Tensor
+ from vllm import envs
+-from vllm.model_executor.layers.batch_invariant import linear_batch_invariant
+ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+     per_token_group_quant_fp8,
+ )
+@@ -583,7 +582,7 @@ class VLLMAttention(CompressedSparseAttention):
+             )
+         if self.indexer is not None:
+             aux_fns[1] = lambda: visible_linear(
+-                linear_batch_invariant,
++                rocm.linear,
+                 hidden_states,
+                 self.indexer.weights_proj.weight,
+             )
+@@ -1234,7 +1233,7 @@ class VLLMAttention(CompressedSparseAttention):
+         indexer_weights = None
+         if self.indexer is not None:
+             indexer_weights = visible_linear(
+-                linear_batch_invariant,
++                rocm.linear,
+                 hidden_states,
+                 self.indexer.weights_proj.weight,
+             )
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/logprob.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/logprob.py
+index 252b0bfdf..a056d165c 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/logprob.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/logprob.py
+@@ -133,8 +133,7 @@ def rocm_aligned_selected_log_probs(
+     batch invariance ``F.linear`` dispatches to the same persistent kernel, so
+     the differentiable logits are the visible ones.
+     """
+-    from vllm.model_executor.layers.batch_invariant import linear_batch_invariant
+-
++    from megatron.lite.model.deepseek_v4.vllm.primitive import rocm
+     from megatron.lite.model.deepseek_v4.vllm_engine.model import selected_log_probs
+ 
+     if chunk_size <= 0:
+@@ -148,7 +147,7 @@ def rocm_aligned_selected_log_probs(
+         chunk_hidden = hidden_states[start:stop]
+         with torch.no_grad():
+             visible = selected_log_probs(
+-                linear_batch_invariant(chunk_hidden.detach(), lm_head_weight.detach()),
++                rocm.linear(chunk_hidden.detach(), lm_head_weight.detach()),
+                 chunk_labels,
+                 temperature=temperature,
+                 vocab_limit=vocab_limit,
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/moe/module.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/moe/module.py
+index 1f95ec5ac..df9d05239 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/moe/module.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/moe/module.py
+@@ -2,6 +2,8 @@
+ 
+ from __future__ import annotations
+ 
++import os
++
+ import torch
+ import torch.distributed as dist
+ import torch.nn as nn
+@@ -183,12 +185,8 @@ class DeepseekV4MoE(LiteDeepseekV4MoE):
+         self._rocm = rocm.is_rocm()
+         self._rollout_ep = rollout_ep
+         if self._rocm:
+-            import vllm.envs as envs
+-
+-            # ROCm: the rollout's batch-invariant MoE is Triton fused MoE with
+-            # the all-gather / reduce-scatter EP combine (see primitive.rocm).
+-            if not envs.VLLM_BATCH_INVARIANT:
+-                raise RuntimeError("DeepSeek V4 vLLM on ROCm requires VLLM_BATCH_INVARIANT=1")
++            # ROCm: Triton fused MoE with the all-gather / reduce-scatter EP
++            # combine (see primitive.rocm); BI selects the combine.
+             if rollout_ep is None or rollout_ep < 1:
+                 raise ValueError("DeepSeek V4 vLLM on ROCm requires the rollout's EP size")
+             moe_token_dispatcher_type = "deepep"
+@@ -378,15 +376,13 @@ class DeepseekV4MoE(LiteDeepseekV4MoE):
+         hidden_states: torch.Tensor,
+         input_ids: torch.Tensor | None,
+     ) -> tuple[torch.Tensor, torch.Tensor]:
+-        from vllm.model_executor.layers.batch_invariant import linear_batch_invariant
+-
+         if self.is_hash_layer and input_ids is None:
+             raise NotImplementedError("hash MoE requires explicit input_ids")
+         weight = self.gate.gate.weight
+         # GateLinear on ROCm: the BI persistent GEMM in BF16, then FP32.
+         logits = (
+             gate_linear(
+-                lambda value: linear_batch_invariant(value, weight),
++                lambda value: rocm.linear(value, weight),
+                 hidden_states,
+                 weight,
+             )
+@@ -431,12 +427,15 @@ class DeepseekV4MoE(LiteDeepseekV4MoE):
+         x_flat = x.reshape(-1, self.hidden_size)
+         weights, ids = self._route_rocm(x_flat, input_ids)
+         slot_values = self.experts(x_flat, weights, ids)
+-        routed = rocm.rollout_ep_combine(
+-            slot_values,
+-            ids,
+-            num_experts=self.config.n_routed_experts,
+-            rollout_ep=self._rollout_ep,
+-        )
++        if self.experts.summed_combine:
++            routed = slot_values  # BI off: already summed per token
++        else:
++            routed = rocm.rollout_ep_combine(
++                slot_values,
++                ids,
++                num_experts=self.config.n_routed_experts,
++                rollout_ep=self._rollout_ep,
++            )
+         shared = self._shared_expert_forward(x_flat)
+         return (shared + routed).view(shape)
+ 
+@@ -474,6 +473,22 @@ def _reduce_scatter_rows(
+     return output[: sizes[rank]]
+ 
+ 
++def _summed_rs_dtype() -> torch.dtype:
++    # BI-off EP combine precision; fp32 default, bf16 opt-in.
++    value = os.environ.get("MLITE_DSV4_MOE_RS_DTYPE", "fp32")
++    if value not in ("fp32", "bf16"):
++        raise ValueError(f"MLITE_DSV4_MOE_RS_DTYPE must be fp32 or bf16, got {value!r}")
++    return torch.float32 if value == "fp32" else torch.bfloat16
++
++
++def _sum_slots(slot_values: torch.Tensor) -> torch.Tensor:
++    """FP32 sum over the top-k slots of ``[T, K, H]`` (slot order)."""
++    total = slot_values[:, 0].float()
++    for slot in range(1, slot_values.shape[1]):
++        total.add_(slot_values[:, slot])
++    return total
++
++
+ class _ROCmEPSlotValues(torch.autograd.Function):
+     """Per-slot routed outputs with the rollout's kernels, BF16-master VJP.
+ 
+@@ -482,6 +497,11 @@ class _ROCmEPSlotValues(torch.autograd.Function):
+     and return every slot's value to its token's rank (a sum in which exactly
+     one rank contributes a nonzero, so it is exact).  The caller reproduces the
+     rollout's per-rank ``moe_sum`` and rank-order reduction from these values.
++
++    With ``experts.summed_combine`` (BI off) each rank instead sums its slots
++    per token and reduce-scatters ``[T, H]`` (FP32 by default), and the
++    output is the routed sum itself: K times less combine traffic and no
++    ``[T_all, K, H]`` gradient.
+     """
+ 
+     @staticmethod
+@@ -525,7 +545,12 @@ class _ROCmEPSlotValues(torch.autograd.Function):
+             num_experts=experts.num_experts,
+             swiglu_limit=experts.swiglu_limit,
+         )
+-        output = _reduce_scatter_rows(slot_values, group, sizes, rank)
++        summed = experts.summed_combine
++        if summed:
++            partial = _sum_slots(slot_values).to(_summed_rs_dtype())
++            output = _reduce_scatter_rows(partial, group, sizes, rank).to(hidden.dtype)
++        else:
++            output = _reduce_scatter_rows(slot_values, group, sizes, rank)
+ 
+         local_expert = ids_all.long() - local_start
+         owned = (local_expert >= 0) & (local_expert < num_local)
+@@ -535,6 +560,7 @@ class _ROCmEPSlotValues(torch.autograd.Function):
+         token_index, slot_index = token_index[order], slot_index[order]
+         counts = torch.bincount(route_expert, minlength=num_local).tolist()
+         ctx.group, ctx.sizes, ctx.rank = group, sizes, rank
++        ctx.summed = summed
+         ctx.counts = counts
+         ctx.swiglu_limit = experts.swiglu_limit
+         ctx.num_local = num_local
+@@ -562,7 +588,10 @@ class _ROCmEPSlotValues(torch.autograd.Function):
+         w13 = weights[:num_local]
+         w2 = weights[num_local:]
+         grad_all = _gather_rows(grad_output.contiguous(), ctx.group, ctx.sizes)
+-        grad_routes = grad_all[token_index, slot_index]
++        if ctx.summed:
++            grad_routes = grad_all[token_index]  # every slot sees the token's grad
++        else:
++            grad_routes = grad_all[token_index, slot_index]
+         route_weights = weights_all[token_index, slot_index].float()
+         hidden_routes = hidden_all[token_index]
+         activated = swiglu_with_probs(gate_up, None, ctx.swiglu_limit)
+@@ -610,14 +639,20 @@ class _ROCmEPSlotValues(torch.autograd.Function):
+             grad_hidden_routes[rows] = grad_gate_up[rows] @ w13[expert]
+ 
+         tokens, top_k = weights_all.shape
+-        grad_slots = hidden_all.new_zeros(
+-            (tokens, top_k, hidden_all.shape[1]), dtype=torch.float32
+-        )
+-        grad_slots[token_index, slot_index] = grad_hidden_routes.float()
++        if ctx.summed:
++            grad_hidden_all = rocm.segmented_row_scatter_add(
++                grad_hidden_routes.float(), token_index, tokens
++            )
++        else:
++            grad_slots = hidden_all.new_zeros(
++                (tokens, top_k, hidden_all.shape[1]), dtype=torch.float32
++            )
++            grad_slots[token_index, slot_index] = grad_hidden_routes.float()
++            grad_hidden_all = grad_slots.sum(dim=1)
+         grad_weights_all = weights_all.new_zeros((tokens, top_k), dtype=torch.float32)
+         grad_weights_all[token_index, slot_index] = grad_route_weights
+         grad_hidden = _reduce_scatter_rows(
+-            grad_slots.sum(dim=1), ctx.group, ctx.sizes, ctx.rank
++            grad_hidden_all, ctx.group, ctx.sizes, ctx.rank
+         ).to(hidden_all.dtype)
+         grad_weights = _reduce_scatter_rows(
+             grad_weights_all, ctx.group, ctx.sizes, ctx.rank
+@@ -641,6 +676,8 @@ class _ROCmVisibleExperts(Experts):
+         self.grouped_fp8 = DeploymentGroupedBlockFP8Adapter(
+             cache_weight=cache_deployment_weights
+         )
++        # BI: per-slot values, the caller replays the rollout's combine.
++        self.summed_combine = not rocm.batch_invariant()
+ 
+     def forward(
+         self,
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/rocm.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/rocm.py
+index 3e64416f1..e8619f402 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/rocm.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/rocm.py
+@@ -32,6 +32,37 @@ def is_rocm() -> bool:
+     return torch.version.hip is not None
+ 
+ 
++@functools.lru_cache(maxsize=1)
++def batch_invariant() -> bool:
++    """``VLLM_BATCH_INVARIANT`` of this process (fixed for its lifetime)."""
++    import vllm.envs as envs
++
++    return bool(envs.VLLM_BATCH_INVARIANT)
++
++
++def linear(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
++    """BF16 ``x @ weight.T``: the BI persistent GEMM, else hipBLASLt (F.linear)."""
++    if batch_invariant():
++        from vllm.model_executor.layers.batch_invariant import linear_batch_invariant
++
++        return linear_batch_invariant(x, weight)
++    return torch.nn.functional.linear(x, weight)
++
++
++def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
++    """RMSNorm: the BI Triton kernel, else vLLM's native ``rms_norm`` op."""
++    if batch_invariant():
++        from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
++
++        return rms_norm_batch_invariant(x, weight, eps)
++    from vllm import _custom_ops as ops
++
++    x = x.contiguous()
++    out = torch.empty_like(x)
++    ops.rms_norm(out, x, weight.to(x.dtype).contiguous(), eps)
++    return out
++
++
+ # ---------------------------------------------------------------------------
+ # Block-FP8 linear
+ # ---------------------------------------------------------------------------
+@@ -120,7 +151,6 @@ def mhc_pre_then_norm(
+ ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+     """``MHCPreOp.forward_hip`` (TileLang, one split) then ``RMSNorm`` (BI)."""
+     from vllm.model_executor.kernels.mhc.tilelang import mhc_pre_tilelang
+-    from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
+ 
+     post, comb, layer_input = mhc_pre_tilelang(
+         residual,
+@@ -134,7 +164,7 @@ def mhc_pre_then_norm(
+         iters,
+         1,
+     )
+-    normed = rms_norm_batch_invariant(layer_input, norm_weight.data, norm_eps)
++    normed = rms_norm(layer_input, norm_weight.data, norm_eps)
+     return post, comb, normed
+ 
+ 
+@@ -294,7 +324,7 @@ def segmented_row_scatter_add(grad_output: torch.Tensor, index: torch.Tensor, ro
+     """Bitwise ``zeros(rows, ...).index_put_((index,), grad_output, accumulate=True)`` for FP32 ``grad_output``."""
+     tail = grad_output.shape[1:]
+     n = index.numel()
+-    g = grad_output.reshape(n, -1)
++    g = grad_output.reshape(n, tail.numel())  # not -1: n may be 0
+     if g.stride(-1) != 1:
+         g = g.contiguous()
+     d = g.shape[1]
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/protocol.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/protocol.py
+index 552e810a8..c54721dc3 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/protocol.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/protocol.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import warnings
+ from collections.abc import Mapping
+ from contextlib import contextmanager
+ from dataclasses import dataclass, field
+@@ -156,9 +157,11 @@ def _validate_platform(impl_cfg: ImplConfig) -> None:
+     import vllm.envs as envs
+ 
+     if not envs.VLLM_BATCH_INVARIANT:
+-        raise NotImplementedError(
+-            "DeepSeek V4 impl='vllm' on ROCm follows the batch-invariant rollout; "
+-            "set VLLM_BATCH_INVARIANT=1"
++        # BI off: native ROCm kernels (primitive.rocm dispatch), not bitwise.
++        warnings.warn(
++            "DeepSeek V4 impl='vllm' on ROCm with VLLM_BATCH_INVARIANT=0: the "
++            "trainer runs non-batch-invariant kernels, so rollout and trainer "
++            "log-probs are close but not bitwise equal"
+         )
+     if impl_cfg.dsa_indexer_loss_coeff:
+         raise NotImplementedError(
+diff --git a/experimental/lite/tests/unit/model/deepseek_v4/vllm/test_rocm_nonbi.py b/experimental/lite/tests/unit/model/deepseek_v4/vllm/test_rocm_nonbi.py
+new file mode 100644
+index 000000000..d9c6b47da
+--- /dev/null
++++ b/experimental/lite/tests/unit/model/deepseek_v4/vllm/test_rocm_nonbi.py
+@@ -0,0 +1,226 @@
++"""impl=vllm on ROCm with VLLM_BATCH_INVARIANT=0: native-kernel dispatch and
++the summed EP combine, checked against the batch-invariant per-slot path.
++
++Needs a ROCm GPU and vLLM; two-rank tests need two GPUs.
++"""
++
++from __future__ import annotations
++
++import os
++import tempfile
++from types import SimpleNamespace
++
++import pytest
++import torch
++import torch.nn.functional as F
++
++pytestmark = pytest.mark.skipif(
++    torch.version.hip is None or not torch.cuda.is_available(),
++    reason="ROCm GPU required",
++)
++
++H, I, K, E = 256, 128, 6, 16
++LIMIT = 7.0
++
++
++def _rocm():
++    from megatron.lite.model.deepseek_v4.vllm.primitive import rocm
++
++    return rocm
++
++
++def _moe():
++    from megatron.lite.model.deepseek_v4.vllm.primitive.moe import module
++
++    return module
++
++
++# ---------------------------------------------------------------------------
++# D2: linear / rms_norm dispatch
++# ---------------------------------------------------------------------------
++
++
++def test_linear_dispatch(monkeypatch):
++    rocm = _rocm()
++    from vllm.model_executor.layers.batch_invariant import linear_batch_invariant
++
++    torch.manual_seed(0)
++    x = torch.randn(37, 512, device="cuda", dtype=torch.bfloat16)
++    w = torch.randn(96, 512, device="cuda", dtype=torch.bfloat16)
++    monkeypatch.setattr(rocm, "batch_invariant", lambda: True)
++    assert torch.equal(rocm.linear(x, w), linear_batch_invariant(x, w))
++    monkeypatch.setattr(rocm, "batch_invariant", lambda: False)
++    assert torch.equal(rocm.linear(x, w), F.linear(x, w))
++
++
++@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
++def test_rms_norm_dispatch(monkeypatch, weight_dtype):
++    rocm = _rocm()
++    from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
++
++    torch.manual_seed(0)
++    x = torch.randn(41, 4096, device="cuda", dtype=torch.bfloat16)
++    w = torch.randn(4096, device="cuda", dtype=weight_dtype)
++    monkeypatch.setattr(rocm, "batch_invariant", lambda: True)
++    assert torch.equal(rocm.rms_norm(x, w, 1e-6), rms_norm_batch_invariant(x, w, 1e-6))
++    monkeypatch.setattr(rocm, "batch_invariant", lambda: False)
++    ref = F.rms_norm(x.float(), (x.shape[-1],), w.to(x.dtype).float(), 1e-6)
++    out = rocm.rms_norm(x, w, 1e-6)
++    assert out.dtype == x.dtype and out.shape == x.shape
++    torch.testing.assert_close(out.float(), ref, rtol=1.6e-2, atol=1e-2)
++
++
++# ---------------------------------------------------------------------------
++# D3: summed EP combine
++# ---------------------------------------------------------------------------
++
++
++def _inputs(tokens, num_local, seed):
++    g = torch.Generator(device="cuda").manual_seed(seed)
++    hidden = torch.randn(tokens, H, device="cuda", dtype=torch.bfloat16, generator=g)
++    logits = torch.randn(tokens, E, device="cuda", generator=g)
++    ids = logits.topk(K, dim=-1).indices.to(torch.int32)
++    weights = torch.rand(tokens, K, device="cuda", generator=g) + 0.1
++    w13 = [
++        (torch.randn(2 * I, H, device="cuda", generator=g) * 0.05).to(torch.bfloat16)
++        for _ in range(num_local)
++    ]
++    w2 = [
++        (torch.randn(H, I, device="cuda", generator=g) * 0.05).to(torch.bfloat16)
++        for _ in range(num_local)
++    ]
++    grad = torch.randn(tokens, H, device="cuda", dtype=torch.bfloat16, generator=g)
++    return hidden, weights, ids, w13, w2, grad
++
++
++def _experts(summed, group, ep_size, ep_rank):
++    from megatron.lite.model.deepseek_v4.vllm.primitive.block_fp8 import (
++        DeploymentGroupedBlockFP8Adapter,
++    )
++
++    return SimpleNamespace(
++        ps=SimpleNamespace(ep_group=group, ep_size=ep_size, ep_rank=ep_rank),
++        num_local_experts=E // ep_size,
++        num_experts=E,
++        swiglu_limit=LIMIT,
++        grouped_fp8=DeploymentGroupedBlockFP8Adapter(cache_weight=False),
++        summed_combine=summed,
++    )
++
++
++def _run(summed, inputs, *, group=None, ep_size=1, ep_rank=0, rollout_ep=1):
++    """Forward + backward of one path; returns output and leaf grads."""
++    moe, rocm = _moe(), _rocm()
++    hidden, weights, ids, w13, w2, grad = inputs
++    hidden = hidden.clone().requires_grad_()
++    weights = weights.clone().requires_grad_()
++    w13 = [w.clone().requires_grad_() for w in w13]
++    w2 = [w.clone().requires_grad_() for w in w2]
++    experts = _experts(summed, group, ep_size, ep_rank)
++    out = moe._ROCmEPSlotValues.apply(hidden, weights, ids, experts, *w13, *w2)
++    if not summed:
++        out = rocm.rollout_ep_combine(out, ids, num_experts=E, rollout_ep=rollout_ep)
++    assert out.shape == hidden.shape and out.dtype == hidden.dtype
++    out.backward(grad)
++    return (
++        out.detach(),
++        hidden.grad,
++        weights.grad,
++        [w.grad for w in w13],
++        [w.grad for w in w2],
++    )
++
++
++@pytest.mark.parametrize("tokens", [1, 7, 300])
++def test_summed_ep1_matches_per_slot(tokens):
++    inputs = _inputs(tokens, E, seed=tokens)
++    ref = _run(False, inputs)
++    new = _run(True, inputs)
++    # Forward: both are the FP32 slot-order sum rounded once to BF16.
++    assert torch.equal(new[0], ref[0])
++    # Router-weight and expert-weight grads: same per-route math.
++    assert torch.equal(new[2], ref[2])
++    for a, b in zip(new[3] + new[4], ref[3] + ref[4]):
++        assert torch.equal(a, b)
++    # Hidden grad: same FP32 terms, different summation order.
++    torch.testing.assert_close(new[1].float(), ref[1].float(), rtol=1.6e-2, atol=1e-3)
++
++
++def test_summed_bf16_rs_opt_in(monkeypatch):
++    moe = _moe()
++    monkeypatch.setenv("MLITE_DSV4_MOE_RS_DTYPE", "bf16")
++    assert moe._summed_rs_dtype() is torch.bfloat16
++    inputs = _inputs(64, E, seed=1)
++    torch.testing.assert_close(_run(True, inputs)[0], _run(False, inputs)[0])
++    monkeypatch.setenv("MLITE_DSV4_MOE_RS_DTYPE", "fp16")
++    with pytest.raises(ValueError):
++        moe._summed_rs_dtype()
++
++
++def test_summed_empty_routes():
++    # No token routed to this rank's experts: zero output and zero grads.
++    moe = _moe()
++    hidden, weights, ids, w13, w2, grad = _inputs(5, E, seed=3)
++    # This "rank" owns experts 0-1; every route goes to experts 8-13.
++    ids = torch.zeros_like(ids) + 8 + torch.arange(K, device="cuda", dtype=ids.dtype)
++    experts = _experts(True, None, 1, 0)
++    experts.num_local_experts = 2
++    hidden.requires_grad_()
++    w13 = [w.requires_grad_() for w in w13[:2]]
++    w2 = [w.requires_grad_() for w in w2[:2]]
++    out = moe._ROCmEPSlotValues.apply(hidden, weights, ids, experts, *w13, *w2)
++    assert not out.any()
++    out.backward(grad)
++    assert not hidden.grad.any()
++    for w in w13 + w2:
++        assert not w.grad.any()
++
++
++def _worker(rank, world, init_file, results):
++    torch.cuda.set_device(rank)
++    torch.distributed.init_process_group(
++        "nccl", init_method=f"file://{init_file}", rank=rank, world_size=world
++    )
++    try:
++        group = torch.distributed.group.WORLD
++        num_local = E // world
++        full = _inputs(96 + 13 * rank, E, seed=10 + rank)
++        hidden, weights, ids, _, _, grad = full
++        # Same expert weights on every rank: build all E, keep this rank's slice.
++        g_inputs = _inputs(1, E, seed=99)
++        w13 = g_inputs[3][rank * num_local : (rank + 1) * num_local]
++        w2 = g_inputs[4][rank * num_local : (rank + 1) * num_local]
++        inputs = (hidden, weights, ids, w13, w2, grad)
++        # rollout_ep=1: the reference rounds the FP32 slot sum once, like the
++        # summed path (rollout_ep=world would add the BI rollout's per-rank
++        # BF16 rounding). Only FP32 association differs: at most one BF16 ulp.
++        kw = dict(group=group, ep_size=world, ep_rank=rank, rollout_ep=1)
++        ref = _run(False, inputs, **kw)
++        new = _run(True, inputs, **kw)
++        torch.testing.assert_close(new[0].float(), ref[0].float(), rtol=2**-7, atol=1e-6)
++        torch.testing.assert_close(new[1].float(), ref[1].float(), rtol=1.6e-2, atol=1e-3)
++        assert torch.equal(new[2], ref[2])
++        for a, b in zip(new[3] + new[4], ref[3] + ref[4]):
++            assert torch.equal(a, b)
++        results[rank] = "ok"
++    except Exception as exc:  # surfaced by the parent
++        results[rank] = repr(exc)
++    finally:
++        torch.distributed.destroy_process_group()
++
++
++@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="two GPUs required")
++def test_summed_ep2_matches_per_slot():
++    import torch.multiprocessing as mp
++
++    world = 2
++    with tempfile.TemporaryDirectory() as tmp:
++        manager = mp.Manager()
++        results = manager.dict()
++        mp.spawn(
++            _worker,
++            args=(world, os.path.join(tmp, "init"), results),
++            nprocs=world,
++            join=True,
++        )
++        assert dict(results) == {0: "ok", 1: "ok"}

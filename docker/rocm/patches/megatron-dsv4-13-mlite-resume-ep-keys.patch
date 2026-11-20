@@ -1,4 +1,4 @@
-# Megatron-LM patch 13/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+# Megatron-LM patch 13/14 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
 #
 # verl_mlite engine: exact resume under expert parallelism (EP-rank keys for
 # expert DTensor params in the distributed checkpoint, optimizer state re-wrapped

@@ -1,4 +1,4 @@
-# Megatron-LM patch 08/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+# Megatron-LM patch 08/14 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
 #
 # MLITE_MEM_LOG=1 logs device memory per micro-batch and before the optimizer
 # step. Off by default; logging only (no synchronization, no allocation).

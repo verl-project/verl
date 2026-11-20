@@ -1,4 +1,4 @@
-# Megatron-LM patch 11/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+# Megatron-LM patch 11/14 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
 #
 # impl=vllm on ROCm: run the dense VJPs eagerly. The compiled VJPs were not
 # run-to-run deterministic on the first call.
