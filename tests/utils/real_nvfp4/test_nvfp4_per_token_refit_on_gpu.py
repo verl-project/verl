@@ -147,19 +147,15 @@ def _runner(llm):
 
 
 def _refit(llm, weights):
-    """The rollout worker's quantized refit, in buckets of 32 tensors."""
-    from verl.utils.vllm.vllm_quant_utils import (
-        load_quanted_weights,
-        prepare_quanted_weights_for_loading,
-        process_quanted_weights_after_loading,
-    )
+    """The rollout worker's refit through vLLM's reload, in buckets of 32 tensors."""
+    from vllm.model_executor.model_loader.reload import finish_reload, start_reload
 
     runner = _runner(llm)
     model = runner.get_model()
-    reload_state = prepare_quanted_weights_for_loading(model)
+    start_reload(model)
     for start in range(0, len(weights), 32):
-        load_quanted_weights(weights[start : start + 32], runner)
-    process_quanted_weights_after_loading(model, reload_state)
+        model.load_weights(weights[start : start + 32])
+    finish_reload(model, runner.vllm_config.model_config, runner.device)
 
 
 def _logprobs(llm):

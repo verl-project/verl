@@ -279,11 +279,9 @@ class VerlDeltaIPCWeightTransferEngine(WeightTransferEngine):
             if self._session_encoding is None:
                 self._session_encoding = encoding
                 if encoding == "dense":
-                    from vllm.model_executor.model_loader.reload import (
-                        initialize_layerwise_reload,
-                    )
+                    from vllm.model_executor.model_loader.reload import start_reload
 
-                    initialize_layerwise_reload(self.model)
+                    start_reload(self.model)
             elif encoding != self._session_encoding:
                 raise ValueError(
                     "One weight update cannot mix dense and sparse DeltaFlush payloads "
@@ -306,14 +304,11 @@ class VerlDeltaIPCWeightTransferEngine(WeightTransferEngine):
 
     def finish_weight_update(self) -> None:
         if self._session_encoding == "dense":
-            # Dense updates use vLLM's layerwise reload lifecycle. Finalize it
-            # once after the last flush to run model-specific post-load work.
-            from vllm.model_executor.model_loader.reload import (
-                finalize_layerwise_reload,
-            )
+            # Dense (full) updates use vLLM's reload lifecycle; finish it once after the last flush.
+            from vllm.model_executor.model_loader.reload import finish_reload
 
             try:
-                finalize_layerwise_reload(self.model, self.model_config)
+                finish_reload(self.model, self.model_config, self.device)
             except BaseException:
                 self._update_failed = True
                 raise

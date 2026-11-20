@@ -140,14 +140,6 @@ def test_ignores_layers_without_a_kv_cache_method(quant_utils):
     assert _scales(model["other"]) == pytest.approx([_DUMMY_SCALE] * 8)
 
 
-def test_refit_post_processing_resets_the_scales(quant_utils):
-    model = nn.ModuleDict({"attn": _attention_layer()})
-
-    quant_utils.process_quanted_weights_after_loading(model, reload_state={})
-
-    assert _scales(model["attn"]) == [1.0] * 8
-
-
 def test_initial_post_load_resets_scales_before_warmup(quant_utils):
     layer = _attention_layer()
 
