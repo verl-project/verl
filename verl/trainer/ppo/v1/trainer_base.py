@@ -70,6 +70,7 @@ from verl.trainer.ppo.utils import (
     need_critic,
     need_reference_policy,
     need_teacher_policy,
+    ref_topk_for_kl,
 )
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
@@ -1849,11 +1850,14 @@ class PPOTrainer(ABC):
         }
         if self.ref_in_actor:
             metadata["no_lora_adapter"] = True
+        # ref_topk_* (topk_rb) are written to TransferQueue by the worker; full sequence, packed with the tokens
+        metadata["ref_topk"] = ref_topk_for_kl(self.config)
         batch.extra_info.update(metadata)
         if self.ref_in_actor:
             output = self.actor_rollout_wg.compute_log_prob(batch)
         else:
             output = self.ref_policy_wg.compute_ref_log_prob(batch)
+        batch.extra_info["ref_topk"] = 0  # extra_info persists: later passes must not emit the top-k again
         assert len(output) == len(batch)
 
         # 2. write ref_log_prob and entropy back to TransferQueue
@@ -1998,6 +2002,7 @@ class PPOTrainer(ABC):
         )
         extra_info = {
             "calculate_entropy": calculate_entropy,
+            "kl_topk_rb": bool(ref_topk_for_kl(self.config)),
             "distillation_use_topk": distillation_use_topk,
             "distillation_only": distillation_only,
             "score_centering": score_centering,

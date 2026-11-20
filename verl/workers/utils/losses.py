@@ -24,6 +24,9 @@ from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
+# per-token outputs of the actor engine for kl_loss_type=topk_rb (see FSDP/Megatron _topk_kl_side_outputs)
+_TOPK_RB_OUTPUTS = ("kl_topk_coarse", "kl_topk_log_q_tail")
+
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     pad_mode = tu.get_non_tensor_data(data=data, key="pad_mode", default=DatasetPadMode.NO_PADDING)
@@ -57,6 +60,15 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
+    topk_rb = config.use_kl_loss and config.kl_loss_type == "topk_rb"
+    if topk_rb:
+        # coarse KL and policy tail from the engine (full logits, kl_topk_rb=True); the rest from the batch
+        kl_topk = {k: no_padding_2_padding(model_output[k], data) for k in _TOPK_RB_OUTPUTS}
+        input_ids = data["input_ids"]
+        labels = torch.nested.nested_tensor_from_jagged(input_ids.values().roll(-1), offsets=input_ids.offsets())
+        ref_topk_ids = no_padding_2_padding(data["ref_topk_ids"], data)
+        kl_topk["label_in_topk"] = (ref_topk_ids == no_padding_2_padding(labels, data).unsqueeze(-1)).any(-1)
+        kl_topk["kl_topk_log_p_tail"] = no_padding_2_padding(data["ref_topk_log_probs"], data)[..., -1]
     entropy = model_output.get("entropy", None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
@@ -178,13 +190,39 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     if config.use_kl_loss:
         ref_log_prob = data["ref_log_prob"]
         # compute kl loss
-        kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
+        if topk_rb:
+            # local import: topk_rb_kl reuses score_centering, which imports this module
+            from verl.trainer.ppo.topk_rb_kl import compute_topk_rb_kl
+
+            kld, kl_value = compute_topk_rb_kl(
+                kl_topk["kl_topk_coarse"],
+                kl_topk["kl_topk_log_q_tail"],
+                kl_topk["kl_topk_log_p_tail"],
+                kl_topk["label_in_topk"],
+                log_prob,
+                ref_log_prob,
+                old_log_prob=old_log_prob,
+                rollout_is_weights=rollout_is_weights,
+            )
+        else:
+            kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
         kl_loss = agg_loss(
             loss_mat=kld, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
         )
-
         policy_loss += kl_loss * config.kl_loss_coef
-        metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
+        kl_metric = kl_loss
+        if topk_rb:
+            # kld is a gradient surrogate: report the unbiased KL estimate, and the mass outside the top-k
+            kl_metric = agg_loss(
+                loss_mat=kl_value,
+                loss_mask=response_mask,
+                loss_agg_mode=config.loss_agg_mode,
+                **config.global_batch_info,
+            )
+            for name, side in (("policy", "q"), ("ref", "p")):
+                tail_mass = masked_mean(kl_topk[f"kl_topk_log_{side}_tail"].exp(), response_mask)
+                metrics[f"kl_topk/{name}_tail_mass"] = Metric(value=tail_mass, aggregation=AggregationType.MEAN)
+        metrics["kl_loss"] = Metric(value=kl_metric, aggregation=metric_aggregation)
         metrics["kl_coef"] = config.kl_loss_coef
 
     return policy_loss, metrics

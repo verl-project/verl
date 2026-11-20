@@ -79,6 +79,14 @@ def need_reference_policy(
     return config.algorithm.get("use_kl_in_reward", False) or config.actor_rollout_ref.actor.use_kl_loss
 
 
+def ref_topk_for_kl(config: DictConfig) -> int:
+    """``k`` of the reference top-k needed by ``actor.kl_loss_type=topk_rb``, or 0 when it is not used."""
+    actor = config.actor_rollout_ref.actor
+    if actor.get("use_kl_loss", False) and actor.get("kl_loss_type", None) == "topk_rb":
+        return int(actor.kl_topk)
+    return 0
+
+
 def need_teacher_policy(
     config: DictConfig,
 ) -> bool:
