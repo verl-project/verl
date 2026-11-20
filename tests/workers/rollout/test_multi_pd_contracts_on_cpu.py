@@ -76,6 +76,15 @@ def test_all_engines_have_disjoint_workers_and_every_prefill_gets_all_decodes(de
     assert len(replica.get_metrics_server_endpoints()) == np + nd
 
 
+@pytest.mark.parametrize("n_prefill,n_decode", [(1, 1), (2, 2)])
+def test_ascend_nixl_is_rejected_before_reserving_ports_or_spawning_engines(n_prefill, n_decode):
+    replica, spawned = _metrics_pd_replica(0, "npu", "nixl", n_prefill, n_decode)
+    with pytest.raises(AssertionError, match="transfer_backend='mooncake'"):
+        asyncio.run(replica.launch_servers())
+    assert spawned == []
+    replica._reserve_pd_ports.assert_not_called()
+
+
 def test_cross_node_workers_fail_before_spawning_any_engine():
     replica, spawned = _metrics_pd_replica(0, "npu", "mooncake", 2, 2)
     replica.workers[-1].__ray_call__ = _remote(lambda fn: ("other-node", "7", "::2"))
@@ -252,9 +261,7 @@ def test_role_overrides_cannot_change_the_planned_topology(role, key, dashed, va
             validate(config)
 
 
-@pytest.mark.parametrize(
-    "device,backend", [("npu", "mooncake"), ("npu", "nixl"), ("cuda", "mooncake"), ("cuda", "nixl")]
-)
+@pytest.mark.parametrize("device,backend", [("npu", "mooncake"), ("cuda", "mooncake"), ("cuda", "nixl")])
 def test_sleep_drains_every_prefill_and_orders_mooncake_consumers_first(device, backend):
     sleep = _load_functions(REPLICA, ["sleep"], "vLLMPDReplica").sleep
     events = []

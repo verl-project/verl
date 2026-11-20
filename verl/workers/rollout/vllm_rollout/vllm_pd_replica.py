@@ -113,9 +113,10 @@ class vLLMPDReplica(vLLMReplica):
         )
         use_ascend_mooncake_v1 = self._is_ascend_platform()
         transfer_backend = self.config.disaggregation.transfer_backend
-        if use_ascend_mooncake_v1 and transfer_backend == "nixl":
-            logger.warning("NixlConnector is not supported for Ascend PD; falling back to MooncakeConnectorV1")
-            transfer_backend = "mooncake"
+        if use_ascend_mooncake_v1:
+            assert transfer_backend == "mooncake", (
+                "Ascend PD requires rollout.disaggregation.transfer_backend='mooncake'; NixlConnector is not supported."
+            )
 
         worker_infos = await asyncio.gather(
             *[
@@ -297,7 +298,7 @@ class vLLMPDReplica(vLLMReplica):
         sleep owns transport unregistration; no connector disconnect RPC is used.
         """
         await asyncio.gather(*[server.wait_for_requests_to_drain.remote() for server in self._prefill_servers])
-        # Ascend also uses Mooncake when the configured NIXL backend falls back.
+        # Ascend uses MooncakeConnectorV1; consumers must sleep before producers.
         if self._is_ascend_platform() or self.config.disaggregation.transfer_backend == "mooncake":
             await asyncio.gather(*[server.sleep.remote() for server in self._decode_servers])
             await asyncio.gather(*[server.sleep.remote() for server in self._prefill_servers])

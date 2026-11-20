@@ -1,8 +1,10 @@
 # Single-node vLLM multi-prefill / multi-decode rollout
 
-Last updated: 11/19/2026.
+Last updated: 11/20/2026.
 
 A PD replica contains `N` independent prefill engines and `M` independent decode engines. Every prefill can hand a request to any decode in its own replica. The complete group must fit on one physical node, with rollout DP=PP=1. The connectors remain GPU NIXL/Mooncake and Ascend MooncakeConnectorV1.
+
+Ascend PD requires explicitly setting `rollout.disaggregation.transfer_backend: mooncake`. Configuring `nixl` raises an assertion before port reservation or engine creation; it does not automatically switch backends. GPU continues to support both NIXL and Mooncake.
 
 ## Configuration and resource layout
 
@@ -56,7 +58,7 @@ Agent / Gateway -> LLMServerClient -> existing global request router
 
 One-P configurations preserve existing actor names. Multi-P names include the P engine index; D actor names keep the existing convention. The bucketed weight-transfer protocol is unchanged.
 
-Before `sleep()`, the trainer must quiesce new generation. The PD override waits for every P's drain call. With Mooncake (including Ascend's NIXL fallback), all D sleep calls complete before any P sleep begins; a D failure prevents P sleep. Native NIXL sleeps all engines after the P drains. Worker sleep owns memory unregistration; no extra connector-disconnect RPC is introduced. Resume keeps the existing barrier: resume every engine, then open admission gates.
+Before `sleep()`, the trainer must quiesce new generation. The PD override waits for every P's drain call. With Mooncake (including Ascend's MooncakeConnectorV1), all D sleep calls complete before any P sleep begins; a D failure prevents P sleep. Native NIXL sleeps all engines after the P drains. Worker sleep owns memory unregistration; no extra connector-disconnect RPC is introduced. Resume keeps the existing barrier: resume every engine, then open admission gates.
 
 This is not a complete handoff/transfer barrier: per-engine drain does not prove the absence of every P-to-D dispatch race. The inherited abort and independent `release_kv_cache()` paths have not been redesigned here. Cancellation, cache release, weight updates and transport lifetime still require target-device validation.
 
