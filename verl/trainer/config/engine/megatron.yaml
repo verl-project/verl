@@ -63,6 +63,9 @@ entropy_from_logits_chunk_size: 2048
 # oc.select: default val for ref.megatron.seed
 seed: 42
 
+# Whether to enable full determinism for distributed training, only for debugging.
+full_determinism: false
+
 # Allow to override Distributed Data Parallel (DDP) config
 override_ddp_config: {}
 

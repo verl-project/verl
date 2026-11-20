@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-from verl.utils.device import get_torch_device, is_device_available
+from verl.utils.device import get_torch_device, is_device_available, is_npu_available
 
 
 def set_random_seed(seed):
@@ -36,7 +36,32 @@ def set_random_seed(seed):
         from megatron.core import tensor_parallel
 
         tensor_parallel.model_parallel_cuda_manual_seed(seed)
-    # FIXME: torch cumsum not support deterministic (used in vllm sampler),
-    # https://github.com/pytorch/pytorch/issues/89492
-    # torch.use_deterministic_algorithms(True, warn_only=True)
-    # os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+
+
+def enable_megatron_full_determinism(seed: int):
+    """Enable full determinism settings specific to the Megatron engine.
+
+    Avoids resetting raw device seeds after model_parallel_cuda_manual_seed has seeded
+    Megatron's RNG tracker, and applies determinism controls across PyTorch, cuBLAS,
+    cuDNN, FlashAttention, and Transformer Engine.
+    """
+    import os
+
+    import torch
+
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+    os.environ.setdefault("FLASH_ATTENTION_DETERMINISTIC", "1")
+    os.environ.setdefault("VERL_DISABLE_FLASH_ATTN_CE", "1")
+    os.environ.setdefault("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+    os.environ.setdefault("NCCL_DETERMINISTIC", "1")
+    os.environ.setdefault("NCCL_ALGO", "Ring")
+    os.environ.setdefault("NCCL_PROTO", "Simple")
+    if is_npu_available:
+        os.environ.setdefault("HCCL_DETERMINISTIC", "true")
+        os.environ.setdefault("CLOSE_MATMUL_K_SHIFT", "1")
+
+    # warn_only=True because colocated vLLM sampler uses torch.cumsum which has no deterministic kernel
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False

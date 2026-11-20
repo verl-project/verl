@@ -213,6 +213,7 @@ def get_ppo_ray_runtime_env(config=None):
         "FLASH_ATTENTION_DETERMINISTIC",
         "NCCL_DETERMINISTIC",
         "NCCL_ALGO",
+        "NVTE_ALLOW_NONDETERMINISTIC_ALGO",
         *BATCH_INVARIANT_ENV,
     ):
         val = os.environ.get(key)

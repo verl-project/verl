@@ -36,4 +36,7 @@ megatron:
   expert_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.expert_model_parallel_size,1}
   expert_tensor_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.expert_tensor_parallel_size,null}
   param_offload: ${oc.select:actor_rollout_ref.actor.megatron.param_offload,False}
+  # Full determinism changes NCCL/process group algorithms and PyTorch determinism,
+  # so a colocated reference model must follow the actor's setting.
+  full_determinism: ${oc.select:actor_rollout_ref.actor.megatron.full_determinism,False}
   forward_only: True
