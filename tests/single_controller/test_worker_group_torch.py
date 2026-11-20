@@ -24,6 +24,23 @@ import torch.distributed
 from verl.single_controller.base.worker import Worker
 from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils.device import get_device_name
+from verl.utils.hccl_diagnostics import hccl_diagnostic_stage
+
+
+def _trace_collective_stage(actor, stage):
+    def tensor_metadata():
+        tensor = getattr(actor, "tensor", None)
+        if tensor is None:
+            return None
+        return {"shape": list(tensor.shape), "dtype": str(tensor.dtype), "device": str(tensor.device)}
+
+    return hccl_diagnostic_stage(
+        f"all_gather.{stage}",
+        actor=type(actor).__name__,
+        rank=actor.rank,
+        world_size=actor.world_size,
+        tensor=tensor_metadata,
+    )
 
 
 @ray.remote
@@ -33,16 +50,19 @@ class TestAllGatherActor(Worker):
         self.size = size
 
     def init(self):
-        torch.distributed.init_process_group()
-        self.tensor = torch.zeros(size=(self.size,), dtype=torch.int64, device=get_device_name())
-        self.tensor += self.rank
+        with _trace_collective_stage(self, "init_process_group"):
+            torch.distributed.init_process_group()
+        with _trace_collective_stage(self, "create_input"):
+            self.tensor = torch.zeros(size=(self.size,), dtype=torch.int64, device=get_device_name())
+            self.tensor += self.rank
 
     def all_gather(self):
         world_size = self._world_size
         output = torch.zeros(
             size=(self.tensor.shape[0] * world_size,), dtype=self.tensor.dtype, device=self.tensor.device
         )
-        torch.distributed.all_gather_into_tensor(output, self.tensor, async_op=False)
+        with _trace_collective_stage(self, "all_gather_into_tensor"):
+            torch.distributed.all_gather_into_tensor(output, self.tensor, async_op=False)
         return output
 
 
@@ -52,16 +72,19 @@ class TestAllGatherActorV2(Worker):
         super().__init__()
         self.size = size
 
-        torch.distributed.init_process_group()
-        self.tensor = torch.zeros(size=(self.size,), dtype=torch.int64, device=get_device_name())
-        self.tensor += self.rank
+        with _trace_collective_stage(self, "init_process_group"):
+            torch.distributed.init_process_group()
+        with _trace_collective_stage(self, "create_input"):
+            self.tensor = torch.zeros(size=(self.size,), dtype=torch.int64, device=get_device_name())
+            self.tensor += self.rank
 
     def all_gather(self):
         world_size = self._world_size
         output = torch.zeros(
             size=(self.tensor.shape[0] * world_size,), dtype=self.tensor.dtype, device=self.tensor.device
         )
-        torch.distributed.all_gather_into_tensor(output, self.tensor, async_op=False)
+        with _trace_collective_stage(self, "all_gather_into_tensor"):
+            torch.distributed.all_gather_into_tensor(output, self.tensor, async_op=False)
         return output
 
 
