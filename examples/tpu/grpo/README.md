@@ -176,6 +176,17 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   env MODEL_NAME=Qwen3.5-35B-A3B bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
 ```
 
+**Graph-mode actor update (optional).** With a `verl-hardware-plugin` whose `engine_kwargs.tpu.graph_trainer` takes a settings dict (e.g. `git -C ../verl-hardware-plugin checkout 8a9e485da66ea76d40b01b4940db08928fc45061`), `TRAINER_MODE=graph_trainer` runs the actor update through TorchTitan's `TpuGraphTrainer`. It needs `USE_KL_LOSS=False`, `EXPERT_PARALLEL_SIZE=1` and one micro-batch per rank (`USE_DYNAMIC_BSZ=True` with `STATIC_MICRO_BATCH_LEN` = `MAX_TOKEN_LEN_PER_GPU`). `GRAPH_TRAINER_SPLIT_LAYERS=2` compiles two layers per forward / backward executable instead of one step graph, as TorchTitan's `qwen35_moe_35b_split_tokamax_benchmark` SFT recipe does; without it the 40-layer step compiles very slowly.
+
+```bash
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env MODEL_NAME=Qwen3.5-35B-A3B TRAINER_MODE=graph_trainer GRAPH_TRAINER_SPLIT_LAYERS=2 \
+  USE_KL_LOSS=False PARAM_DTYPE=bfloat16 OPTIM_IMPL=fused SPARSECORE_OFFLOAD=True TRAINER_SCOPED_VMEM_LIMIT_KIB=65472 \
+  TRAIN_BATCH_SIZE=32 PPO_MINI_BATCH_SIZE=32 ROLLOUT_N=4 \
+  USE_DYNAMIC_BSZ=True MAX_TOKEN_LEN_PER_GPU=32768 STATIC_MICRO_BATCH_LEN=32768 STATIC_MAX_RESPONSE_LEN=2048 \
+  bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
+```
+
 ### Qwen3.5-397B-A17B (expert parallelism)
 
 Expert parallelism (`EXPERT_PARALLEL_SIZE > 1`) needs torchtitan from [google-pytorch/torchtitan#142](https://github.com/google-pytorch/torchtitan/pull/142), which enables Qwen3.5 with EP on TPU. Build the image at its head commit:
@@ -223,3 +234,38 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash example
 ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   env NNODES_TRAINER=4 N_CHIPS_TRAINER=4 NNODES_ROLLOUT=4 N_CHIPS_ROLLOUT=4 bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
 ```
+
+**bfloat16 FSDP gradient reduction.** `MIXED_PRECISION_REDUCE` defaults to `bfloat16` on the actor, reducing `update_actor` latency by ~9–18% across eager and graph modes with matching 30-step GSM8K reward and KL; set `MIXED_PRECISION_REDUCE=float32` to keep `float32` reduce-scatter. Optionally set `AC_SAVE_SPLASH_AND_ROUTING=True` in eager mode to save Splash attention and MoE routing outputs.
+
+**Graph-mode actor update (optional).** With `verl-hardware-plugin` including PR #134 (`engine_kwargs.tpu.trainer_mode=graph_trainer` and dict `engine_kwargs.tpu.graph_trainer`, e.g. `git -C ../verl-hardware-plugin checkout 8a9e485da66ea76d40b01b4940db08928fc45061`), `TRAINER_MODE=graph_trainer` runs the actor update through TorchTitan's `TpuGraphTrainer`: forward, fused log-prob, PPO loss and backward of a micro-batch are traced once and compiled as one program. The first step pays a one-time trace and compile. Each rank must fit its mini-batch in one micro-batch, so raise `MAX_TOKEN_LEN_PER_GPU` if the run reports more than one; `STATIC_MICRO_BATCH_LEN` defaults to it.
+
+- **Lowest per-step latency (`8192` tokens/chip):** default unsplit `tpu_selective` (`GRAPH_TRAINER_SAVE_REGIONS=moe.routing,attention.inner_attention`), with `GRAPH_TRAINER_FSDP_BARRIER_POLICY` auto-defaulting to `prefetch` on `v5p*` and `interleave` elsewhere (`prefetch` exceeds compile HBM on `tpu7x` 2x2x1):
+
+```bash
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env TRAINER_MODE=graph_trainer bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
+```
+
+- **Fast compile, lower HBM, and large-batch MFU scaling (`16384`–`32768` tokens/chip):** `GRAPH_TRAINER_SPLIT_LAYERS=1` defaults to `memory_policy=default`, `fsdp_barrier_policy=none`, `enable_remat_barriers=false`, and `backward_partition_mode=fsdp_pipeline` (cuts compile time to ~1.5 min, saves ~10 GB HBM, and enables `@16384` on `tpu7x` / `@32768` on `v5p` where unsplit OOMs). Raise the batch with the token budget so each chip's micro-batch is mostly real tokens:
+
+```bash
+# TPU v7x (8 trainer chips), highest MFU in the table below
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env TRAINER_MODE=graph_trainer GRAPH_TRAINER_SPLIT_LAYERS=1 MAX_TOKEN_LEN_PER_GPU=16384 \
+  bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
+
+# TPU v5p 2x2x4 (16 trainer chips, RUNTIME_ENV as above), highest MFU in the table below
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env NNODES_TRAINER=4 N_CHIPS_TRAINER=4 NNODES_ROLLOUT=4 N_CHIPS_ROLLOUT=4 \
+  TRAIN_BATCH_SIZE=128 PPO_MINI_BATCH_SIZE=128 TRAINER_MODE=graph_trainer GRAPH_TRAINER_SPLIT_LAYERS=1 \
+  MAX_TOKEN_LEN_PER_GPU=32768 bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
+```
+
+Best measured configurations (Qwen3-30B-A3B GSM8K GRPO, `MAX_RESPONSE_LEN=1024`, thinking off, `verify_parity=all`; `update_actor` and `perf/mfu/actor` are medians over steps 2-8, first step excluded). On v7x, `32 x 8 @8192` needs more than one micro-batch per rank, so its `8192` rows use `TRAIN_BATCH_SIZE=PPO_MINI_BATCH_SIZE=16`:
+
+| Hardware (trainer) | Batch @ tokens/chip | Settings | `update_actor` | MFU | Eager (`AC_SAVE_SPLASH_AND_ROUTING=True`), bf16 reduce |
+|---|---|---|---|---|---|
+| v5p 2x2x4 | 32 x 8 @8192 | `TRAINER_MODE=graph_trainer` (`prefetch`) | 3.29 s | 0.078 | 3.65 s / 0.072 |
+| v5p 2x2x4 | 128 x 8 @32768 | `+ GRAPH_TRAINER_SPLIT_LAYERS=1` | 9.03 s | 0.110 | 9.72 s / 0.101 |
+| v7x 2x2x1 | 16 x 8 @8192 | `TRAINER_MODE=graph_trainer` (`interleave`) | 2.02 s | 0.050 | 2.13 s / 0.047 |
+| v7x 2x2x1 | 32 x 8 @16384 | `+ GRAPH_TRAINER_SPLIT_LAYERS=1` | 2.86 s | 0.067 | 3.16 s / 0.059 |
