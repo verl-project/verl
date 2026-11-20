@@ -20,7 +20,7 @@ from verl.single_controller.base.decorator import Dispatch, make_nd_compute_data
 from verl.utils import tensordict_utils as tu
 from verl.utils.profiler import DistProfiler
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
-from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker
+from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, _with_routing_replay_flag
 
 
 class OptimStepParams(TypedDict, total=False):
@@ -197,7 +197,9 @@ class TinkerActorRolloutRefWorker(ActorRolloutRefWorker):
         return self.actor.optimizer_zero_grad()
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"), blocking=False)
+    @_with_routing_replay_flag(enabled=True)
     def forward_backward(self, data: TensorDict) -> TensorDict:
+        """Run the actor split forward/backward, arming router replay when enabled."""
         assert "actor" in self.role, "forward_backward only support actor role"
         output = self.actor.forward_backward(data=data)
         return output.cpu() if output is not None else None
