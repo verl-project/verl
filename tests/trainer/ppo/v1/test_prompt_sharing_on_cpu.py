@@ -86,10 +86,13 @@ def _public_keys(uids: list[str]) -> set[str]:
 
 
 def _config(storage_backend: str = "SimpleStorage", share_prompts: bool | None = None) -> OmegaConf:
-    transfer_queue = {"backend": {"storage_backend": storage_backend}}
-    if share_prompts is not None:
-        transfer_queue["share_prompts"] = share_prompts
-    return OmegaConf.create({"transfer_queue": transfer_queue})
+    agent = {} if share_prompts is None else {"share_prompts": share_prompts}
+    return OmegaConf.create(
+        {
+            "transfer_queue": {"backend": {"storage_backend": storage_backend}},
+            "actor_rollout_ref": {"rollout": {"agent": agent}},
+        }
+    )
 
 
 def test_prompt_sharing_needs_simple_storage():

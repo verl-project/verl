@@ -347,6 +347,7 @@ actor_rollout_ref:
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8
+      share_prompts: true
       default_agent_loop: single_turn_agent
       agent_loop_config_path: null
       custom_async_server:
@@ -930,7 +931,6 @@ distillation:
   teacher_key: data_source
 transfer_queue:
   enable: false
-  share_prompts: true
   backend:
     storage_backend: SimpleStorage
     SimpleStorage:
