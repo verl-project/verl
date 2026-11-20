@@ -49,6 +49,7 @@ from verl.utils.real_nvfp4 import real_nvfp4_enabled
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
 from verl.utils.tracking import RLInsightLogger
+from verl.utils.vllm.npu_vllm_patch import isolate_native_training_npu_ops
 from verl.workers.config import (
     ActorConfig,
     DistillationConfig,
@@ -117,6 +118,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
     """
 
     def __init__(self, config: TrainingWorkerConfig):
+        # Temporary operator isolation; remove once the corresponding fix lands in vllm-ascend.
+        isolate_native_training_npu_ops()
         Worker.__init__(self)
 
         from verl.workers.engine import BaseEngine, EngineRegistry
@@ -498,6 +501,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def __init__(
         self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
     ):
+        # Temporary operator isolation; remove once the corresponding fix lands in vllm-ascend.
+        if role in ("actor", "ref", "actor_rollout", "actor_rollout_ref"):
+            isolate_native_training_npu_ops()
         Worker.__init__(self)
         self.config = config
         self.distillation_config = distillation_config

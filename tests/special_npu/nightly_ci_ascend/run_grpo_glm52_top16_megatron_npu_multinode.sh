@@ -4,6 +4,7 @@ set -x
 # Use the default HCCL executor with inter-node RoCE
 unset HCCL_OP_EXPANSION_MODE # workaround for https://gitcode.com/cann/hcomm/issues/1084
 export HCCL_INTER_HCCS_DISABLE=TRUE # workaround for https://gitcode.com/cann/hcomm/issues/1083
+export VLLM_USE_V2_MODEL_RUNNER=1
 
 # ---- user-adjustable ----
 # # 0. download HF checkpoint
@@ -214,6 +215,7 @@ EXTRA=(
     "++ray_kwargs.ray_init.runtime_env.py_executable='env -u HCCL_OP_EXPANSION_MODE python3'"
     "++ray_kwargs.ray_init.runtime_env.env_vars.HCCL_INTER_HCCS_DISABLE='TRUE'"
     "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_VLLM_ASCEND_GLM52_PATCH='1'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V2_MODEL_RUNNER='1'"
     actor_rollout_ref.nccl_timeout=7200
     +transfer_queue.backend.SimpleStorage.required_node_resource=CPU
     --config-name='ppo_megatron_trainer' # need to be the last one, as it will split the positional overrides list
