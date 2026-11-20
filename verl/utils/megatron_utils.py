@@ -1289,6 +1289,15 @@ def copy_megatron_model_to_cpu(models):
 
             cpu_state[f"model_chunk_{model_idx}"] = {"model_state": model_state, "is_ddp": False}
 
+        # Snapshot persistent policy buffers without invoking state_dict hooks.
+        # Keep aliases until filtering: a nonpersistent name may be registered first.
+        cpu_state[f"model_chunk_{model_idx}"]["persistent_buffers"] = {
+            f"{module_name}.{name}" if module_name else name: buffer.detach().to("cpu", copy=True)
+            for module_name, module in model_chunk.named_modules()
+            for name, buffer in module.named_buffers(recurse=False, remove_duplicate=False)
+            if name not in module._non_persistent_buffers_set
+        }
+
     return cpu_state
 
 
@@ -1329,3 +1338,6 @@ def restore_megatron_model_from_cpu(models, cpu_state):
                 if name in model_state:
                     param_state = model_state[name]
                     param.data.copy_(param_state["data"].to(param.device))
+
+        for name, saved_buffer in chunk_state.get("persistent_buffers", {}).items():
+            model_chunk.get_buffer(name).copy_(saved_buffer)
