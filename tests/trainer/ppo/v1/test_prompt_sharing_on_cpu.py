@@ -20,10 +20,10 @@ import torch
 import transfer_queue as tq
 from omegaconf import OmegaConf
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput, AgentLoopWorker
+from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput
+from verl.experimental.agent_loop.agent_loop_tq_share import AgentLoopWorkerTQShare, _PublicMultiModalInputs
 from verl.experimental.agent_loop.preprocess_cache import PromptPreprocessCache
-from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ, _PublicMultiModalInputs
-from verl.trainer.ppo.v1.prompt_sharing import (
+from verl.experimental.agent_loop.prompt_sharing import (
     PUBLIC_PARTITION,
     prompt_sharing_enabled,
     prompt_sharing_requested,
@@ -31,11 +31,10 @@ from verl.trainer.ppo.v1.prompt_sharing import (
     publish_public_prompts,
     release_public_prompts,
 )
+from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ, _worker_class
 from verl.utils import tensordict_utils as tu
 
 pytestmark = pytest.mark.skipif(not hasattr(tq, "kv_link"), reason="TransferQueue has no public partition links")
-
-_WorkerTQ = AgentLoopWorkerTQ.__ray_metadata__.modified_class
 
 
 @pytest.fixture(scope="module")
@@ -45,13 +44,9 @@ def tq_init():
     tq.close()
 
 
-class _DummyWorker:
-    _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
-    _compute_position_ids = AgentLoopWorker._compute_position_ids
-    _compute_score = AgentLoopWorker._compute_score
-    _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
-    _share_multi_modal_inputs = _WorkerTQ._share_multi_modal_inputs
-    _get_multi_modal_inputs = _WorkerTQ._get_multi_modal_inputs
+class _DummyWorker(AgentLoopWorkerTQShare):
+    """A sharing worker with only the state its postprocessing reads, so no rollout backend is needed."""
+
     distillation_enabled = False
 
     def __init__(self, public_prompt_fields: dict[str, list[str]], shareable_multi_modal_keys=frozenset()):
@@ -106,6 +101,13 @@ def test_share_prompts_switch_turns_off_storage_and_preprocessing_sharing():
     assert prompt_sharing_requested(_config(storage_backend="MooncakeStore"))
 
 
+def test_share_prompts_switch_selects_the_rollout_worker():
+    off = _worker_class(_config(share_prompts=False)).__ray_metadata__.modified_class
+    on = _worker_class(_config(share_prompts=True)).__ray_metadata__.modified_class
+    assert issubclass(off, AgentLoopWorkerTQ) and not issubclass(off, AgentLoopWorkerTQShare)
+    assert issubclass(on, AgentLoopWorkerTQShare)
+
+
 @pytest.mark.asyncio
 async def test_trajectories_link_public_prompt_until_all_are_cleared(tq_init):
     uid = _uid()
@@ -125,7 +127,7 @@ async def test_trajectories_link_public_prompt_until_all_are_cleared(tq_init):
             num_turns=2,
             metrics=AgentLoopMetrics(),
         )
-        await _WorkerTQ._agent_loop_postprocess(worker, output, False, session_id=session_id, **prompt)
+        await worker._agent_loop_postprocess(output, False, session_id=session_id, **prompt)
         keys.append(f"{uid}_{session_id}_0")
 
     rows = tq.kv_describe(keys=keys, partition_id="train")
@@ -158,7 +160,7 @@ async def test_sessions_with_equal_multi_modal_inputs_link_one_copy(tq_init):
         output = AgentLoopOutput(
             prompt_ids=[101, 102], response_ids=[11], response_mask=[1], num_turns=2, metrics=AgentLoopMetrics()
         )
-        await _WorkerTQ._agent_loop_postprocess(worker, output, False, session_id=session_id, **prompt)
+        await worker._agent_loop_postprocess(output, False, session_id=session_id, **prompt)
         keys.append(f"{uid}_{session_id}_0")
 
     mm_key = public_multi_modal_key(uid)
@@ -205,7 +207,7 @@ async def test_sessions_with_same_media_compute_multi_modal_inputs_once(tq_init,
             num_turns=2,
             metrics=AgentLoopMetrics(),
         )
-        await _WorkerTQ._agent_loop_postprocess(worker, output, False, session_id=session_id, **prompt)
+        await worker._agent_loop_postprocess(output, False, session_id=session_id, **prompt)
         keys.append(f"{uid}_{session_id}_0")
 
     assert len(computed) == (3 if text_dependent else 2)
