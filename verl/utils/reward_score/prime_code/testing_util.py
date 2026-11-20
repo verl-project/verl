@@ -98,6 +98,43 @@ def clean_traceback(error_traceback):
     return error_traceback
 
 
+def _clean_output(obj):
+    """Recursively convert custom subclasses/spoofed objects to plain Python primitives.
+
+    Preserves int/float/str/bool keys and values without JSON key stringification,
+    and converts tuples/sets to lists/sets of clean primitives.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, bool):
+        return bool(obj)
+    if isinstance(obj, int):
+        return int.__int__(obj)
+    if isinstance(obj, float):
+        return float.__float__(obj)
+    if isinstance(obj, str):
+        return str.__str__(obj)
+    if isinstance(obj, list):
+        return [_clean_output(x) for x in list.__iter__(obj)]
+    if isinstance(obj, tuple):
+        return [_clean_output(x) for x in tuple.__iter__(obj)]
+    if isinstance(obj, dict):
+        return {_clean_output(k): _clean_output(v) for k, v in dict.items(obj)}
+    if isinstance(obj, set):
+        return {_clean_output(x) for x in set.__iter__(obj)}
+    if hasattr(obj, "tolist") and callable(obj.tolist):
+        try:
+            return _clean_output(obj.tolist())
+        except Exception:
+            pass
+    if hasattr(obj, "item") and callable(obj.item):
+        try:
+            return _clean_output(obj.item())
+        except Exception:
+            pass
+    raise TypeError(f"Unsupported output type: {type(obj)}")
+
+
 def run_test(in_outs, test=None, debug=False, timeout=15):
     """
     if test(generated_code) is not None it'll try to run the code.
@@ -275,18 +312,23 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                     raw_true_output_copy = json.dumps(output)
                     raw_true_output_copy = truncatefn(raw_true_output_copy, 200)
 
-                    # ground truth sequences are not tuples
-                    if isinstance(output, tuple):
-                        output = list(output)
+                    # Normalize output to plain Python types to prevent custom __eq__
+                    # overrides (e.g. subclassing int/list with __eq__ returning True)
+                    # from spoofing test outcomes, while preserving integer dictionary keys.
+                    clean_output = _clean_output(output)
 
-                    tmp_result = output == in_outs["outputs"][index]
+                    # ground truth sequences are not tuples
+                    if isinstance(clean_output, tuple):
+                        clean_output = list(clean_output)
+
+                    tmp_result = clean_output == in_outs["outputs"][index]
                     if isinstance(in_outs["outputs"][index], list) and in_outs["outputs"][index]:
-                        tmp_result = tmp_result or (output == in_outs["outputs"][index][0])
+                        tmp_result = tmp_result or (clean_output == in_outs["outputs"][index][0])
 
                     # ground truth sequences are not tuples
                     try:
-                        if isinstance(output[0], tuple):
-                            tmp_result = tmp_result or ([list(x) for x in output] == in_outs["outputs"][index][0])
+                        if isinstance(clean_output[0], tuple):
+                            tmp_result = tmp_result or ([list(x) for x in clean_output] == in_outs["outputs"][index][0])
                     except Exception:
                         pass
                     results.append(tmp_result)

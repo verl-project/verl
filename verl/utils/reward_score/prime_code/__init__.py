@@ -21,6 +21,8 @@ from .utils import check_correctness as apps_check_correctness
 def compute_score(completion, test_cases, continuous=False):
     # try to get code solution from completion. if the completion is pure code, this will not take effect.
     solution = completion.split("```python")[-1].split("```")[0]
+    success = False
+    metadata_list = None
     try:
         try:
             if not isinstance(test_cases, dict):
@@ -66,6 +68,9 @@ def compute_score(completion, test_cases, continuous=False):
                     break
             res_count = len(res_list) if len(res_list) > 0 else 1
             success = sum(map(lambda x: x is True, res_list)) / res_count
+        else:
+            success = False
+            metadata_list = None
     except Exception:
         traceback.print_exc(10)
         success = False
