@@ -201,6 +201,9 @@ trainer:
   # Whether to run validation only
   val_only: False
 
+  # Binary Bayes@N posterior moments for complete V1 sync validation runs
+  val_bayes_at_n: False
+
   # Validation frequency (in training iterations)
   test_freq: -1
 
