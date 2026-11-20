@@ -2,15 +2,26 @@
 Search Tool Integration
 =======================
 
-Last updated: 05/09/2026.
+Last updated: 11/18/2026.
 
 .. note::
 
    The in-tree ``verl.tools.search_tool.SearchTool`` reference implementation
-   used throughout this guide has been removed. The end-to-end recipe
-   (config, retrieval server, training script) still works as documentation
-   of the integration pattern, but the ``SearchTool`` class must now be
-   provided by users (see :class:`verl.tools.base_tool.BaseTool`).
+   used throughout this guide was removed in
+   `#6302 <https://github.com/verl-project/verl/pull/6302>`__, and the example
+   files referenced below (download script, retrieval server, tool config and
+   training script under ``examples/sglang_multiturn/``) were removed earlier in
+   `#6126 <https://github.com/verl-project/verl/pull/6126>`__. The commands on
+   this page therefore do not run on the current ``main`` branch; they are kept
+   as documentation of the integration pattern. To run the original end-to-end
+   recipe, check out the last commit that still contains these files:
+
+   .. code:: bash
+
+      git checkout 9cd3542084900ab8aa07b84469ce919f9588361c
+
+   On ``main``, the ``SearchTool`` class must be provided by users
+   (see :class:`verl.tools.base_tool.BaseTool`).
 
 Introduction
 ------------
@@ -209,7 +220,7 @@ Testing on 8 x H20
    # Set GPUs and run with a suitable log path
    export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-   nohup bash examples/sglang_multiturn/search_r1_like/run_qwen2_5_3b_search_multiturn_fsdp.sh \
+   nohup bash examples/sglang_multiturn/search_r1_like/run_qwen2.5-3b_instruct_search_multiturn.sh \
      trainer.experiment_name=qwen2.5-3b-it_rm-searchR1-like-sgl-multiturn-$(now) \
      > logs/searchR1-like$(now).log 2>&1 &
 
