@@ -77,6 +77,34 @@ algorithm:
   # Advantage estimator type: "gae", "grpo", "reinforce_plus_plus", etc.
   adv_estimator: gae
 
+  # Optional turn-level process scoring and actor-advantage shaping (v1 TransferQueue only).
+  # extra_fields.turn_rewards takes precedence over configured scorer evaluation.
+  process_reward:
+
+    # Typed process-reward configuration.
+    _target_: verl.trainer.config.ProcessRewardConfig
+
+    # Process rewards are opt-in; outcome rewards and critic returns are unchanged.
+    enabled: false
+
+    # Advantage shaping: additive, gvpo, or process_weighted.
+    mode: additive
+
+    # Global process-score weight, applied once after advantage estimation.
+    weight: 1.0
+
+    # GVPO failure-token negative-advantage scale, near-zero penalty and tolerance.
+    negative_scale: 0.2
+
+    # GVPO fixed penalty for failed tokens with near-zero outcome advantage.
+    zero_penalty: 0.4
+
+    # Tolerance defining the near-zero outcome-advantage branch.
+    zero_eps: 1.0e-6
+
+    # Optional list of {path, weight, kwargs}; unnecessary when the agent supplies turn_rewards.
+    scorers: []
+
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
 

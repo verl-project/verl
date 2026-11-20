@@ -31,6 +31,7 @@ from verl.experimental.agent_loop import (
     AgentLoopWorker,
     get_trajectory_info,
 )
+from verl.trainer.ppo.process_reward import ProcessRewardRunner
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
@@ -57,6 +58,10 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
+        process_config = self.config.algorithm.get("process_reward", {})
+        self.process_reward_runner = (
+            ProcessRewardRunner(process_config.get("scorers", [])) if process_config.get("enabled", False) else None
+        )
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""
@@ -179,6 +184,10 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 output.reward_score = final_output.reward_score
                 output.extra_fields["reward_extra_info"] = final_output.extra_fields["reward_extra_info"]
 
+        if self.process_reward_runner is not None and not validate:
+            for output in outputs:
+                output.extra_fields["process_scores"] = await self.process_reward_runner.score(output, kwargs)
+
         # NOTE: agent loop may has multiple outputs, put each output into TransferQueue.
         # key format: {uid}_{session_id}_{index}
         # - uid: raw prompt uid from dataset
@@ -197,7 +206,10 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
             keys.append(f"{uid}_{session_id}_{i}")
             field = output.as_dict()
+            process_scores = field["extra_fields"].pop("process_scores", None)
             field.update(kwargs)
+            if process_scores is not None:
+                field["process_scores"] = process_scores
             # do not store raw image/video
             field.pop("multi_modal_data", None)
             # TODO: uniform response_mask and loss_mask

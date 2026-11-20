@@ -31,8 +31,10 @@ from verl.experimental.agent_loop.agent_loop import (
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.tools.function_tool import FunctionTool, normalize_function_tool_return
 from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, ToolResponse
+from verl.trainer.ppo.process_reward import validate_turn_rewards
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.tokenizer.continuous_token import MergeResult
 from verl.workers.rollout.replica import TokenOutput
 
 logger = logging.getLogger(__file__)
@@ -84,6 +86,8 @@ class AgentData:
         self.response_ids: list[int] = []
         self.response_mask: list[int] = []
         self.response_logprobs: list[float] = []
+        self.generated_turn_spans: list[tuple[int, int]] = []
+        self.use_process_reward = False
         self.turn_scores: list[float] = []
         self.tool_rewards: list[float] = []
         self.user_turns = 0
@@ -96,6 +100,23 @@ class AgentData:
 
         # Extra fields for dynamic addition, e.g., tool session data
         self.extra_fields: dict[str, Any] = {}
+
+
+def _align_generated_turn_spans(agent_data: AgentData, merge_result: MergeResult) -> None:
+    """Apply Continuous Token suffix edits to generated-turn boundaries."""
+    retained = max(0, len(agent_data.response_mask) - merge_result.removed_prefix_token_count)
+    spans = [(start, min(end, retained)) for start, end in agent_data.generated_turn_spans if start < retained]
+    if (
+        len(spans) < len(agent_data.generated_turn_spans)
+        and agent_data.use_process_reward
+        and "turn_rewards" in agent_data.extra_fields
+    ):
+        rewards = validate_turn_rewards(agent_data.extra_fields["turn_rewards"], len(agent_data.generated_turn_spans))
+        agent_data.extra_fields["turn_rewards"] = rewards[: len(spans)].tolist()
+    if merge_result.kind == "assistant" and merge_result.appended_token_count:
+        start = retained + len(merge_result.inserted_token_ids)
+        spans.append((start, start + merge_result.appended_token_count))
+    agent_data.generated_turn_spans = spans
 
 
 @register("tool_agent")
@@ -130,7 +151,9 @@ class ToolAgentLoop(AgentLoopBase):
         return f"det-{priority}" if full_determinism else uuid4().hex
 
     @rollout_trace_op
-    async def run(self, sampling_params: dict[str, Any], priority: int = 0, **kwargs) -> AgentLoopOutput:
+    async def run(
+        self, sampling_params: dict[str, Any], priority: int = 0, validate: bool = False, **kwargs
+    ) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
 
         # extract multimodal inputs from messages
@@ -154,6 +177,8 @@ class ToolAgentLoop(AgentLoopBase):
             request_id=request_id,
             tools_kwargs=tools_kwargs,
         )
+        process_config = self.config.algorithm.get("process_reward", {})
+        agent_data.use_process_reward = process_config.get("enabled", False) and not validate
 
         # Per-sample tool selection: filter global tools by extra_info.tool_selection
         extra_info = kwargs.get("extra_info", {}) or {}
@@ -212,6 +237,14 @@ class ToolAgentLoop(AgentLoopBase):
             extra_fields=agent_data.extra_fields,
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
+        output.extra_fields["generated_turn_spans"] = [
+            (start, min(end, len(output.response_ids)))
+            for start, end in agent_data.generated_turn_spans
+            if start < len(output.response_ids)
+        ]
+        if agent_data.use_process_reward and "turn_rewards" in output.extra_fields:
+            rewards = validate_turn_rewards(output.extra_fields["turn_rewards"], len(agent_data.generated_turn_spans))
+            output.extra_fields["turn_rewards"] = rewards[: len(output.extra_fields["generated_turn_spans"])].tolist()
         return output
 
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
@@ -280,6 +313,7 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.response_logprobs if (agent_data.response_logprobs or output.log_probs) else None,
             assistant_logprobs=output.log_probs if output.log_probs else None,
         )
+        _align_generated_turn_spans(agent_data, merge_result)
         agent_data.prompt_ids = merge_result.token_ids
         agent_data.response_mask = response_mask
         if response_logprobs is not None:
@@ -395,6 +429,7 @@ class ToolAgentLoop(AgentLoopBase):
         )
         if len(response_mask) >= self.response_length:
             return AgentState.TERMINATED
+        _align_generated_turn_spans(agent_data, merge_result)
         agent_data.prompt_ids = merge_result.token_ids
         agent_data.response_mask = response_mask
         if agent_data.response_logprobs:

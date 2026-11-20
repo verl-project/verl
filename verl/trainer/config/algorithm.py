@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from verl.base_config import BaseConfig
 
-__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig"]
+__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig", "ProcessRewardConfig"]
 
 
 @dataclass
@@ -697,6 +697,26 @@ class RolloutCorrectionConfig(BaseConfig):
 
 
 @dataclass
+class ProcessRewardConfig(BaseConfig):
+    """Optional v1 process scoring and post-estimation actor-advantage shaping.
+
+    ``turn_rewards`` supplied by an agent takes precedence over scorer evaluation.
+    Scorer dictionaries contain a fully qualified ``path``, optional ``weight``
+    and constructor ``kwargs``. Global ``weight`` applies after aggregation.
+    ``gvpo`` uses negative scores as failure flags, with ``negative_scale``,
+    ``zero_penalty`` and ``zero_eps`` controlling its advantage branches.
+    """
+
+    enabled: bool = False
+    mode: str = "additive"
+    weight: float = 1.0
+    negative_scale: float = 0.2
+    zero_penalty: float = 0.4
+    zero_eps: float = 1e-6
+    scorers: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class AlgoConfig(BaseConfig):
     """Configuration for the algorithm.
 
@@ -706,6 +726,7 @@ class AlgoConfig(BaseConfig):
         gamma (float): Discount factor for future rewards.
         lam (float): Trade-off between bias and variance in the GAE estimator.
         adv_estimator (str): Advantage estimator type: "gae", "grpo", "reinforce_plus_plus", etc.
+        process_reward (ProcessRewardConfig): Optional v1 turn scoring and actor-advantage shaping.
         norm_adv_by_std_in_grpo (bool): Whether to normalize advantages by std (specific to GRPO).
         use_kl_in_reward (bool): Whether to enable in-reward KL penalty.
         kl_penalty (str): How to estimate KL divergence: "kl", "abs", "mse", "low_var_kl", or "full".
@@ -734,6 +755,7 @@ class AlgoConfig(BaseConfig):
     gamma: float = 1.0
     lam: float = 1.0
     adv_estimator: str = "gae"
+    process_reward: ProcessRewardConfig = field(default_factory=ProcessRewardConfig)
     norm_adv_by_std_in_grpo: bool = True
     use_kl_in_reward: bool = False
     kl_penalty: str = "kl"
