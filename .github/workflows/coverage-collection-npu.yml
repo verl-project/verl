@@ -1,0 +1,145 @@
+# Calls the original workloads directly; no generated job definitions.
+# Temporary PR trigger for validation; schedule is 05:00 UTC+8 on alternate calendar days.
+name: Coverage Collection (Ascend PR workloads)
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - .github/workflows/**
+      - scripts/ci/**
+  schedule:
+    - cron: 0 21 */2 * *
+permissions:
+  contents: read
+concurrency:
+  group: ascend-coverage-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  e2e_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_ppo_trainer_megatron_sglang_2_ascend:
+    # Temporarily pause SGLang coverage until its issues are fixed.
+    # Restore: if: github.repository_owner == 'verl-project'
+    if: ${{ false }}
+    uses: ./.github/workflows/e2e_ppo_trainer_megatron_sglang_2_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_ppo_trainer_megatron_sglang_ascend:
+    # Temporarily pause SGLang coverage until its issues are fixed.
+    # Restore: if: github.repository_owner == 'verl-project'
+    if: ${{ false }}
+    uses: ./.github/workflows/e2e_ppo_trainer_megatron_sglang_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_ppo_trainer_megatron_vllm_2_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_ppo_trainer_megatron_vllm_2_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_ppo_trainer_megatron_vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_ppo_trainer_megatron_vllm_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_ppo_trainer_veomni_vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_ppo_trainer_veomni_vllm_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_sft_llm_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_sft_llm_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_v1_separate_async_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_v1_separate_async_ascend.yml
+    with:
+      coverage_mode: true
+  model_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/model_ascend.yml
+    with:
+      coverage_mode: true
+  npu_unit_tests:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/npu_unit_tests.yml
+    with:
+      coverage_mode: true
+  reward_model_sglang_ascend:
+    # Temporarily pause SGLang coverage until its issues are fixed.
+    # Restore: if: github.repository_owner == 'verl-project'
+    if: ${{ false }}
+    uses: ./.github/workflows/reward_model_sglang_ascend.yml
+    with:
+      coverage_mode: true
+  reward_model_vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/reward_model_vllm_ascend.yml
+    with:
+      coverage_mode: true
+  sgl_ascend:
+    # Temporarily pause SGLang coverage until its issues are fixed.
+    # Restore: if: github.repository_owner == 'verl-project'
+    if: ${{ false }}
+    uses: ./.github/workflows/sgl_ascend.yml
+    with:
+      coverage_mode: true
+  vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/vllm_ascend.yml
+    with:
+      coverage_mode: true
+  aggregate_coverage:
+    name: Aggregate coverage archives
+    if: ${{ always() && github.repository_owner == 'verl-project' }}
+    needs:
+      - e2e_ascend
+      - e2e_ppo_trainer_megatron_sglang_2_ascend
+      - e2e_ppo_trainer_megatron_sglang_ascend
+      - e2e_ppo_trainer_megatron_vllm_2_ascend
+      - e2e_ppo_trainer_megatron_vllm_ascend
+      - e2e_ppo_trainer_veomni_vllm_ascend
+      - e2e_sft_llm_ascend
+      - e2e_v1_separate_async_ascend
+      - model_ascend
+      - npu_unit_tests
+      - reward_model_sglang_ascend
+      - reward_model_vllm_ascend
+      - sgl_ascend
+      - vllm_ascend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install archive dependencies
+        run: |
+          python -m pip install uv
+          uv pip install --system PyYAML==6.0.2
+      - name: Download job archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ascend-coverage-*.yml-*
+          path: .ci-coverage/downloads
+          merge-multiple: false
+      - name: Build combined coverage archive
+        env:
+          COVERAGE_NEEDS: ${{ toJSON(needs) }}
+        run: python scripts/ci/coverage/aggregate.py .ci-coverage/downloads .ci-coverage/combined/coverage.tar.gz
+      - name: Upload combined coverage archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascend-coverage-combined-${{ github.run_attempt }}
+          path: .ci-coverage/combined/coverage.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14

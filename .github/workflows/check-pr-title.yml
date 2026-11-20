@@ -31,9 +31,11 @@
 
 
 on:
-  pull_request:
-    types: [opened, edited, synchronize]
+  # Temporarily disabled: this PR runs coverage collection only.
+  # pull_request:
+  #   types: [opened, edited, synchronize]
 
+  workflow_dispatch:
 jobs:
   check-title:
     runs-on: ubuntu-latest

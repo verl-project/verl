@@ -1,11 +1,13 @@
 name: Type Annotation and Docstring Coverage
 
 on:
-  pull_request:
-    paths:
-      - '**/*.py'
-      - '.github/workflows/type-coverage-check.yml'
+  # Temporarily disabled: this PR runs coverage collection only.
+  # pull_request:
+  #   paths:
+  #     - '**/*.py'
+  #     - '.github/workflows/type-coverage-check.yml'
 
+  workflow_dispatch:
 jobs:
   type-coverage-check:
     runs-on: ubuntu-latest

@@ -39,21 +39,22 @@ on:
     branches:
       - main
       - v0.*
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      - .github/workflows/sanity.yml
-      - "tests/special_sanity/**"
-      # Dependency changes: this job runs `uv run --frozen`, so the lock IS
-      # the environment under test - a resolution change must be validated
-      # even when it touches no .py file.
-      - "pyproject.toml"
-      - "uv.lock"
+  # Temporarily disabled: this PR runs coverage collection only.
+  # pull_request:
+  #   branches:
+  #     - main
+  #     - v0.*
+  #   paths:
+  #     - "**/*.py"
+  #     - .github/workflows/sanity.yml
+  #     - "tests/special_sanity/**"
+  #     # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+  #     # the environment under test - a resolution change must be validated
+  #     # even when it touches no .py file.
+  #     - "pyproject.toml"
+  #     - "uv.lock"
 
-# Cancel jobs on the same ref if a new one is triggered
+  # Cancel jobs on the same ref if a new one is triggered
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}

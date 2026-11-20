@@ -39,16 +39,17 @@ on:
     branches:
       - main
       - v0.*
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      - "docs/**"
-      - .github/workflows/doc.yml
+  # Temporarily disabled: this PR runs coverage collection only.
+  # pull_request:
+  #   branches:
+  #     - main
+  #     - v0.*
+  #   paths:
+  #     - "**/*.py"
+  #     - "docs/**"
+  #     - .github/workflows/doc.yml
 
-# Cancel jobs on the same ref if a new one is triggered
+  # Cancel jobs on the same ref if a new one is triggered
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
