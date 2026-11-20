@@ -193,6 +193,7 @@ jobs:
           $UV_RUN ray stop --force
           $UV_RUN pytest -s -x tests/models/test_engine.py
           $UV_RUN pytest -s -x tests/models/test_model_forward_fused.py
+          VERL_REQUIRE_MCORE_TESTS=1 $UV_RUN pytest -s -x tests/models/test_mcore_recompute_reclaim.py
 
   cleanup:
     runs-on: ubuntu-latest

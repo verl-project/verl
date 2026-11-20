@@ -662,40 +662,17 @@ def apply_patch_megatron_recomputation_backward():
             strict=False,
         )
         torch.autograd.backward(outputs, args)
-        # Clone grads to return
-        grads = tuple(
-            inp.grad.clone()
-            if isinstance(inp, torch.Tensor) and inp.grad is not None
-            else inp.grad
-            if isinstance(inp, torch.Tensor)
-            else inp
-            for inp in detached_inputs
-        )
-        cur_stream = torch.cuda.current_stream()
-        # Release saved input/grad tensors (MoE residual-memory leak fix, commit 04df110c).
-        # Skip MTP layer checkpoints: their saved ``hidden_states`` aliases the decoder
-        # output (a ``torch.chunk`` view), and MTP backward runs before the decoder
-        # backward, so ``resize_(0)`` would truncate storage the decoder still needs
-        # -> async CUDA illegal-memory-access.
-        is_mtp_checkpoint = False
-        run_fn = getattr(ctx, "run_function", None)
-        for cell in getattr(run_fn, "__closure__", None) or ():
-            try:
-                obj = cell.cell_contents
-            except ValueError:
-                continue
-            if obj.__class__.__name__ == "MultiTokenPredictionLayer":
-                is_mtp_checkpoint = True
-                break
-        if not is_mtp_checkpoint:
-            for t in detached_inputs:
-                if isinstance(t, torch.Tensor) and t.requires_grad:
-                    t.record_stream(cur_stream)
-                    t.untyped_storage().resize_(0)
-                    if t.grad is not None:
-                        t.grad.record_stream(cur_stream)
-                        t.grad.untyped_storage().resize_(0)
-        # ctx.saved_tensors = None
+        grads = tuple(inp.grad if isinstance(inp, torch.Tensor) else inp for inp in detached_inputs)
+        # Release the detached recompute leaves (MoE residual-memory leak fix, commit 04df110c):
+        # a recomputed graph that outlives this call (e.g. a MoE token dispatcher keeps its routing
+        # ``probs``) keeps them, hence their data and ``.grad``, alive through its AccumulateGrad
+        # nodes. Drop only the leaves' own references: their storage is the saved input's, which
+        # another segment (a tensor fed to several chunks) or a later backward (MTP's
+        # ``hidden_states`` view) may still read, so it must not be resized away.
+        for t in detached_inputs:
+            if isinstance(t, torch.Tensor) and t.requires_grad:
+                t.grad = None
+                t.data = t.new_empty(0)
         return (None, None) + grads
 
     rd.CheckpointFunction.backward = patch_backward
