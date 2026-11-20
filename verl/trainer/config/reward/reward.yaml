@@ -1,4 +1,8 @@
 # configs for the reward computation
+defaults:
+  - ../profiler@profiler: profiler
+  - _self_
+
 _target_: verl.workers.config.RewardConfig
 
 # we launch num_workers reward managers to parallelize the reward computation

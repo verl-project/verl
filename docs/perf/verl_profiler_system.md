@@ -1,6 +1,6 @@
 # verl Profiler System
 
-Last updated: 09/07/2026.
+Last updated: 10/20/2026.
 
 ## Architecture
 
@@ -22,7 +22,13 @@ When some tool need to profile behavior of each role, configurations in role-lev
 
 For tool config in role-level, there are some detailed behavior needed to control, like the `discrete` mode in nsys profiler.
 
-Every role has a profiler config, and by default, rollout/ref/reward models follow the Actor's behavior.
+Every role has a profiler config. Colocated roles share the profiling window of their process.
+
+## Profiling lifecycle
+
+Worker profilers provide start/stop controls, and managers coordinate them across their workers. For profiling to take effect, the trainer must connect these controls to its profiling windows. The remaining role integrations are unfinished work to be completed in follow-up changes.
+
+See the individual tool guides for configuration and integration requirements.
 
 ## CUDA/NPU memory snapshots
 

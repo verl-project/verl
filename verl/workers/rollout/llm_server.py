@@ -18,6 +18,7 @@ Utility classes for manage and request LLM servers:
 """
 
 import asyncio
+import copy
 import logging
 import os
 from typing import Any, Optional
@@ -29,6 +30,7 @@ from omegaconf import DictConfig
 
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import normalize_token_ids
+from verl.utils.profiler.nsight import resolve_ray_actor_profiler_config
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.tracking import RLInsightLogger
@@ -397,7 +399,9 @@ class LLMServerManager:
         load_balancer_cls: type | None = None,
     ):
         self.config = config
-        self.rollout_config = config.actor_rollout_ref.rollout
+        self.rollout_config = copy.deepcopy(config.actor_rollout_ref.rollout)
+        if self.rollout_config.get("profiler") is not None:
+            self.rollout_config.profiler = resolve_ray_actor_profiler_config(self.rollout_config.profiler, config)
         self.model_config = config.actor_rollout_ref.model
         self.worker_group = worker_group
         self.rollout_resource_pool = rollout_resource_pool
