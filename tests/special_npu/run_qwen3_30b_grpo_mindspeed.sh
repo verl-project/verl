@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# Routed-expert capture requires V2; use it for both baseline and R3 runs.
+export VLLM_USE_V2_MODEL_RUNNER=1
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
@@ -72,6 +74,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=True \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=2 \
     actor_rollout_ref.rollout.temperature=1.0 \
@@ -97,6 +100,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE" \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=2 \
+    actor_rollout_ref.actor.megatron.router_replay.mode=R3 \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=2 \
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=2 \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=${USE_DIST_CKPT} \
@@ -123,7 +127,8 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.total_training_steps=1 \
     actor_rollout_ref.actor.use_torch_compile=False \
     actor_rollout_ref.ref.use_torch_compile=False \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True $@
+    '++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V2_MODEL_RUNNER="1"' \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True "$@"
 
 # clean up
 if [[ "$USE_DUMMY_MODEL" == "True" ]]; then
