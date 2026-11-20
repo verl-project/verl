@@ -14,11 +14,12 @@
 import os
 
 import ray
+import transfer_queue as tq
 from hydra import compose, initialize_config_dir
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
-from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
+from tests.experimental.agent_loop.agent_utils import generate_and_collect, init_agent_loop_manager
 from verl.protocol import DataProto
 from verl.trainer.ppo.utils import create_rl_sampler
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
@@ -91,10 +92,10 @@ def test_agent_reward_loop_standalone():
     # 3. generate responses
     batch_dict = next(iter(dataloader))
     batch = DataProto.from_single_dict(batch_dict)
-    gen_batch = agent_loop_manager.generate_sequences(prompts=batch)
+    gen_batch = generate_and_collect(agent_loop_manager, batch.to_tensordict(), config.actor_rollout_ref.rollout.n)
 
-    rm_scores = gen_batch.batch["rm_scores"]
-    accuracy = rm_scores.sum(dim=-1).mean()
+    accuracy = sum(row["rm_scores"].sum().item() for row in gen_batch) / len(gen_batch)
     print(accuracy)
 
+    tq.close()
     ray.shutdown()

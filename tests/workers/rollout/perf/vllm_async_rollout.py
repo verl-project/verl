@@ -34,11 +34,17 @@ import os
 import time
 
 import ray
+import transfer_queue as tq
 from omegaconf import DictConfig
 from torch.utils.data import SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from tests.experimental.agent_loop.agent_utils import AgentLoopManager, RayWorkerGroup, init_agent_loop_manager
+from tests.experimental.agent_loop.agent_utils import (
+    AgentLoopManager,
+    RayWorkerGroup,
+    generate_and_collect,
+    init_agent_loop_manager,
+)
 from verl.protocol import DataProto
 from verl.utils import hf_tokenizer
 from verl.utils.dataset import RLHFDataset
@@ -116,7 +122,7 @@ def perf_rollout(mode, backend, n_gpus_per_node, num_steps):
             non_tensor_batch_keys=["raw_prompt_ids", "raw_prompt"],
         )
         t_start = time.time()
-        gen_batch = agent_loop_manager.generate_sequences(batch)
+        gen_batch = generate_and_collect(agent_loop_manager, batch.to_tensordict(), config.actor_rollout_ref.rollout.n)
         t_end = time.time()
         print(
             f"[DEBUG] backend: {backend}, n_gpus_per_node: {n_gpus_per_node}, batch_size: {len(gen_batch)}, "
@@ -125,6 +131,7 @@ def perf_rollout(mode, backend, n_gpus_per_node, num_steps):
         if step + 1 >= num_steps:
             break
 
+    tq.close()
     ray.shutdown()
 
 

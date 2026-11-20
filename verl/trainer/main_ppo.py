@@ -131,13 +131,13 @@ class TaskRunnerV1:
         1. implement `generate_sequences` method
         2. put agent loop outputs into TransferQueue
         """
-        from verl.trainer.ppo.v1 import AgentLoopManagerTQ
+        from verl.experimental.agent_loop import AgentLoopManager
 
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
             agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
         else:
-            agent_loop_manager_cls = AgentLoopManagerTQ
+            agent_loop_manager_cls = AgentLoopManager
 
         self.agent_loop_manager = agent_loop_manager_cls.create(
             config=self.config,

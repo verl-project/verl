@@ -16,12 +16,11 @@ import os
 
 import pytest
 import ray
+import transfer_queue as tq
 from omegaconf import DictConfig
 from openai import AsyncOpenAI, OpenAI
 
-from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
-from verl.checkpoint_engine import CheckpointEngineManager
-from verl.utils import omega_conf_to_dataclass
+from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager_and_workers
 from verl.workers.rollout.llm_server import LLMServerManager
 
 
@@ -49,6 +48,7 @@ def init_config() -> DictConfig:
 @pytest.mark.parametrize("tp_size", [2, 4])
 async def test_standalone_rollout(init_config, tp_size):
     """Test standalone rollout single node and multi nodes."""
+    tq.close()
     ray.shutdown()
     ray.init(
         runtime_env={
@@ -96,12 +96,14 @@ async def test_standalone_rollout(init_config, tp_size):
 
     await asyncio.gather(*(generate(address) for address in server_addresses))
 
+    tq.close()
     ray.shutdown()
 
 
 @pytest.mark.skip(reason="local test only")
 def test_hybrid_rollout_with_ep(init_config):
     """Test hybrid rollout with expert parallelism, DP=2, TP=4, EP=8."""
+    tq.close()
     ray.shutdown()
     ray.init(
         runtime_env={
@@ -126,17 +128,10 @@ def test_hybrid_rollout_with_ep(init_config):
     # - build FSDP model and optimizer
     # - offload FSDP model and optimizer, build rollout
     # - sleep rollout and load FSDP model and optimizer
-    agent_loop_manager = init_agent_loop_manager(init_config)
-    checkpoint_manager = CheckpointEngineManager(
-        config=omega_conf_to_dataclass(init_config.actor_rollout_ref.rollout.checkpoint_engine),
-        actor_wg=agent_loop_manager.worker_group,
-        replicas=agent_loop_manager.rollout_replicas,
-    )
-    checkpoint_manager.sleep_replicas()
-    checkpoint_manager.update_weights()
+    _, _, checkpoint_manager = init_agent_loop_manager_and_workers(init_config)
 
     # 3. test async openai call
-    server_address = agent_loop_manager.server_addresses[0]
+    server_address = checkpoint_manager.replicas[0].server_address
     client = OpenAI(
         api_key="123-abc",
         base_url=f"http://{server_address}/v1",
@@ -158,4 +153,5 @@ def test_hybrid_rollout_with_ep(init_config):
     print(f"response: {completion}")
 
     print("Test passed!")
+    tq.close()
     ray.shutdown()
