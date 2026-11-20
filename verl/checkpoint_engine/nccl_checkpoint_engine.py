@@ -20,8 +20,9 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import AsyncGenerator, Generator
+from uuid import UUID, uuid4
 
 import ray
 import torch
@@ -53,6 +54,9 @@ except ImportError:
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+_SUBSCRIPTION_TIMEOUT_S = 60
+_PROBE_INTERVAL_S = 0.05
+
 
 @dataclass
 class MasterMetadata:
@@ -61,6 +65,7 @@ class MasterMetadata:
     zmq_ip: str
     zmq_port: int
     multi_sender: bool
+    subscription_epoch: UUID = field(default_factory=uuid4, kw_only=True)
 
 
 @dataclass
@@ -146,6 +151,9 @@ class NCCLCheckpointEngine(CheckpointEngine):
             keeps the group at one sender (actor rank 0) plus the rollout workers.
     """
 
+    # The delta engine inherits group setup but has its own metadata protocol.
+    _confirm_bucket_subscriptions = True
+
     def __init__(
         self,
         bucket_size: int,
@@ -164,6 +172,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
         # start zeromq server for broadcasting bucket tensor metadata
         self.is_master = is_master
         self.topic = "bucket_metadata"
+        self.socket = None
         if self.is_master:
             self._start_zmq_server()
 
@@ -177,6 +186,11 @@ class NCCLCheckpointEngine(CheckpointEngine):
         return ray.get_runtime_context().get_node_id()
 
     def prepare(self) -> WorkerMetadata:
+        # A failed subscription handshake skips the manager's normal finalize.
+        if self.rebuild_group and getattr(self, "rank", None) is not None:
+            self.finalize()
+        # Release both previous buckets before allocating either replacement on a retry.
+        self.send_buf = self.recv_buf = None
         # For master process, use cupy instead of torch to avoid memory register error
         # when `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
         if self.is_master:
@@ -203,6 +217,10 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
         self.send_buf = None
         self.recv_buf = None
+
+        if not self.is_master and self.socket is not None:
+            self.socket.close(linger=0)
+            self.socket = None
 
         torch.cuda.empty_cache()
 
@@ -268,7 +286,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
         self.listen_port, _ = get_free_port(self.ip)
 
         context = zmq.Context()
-        self.socket = context.socket(zmq.PUB)
+        self.socket = context.socket(zmq.XPUB if self._confirm_bucket_subscriptions else zmq.PUB)
         if is_valid_ipv6_address(self.ip):
             address = f"tcp://[{self.ip}]:{self.listen_port}"
             self.socket.setsockopt(zmq.IPV6, 1)
@@ -279,6 +297,8 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
     def _connect_zmq_client(self, metadata: MasterMetadata):
         assert not self.is_master, "Master process should not connect to other processes."
+        if self.socket is not None:
+            self.socket.close(linger=0)
         context = zmq.Context()
         self.socket = context.socket(zmq.SUB)
         if is_valid_ipv6_address(metadata.zmq_ip):
@@ -289,6 +309,57 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
         self.socket.connect(address)
         self.socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)
+
+    def _wait_for_subscribers(self):
+        """Send on the bucket topic until each rollout rank has proved it can receive it."""
+        topic = self.topic.encode()
+        expected = {f"ready/{self.topic}/{rank}".encode(): rank for rank in range(self.num_senders, self.world_size)}
+        missing = set(expected.values())
+        ever_acked = set()
+        deadline = time.monotonic() + _SUBSCRIPTION_TIMEOUT_S
+        next_probe = 0.0
+        while missing:
+            now = time.monotonic()
+            if now >= deadline:
+                raise TimeoutError(
+                    f"{self.group_name} {self.topic}: missing metadata subscribers: "
+                    f"never_acked={sorted(missing - ever_acked)}, acked_then_left={sorted(missing & ever_acked)}"
+                )
+            if now >= next_probe:
+                self.socket.send_multipart([topic, b"probe"])
+                next_probe = now + _PROBE_INTERVAL_S
+            if self.socket.poll(max(1, int(1000 * (min(next_probe, deadline) - now)))):
+                event = self.socket.recv()
+                rank = expected.get(event[1:])
+                if rank is not None:
+                    if event[:1] == b"\x01":
+                        ever_acked.add(rank)
+                        missing.discard(rank)
+                    elif event[:1] == b"\x00":
+                        missing.add(rank)
+
+        # The manager waits for every init to return. On this same pipe, consuming
+        # "complete" drains earlier probes before the ordinary bucket reader runs.
+        self.socket.send_multipart([topic, b"complete"])
+
+    def _confirm_subscription(self):
+        topic = self.topic.encode()
+        confirmed = False
+        deadline = time.monotonic() + _SUBSCRIPTION_TIMEOUT_S
+        while (remaining := deadline - time.monotonic()) > 0:
+            if not self.socket.poll(max(1, int(1000 * remaining))):
+                continue
+            frames = self.socket.recv_multipart()
+            if frames == [topic, b"probe"]:
+                if not confirmed:
+                    self.socket.setsockopt_string(zmq.SUBSCRIBE, f"ready/{self.topic}/{self.rank}")
+                    confirmed = True
+            elif confirmed and frames == [topic, b"complete"]:
+                return
+            else:
+                raise RuntimeError(f"{self.group_name} {self.topic}: unexpected metadata handshake on rank {self.rank}")
+        stage = "completion" if confirmed else "probe"
+        raise TimeoutError(f"{self.group_name} {self.topic}: rank {self.rank} timed out waiting for {stage}")
 
     def init_process_group(self, rank: int, world_size: int, master_metadata: MasterMetadata, num_senders: int):
         """Initialize the NCCL process group.
@@ -318,10 +389,23 @@ class NCCLCheckpointEngine(CheckpointEngine):
                 f"world_size {world_size} is not equal to self.world_size {self.world_size}"
             )
 
-        # Only consumers read the bucket metadata stream; relays never touch the payload.
+        # A reused NCCL group still gets a fresh SUB, so scope both the topic and its ACKs to this update.
+        if self._confirm_bucket_subscriptions:
+            self.topic = f"bucket_metadata/{master_metadata.subscription_epoch.hex}"
         if self.rank >= num_senders:
             self._connect_zmq_client(master_metadata)
         collective.barrier(self.group_name)
+
+        if self._confirm_bucket_subscriptions:
+            if rank == 0:
+                self._wait_for_subscribers()
+            elif rank >= num_senders:
+                try:
+                    self._confirm_subscription()
+                except Exception:
+                    self.socket.close(linger=0)
+                    self.socket = None
+                    raise
 
         logger.info(f"init_process_group rank: {self.rank}, world_size: {self.world_size}")
 
@@ -350,25 +434,15 @@ class NCCLCheckpointEngine(CheckpointEngine):
             return
 
         send_buf, recv_buf = self.send_buf, self.recv_buf
-        broadcast_op = None
-
-        # In the case of multi senders, the broadcast and all-gather kernels must
-        # be queued in a deterministic order, otherwise the NCCL kernel may deadlock.
-        # Moreover the wait_for_complete() function only waits for the NCCL kernel to be enqueued,
-        # not for the kernel to finish.
-        pipelined = self.num_senders == 1
 
         start_time = time.time()
         bucket_meta: dict[str, TensorMeta] = {}
         offset = 0
         async for tensor_meta, chunk in split_weight_chunks(weights, self.bucket_size):
+            broadcast_op = None
             # fill the tensor bucket
             if offset + tensor_meta.chunk_size > self.bucket_size:
                 torch.cuda.synchronize()
-
-                # wait previous broadcast op finish
-                if pipelined and broadcast_op is not None:
-                    await broadcast_op.wait_for_complete()
 
                 broadcast_op = BroadcastOperation(
                     rank=self.rank,
@@ -392,14 +466,13 @@ class NCCLCheckpointEngine(CheckpointEngine):
             send_buf[offset : offset + tensor_meta.chunk_size] = cp.asarray(chunk)
             offset += tensor_meta.chunk_size
 
-            # keep the relays in step: no-op once the bucket's broadcast has already been drained
-            if not pipelined and broadcast_op is not None:
+            # Advancing the export iterator can enqueue an actor-group all-gather.
+            # Let the executor enqueue this bucket's broadcast before requesting the next chunk.
+            if broadcast_op is not None:
                 await broadcast_op.wait_for_complete()
 
         # broadcast last bucket
         torch.cuda.synchronize()
-        if pipelined and broadcast_op is not None:
-            await broadcast_op.wait_for_complete()
 
         broadcast_op = BroadcastOperation(
             rank=self.rank,

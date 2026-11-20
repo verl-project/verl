@@ -1,7 +1,7 @@
 Engine Workers
 ==============
 
-Last updated: 04/20/2026.
+Last updated: 11/20/2026.
 
 :mod:`verl.workers.engine_workers` provides the worker-layer classes that
 ``RayWorkerGroup`` instantiates for PPO / GRPO / SFT style RL training.
@@ -118,6 +118,14 @@ Key RPCs
      ``checkpoint_engine.backend`` (e.g. ``nccl`` for a full-weight broadcast, or
      ``delta`` to broadcast only the parameters that changed since the previous
      sync — see :doc:`../advance/one_step_off`).
+
+     With the NVIDIA ``nccl`` backend, each rollout receiver confirms its
+     ZeroMQ bucket metadata subscription before the first weight broadcast
+     of each update. This also applies when the NCCL group is reused.
+     If the 60-second subscription handshake times out, the sender reports
+     checkpoint group ranks in ``never_acked`` (no confirmation for this
+     update) and ``acked_then_left`` (confirmed and subsequently unsubscribed).
+     Actor relays participate in the broadcast and are excluded from both lists.
 
 5. ``save_checkpoint`` / ``load_checkpoint``
 

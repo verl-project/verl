@@ -268,6 +268,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     MAX_ENTRY_ELEMS = 64 << 20
 
     wire_format = "delta_flush"
+    _confirm_bucket_subscriptions = False
 
     def prepare(self) -> WorkerMetadata:
         # Delta broadcasts small per-flush buffers directly, so skip the parent's
