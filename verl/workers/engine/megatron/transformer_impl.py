@@ -472,7 +472,9 @@ class MegatronEngine(BaseEngine):
         self.tf_config = updated_tf_config
         print(f"module: {len(module)}")
 
-        if self.engine_config.use_dist_checkpointing:
+        # Native restart saves do not require a native initial model. Without
+        # an explicit native checkpoint path, bootstrap from the HF model.
+        if self.engine_config.use_dist_checkpointing and self.engine_config.dist_checkpointing_path is not None:
             load_mcore_dist_weights(
                 module, self.engine_config.dist_checkpointing_path, is_value_model=self.is_value_model
             )
