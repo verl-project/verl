@@ -26,11 +26,25 @@ try:
         group_limited_topk,
     )
     from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
-except ImportError:
-    warnings.warn("NPU not support router replay for now.", stacklevel=2)
+
+    _REPLAY_IMPORT_ERROR = None
+except ImportError as exc:
+    warnings.warn(
+        f"Router replay is unavailable because Megatron-Core's MoE helpers failed to import: {exc!r}",
+        stacklevel=2,
+    )
     MoEAlltoAllTokenDispatcher = None
+    _REPLAY_IMPORT_ERROR = exc
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
+
+_REPLAY_REQUIRED_SYMBOLS = (
+    "apply_router_token_dropping",
+    "compute_routing_scores_for_aux_loss",
+    "group_limited_topk",
+    "MoEAlltoAllTokenDispatcher",
+)
+_INT16_MAX = torch.iinfo(torch.int16).max
 
 # https://github.com/THUDM/slime/blob/main/slime/utils/routing_replay.py
 
@@ -102,8 +116,10 @@ class RouterReplay:
         """Returns the recorded topk indices."""
         return self.recorded_topk_idx
 
-    def record_indices(self, topk_indices: torch.Tensor):
-        """Records the topk indices."""
+    def record_indices(self, topk_indices: torch.Tensor, num_experts: int | None = None):
+        """Records the topk indices, compressing to int16 when expert ids fit."""
+        if num_experts is not None and num_experts <= _INT16_MAX:
+            topk_indices = topk_indices.to(torch.int16)
         self.recorded_topk_idx = topk_indices
 
     def get_replay_topk(self, scores, topk, num_groups=None, group_topk=None, default_compute_topk=None):
@@ -111,7 +127,7 @@ class RouterReplay:
         action = self.router_replay_action
         if action == RouterReplayAction.RECORD:
             probs, indices = default_compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
-            self.record_indices(indices)
+            self.record_indices(indices, num_experts=scores.shape[-1])
             return probs, indices
 
         if action == RouterReplayAction.REPLAY_FORWARD and self.target_topk_idx is not None:
@@ -123,7 +139,7 @@ class RouterReplay:
         else:
             return default_compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
 
-        indices = indices.to(scores.device)
+        indices = indices.to(device=scores.device, dtype=torch.int64)
         if replay_mask is not None:
             _, native_indices = default_compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
             if indices.shape != native_indices.shape or replay_mask.numel() != scores.shape[0]:
@@ -345,6 +361,14 @@ def apply_router_replay_patch():
     This patch dynamically adds the 'enable_routing_replay' attribute to TransformerConfig
     and modifies the TopKRouter to support recording and replaying of routing decisions.
     """
+    missing = [name for name in _REPLAY_REQUIRED_SYMBOLS if globals().get(name) is None]
+    if _REPLAY_IMPORT_ERROR is not None or missing:
+        raise RuntimeError(
+            "Router replay cannot be enabled because Megatron-Core's MoE helpers are unavailable "
+            f"(import_error={_REPLAY_IMPORT_ERROR!r}, missing_symbols={missing}). "
+            "Disable router replay or use a Megatron-Core build that provides "
+            "megatron.core.transformer.moe.moe_utils and MoEAlltoAllTokenDispatcher."
+        )
     print("Applying Router Replay Patch...")
     # Clear router instances to avoid state leakage between model initializations.
     RouterReplay.router_instances.clear()
@@ -385,12 +409,13 @@ def apply_router_replay_patch():
 
         @wraps(original_hash_routing)
         def hash_routing_with_recording(self, logits, input_ids):
+            """Record hash-router indices during the patched forward."""
             output = original_hash_routing(self, logits, input_ids)
             if self.router_replay is not None and self.router_replay.router_replay_action == RouterReplayAction.RECORD:
                 indices = self.tid2eid[input_ids.T.reshape(-1)].long()
                 if self.config.moe_router_force_load_balancing or self.config.moe_router_force_biased is not None:
                     _, indices = torch.topk(logits, k=self.topk, dim=1)
-                self.router_replay.record_indices(indices)
+                self.router_replay.record_indices(indices, num_experts=logits.shape[-1])
             return output
 
         router_module.RouterReplay = RouterReplay
