@@ -21,7 +21,7 @@ import transfer_queue as tq
 from omegaconf import DictConfig
 from transfer_queue import KVBatchMeta
 
-from verl.trainer.ppo.v1.prompt_sharing import PUBLIC_PARTITION, release_public_prompts
+from verl.experimental.agent_loop.prompt_sharing import PUBLIC_PARTITION, release_public_prompts
 from verl.utils.dataset.dataloader import DataLoaderExhausted
 from verl.utils.skip import SkipManager
 

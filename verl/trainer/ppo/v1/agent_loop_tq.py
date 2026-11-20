@@ -18,8 +18,6 @@
 import asyncio
 import logging
 import os
-from dataclasses import dataclass
-from dataclasses import field as dataclass_field
 from typing import Any
 
 import ray
@@ -32,16 +30,6 @@ from verl.experimental.agent_loop import (
     AgentLoopOutput,
     AgentLoopWorker,
     get_trajectory_info,
-)
-from verl.experimental.agent_loop.preprocess_cache import PromptPreprocessCache
-from verl.trainer.ppo.v1.prompt_sharing import (
-    PUBLIC_PARTITION,
-    async_release_public_prompts,
-    multi_modal_inputs_equal,
-    prompt_sharing_enabled,
-    prompt_sharing_requested,
-    public_multi_modal_key,
-    publish_public_prompts,
 )
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
@@ -58,21 +46,16 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
     params["temperature"] = 0
 
 
-@dataclass
-class _PublicMultiModalInputs:
-    lock: asyncio.Lock = dataclass_field(default_factory=asyncio.Lock)
-    value: dict | None = None
+def _worker_class(config):
+    """The worker the rollout runs on: sharing lives in a subclass, so turning it off never imports it."""
+    # Imported here because the subclass lives below this module in the import graph.
+    from verl.experimental.agent_loop.prompt_sharing import prompt_sharing_requested
 
+    if not prompt_sharing_requested(config):
+        return ray.remote(AgentLoopWorkerTQ)
+    from verl.experimental.agent_loop.agent_loop_tq_share import AgentLoopWorkerTQShare
 
-def _shareable_multi_modal_keys(processor) -> frozenset[str]:
-    """Keys of ``multi_modal_inputs`` that depend only on the media, not on the prompt and response text."""
-    keys = {"images_seqlens"}
-    for name in ("image_processor", "video_processor", "feature_extractor"):
-        keys.update(getattr(getattr(processor, name, None), "model_input_names", None) or ())
-    # _compute_position_ids rebuilds mm_token_type_ids from input_ids and drops it, but only for M-RoPE processors.
-    if hasattr(processor, "get_rope_index"):
-        keys.add("mm_token_type_ids")
-    return frozenset(keys)
+    return ray.remote(AgentLoopWorkerTQShare)
 
 
 async def _settle_session_tasks(tasks: list[asyncio.Task[Any]]) -> list[BaseException]:
@@ -80,35 +63,16 @@ async def _settle_session_tasks(tasks: list[asyncio.Task[Any]]) -> list[BaseExce
     return [result for result in results if isinstance(result, BaseException)]
 
 
-@ray.remote
 class AgentLoopWorkerTQ(AgentLoopWorker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
-        self.share_prompt_fields = prompt_sharing_enabled(self.config)
-        self.share_preprocessing = prompt_sharing_requested(self.config)
-        # uid => fields its trajectories link from the public prompt put under uid
-        self.public_prompt_fields: dict[str, list[str]] = {}
-        # uid => multi_modal_inputs the first finished session of uid put under public_multi_modal_key(uid)
-        self.public_multi_modal_inputs: dict[str, _PublicMultiModalInputs] = {}
-        # uid => media preprocessing the sessions of uid share
-        self.preprocess_caches: dict[str, PromptPreprocessCache] = {}
-        self.shareable_multi_modal_keys = _shareable_multi_modal_keys(self.processor)
-
-    def _get_preprocess_cache(self, sample_kwargs: dict[str, Any]) -> PromptPreprocessCache | None:
-        return self.preprocess_caches.get(sample_kwargs.get("uid"))
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""
         validate = batch["validate"] if "validate" in batch else False
         batch.pop("validate", None)
-        public_fields = []
-        if self.share_prompt_fields:
-            # Freeing runs here because this is the point reached after a step cleared the trajectories
-            # that were linking the public prompts of the previous batch.
-            await async_release_public_prompts()
-            public_fields = await publish_public_prompts(batch)
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -151,33 +115,15 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
             # “fire-and-forget” background tasks
             task = asyncio.create_task(
-                self._run_prompt(
-                    prompt,
-                    sampling_params,
-                    trajectory=trajectory_info[i],
-                    trace=trace_this_sample,
-                    public_fields=public_fields,
-                )
+                self._run_prompt(prompt, sampling_params, trajectory=trajectory_info[i], trace=trace_this_sample)
             )
             self.background_tasks.add(task)
             task.add_done_callback(self.background_tasks.discard)
 
-    async def _run_prompt(
-        self,
-        prompt: dict,
-        sampling_params: dict,
-        trajectory: dict,
-        trace: bool = False,
-        public_fields: list[str] | None = None,
-    ) -> None:
+    async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
         uid, partition_id = prompt["uid"], "train" if not trajectory["validate"] else "val"
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
-        if self.share_preprocessing:
-            self.preprocess_caches[uid] = PromptPreprocessCache()
-        if public_fields:
-            self.public_prompt_fields[uid] = public_fields
-            self.public_multi_modal_inputs[uid] = _PublicMultiModalInputs()
         tasks = []
         try:
             # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
@@ -216,53 +162,21 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             if tasks:
                 await _settle_session_tasks(tasks)
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
-        finally:
-            self.preprocess_caches.pop(uid, None)
-            self.public_prompt_fields.pop(uid, None)
-            self.public_multi_modal_inputs.pop(uid, None)
 
     async def _get_multi_modal_inputs(self, uid: str, output: AgentLoopOutput, input_ids: torch.Tensor) -> dict:
-        """``multi_modal_inputs`` of an output, computed once for the sessions of uid that saw the same media."""
-        cache = self.preprocess_caches.get(uid)
-        if cache is None or not output.multi_modal_data:
-            return self._compute_multi_modal_inputs(output, input_ids)
+        """``multi_modal_inputs`` of one output; a subclass may compute them once for the sessions of uid."""
+        return self._compute_multi_modal_inputs(output, input_ids)
 
-        computed = None
-
-        async def compute() -> dict | None:
-            nonlocal computed
-            computed = self._compute_multi_modal_inputs(output, input_ids)
-            # None tells the other sessions to compute their own, since some features depend on the text.
-            return dict(computed) if computed.keys() <= self.shareable_multi_modal_keys else None
-
-        shared = await cache.get_or_compute(
-            "multi_modal_inputs", (output.multi_modal_data, output.mm_processor_kwargs), compute
+    async def _put_trajectories(
+        self, keys: list[str], fields: list[dict], tags: list[dict], partition_id: str, sample_kwargs: dict[str, Any]
+    ) -> None:
+        """Store the outputs of one session; a subclass may link shared fields instead of storing them."""
+        await tq.async_kv_batch_put(
+            keys=keys,
+            fields=list_of_dict_to_tensordict(fields),
+            tags=tags,
+            partition_id=partition_id,
         )
-        if computed is not None:
-            return computed
-        if shared is None:
-            return self._compute_multi_modal_inputs(output, input_ids)
-        # _compute_position_ids pops keys from the returned dict.
-        return dict(shared)
-
-    async def _share_multi_modal_inputs(self, uid: str, multi_modal_inputs: list[dict]) -> bool:
-        """Whether the outputs of a session can link ``multi_modal_inputs`` from the public key of uid.
-
-        The first session to finish puts its inputs; the others link them only if equal, since multi-turn
-        sessions may see different images.
-        """
-        shared = self.public_multi_modal_inputs.get(uid)
-        if shared is None or not multi_modal_inputs[0]:
-            return False
-        async with shared.lock:
-            if shared.value is None:
-                await tq.async_kv_batch_put(
-                    keys=[public_multi_modal_key(uid)],
-                    partition_id=PUBLIC_PARTITION,
-                    fields=list_of_dict_to_tensordict([{"multi_modal_inputs": multi_modal_inputs[0]}]),
-                )
-                shared.value = multi_modal_inputs[0]
-        return all(multi_modal_inputs_equal(inputs, shared.value) for inputs in multi_modal_inputs)
 
     async def _agent_loop_postprocess(
         self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
@@ -296,9 +210,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # - uid: raw prompt uid from dataset
         # - session_id: session id for rollout.n sampling
         # - index: index of agent loop output
-        # Dataset fields are linked from the public prompt rather than stored n times.
-        public_fields = [key for key in self.public_prompt_fields.get(uid, ()) if key in kwargs]
-        keys, fields, tags, all_multi_modal_inputs = [], [], [], []
+        keys, fields, tags = [], [], []
         for i, output in enumerate(outputs):
             prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
             responses = torch.tensor(output.response_ids, dtype=torch.int64)
@@ -314,13 +226,11 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             field.update(kwargs)
             # do not store raw image/video
             field.pop("multi_modal_data", None)
-            for key in public_fields:
-                field.pop(key)
             # TODO: uniform response_mask and loss_mask
             field["loss_mask"] = field["response_mask"]
             field["input_ids"] = input_ids
             field["position_ids"] = position_ids
-            all_multi_modal_inputs.append(multi_modal_inputs)
+            field["multi_modal_inputs"] = multi_modal_inputs
             fields.append(field)
             prompt_len, response_len = field["prompts"].size(0), field["responses"].size(0)
             tags.append(
@@ -341,30 +251,13 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             )
 
         partition_id = "train" if not validate else "val"
-        if public_fields:
-            await tq.async_kv_link(keys=keys, partition_id=partition_id, public_key=uid, fields=public_fields)
-        if await self._share_multi_modal_inputs(uid, all_multi_modal_inputs):
-            await tq.async_kv_link(
-                keys=keys,
-                partition_id=partition_id,
-                public_key=public_multi_modal_key(uid),
-                fields="multi_modal_inputs",
-            )
-        else:
-            for field, multi_modal_inputs in zip(fields, all_multi_modal_inputs, strict=True):
-                field["multi_modal_inputs"] = multi_modal_inputs
-        await tq.async_kv_batch_put(
-            keys=keys,
-            fields=list_of_dict_to_tensordict(fields),
-            tags=tags,
-            partition_id=partition_id,
-        )
+        await self._put_trajectories(keys, fields, tags, partition_id, kwargs)
 
 
 class AgentLoopManagerTQ(AgentLoopManager):
-    def __init__(self, *args, **kwargs):
-        self.agent_loop_workers_class = AgentLoopWorkerTQ
-        super().__init__(*args, **kwargs)
+    def __init__(self, config, *args, **kwargs):
+        self.agent_loop_workers_class = _worker_class(config)
+        super().__init__(config, *args, **kwargs)
 
     @classmethod
     @auto_await
