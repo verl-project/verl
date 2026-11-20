@@ -27,7 +27,6 @@ from omegaconf import OmegaConf
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput, AgentLoopWorker
 from verl.experimental.reward_loop.reward_manager.naive import NaiveRewardManager
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.v1 import trainer_base
 from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
@@ -244,10 +243,14 @@ def test_bayes_validation_rejects_corrupted_trajectory_identity(monkeypatch, cha
         trainer._validate()
 
 
-def test_disabled_bayes_validation_keeps_failure_padding(monkeypatch):
+@pytest.mark.parametrize("custom_loader", [False, True])
+def test_disabled_bayes_validation_keeps_failure_padding(monkeypatch, custom_loader):
     """Ordinary validation still includes missing sessions as incorrect."""
     trainer, _, _ = _validation_trainer(monkeypatch, [[0, None], [1, 1]])
     trainer.config.trainer.val_bayes_at_n = False
+    if custom_loader:
+        trainer.config.data.custom_dataloader = {"_target_": "example.CustomLoader"}
+        trainer._custom_val_batch_size = 2
     metrics = trainer._validate()
     assert not any("/bayes@" in key for key in metrics)
     assert metrics["val-core/source/acc/mean@2"] == 0.5
@@ -284,14 +287,33 @@ def test_bayes_validation_rejects_unsupported_config(monkeypatch, path, value):
     assert submitted == []
 
 
-def test_bayes_validation_rejects_async_and_legacy_trainers(monkeypatch):
+def test_bayes_validation_rejects_async_trainers(monkeypatch):
     """The opt-in is restricted to fixed-checkpoint V1 synchronous validation."""
     trainer, submitted, _ = _validation_trainer(monkeypatch, [[0, 1]])
     trainer.trainer_mode = "separate_async"
     with pytest.raises(ValueError, match="trainer_mode=sync"):
         trainer._validate()
-    with pytest.raises(ValueError, match="trainer.use_v1=true"):
-        RayPPOTrainer._validate(trainer)
+    assert submitted == []
+
+
+@pytest.mark.parametrize(
+    ("val_before_train", "val_only", "test_freq"),
+    [(True, False, -1), (False, True, -1), (False, False, 1)],
+)
+def test_bayes_rejects_custom_validation_loader(monkeypatch, val_before_train, val_only, test_freq):
+    """Reject custom validation loaders before setup or rollout submission."""
+    trainer, submitted, _ = _validation_trainer(monkeypatch, [[0, 1]])
+    trainer.config.data.custom_dataloader = {"_target_": "example.CustomLoader"}
+    trainer.config.trainer.val_before_train = val_before_train
+    trainer.config.trainer.val_only = val_only
+    trainer.config.trainer.test_freq = test_freq
+    callback_setup = Mock(side_effect=AssertionError("callback setup must not run"))
+    monkeypatch.setattr(trainer_base, "build_checkpoint_callback", callback_setup)
+
+    for validate in (lambda: _Trainer(trainer.config), trainer._validate):
+        with pytest.raises(ValueError, match="requires the default validation dataloader"):
+            validate()
+    callback_setup.assert_not_called()
     assert submitted == []
 
 
@@ -320,30 +342,14 @@ def test_bayes_static_config_rejected_during_v1_construction(monkeypatch, path, 
     callback_setup.assert_not_called()
 
 
-@pytest.mark.parametrize("val_before_train", [False, True])
-def test_bayes_legacy_rejected_during_construction(monkeypatch, val_before_train):
-    """Legacy Bayes@N must fail before logger or dataset setup."""
-    config = _config()
-    config.trainer.val_before_train = val_before_train
-    logger_setup = Mock(side_effect=AssertionError("logger setup must not run"))
-    monkeypatch.setattr("verl.trainer.ppo.ray_trainer.ValidationGenerationsLogger", logger_setup)
-
-    with pytest.raises(ValueError, match="trainer.use_v1=true"):
-        RayPPOTrainer(
-            config,
-            tokenizer=None,
-            role_worker_mapping={trainer_base.Role.ActorRollout: object()},
-            resource_pool_manager=None,
-        )
-    logger_setup.assert_not_called()
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-def test_bayes_supported_or_disabled_constructor_accepts_config(monkeypatch, enabled):
+@pytest.mark.parametrize(("enabled", "custom_training_loader"), [(False, False), (True, False), (True, True)])
+def test_bayes_supported_or_disabled_constructor_accepts_config(monkeypatch, enabled, custom_training_loader):
     """Valid Bayes@N and disabled non-Bayes configurations still construct normally."""
     config = _config()
     config.trainer.val_before_train = False
     config.trainer.val_bayes_at_n = enabled
+    if custom_training_loader:
+        config.data.custom_dataloader = {"_target_": "example.CustomLoader"}
     if not enabled:
         config.trainer.v1.trainer_mode = "separate_async"
         config.actor_rollout_ref.rollout.val_kwargs.do_sample = False

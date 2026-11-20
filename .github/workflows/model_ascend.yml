@@ -54,13 +54,17 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Config locks must stay off the read-only model cache mount.
+  MEGATRON_CONFIG_LOCK_DIR: /root/.cache/temp/megatron-config-locks
+
 jobs:
   model_rmpad_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -91,9 +95,14 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/modelscope/hub/models ~/models
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running rmpad model tests on 8 NPUs
         run: |
-          pytest -s tests/models/test_transformer.py
+          PYTHONFAULTHANDLER=1 pytest -s tests/models/test_transformer.py
       - name: Running FSDP rmpad model tests on 8 NPUs
         run: |
           STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
@@ -103,6 +112,12 @@ jobs:
       - name: Run distributed test
         run: |
           bash tests/special_distributed/run_all.sh
+      - name: Run shared fused-forward contract tests
+        env:
+          VERL_USE_EXTERNAL_MODULES: megatron_adaptor
+        run: |
+          # Preload verl so Ascend patches run before test modules import Megatron.
+          pytest -p verl -s -x tests/models/test_model_forward_fused.py
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # TODO: Move test_engine.py's check_dtype=False, when npu's vllm0.23.0 is ok, run pytest -s -x tests/models/test_engine.py::test_actor_engine[fsdp] check it
@@ -112,7 +127,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -123,6 +138,10 @@ jobs:
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
@@ -137,10 +156,18 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/modelscope/hub/models ~/models
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running FSDP2 rmpad model tests on 8 NPUs
         run: |
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
       - name: Running model_engine_ascend
+        env:
+          # Keep generated test checkpoints off the quota-limited /tmp filesystem.
+          PYTEST_DEBUG_TEMPROOT: /root/.cache/temp
         run: |
           ray stop --force
-          pytest tests/models/test_engine.py
+          PYTHONFAULTHANDLER=1 pytest tests/models/test_engine.py --override-ini tmp_path_retention_policy=none

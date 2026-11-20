@@ -41,6 +41,11 @@ _DEVICE_FLOPS = {
     "Ascend950DT": 432e12,
     "Ascend910": 354e12,
     "RTX 3070 Ti": 21.75e12,
+    "TPU v7x": 1153.5e12,
+    "TPU v7": 1153.5e12,
+    "TPU v6e": 918e12,
+    "TPU v5p": 459e12,
+    "TPU v5e": 197e12,
 }
 
 
@@ -74,10 +79,10 @@ def get_device_flops(unit="T", device_name=None):
     # pass device_name is for testing purpose only
     if device_name is None:
         device = get_torch_device()
-        if device == torch.cpu:
+        if device == torch.cpu or (hasattr(device, "is_available") and not device.is_available()):
             device_name = "CPU"
         else:
-            device_name = get_torch_device().get_device_name()
+            device_name = device.get_device_name() or ""
 
     flops = float("inf")  # INF flops for unkown gpu type
 
@@ -320,8 +325,9 @@ def _compute_qwen3_5_gdn_recurrence_flops(config, tokens_sum, num_linear_attn_la
 
 
 def _estimate_qwen3_5_flops(config, tokens_sum, batch_seqlens, delta_time, **kargs):
-    # qwen3_5 and qwen3_5_moe use text_config and vision_config for the LLM and ViT parts.
-    text_config = config.text_config if hasattr(config, "text_config") else config
+    # qwen3_5 and qwen3_5_moe use text_config and vision_config for the LLM and ViT parts;
+    # text-only checkpoints (qwen3_5_text, qwen3_5_moe_text) place text attributes at the top level.
+    text_config = getattr(config, "text_config", None) or config
     hidden_size = text_config.hidden_size
     vocab_size = text_config.vocab_size
     num_hidden_layers = text_config.num_hidden_layers
@@ -330,7 +336,7 @@ def _estimate_qwen3_5_flops(config, tokens_sum, batch_seqlens, delta_time, **kar
         _compute_qwen3_5_hybrid_attn_params(text_config)
     )
 
-    if hasattr(text_config, "num_experts"):
+    if getattr(text_config, "num_experts", None) is not None:
         moe_gate_N = hidden_size * text_config.num_experts
         moe_expertmlp_N = hidden_size * text_config.moe_intermediate_size * text_config.num_experts_per_tok * 3
         moe_sharedexpertmlp_N = hidden_size * text_config.shared_expert_intermediate_size * 3
@@ -351,7 +357,7 @@ def _estimate_qwen3_5_flops(config, tokens_sum, batch_seqlens, delta_time, **kar
 
     images_seqlens = kargs.get("images_seqlens", None)
     if images_seqlens is not None:
-        vit_flops = _estimate_qwen3_vit_flop(images_seqlens, config.vision_config)
+        vit_flops = _estimate_qwen3_vit_flop(images_seqlens, getattr(config, "vision_config", None))
     else:
         vit_flops = 0
 
@@ -686,7 +692,9 @@ ESTIMATE_FUNC = {
     "qwen3_vl": _estimate_qwen3_vl_flops,
     "qwen3_vl_moe": _estimate_qwen3_vl_moe_flops,
     "qwen3_5": _estimate_qwen3_5_flops,
+    "qwen3_5_text": _estimate_qwen3_5_flops,
     "qwen3_5_moe": _estimate_qwen3_5_flops,
+    "qwen3_5_moe_text": _estimate_qwen3_5_flops,
     "deepseek_v3": _estimate_deepseek_v3_flops,
     "minicpmv": _estimate_qwen2_flops,
     "minicpmo": _estimate_qwen2_flops,

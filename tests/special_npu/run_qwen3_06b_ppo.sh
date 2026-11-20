@@ -26,6 +26,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=2 \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=delta_sharded \
+    +actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.delta_sharded.encoding=indices \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.use_torch_compile=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
@@ -55,8 +57,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.test_freq=-1 \
     trainer.total_epochs=1 \
     trainer.total_training_steps=2 \
-    skip.rollout.enable=${SKIP_ENABLE} \
-    skip.rollout.dump_dir=${SKIP_DUMP_DIR} \
-    skip.rollout.steps=${SKIP_STEPS} \
-    skip.rollout.action=${SKIP_ACTION} \
+    skip.rollout_tq.enable=${SKIP_ENABLE} \
+    skip.rollout_tq.dump_dir=${SKIP_DUMP_DIR} \
+    skip.rollout_tq.steps=${SKIP_STEPS} \
+    skip.rollout_tq.action=${SKIP_ACTION} \
     "$@"

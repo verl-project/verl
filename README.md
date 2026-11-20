@@ -48,6 +48,7 @@ verl is fast with:
 </p>
 
 ## News
+- [2026/11] Mainline PPO training now uses V1 exclusively; the V0 trainer has been removed. Fully async and one-step-off trainers have moved to [verl-recipe](https://github.com/verl-project/verl-recipe), pinned to verl v0.9.1.
 - [2026/08] [verl-vla](https://github.com/verl-project/verl-vla) `v0.1.0` is released: a unified VLA post-training framework for human-in-the-loop data collection, supervised fine-tuning, and reinforcement learning across simulators, real robots, and distributed cloud-edge resources, built on top of verl.
 - [2026/08] [VeRL-Tinker](https://github.com/verl-project/verl-recipe/tree/main/verl_tinker) is released: keep the Tinker Cookbook loop you know, and run SFT, RL, and distillation on verl-managed GPU workers you control; read the blog [here](https://verl-project.github.io/posts/2026-08-11-verl-tinker/).
 - [2026/08] [VeRL-Omni](https://github.com/verl-project/verl-omni) `v0.2.0` is released: faster diffusion RL, rebuilt Qwen3-Omni multimodal training (DPO & GSPO), plus LTX-2.3, Qwen-Image-Edit support and more.
@@ -60,7 +61,7 @@ verl is fast with:
 - [2026/03] verl is presented at NVIDIA GTC26: [session#1](https://www.nvidia.com/en-us/on-demand/session/gtc26-S81829/), [session#2](https://www.nvidia.com/en-us/on-demand/session/gtc26-S81620/)
 - [2026/01] verl has been migrated to the [verl-project](https://github.com/verl-project)
 - [2026/01] verl first meetup was successfully held in Shanghai on 01/10, hosted by Volcengine and NVIDIA, the slides has been uploaded to [verl-data](https://github.com/verl-project/verl-data).
-- [2026/01] The `recipe` directory has been migrated to a dedicated repository: [verl-recipe](https://github.com/verl-project/verl-recipe) and added as a submodule. See https://github.com/verl-project/verl/pull/4795. It can be used as it was after `git submodule update --init --recursive recipe`. Note that [`transfer_queue`](verl/experimental/transfer_queue), [`fully_async_policy`](verl/experimental/fully_async_policy), [`one_step_off_policy`](verl/experimental/one_step_off_policy) and [`vla`](verl/experimental/vla) are kept under [`verl/experimental`](verl/experimental) since they are planned to be merged into the main library. Use them through `verl.experimental.{module}`.
+- [2026/01] The `recipe` directory has been migrated to a dedicated repository: [verl-recipe](https://github.com/verl-project/verl-recipe) and added as a submodule. See https://github.com/verl-project/verl/pull/4795. It can be used as it was after `git submodule update --init --recursive recipe`. Note that [`transfer_queue`](https://github.com/verl-project/verl/tree/35754944221f189d41bb50f0e9980eb49f860350/verl/experimental/transfer_queue), [`fully_async_policy`](https://github.com/verl-project/verl/tree/1876b06d0a3e4e71e06230be10af14492ca8a75b/verl/experimental/fully_async_policy), [`one_step_off_policy`](https://github.com/verl-project/verl/tree/1876b06d0a3e4e71e06230be10af14492ca8a75b/verl/experimental/one_step_off_policy) and [`vla`](https://github.com/verl-project/verl/tree/6bd13cea3d0644ea08eebd79b069bf21a90842b5/verl/experimental/vla) are kept under [`verl/experimental`](verl/experimental) since they are planned to be merged into the main library. Use them through `verl.experimental.{module}`.
 - [2025/12] [Mind Lab](https://macaron.im/mindlab) successfully used [verl](https://github.com/verl-project/verl) and [Megatron-bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) to train GRPO Lora for Trillion-parameter model on 64 H800 - See their [techblog](https://macaron.im/mindlab/research/building-trillion-parameter-reasoning-rl-with-10-gpus).
 - [2025/10] verl is presented in the [PyTorch Conference 2025](https://pytorch.org/event/pytorch-conference-2025/).
 - [2025/08] verl is presented in the [PyTorch Expert Exchange Webinar](https://www.youtube.com/watch?v=Vd79NmmqY3Q&t=2s). [Slides](https://github.com/eric-haibin-lin/verl-community/blob/main/slides/verl_talk_pytorch_2025_08.pdf) available.
@@ -106,7 +107,7 @@ verl is fast with:
 - Scales up to 671B models and hundreds of GPUs with [expert parallelism](https://github.com/verl-project/verl/pull/1467)
 - Multi-gpu [LoRA RL](https://verl.readthedocs.io/en/latest/advance/ppo_lora.html) support to save memory.
 - Experiment tracking with wandb, swanlab, mlflow and tensorboard.
-- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/README.md)
+- Hardware Support: Supports NVIDIA, AMD, [Huawei Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/README.md), [Intel XPU](https://github.com/verl-project/verl-hardware-plugin/blob/main/docs/accelerators/xpu/README.md) (via verl-hardware-plugin)
 
 ## Getting Started
 

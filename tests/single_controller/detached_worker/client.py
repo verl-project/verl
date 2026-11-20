@@ -22,6 +22,7 @@ from tensordict import TensorDict
 
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.utils.device import get_device_name
 
 
 def compute_position_id_with_mask(mask):
@@ -39,7 +40,9 @@ if __name__ == "__main__":
     sequence_length = 1024
 
     # give Trainer some data to train
-    input_ids = torch.randint(low=0, high=256, size=(batch_size, sequence_length), dtype=torch.int64, device="cuda")
+    input_ids = torch.randint(
+        low=0, high=256, size=(batch_size, sequence_length), dtype=torch.int64, device=get_device_name()
+    )
     attention_mask = torch.ones_like(input_ids)
     position_ids = compute_position_id_with_mask(attention_mask)
 

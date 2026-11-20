@@ -35,10 +35,11 @@ from vllm.entrypoints.openai.api_server import build_app, init_app_state
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput
+from vllm.outputs import STREAM_FINISHED, RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 
 from verl.plugin.platform import get_platform
@@ -54,10 +55,11 @@ from verl.utils.profiler import (
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, prefix_cache_salt
 from verl.workers.rollout.utils import (
     extract_response_topk_logprobs_with_coverage,
     get_max_position_embeddings,
+    get_node_visible_devices,
     get_vision_placeholder_token_ids,
     qwen2_5_vl_dedup_image_tokens,
     run_uvicorn,
@@ -318,10 +320,18 @@ class vLLMHttpServer:
             set_expandable_segments(True)
 
         hf_overrides = self._apply_quantization()
+        hf_quantization_config = getattr(self.model_config.hf_config, "quantization_config", None)
+        effective_quantization_config = hf_overrides.get("quantization_config") or hf_quantization_config
+        from verl.utils.vllm.vllm_quant_utils import set_default_vllm_quantization_backends
+
+        set_default_vllm_quantization_backends(effective_quantization_config, engine_kwargs)
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
             compilation_config = json.loads(compilation_config)
+        from verl.utils.real_nvfp4 import check_nvfp4_per_token_rollout
+
+        check_nvfp4_per_token_rollout(self.config, effective_quantization_config, compilation_config, engine_kwargs)
         compilation_config.setdefault("cudagraph_mode", "FULL_AND_PIECEWISE")
 
         # FULL cuda graph is not yet supported with DCP, downgrade to PIECEWISE
@@ -407,10 +417,22 @@ class vLLMHttpServer:
             dp_args = {
                 "data_parallel_size": self.config.data_parallel_size,
                 "data_parallel_size_local": data_parallel_size_local,
-                "data_parallel_start_rank": self.node_rank * data_parallel_size_local,
                 "data_parallel_address": self._master_address,
                 "data_parallel_rpc_port": self._dp_rpc_port,
             }
+            if self.node_rank > 0:
+                # Only the headless follower nodes get a start rank. Since vLLM 0.28 a
+                # non-headless server that receives ``data_parallel_start_rank`` is put
+                # into hybrid-LB mode (EngineArgs.create_engine_config), and in that
+                # mode the leader rejects headless remote engines with
+                # "Remote engine N must not use --headless in external or hybrid dp lb
+                # mode". The node-0 API server is the internal-LB leader and must not
+                # carry a start rank (its local engines start at rank 0 anyway).
+                dp_args["data_parallel_start_rank"] = self.node_rank * data_parallel_size_local
+            else:
+                # A start rank configured through engine_kwargs would put the leader into
+                # hybrid-LB mode just the same; the leader's engines always start at rank 0.
+                args.pop("data_parallel_start_rank", None)
             args.update(dp_args)
 
         args.update({"enable_expert_parallel": self.config.expert_parallel_size > 1})
@@ -698,11 +720,15 @@ class vLLMHttpServer:
         if rejected is not None:
             return rejected
 
+        cache_salt = prefix_cache_salt(self.config, self.global_steps)
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
+
         with RLInsightLogger.trace_state(
             "vllm_generate",
             state_lane_id=ray.get_runtime_context().get_actor_name(),
         ):
-            generator = self.engine.generate(
+            final_res = await self._generate_admitted(
                 prompt=prompt,
                 sampling_params=sampling_params,
                 request_id=request_id,
@@ -710,19 +736,6 @@ class vLLMHttpServer:
                 priority=priority,
                 data_parallel_rank=self._dp_rank_for_session(session_id),
             )
-
-            # Get final response
-            final_res: Optional[RequestOutput] = None
-            admitted = False
-            try:
-                async for output in generator:
-                    if not admitted:
-                        admitted = True
-                        self._admitting -= 1
-                    final_res = output
-            finally:
-                if not admitted:
-                    self._admitting -= 1
             assert final_res is not None
 
         extra_fields = {"global_steps": self.global_steps}
@@ -793,7 +806,7 @@ class vLLMHttpServer:
         finish_reason = final_res.outputs[0].finish_reason
         if finish_reason == "abort":
             stop_reason = "aborted"
-        elif finish_reason in ("stop", "length"):
+        elif finish_reason == "stop":
             stop_reason = "completed"
         else:
             stop_reason = finish_reason  # for more stop reason in the future
@@ -913,6 +926,9 @@ class vLLMHttpServer:
             session_id=session_id,
         )
 
+    @RLInsightLogger.trace_state_decorator(
+        "wake_up", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:
             return
@@ -922,18 +938,17 @@ class vLLMHttpServer:
             # processes across all DP shards (unlike collective_rpc which only reaches
             # TP workers within a single shard).
             await self.engine.wake_up(tags=tags or self._get_wake_up_tags())
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
-            # reset_connector=True drops any attached external KV store
-            # (e.g. MooncakeStoreConnector) whose entries were computed
-            # against the previous weights. No-op success when no connector
-            # is configured (vLLM scheduler treats it as such).
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
+    @RLInsightLogger.trace_state_decorator(
+        "sleep", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
@@ -941,21 +956,45 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            await self._engine_sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
+    async def _engine_sleep(self, level: int):
+        # Sleep discards the KV cache and, by default, resets the KV connector, which for a shared store
+        # (e.g. MooncakeStoreConnector) deletes entries other replicas still use. Under "salt" that is never
+        # needed: unchanged weights keep the current salt, and new weights get a new one.
+        if self.config.external_kv_cache_invalidation == "salt":
+            if "reset_connector" in inspect.signature(self.engine.sleep).parameters:
+                await self.engine.sleep(level=level, reset_connector=False)
+                return
+            logger.warning(
+                "external_kv_cache_invalidation='salt': this vLLM's sleep() cannot keep the KV connector's cache "
+                "(needs vllm-project/vllm#57810), so the external KV store is reset on sleep."
+            )
+        await self.engine.sleep(level=level)
+
+    async def _reset_prefix_cache(self):
+        # Under "reset", reset_connector=True also drops any attached external KV store
+        # (e.g. MooncakeStoreConnector) whose entries were computed against the previous
+        # weights; with no connector it is a no-op success. Under "salt" those entries
+        # are unreachable through their old salt, so the store, which other replicas may
+        # still be reading and writing, is left intact.
+        await self.engine.reset_prefix_cache(reset_connector=self.config.external_kv_cache_invalidation == "reset")
+
+    @RLInsightLogger.trace_state_decorator(
+        "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def clear_kv_cache(self):
         if self.node_rank == 0:
-            # reset_connector=True drops any attached external KV store
-            # (e.g. MooncakeStoreConnector) whose entries were computed
-            # against the previous model weights. With no connector it
-            # is a no-op success, so we can pass it unconditionally.
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
 
             await self.engine.reset_mm_cache()
             await self.engine.reset_encoder_cache()
 
+    @RLInsightLogger.trace_state_decorator(
+        "release_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def release_kv_cache(self):
         """Free the kv_cache pool for the duration of a weight sync."""
         # TODO: use the real release_kv_cache() method after vllm supports it (vllm#44890/46438)
@@ -963,9 +1002,12 @@ class vLLMHttpServer:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self._engine_sleep(level=self._resolve_sleep_level())
         await self.engine.wake_up(tags=["weights"])
 
+    @RLInsightLogger.trace_state_decorator(
+        "resume_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -973,7 +1015,7 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
         await self.engine.wake_up(tags=["kv_cache"])
-        await self.engine.reset_prefix_cache(reset_connector=True)
+        await self._reset_prefix_cache()
 
     async def snapshot(self) -> dict[str, Any]:
         """Return live KV-cache and scheduler queue observations.
@@ -1155,6 +1197,12 @@ class vLLMHttpServer:
             deadline = time.monotonic() + _GATE_BARRIER_TIMEOUT_S
             while self._admitting > 0:
                 if time.monotonic() > deadline:
+                    if self.config.external_kv_cache_invalidation == "salt":
+                        # A straggler would run on the new weights under its old salt and write
+                        # into the kept KV store, so do not proceed with the weight update.
+                        raise RuntimeError(
+                            f"Submission gate barrier timed out with {self._admitting} admission(s) in flight"
+                        )
                     logger.warning(
                         "Submission gate barrier timed out with %d admission(s) in flight, proceeding",
                         self._admitting,
@@ -1165,7 +1213,7 @@ class vLLMHttpServer:
             # Snapshot request IDs before pausing for reporting
             request_ids = list(self.engine.output_processor.request_states.keys())
 
-            # pause_generation with wait_for_inflight_requests=False will:
+            # pause_generation in abort mode will:
             # 1. Set engine to paused state (new requests are accepted but not scheduled)
             # 2. Abort all in-flight requests
             # 3. Wait for requests to drain
@@ -1174,11 +1222,20 @@ class vLLMHttpServer:
             #    on this path, so any attached external KV store (e.g.
             #    MooncakeStoreConnector) is invalidated along with the
             #    local prefix cache — RL-correct hard-reset at every
-            #    weight update boundary, no extra kwargs needed.
-            await self.engine.pause_generation(
-                wait_for_inflight_requests=False,
-                clear_cache=reset_prefix_cache,
-            )
+            #    weight update boundary. pause_generation cannot keep the
+            #    connector, so "salt" pauses without clearing and then
+            #    clears only the local caches via clear_kv_cache().
+            reset_connector = self.config.external_kv_cache_invalidation == "reset"
+            clear_cache = reset_prefix_cache and reset_connector
+            if _VLLM_VERSION >= version.parse("0.32.0"):
+                await self.engine.pause_generation(mode="abort", clear_cache=clear_cache)
+            else:
+                await self.engine.pause_generation(
+                    wait_for_inflight_requests=False,
+                    clear_cache=clear_cache,
+                )
+            if reset_prefix_cache and not reset_connector:
+                await self.clear_kv_cache()
 
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
@@ -1228,6 +1285,70 @@ class vLLMHttpServer:
         # that keeps "gate closed and _admitting == 0" from being observed mid-admission.
         self._admitting += 1
         return None
+
+    async def _generate_admitted(
+        self,
+        prompt: Any,
+        sampling_params: SamplingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest],
+        priority: int,
+        data_parallel_rank: Optional[int] = None,
+    ) -> Optional[RequestOutput]:
+        """Run one admitted request to completion and return its final RequestOutput.
+
+        The caller has already bumped ``_admitting`` in ``_park_until_admitted``; this method drops
+        it exactly once, as soon as the request is guaranteed to be covered by a later
+        ``pause_generation()``. That is when ``AsyncLLM.add_request()`` returns: the request is
+        then registered in the output processor and has been sent to EngineCore over the same
+        ordered input socket that ``pause_scheduler`` travels on.
+
+        Releasing the barrier only on the first yielded token (the previous behaviour, via
+        ``AsyncLLM.generate()``) made it wait for the request to be *scheduled and prefilled*.
+        With ``len(batch) > max_num_seqs`` most requests sit in the scheduler's WAITING queue for
+        seconds, and ``abort_all_requests()`` could not pause the engine until every one of them
+        had been scheduled -- a 5-15s stall per weight sync on TPU GRPO runs.
+        """
+        final_res: Optional[RequestOutput] = None
+        queue = None
+        admitted = False
+        try:
+            queue = await self.engine.add_request(
+                request_id,
+                prompt,
+                sampling_params,
+                lora_request=lora_request,
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
+            )
+            # Landed in the engine: a pause from here on covers this request.
+            admitted = True
+            self._admitting -= 1
+
+            # Drain the per-request collector exactly as AsyncLLM.generate() does.
+            finished = False
+            while not finished:
+                output = queue.get_nowait() or await queue.get()
+                finished = output.finished
+                if output is STREAM_FINISHED:
+                    continue
+                final_res = output
+        except (asyncio.CancelledError, Exception) as e:
+            # Client disconnected or the request failed mid-flight: drop it from the engine like
+            # AsyncLLM.generate() does, so no orphaned request is left in the scheduler. The collector
+            # holds vLLM's internal request id, which may differ from the caller's request_id.
+            if queue is not None and not isinstance(e, EngineDeadError):
+                try:
+                    await self.engine.abort(queue.request_id, internal=True)
+                except Exception:
+                    logger.debug("failed to abort request %s after %s", request_id, type(e).__name__, exc_info=True)
+            raise
+        finally:
+            if not admitted:
+                self._admitting -= 1
+            if queue is not None:
+                queue.close()
+        return final_res
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.
@@ -1325,6 +1446,14 @@ class vLLMHttpServer:
                 "rollout.engine_kwargs.vllm may not set args that verl derives from its config: "
                 + "; ".join(f"{key} (set {_VERL_MANAGED_VLLM_ARGS[key.replace('-', '_')]})" for key in managed)
             )
+        if _VLLM_VERSION >= version.parse("0.27.1") and is_torch_npu_available(check_device=False):
+            # Ascend RL defaults disable NZ weights for sleep/wake and weight updates.
+            additional_config = dict(engine_kwargs.get("additional_config") or {})
+            rl_config = dict(additional_config.get("rl_config") or {})
+            rl_config.setdefault("enabled", True)
+            additional_config["rl_config"] = rl_config
+            engine_kwargs["additional_config"] = additional_config
+
         if _VLLM_VERSION < version.parse("0.22.0"):
             # Work around multimodal processor cache desync across pause/resume.
             # See: https://github.com/vllm-project/vllm/pull/43001/
@@ -1402,16 +1531,6 @@ class vLLMHttpServer:
 
         # The trainer quantizes every refit to this config; vLLM picks the method up from hf_overrides.
         quantization_config = quantization.build_quantization_config(self.model_config.local_path)
-        # FP8_BLOCK carries FP32 block scales. DeepGEMM's E8M0 mode (vLLM's default) would round them
-        # to powers of two and drift from the trainer. MX formats carry E8M0 scales natively and must
-        # retain vLLM's E8M0 path.
-        uses_fp32_block_scales = any(
-            group.get("weights", {}).get("strategy") == "block"
-            and group.get("weights", {}).get("scale_dtype") in {None, "torch.float32"}
-            for group in quantization_config.get("config_groups", {}).values()
-        )
-        if uses_fp32_block_scales:
-            os.environ.setdefault("VLLM_USE_DEEP_GEMM_E8M0", "0")
         logger.info(f"Rollout compressed-tensors quantization_config: {quantization_config}")
         return {"quantization_config": quantization_config}
 
@@ -1437,7 +1556,7 @@ class vLLMHttpServer:
         MTP drafter-only weights are initialized by vLLM and are not guaranteed
         to be restored by actor weight sync after level 2 sleep discards them.
         lora only update adapter weights, so set sleep level to 1.
-        vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
+        vllm-ascend < 0.30.0 requires sleep level 1 to avoid EP precision issues.
         """
         mtp_config = getattr(self.config, "mtp", None)
         mtp_rollout_enabled = (
@@ -1445,7 +1564,9 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
+        if mtp_rollout_enabled or self.lora_as_adapter:
+            return 1
+        if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
             return 1
         return 2
 
@@ -1475,7 +1596,7 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self._engine_sleep(level=self._resolve_sleep_level())
         await self.engine.reset_encoder_cache()
 
 
@@ -1495,33 +1616,45 @@ class vLLMReplica(RolloutReplica):
         )
         self.server_class = ray.remote(vLLMHttpServer)
 
+    def _get_server_env_vars(self, node_ids: list[str]) -> dict[str, str]:
+        """Environment variables of this replica's server actors (one per node, ``node_ids`` in node-rank order).
+
+        Platforms whose engine needs per-replica settings (e.g. the device topology of the replica's hosts) can
+        override this instead of ``launch_servers``.
+        """
+        return {
+            **{var: "1" for var in get_platform().ray_noset_envvars()},
+            **get_platform().rollout_env_vars(),
+        }
+
     async def launch_servers(self):
         """Launch http server in each node."""
         assert len(self.workers) == self.world_size, (
             f"worker number {len(self.workers)} not equal to world size {self.world_size}"
         )
 
-        # get (node_id, CUDA_VISIBLE_DEVICES) of all workers
+        # get (node_id, accelerator ids) of all workers; a worker that holds no accelerator has no ids
         worker_infos = await asyncio.gather(
             *[
                 worker.__ray_call__.remote(
                     lambda self: (
                         ray.get_runtime_context().get_node_id(),
-                        ray.get_runtime_context().get_accelerator_ids()[get_resource_name()][0],
+                        ray.get_runtime_context().get_accelerator_ids().get(get_resource_name(), []),
                     )
                 )
                 for worker in self.workers
             ]
         )
-        worker_cuda_visible_devices = [worker_info[1] for worker_info in worker_infos]
+        worker_accelerator_ids = [worker_info[1] for worker_info in worker_infos]
         worker_node_ids = [worker_info[0] for worker_info in worker_infos]
 
         # create server actor in each node with node affinity and cuda visible devices
         nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
+        env_vars = self._get_server_env_vars(worker_node_ids[::gpus_per_replica_node])
         for node_rank in range(nnodes):
             workers = self.workers[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
-            node_cuda_visible_devices = ",".join(
-                worker_cuda_visible_devices[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
+            node_cuda_visible_devices = get_node_visible_devices(
+                worker_accelerator_ids[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             )
             node_id = worker_node_ids[node_rank * gpus_per_replica_node]
             prefix = self._get_server_name_prefix()
@@ -1531,11 +1664,6 @@ class vLLMReplica(RolloutReplica):
                 name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
             else:
                 name = f"{prefix}server_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            env_vars = {
-                **{var: "1" for var in get_platform().ray_noset_envvars()},
-                **get_platform().rollout_env_vars(),
-            }
-
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
