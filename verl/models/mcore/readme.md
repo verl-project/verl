@@ -139,3 +139,19 @@ The necessary features under development for scaling up are
     - more efficient and general weight resharding and loading
 3. Offline weights conversion
     - support weights larger than single GPU memory
+
+## Temporary compatibility
+
+Compatibility installation is centralized in `compat.py`: bootstrap before the
+model registry import, process-wide engine setup, model construction, and
+per-model MTP setup. `PATCHES` records each feature's reason, upstream links and
+retirement condition. Installation is idempotent per process or model; failed
+installations remain retryable and the registry does not retain discarded models.
+
+Necessity is checked before an installer runs. The old writer and MLA replacements
+are skipped outside their affected versions. Optional-extension installers probe
+the installed dependency themselves. MTP and router compatibility remains required
+until their verl consumers use the native contracts: Core PR #8673 covers only
+output-weight detachment, and #8674 covers masked replay. Merging either PR alone
+does not retire every part of these legacy adapters. Recompute has no validated
+retirement boundary yet; coordinate verl PR #8338 and measure memory first.
