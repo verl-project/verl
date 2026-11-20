@@ -30,6 +30,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 from packaging import version
 
@@ -81,12 +82,18 @@ def _direct_repacking_process(self, layer):
     layer.w13_weight = torch.nn.Parameter(_swap_halves(layer.w13_weight.data), requires_grad=False)
 
 
+class _QuantizeMethodBase:
+    def process_weights_after_loading(self, layer):
+        pass
+
+
 class _StubVllmFp8:
     NAMES = (
         "vllm",
         "vllm.model_executor",
         "vllm.model_executor.layers",
         "vllm.model_executor.layers.quantization",
+        "vllm.model_executor.layers.quantization.base_config",
         _FP8_MODULE,
     )
 
@@ -97,6 +104,7 @@ class _StubVllmFp8:
         self._saved = {n: sys.modules.get(n) for n in self.NAMES}
         mods = {n: types.ModuleType(n) for n in self.NAMES}
         fp8 = mods[_FP8_MODULE]
+        mods["vllm.model_executor.layers.quantization.base_config"].QuantizeMethodBase = _QuantizeMethodBase
 
         def replace_parameter(layer, name, new_data, prefer_copy=False):
             setattr(layer, name, torch.nn.Parameter(new_data, requires_grad=False))
@@ -174,6 +182,52 @@ def test_same_shape_repack_is_restaged_and_reprocessed_into_the_live_storage():
             assert torch.equal(layer.w13_weight_scale_inv.data, _swap_halves(fresh_scale))
             # the kernel captured right after the replace calls points at the live params, not staging buffers
             assert layer._kernel_refs[0] is live_w and layer._kernel_refs[1] is live_s
+        finally:
+            for p in patchers:
+                p.stop()
+
+
+class _LoraModularMethod:
+    """vLLM's merge=False ``FusedMoEModularMethod`` stand-in: keeps the real method, has no post-load hook."""
+
+    def __init__(self, old_quant_method):
+        self.old_quant_method = old_quant_method
+
+
+class _InheritedNoOpLoraMethod(_LoraModularMethod, _QuantizeMethodBase):
+    pass
+
+
+class _DelegatingLoraMethod(_LoraModularMethod):
+    def process_weights_after_loading(self, layer):
+        self.old_quant_method.process_weights_after_loading(layer)
+        layer._lora_kernel_refs = layer._kernel_refs
+
+
+@pytest.mark.parametrize("wrapper", [_LoraModularMethod, _InheritedNoOpLoraMethod, _DelegatingLoraMethod])
+def test_lora_wrapped_moe_reprocesses_once_and_preserves_wrapper_hook(wrapper):
+    module = _load_fp8_utils()
+    with _StubVllmFp8(_cutlass_like_process) as stub:
+        patchers = module.build_fp8_method_patchers(version.parse("0.24.0"))
+        for p in patchers:
+            p.start()
+        try:
+            model, layer = _loaded_layer(module, stub)
+            # LoRA installs its wrapper after the initial load.
+            layer.quant_method = wrapper(layer.quant_method)
+            live_w = layer.w13_weight
+
+            staged = module.stage_fp8_params_for_loading(model)
+            assert staged == [layer]
+            fresh = torch.randint(-6, 7, live_w.shape).to(torch.float8_e4m3fn)
+            layer.w13_weight.data.copy_(fresh)
+            module.process_fp8_weights_after_loading(staged)
+
+            assert layer._process_calls == 2, "the refit must run the kernel prep exactly once"
+            if wrapper is _DelegatingLoraMethod:
+                assert layer._lora_kernel_refs[0] is live_w
+            assert layer.w13_weight is live_w and layer.w13_weight.data_ptr() == live_w.data_ptr()
+            assert torch.equal(layer.w13_weight.data.view(torch.uint8), _swap_halves(fresh).view(torch.uint8))
         finally:
             for p in patchers:
                 p.stop()

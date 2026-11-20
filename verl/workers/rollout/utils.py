@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import os
+from itertools import groupby, zip_longest
 
 import numpy as np
 import ray
@@ -108,6 +109,37 @@ async def ensure_async_iterator(iterable):
             yield item
 
 
+def routing_replay_prompts_match(
+    actor_ids: list[int],
+    rollout_ids: list[int],
+    *,
+    image_token_id: int | None = None,
+    image_count: int = 0,
+) -> bool:
+    """Compare replay prompts, allowing V4.1 image expansion from a compact prompt only."""
+    if actor_ids == rollout_ids:
+        return True
+    if image_token_id is None or image_count <= 0:
+        return False
+    compact, expanded = sorted((actor_ids, rollout_ids), key=len)
+    if compact.count(image_token_id) != image_count:
+        return False
+
+    runs = zip_longest(groupby(compact), groupby(expanded), fillvalue=(None, ()))
+    for (token, compact_run), (other_token, expanded_run) in runs:
+        if token != other_token:
+            return False
+        compact_len = sum(1 for _ in compact_run)
+        expanded_len = sum(1 for _ in expanded_run)
+        if token == image_token_id:
+            # A V4.1 image spans 2 + height * (width + 1) tokens, at least four per image.
+            if expanded_len < 4 * compact_len:
+                return False
+        elif expanded_len != compact_len:
+            return False
+    return True
+
+
 def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
     """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
     <|image_pad|> and <|video_pad|> token by image_data.
@@ -121,12 +153,15 @@ def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
     if (
         processor is not None
         and hasattr(processor, "image_processor")
-        and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__
+        and any(
+            name in processor.image_processor.__class__.__name__
+            for name in ("Qwen2VLImageProcessor", "Glm5NextImageProcessor")
+        )
     ):
         prompt_ids = np.array(prompt_ids)
         mask = np.ones(len(prompt_ids), dtype=bool)
         is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
-        mask[1:] &= ~(is_value[1:] & is_value[:-1])
+        mask[1:] &= ~(is_value[1:] & (prompt_ids[1:] == prompt_ids[:-1]))
         return prompt_ids[mask].tolist()
     else:
         return prompt_ids

@@ -36,8 +36,13 @@ class PPOTrainerSync(PPOTrainer):
         with marked_timer("update_weights", self.timing_raw, color="red"):
             # wake up all replicas to update weights
             self.checkpoint_manager.update_weights(self.global_steps)
+            # on_sample_end aborted the replicas, so reopen generation here. update_weights does not
+            # resume: callers that already resume (e.g. hybrid switch_to_rollout) would do it twice.
+            self.checkpoint_manager.resume_generation_replicas()
 
     def on_sample_end(self):
+        # Routing replay's AuxOutput connector requires PAUSED_ALL for cache reset.
+        self.checkpoint_manager.abort_replicas()
         # sleep all replicas to discard weights and kv cache
         self.checkpoint_manager.sleep_replicas()
         if self.curr_step_profile:
