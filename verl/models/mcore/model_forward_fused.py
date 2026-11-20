@@ -190,14 +190,19 @@ def fused_output_processor(
 
 def _get_patching_model(model: torch.nn.Module):
     model = unwrap_model(model)
-    if isinstance(model, GPTModel):
+    # GPTModel, or any language model exposing Megatron's output-processor hook (e.g. HybridModel, which
+    # Megatron-Bridge >= 0.7 builds for DeepSeek-V4): the hook path needs no GPT-specific forward patch.
+    if isinstance(model, GPTModel) or _supports_output_processor_hook(model):
         return model
 
-    if not (hasattr(model, "language_model") and isinstance(model.language_model, GPTModel)):
-        print(f"Model {model.__class__.__name__} is not a supported for fused forward")
-        return None
+    language_model = getattr(model, "language_model", None)
+    if isinstance(language_model, GPTModel) or (
+        language_model is not None and _supports_output_processor_hook(language_model)
+    ):
+        return language_model
 
-    return model.language_model
+    print(f"Model {model.__class__.__name__} is not a supported for fused forward")
+    return None
 
 
 def _validate_liger_moe_runtime(model: GPTModel) -> None:
@@ -271,7 +276,7 @@ def patch_fused_forward(
 ):
     model = _get_patching_model(model)
     if model is None:
-        return
+        return False
     if model_config is not None:
         configured_backend = (model_config.fused_kernel_options or {}).get("impl_backend")
         impl_backend = (
@@ -287,14 +292,18 @@ def patch_fused_forward(
         setattr(model, _FUSED_FORWARD_MODE_ATTR, mode)
 
     if mode == _HOOK_MODE:
-        return
+        return True
 
     assert version.parse(mcore.__version__) >= version.parse("0.13.0"), (
         "Fused forward patching requires mecore >= 0.13.0"
     )
+    if not isinstance(model, GPTModel):
+        print(f"Model {model.__class__.__name__} lacks the output-processor hook; the legacy fused forward is GPT-only")
+        return False
     if not hasattr(model, "forward_backup"):
         model.forward_backup = model.forward
         model.forward = _fused_GPTModel_forward.__get__(model, model.__class__)
+    return True
 
 
 def unpatch_fused_forward(model: torch.nn.Module):

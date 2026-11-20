@@ -142,6 +142,8 @@ qat:
   enable: false
   # Quantization mode: "fp8", "mxfp8", "mxfp4", "mxfp4_mxfp8", or "nvfp4".
   # NVFP4 is W4A4 on routed experts only.
+  # "mxfp4_experts" is weight-only MXFP4 on routed experts for DeepSeek-V4; it stacks on TE FP8 training
+  # (override_transformer_config.fp8), whose real FP8 GEMM then quantizes the activations.
   mode: "fp8"
   # Group size for blockwise quantization (NVFP4 requires 16)
   group_size: 16
