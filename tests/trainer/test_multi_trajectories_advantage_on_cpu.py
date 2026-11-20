@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 import torch
@@ -18,6 +20,23 @@ import torch
 from verl.protocol import DataProto
 from verl.trainer.ppo.core_algos import AdvantageEstimator
 from verl.trainer.ppo.v1.utils import compute_advantage, compute_advantage_for_multi_trajectories
+
+
+@pytest.mark.parametrize("estimator", ["codapo", AdvantageEstimator.CODAPO])
+@pytest.mark.parametrize(
+    "keys",
+    [
+        ["prompt_a_0_0", "prompt_a_0_1", "prompt_a_1_0"],
+        ["prompt_a_0_1", "prompt_a_1_0"],
+        ["prompt_a_0_0", "prompt_a_0_0"],
+    ],
+)
+def test_codapo_rejects_multi_output_before_advantage_computation(estimator, keys):
+    """Reject repeated sessions and later outputs, including partially filtered sessions."""
+    with patch("verl.trainer.ppo.v1.utils.compute_advantage") as compute:
+        with pytest.raises(ValueError, match="CoDaPO does not support multi-output agent loops"):
+            compute_advantage_for_multi_trajectories(DataProto(), keys, estimator)
+    compute.assert_not_called()
 
 
 @pytest.fixture
