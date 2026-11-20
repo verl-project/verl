@@ -32,6 +32,7 @@ from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.logging_utils import configure_verl_logging
+from verl.utils.tracking import RLInsightLogger
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -84,6 +85,12 @@ def run_ppo(config, task_runner_class) -> None:
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
+
+    RLInsightLogger.init(
+        project_name=config.trainer.project_name,
+        experiment_name=config.trainer.experiment_name,
+        config=config,
+    )
 
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
