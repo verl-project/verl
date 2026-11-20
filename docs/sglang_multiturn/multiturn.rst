@@ -1,7 +1,7 @@
 Multi-turn Rollout Support
 ==========================
 
-Last updated: 05/09/2026.
+Last updated: 10/08/2026.
 
 Basic Configuration
 ~~~~~~~~~~~~~~~~~~~
@@ -29,6 +29,8 @@ For custom environment interaction tools, you can implement your own tools based
         config: 
             type: native
         tool_schema:
+
+A ``BaseTool`` instance is created by the first call to that tool in a trajectory, reused by every later call to it in the same trajectory, and released once when the trajectory ends, including when it ends with an error. Calls to the same tool within one turn run concurrently on the same instance.
 
 For stateless tools that don't need ``BaseTool``'s ``create``/``release`` lifecycle, see the `Function Tool Configuration`_ section below for the simpler ``@function_tool`` API.
 
