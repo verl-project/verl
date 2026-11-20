@@ -235,11 +235,21 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   env NNODES_TRAINER=4 N_CHIPS_TRAINER=4 NNODES_ROLLOUT=4 N_CHIPS_ROLLOUT=4 bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
 ```
 
-**Graph-mode actor update (optional).** With a `verl-hardware-plugin` that has `engine_kwargs.tpu.trainer_mode=graph_trainer` (verl-hardware-plugin#134, e.g. `git -C ../verl-hardware-plugin checkout 3425d56c8ebdb2576ed43664cbfe2195dd901281`), `TRAINER_MODE=graph_trainer` runs the actor update through TorchTitan's `TpuGraphTrainer`: forward, fused log-prob, PPO loss and backward of a micro-batch are traced once and compiled as one program. The first step pays a one-time trace and compile of several minutes. Each rank must fit its mini-batch in one micro-batch, so raise `MAX_TOKEN_LEN_PER_GPU` if the run reports more than one; `STATIC_MICRO_BATCH_LEN` defaults to it.
+**bfloat16 FSDP gradient reduction.** `MIXED_PRECISION_REDUCE` defaults to `bfloat16` on the actor, reducing `update_actor` latency by ~9–18% across eager and graph modes with matching 30-step GSM8K reward and KL; set `MIXED_PRECISION_REDUCE=float32` to keep `float32` reduce-scatter. Optionally set `AC_SAVE_SPLASH_AND_ROUTING=True` in eager mode to save Splash attention and MoE routing outputs.
+
+**Graph-mode actor update (optional).** With `verl-hardware-plugin` including PR #134 (`engine_kwargs.tpu.trainer_mode=graph_trainer` and dict `engine_kwargs.tpu.graph_trainer`, e.g. `git -C ../verl-hardware-plugin checkout 8a9e485da66ea76d40b01b4940db08928fc45061`), `TRAINER_MODE=graph_trainer` runs the actor update through TorchTitan's `TpuGraphTrainer`: forward, fused log-prob, PPO loss and backward of a micro-batch are traced once and compiled as one program. The first step pays a one-time trace and compile. Each rank must fit its mini-batch in one micro-batch, so raise `MAX_TOKEN_LEN_PER_GPU` if the run reports more than one; `STATIC_MICRO_BATCH_LEN` defaults to it.
+
+- **Lowest per-step latency (`8192` tokens/chip):** default unsplit `tpu_selective` (`GRAPH_TRAINER_SAVE_REGIONS=moe.routing,attention.inner_attention`), with `GRAPH_TRAINER_FSDP_BARRIER_POLICY` auto-defaulting to `prefetch` on `v5p*` and `interleave` elsewhere (`prefetch` exceeds compile HBM on `tpu7x` 2x2x1):
 
 ```bash
 ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
-  env TRAINER_MODE=graph_trainer GRAPH_TRAINER_MEMORY_POLICY=tpu_selective \
-  GRAPH_TRAINER_SAVE_REGIONS=moe.routing,attention.inner_attention GRAPH_TRAINER_FSDP_SCHEDULE=interleave \
+  env TRAINER_MODE=graph_trainer bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
+```
+
+- **Fast compile, lower HBM, and large-batch MFU scaling (`16384`–`32768` tokens/chip):** `GRAPH_TRAINER_SPLIT_LAYERS=1` defaults to `memory_policy=default`, `fsdp_barrier_policy=none`, `enable_remat_barriers=false`, and `backward_partition_mode=fsdp_pipeline` (cuts compile time to ~1.5 min, saves ~10 GB HBM, and enables `@16384` on `tpu7x` / `@32768` on `v5p` where unsplit OOMs):
+
+```bash
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env TRAINER_MODE=graph_trainer GRAPH_TRAINER_SPLIT_LAYERS=1 MAX_TOKEN_LEN_PER_GPU=16384 \
   bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
 ```
