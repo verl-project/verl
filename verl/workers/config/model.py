@@ -138,6 +138,13 @@ class HFModelConfig(BaseConfig):
     use_fused_kernels: bool = False
     fused_kernel_options: dict = field(default_factory=dict)
 
+    # whether to enable cross-step prompt KV caching for the ref model via HF
+    # native ``past_key_values`` (prefill cache). On a cache hit the prompt's
+    # transformer layers are skipped entirely. Compatible with all attention
+    # backends (eager/sdpa/flash). See ref_prefix_cache.py. NOTE: FSDP +
+    # use_cache interaction must be validated on GPU/NPU before real training.
+    use_ref_prefix_cache: bool = False
+
     # TiledMLP configuration for memory-efficient MLP computation
     tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
 
