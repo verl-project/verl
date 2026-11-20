@@ -84,8 +84,6 @@ actor_rollout_ref:
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
-        record_file: null
-        replay_file: null
       qat:
         _target_: verl.workers.config.QATEngineConfig
         enable: false
@@ -280,8 +278,6 @@ actor_rollout_ref:
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
-        record_file: null
-        replay_file: null
       qat:
         _target_: verl.workers.config.QATEngineConfig
         enable: false
@@ -625,8 +621,6 @@ critic:
     router_replay:
       _target_: verl.workers.config.EngineRouterReplayConfig
       mode: disabled
-      record_file: null
-      replay_file: null
     qat:
       _target_: verl.workers.config.QATEngineConfig
       enable: false

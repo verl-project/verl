@@ -127,14 +127,6 @@ router_replay:
   # - R3: Use R3 routing strategy (record mode)
   mode: disabled
 
-  # File path to save recorded routing decisions
-  # Required when mode is 'record', 'R2', or 'R3'
-  record_file: null
-
-  # File path to load recorded routing decisions for replay
-  # Required when mode is 'replay'
-  replay_file: null
-
 # QAT (Quantization-Aware Training) configuration
 qat:
   _target_: verl.workers.config.QATEngineConfig
