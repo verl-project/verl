@@ -40,7 +40,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 def _call_accepts_kwarg(fn, name: str) -> bool:
     params = signature(fn).parameters
-    return name in params or any(param.kind == param.VAR_KEYWORD for param in params.values())
+    return name in params
 
 
 def _prepare_packed_seq_idx(cu_seqlens: torch.LongTensor, cu_seqlens_cpu: Optional[torch.LongTensor]):
