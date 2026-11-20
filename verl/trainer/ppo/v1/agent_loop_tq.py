@@ -49,13 +49,13 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 def _worker_class(config):
     """The worker the rollout runs on: sharing lives in a subclass, so turning it off never imports it."""
     # Imported here because the subclass lives below this module in the import graph.
-    from verl.experimental.agent_loop.prompt_sharing import prompt_sharing_requested
+    from verl.experimental.agent_loop.prompt_sharing import prompt_sharing_enabled
 
-    if not prompt_sharing_requested(config):
-        return ray.remote(AgentLoopWorkerTQ)
-    from verl.experimental.agent_loop.agent_loop_tq_share import AgentLoopWorkerTQShare
+    if prompt_sharing_enabled(config):
+        from verl.experimental.agent_loop.agent_loop_tq_share import AgentLoopWorkerTQShare
 
-    return ray.remote(AgentLoopWorkerTQShare)
+        return ray.remote(AgentLoopWorkerTQShare)
+    return ray.remote(AgentLoopWorkerTQ)
 
 
 async def _settle_session_tasks(tasks: list[asyncio.Task[Any]]) -> list[BaseException]:

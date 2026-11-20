@@ -26,15 +26,12 @@ from verl.experimental.agent_loop.preprocess_cache import PromptPreprocessCache
 from verl.experimental.agent_loop.prompt_sharing import (
     PUBLIC_PARTITION,
     prompt_sharing_enabled,
-    prompt_sharing_requested,
     public_multi_modal_key,
     publish_public_prompts,
     release_public_prompts,
 )
 from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ, _worker_class
 from verl.utils import tensordict_utils as tu
-
-pytestmark = pytest.mark.skipif(not hasattr(tq, "kv_link"), reason="TransferQueue has no public partition links")
 
 
 @pytest.fixture(scope="module")
@@ -90,22 +87,19 @@ def _config(storage_backend: str = "SimpleStorage", share_prompts: bool | None =
     )
 
 
-def test_prompt_sharing_needs_simple_storage():
+def test_prompt_sharing_needs_the_switch_and_simple_storage():
     assert prompt_sharing_enabled(_config())
+    assert not prompt_sharing_enabled(_config(share_prompts=False))
     assert not prompt_sharing_enabled(_config(storage_backend="MooncakeStore"))
 
 
-def test_share_prompts_switch_turns_off_storage_and_preprocessing_sharing():
-    off = _config(share_prompts=False)
-    assert not prompt_sharing_enabled(off) and not prompt_sharing_requested(off)
-    assert prompt_sharing_requested(_config(storage_backend="MooncakeStore"))
+def test_prompt_sharing_selects_the_rollout_worker():
+    def worker(config):
+        return _worker_class(config).__ray_metadata__.modified_class
 
-
-def test_share_prompts_switch_selects_the_rollout_worker():
-    off = _worker_class(_config(share_prompts=False)).__ray_metadata__.modified_class
-    on = _worker_class(_config(share_prompts=True)).__ray_metadata__.modified_class
-    assert issubclass(off, AgentLoopWorkerTQ) and not issubclass(off, AgentLoopWorkerTQShare)
-    assert issubclass(on, AgentLoopWorkerTQShare)
+    assert issubclass(worker(_config(share_prompts=True)), AgentLoopWorkerTQShare)
+    for config in (_config(share_prompts=False), _config(storage_backend="MooncakeStore")):
+        assert issubclass(worker(config), AgentLoopWorkerTQ) and not issubclass(worker(config), AgentLoopWorkerTQShare)
 
 
 @pytest.mark.asyncio

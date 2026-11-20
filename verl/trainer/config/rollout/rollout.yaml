@@ -266,8 +266,8 @@ agent:
 
   # Whether the rollout.n trajectories of a prompt share its preprocessing and storage:
   # media is decoded and run through the processor once per prompt, and the prompt fields and
-  # multi_modal_inputs are stored once rather than per trajectory (storage sharing needs
-  # TransferQueue on SimpleStorage).
+  # multi_modal_inputs are stored once rather than per trajectory. Needs TransferQueue on
+  # SimpleStorage; other storage backends ignore it.
   share_prompts: True
 
   # default agent loop to use if `agent_name` not set in RL dataset
