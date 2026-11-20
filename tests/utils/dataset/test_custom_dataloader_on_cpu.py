@@ -502,7 +502,7 @@ def test_custom_path_needs_no_files_or_dataset_and_sets_optimizer_horizon(traine
     namespace["StatefulDataLoader"].assert_not_called()
     assert trainer.steps_per_epoch is None
     assert trainer.total_training_steps == 3
-    assert trainer.config.actor_rollout_ref.actor.optim.total_training_steps == 6
+    assert trainer.config.actor_rollout_ref.actor.optim.total_training_steps == 3
     train, val = trainer.train_dataloader, trainer.val_dataloader
     assert train.batch_size == 2 and val.batch_size == 4
     trainer.close_dataloaders()

@@ -103,3 +103,27 @@ def test_forward_only_stage_is_not_a_profiler_step():
 
     assert TrainingWorker.infer_batch(worker, data) is None
     worker.profiler.step.assert_not_called()
+
+
+def test_train_mini_batch_respects_outer_update_lr_scheduler_flag(monkeypatch):
+    def run(update_lr_scheduler):
+        mini_batches = [TensorDict({}, batch_size=[]) for _ in range(3)]
+        monkeypatch.setattr(tu, "make_iterator", lambda data, **kwargs: iter(mini_batches))
+        worker = _worker(_engine())
+        seen_flags = []
+
+        def fake_train_batch(td):
+            seen_flags.append(tu.get(td, "update_lr_scheduler"))
+            return {}
+
+        worker.train_batch = fake_train_batch
+        data = TensorDict({}, batch_size=[3])
+        tu.assign_non_tensor(data, num_mini_batch=3)
+        if update_lr_scheduler is not None:
+            tu.assign_non_tensor(data, update_lr_scheduler=update_lr_scheduler)
+        TrainingWorker.train_mini_batch(worker, data)
+        return seen_flags
+
+    assert run(None) == [False, False, True]
+    assert run(True) == [False, False, True]
+    assert run(False) == [False, False, False]

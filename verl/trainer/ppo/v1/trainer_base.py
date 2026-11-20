@@ -797,15 +797,13 @@ class PPOTrainer(ABC):
         self.total_training_steps = total_training_steps
         logger.info(f"Total training steps: {self.total_training_steps}")
 
-        # Each global step performs parameter_sync_step local optimizer updates.
-        optim_total_training_steps = total_training_steps * self.parameter_sync_step
         try:
             OmegaConf.set_struct(self.config, True)
             with open_dict(self.config):
                 if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
-                    self.config.actor_rollout_ref.actor.optim.total_training_steps = optim_total_training_steps
+                    self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
                 if OmegaConf.select(self.config, "critic.optim"):
-                    self.config.critic.optim.total_training_steps = optim_total_training_steps
+                    self.config.critic.optim.total_training_steps = total_training_steps
         except Exception as e:
             logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
@@ -1961,6 +1959,8 @@ class PPOTrainer(ABC):
             "seed": self.config.critic.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.critic.shuffle},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            # Advance the LR schedule once per global PPO step, not on every streaming mini-batch.
+            "update_lr_scheduler": self.local_trigger_step == self.parameter_sync_step - 1,
         }
         batch.extra_info.update(extra_info)
 
@@ -2007,6 +2007,8 @@ class PPOTrainer(ABC):
             "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            # Advance the LR schedule once per global PPO step, not on every streaming mini-batch.
+            "update_lr_scheduler": self.local_trigger_step == self.parameter_sync_step - 1,
         }
         batch.extra_info.update(extra_info)
 
