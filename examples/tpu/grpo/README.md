@@ -176,6 +176,17 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   env MODEL_NAME=Qwen3.5-35B-A3B bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
 ```
 
+**Graph-mode actor update (optional).** With a `verl-hardware-plugin` whose `engine_kwargs.tpu.graph_trainer` takes a settings dict (e.g. `git -C ../verl-hardware-plugin checkout 8a9e485da66ea76d40b01b4940db08928fc45061`), `TRAINER_MODE=graph_trainer` runs the actor update through TorchTitan's `TpuGraphTrainer`. It needs `USE_KL_LOSS=False`, `EXPERT_PARALLEL_SIZE=1` and one micro-batch per rank (`USE_DYNAMIC_BSZ=True` with `STATIC_MICRO_BATCH_LEN` = `MAX_TOKEN_LEN_PER_GPU`). `GRAPH_TRAINER_SPLIT_LAYERS=2` compiles two layers per forward / backward executable instead of one step graph, as TorchTitan's `qwen35_moe_35b_split_tokamax_benchmark` SFT recipe does; without it the 40-layer step compiles very slowly.
+
+```bash
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env MODEL_NAME=Qwen3.5-35B-A3B TRAINER_MODE=graph_trainer GRAPH_TRAINER_SPLIT_LAYERS=2 \
+  USE_KL_LOSS=False PARAM_DTYPE=bfloat16 OPTIM_IMPL=fused SPARSECORE_OFFLOAD=True TRAINER_SCOPED_VMEM_LIMIT_KIB=65472 \
+  TRAIN_BATCH_SIZE=32 PPO_MINI_BATCH_SIZE=32 ROLLOUT_N=4 \
+  USE_DYNAMIC_BSZ=True MAX_TOKEN_LEN_PER_GPU=32768 STATIC_MICRO_BATCH_LEN=32768 STATIC_MAX_RESPONSE_LEN=2048 \
+  bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
+```
+
 ### Qwen3.5-397B-A17B (expert parallelism)
 
 Expert parallelism (`EXPERT_PARALLEL_SIZE > 1`) needs torchtitan from [google-pytorch/torchtitan#142](https://github.com/google-pytorch/torchtitan/pull/142), which enables Qwen3.5 with EP on TPU. Build the image at its head commit:
