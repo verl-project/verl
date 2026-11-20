@@ -764,13 +764,13 @@ def compute_is_metrics(
 
     # Compute standard deviation / ESS from the actual applied weights so exact
     # IcePop diagnostics preserve zeroed-out coefficients.
+    # Population variance, centered before squaring. E[x^2] - (E[x])^2 cancels in
+    # float32 when sequence-level weights are constant across a sequence, so a
+    # one-row batch and the same row padded with empty rows disagree by ~1e-4.
     mask_count: torch.Tensor = response_mask.sum()
     if mask_count > 1:
         weights_for_std: torch.Tensor = rollout_is_weights.clamp(min=0.0, max=rollout_is_threshold)
-        mean_clamped: torch.Tensor = verl_F.masked_mean(weights_for_std, response_mask)
-        rollout_is_var: torch.Tensor = (
-            verl_F.masked_mean(weights_for_std.square(), response_mask) - mean_clamped.square()
-        )
+        rollout_is_var: torch.Tensor = verl_F.masked_var(weights_for_std, response_mask, unbiased=False)
         metrics["rollout_is_std"] = torch.sqrt(torch.clamp(rollout_is_var, min=0.0)).item()
     else:
         metrics["rollout_is_std"] = 0.0
