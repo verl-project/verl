@@ -508,9 +508,16 @@ class FSDPEngine(BaseEngine):
         return module
 
     def _build_optimizer(self, module):
+        """Pass model metadata to optimizers that classify parameters by role."""
         from verl.workers.config.optimizer import build_optimizer
 
-        optimizer = build_optimizer(module.parameters(), self.optimizer_config)
+        optimizer = build_optimizer(
+            module.parameters(),
+            self.optimizer_config,
+            model=module,
+            engine_config=self.engine_config,
+            model_config=self.model_config,
+        )
 
         return optimizer
 
@@ -548,7 +555,15 @@ class FSDPEngine(BaseEngine):
         return lr_scheduler
 
     def _build_model_optimizer(self):
+        """Validate the backend, shard the loaded model and initialize training state."""
         from verl.utils.model import print_model_size
+
+        if not self.engine_config.forward_only and self.optimizer_config.optimizer.lower() == "muon":
+            from verl.utils.fsdp2_muon import validate_fsdp2_muon_config
+
+            validate_fsdp2_muon_config(self.optimizer_config, self.engine_config, self.model_config)
+            if self.device_mesh.ndim != 1:
+                raise ValueError("FSDP2 Muon requires a single 1D mesh; HSDP is unsupported.")
 
         # Load base model with specified configuration and dtype
         module = self._build_module()
@@ -792,7 +807,8 @@ class FSDPEngine(BaseEngine):
         """
         self.lr_scheduler.step()
         lr = self.lr_scheduler.get_last_lr()[0]  # only return the first group
-        return lr
+        # Muon keeps LR on device; metrics must also deserialize on CPU Ray drivers.
+        return lr.item() if isinstance(lr, torch.Tensor) else lr
 
     def to(self, device: str, model: bool = True, optimizer: bool = True, grad: bool = True):
         """
