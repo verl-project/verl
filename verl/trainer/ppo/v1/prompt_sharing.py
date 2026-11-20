@@ -39,8 +39,8 @@ _PRIVATE_PROMPT_FIELDS = frozenset({"agent_name", "multi_modal_data", "__rollout
 
 
 def prompt_sharing_requested(config: DictConfig) -> bool:
-    """Whether ``transfer_queue.share_prompts`` asks the trajectories of a prompt to share preprocessing."""
-    return bool(config.transfer_queue.get("share_prompts", True))
+    """Whether ``rollout.agent.share_prompts`` asks the trajectories of a prompt to share preprocessing."""
+    return bool(config.actor_rollout_ref.rollout.agent.get("share_prompts", True))
 
 
 def prompt_sharing_enabled(config: DictConfig) -> bool:
