@@ -282,13 +282,16 @@ def test_agent_loop_output_as_dict_rejects_misaligned_rollout_topk():
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeypatch):
+@pytest.mark.parametrize("validate", [False, True])
+async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeypatch, validate):
     captured_kwargs: dict[str, Any] = {}
+    run_kwargs: dict[str, Any] = {}
     expected_output = object()
 
     class _FakeAgentLoop:
         async def run(self, sampling_params: dict[str, Any], **kwargs):
-            del sampling_params, kwargs
+            del sampling_params
+            run_kwargs.update(kwargs)
             return expected_output
 
     def fake_instantiate(*, config, **kwargs):
@@ -316,11 +319,12 @@ async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeyp
     worker._agent_loop_postprocess = passthrough_postprocess
     result = await worker._run_agent_loop(
         {},
-        {"step": 0, "sample_index": 0, "rollout_n": 0, "validate": False},
+        {"step": 0, "sample_index": 0, "rollout_n": 0, "validate": validate},
         agent_name="scalar_model_type_test",
     )
 
     assert result is expected_output
+    assert run_kwargs["validate"] is validate
     assert captured_kwargs["hf_model_type"] == "qwen2_5_vl"
     assert isinstance(captured_kwargs["hf_model_type"], str)
     assert "hf_config" not in captured_kwargs

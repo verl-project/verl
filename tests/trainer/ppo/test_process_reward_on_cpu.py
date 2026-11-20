@@ -15,8 +15,10 @@
 from types import SimpleNamespace
 
 import pytest
+import tensordict
 import torch
 from omegaconf import OmegaConf
+from packaging.version import parse as parse_version
 
 from verl.trainer.config.algorithm import AlgoConfig, ProcessRewardConfig
 from verl.trainer.ppo.process_reward import (
@@ -145,6 +147,9 @@ def test_weighted_mode_rejects_out_of_range_scores():
         )
 
 
+@pytest.mark.skipif(
+    parse_version(tensordict.__version__) < parse_version("0.10"), reason="requires at least tensordict 0.10"
+)
 def test_process_scores_survive_v1_jagged_batch_transport():
     fields = [
         {"response_mask": torch.tensor([1, 0, 1]), "process_scores": torch.tensor([0.3, 0.0, 0.7])},

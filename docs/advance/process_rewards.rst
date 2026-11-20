@@ -42,8 +42,9 @@ The worker broadcasts each scalar to that turn's generated tokens. For example:
    turn_rewards:           [-1.0, 0.5]
    process_scores:         [-1, -1, 0, 0, 0.5, 0.5]
 
-``turn_rewards`` takes precedence whenever the key exists, including an all-zero
-list. It must contain exactly one finite scalar per retained generated turn.
+During enabled training rollouts, ``turn_rewards`` takes precedence whenever the
+key exists, including an all-zero list. It must contain exactly one finite scalar
+per retained generated turn.
 ``None``, a wrong shape/count, or NaN/Inf rejects the trajectory rather than
 falling back to a scorer. Per-scorer weights do not apply to this input; the
 global ``algorithm.process_reward.weight`` still applies during shaping.
@@ -63,12 +64,16 @@ turns. This fallback cannot distinguish adjacent generations, so a custom loop
 with adjacent turns should always supply explicit boundaries.
 
 The built-in ToolAgentLoop records boundaries across Continuous Token merges,
-including inserted non-generated boundaries and removed suffix tokens. It clips
-spans and any supplied turn rewards when the final response is truncated. A
+including inserted non-generated boundaries and removed suffix tokens. During
+enabled training rollouts, it removes a reward when its whole turn is removed
+and clips spans and supplied turn rewards with the final response truncation. A
 partly retained turn keeps its score; turns with no retained generated tokens
 are absent from the final spans. Feedback supplied by a custom agent must match
 the retained spans. Do not use ``num_turns`` as the reward count: that field also
 counts user and tool turns.
+
+Disabled process rewards and validation rollouts preserve the supplied
+``turn_rewards`` extra field without strict feedback validation or reward truncation.
 
 Custom scorers
 --------------

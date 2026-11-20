@@ -87,6 +87,7 @@ class AgentData:
         self.response_mask: list[int] = []
         self.response_logprobs: list[float] = []
         self.generated_turn_spans: list[tuple[int, int]] = []
+        self.use_process_reward = False
         self.turn_scores: list[float] = []
         self.tool_rewards: list[float] = []
         self.user_turns = 0
@@ -105,6 +106,13 @@ def _align_generated_turn_spans(agent_data: AgentData, merge_result: MergeResult
     """Apply Continuous Token suffix edits to generated-turn boundaries."""
     retained = max(0, len(agent_data.response_mask) - merge_result.removed_prefix_token_count)
     spans = [(start, min(end, retained)) for start, end in agent_data.generated_turn_spans if start < retained]
+    if (
+        len(spans) < len(agent_data.generated_turn_spans)
+        and agent_data.use_process_reward
+        and "turn_rewards" in agent_data.extra_fields
+    ):
+        rewards = validate_turn_rewards(agent_data.extra_fields["turn_rewards"], len(agent_data.generated_turn_spans))
+        agent_data.extra_fields["turn_rewards"] = rewards[: len(spans)].tolist()
     if merge_result.kind == "assistant" and merge_result.appended_token_count:
         start = retained + len(merge_result.inserted_token_ids)
         spans.append((start, start + merge_result.appended_token_count))
@@ -143,7 +151,9 @@ class ToolAgentLoop(AgentLoopBase):
         return f"det-{priority}" if full_determinism else uuid4().hex
 
     @rollout_trace_op
-    async def run(self, sampling_params: dict[str, Any], priority: int = 0, **kwargs) -> AgentLoopOutput:
+    async def run(
+        self, sampling_params: dict[str, Any], priority: int = 0, validate: bool = False, **kwargs
+    ) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
 
         # extract multimodal inputs from messages
@@ -167,6 +177,8 @@ class ToolAgentLoop(AgentLoopBase):
             request_id=request_id,
             tools_kwargs=tools_kwargs,
         )
+        process_config = self.config.algorithm.get("process_reward", {})
+        agent_data.use_process_reward = process_config.get("enabled", False) and not validate
 
         # Per-sample tool selection: filter global tools by extra_info.tool_selection
         extra_info = kwargs.get("extra_info", {}) or {}
@@ -230,7 +242,7 @@ class ToolAgentLoop(AgentLoopBase):
             for start, end in agent_data.generated_turn_spans
             if start < len(output.response_ids)
         ]
-        if "turn_rewards" in output.extra_fields:
+        if agent_data.use_process_reward and "turn_rewards" in output.extra_fields:
             rewards = validate_turn_rewards(output.extra_fields["turn_rewards"], len(agent_data.generated_turn_spans))
             output.extra_fields["turn_rewards"] = rewards[: len(output.extra_fields["generated_turn_spans"])].tolist()
         return output
