@@ -1,7 +1,7 @@
 昇腾镜像说明
 ===================================
 
-Last updated: 11/09/2026.
+Last updated: 11/11/2026.
 
 
 镜像获取与公开镜像地址
@@ -24,11 +24,9 @@ verl v0.9.1 的 vLLM 镜像使用 CANN 9.1.0、Python 3.12 和 vLLM 0.23.0，支
 镜像硬件支持
 -----------------------------------
 
-Atlas 200T A2 Box16
+Atlas A2训练系列产品
 
-Atlas 900 A2 PoD
-
-Atlas 800T A3
+Atlas A3训练系列产品
 
 Ascend 950PR&950DT系列产品
 
@@ -44,6 +42,17 @@ TransformerEngineNPU 使用 ``26.2.0_release_v2.17``；MindSpeed-Ops 使用 ``26
 
 当前 A2/A3/950 vLLM latest Dockerfile 使用克隆仓库中的 ``requirements-npu.txt``，在安装 verl 后补装 ``triton-ascend==3.6.0.post2``。
 例如，可在仓库根目录运行构建：``docker build -f docker/ascend/Dockerfile.ascend_9.2.1_a2 .``。
+
+.. note::
+
+   CANN 9.2.1 的 A2/A3/950 vLLM Dockerfile 会向 Megatron-Bridge ``v0.5.0`` 应用
+   `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_。
+   当 Transformers 已提供原生 Qwen3-ASR 配置时，补丁会跳过 Megatron-Bridge 内置的
+   AutoConfig、AutoModel 和 AutoProcessor 注册，避免导入时出现 ``qwen3_asr`` 重复注册错误；
+   否则保留原有的内置注册逻辑。
+
+   构建时须以仓库根目录作为 Docker 构建上下文，以便 Dockerfile 复制该补丁。
+   补丁在镜像构建时自动应用，使用构建后的容器无需再次手动应用。
 
 vLLM 后端当前 Dockerfile 目标组件版本
 ----------------------------------------------------------------

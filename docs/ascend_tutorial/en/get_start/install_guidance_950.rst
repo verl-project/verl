@@ -1,7 +1,7 @@
 Ascend Installation Guide (Ascend 950PR&950DT products)
 ===============================================================
 
-Last updated: 11/06/2026.
+Last updated: 11/13/2026.
 
 
 .. contents:: Table of Contents
@@ -13,7 +13,7 @@ Last updated: 11/06/2026.
 Framework Backend Support
 --------------------------
 
-Currently, the following common training and inference backends are supported for deployment on NPU for Ascend 950PR&950DT products. You can directly obtain published images from our :doc:`Ascend Image Guide <dockerfile_build_guidance>` or perform a custom installation according to the instructions below.
+Currently, the following common training and inference backends are supported for deployment on NPU for Ascend 950PR&950DT products. You can directly obtain published images from our `Ascend Image Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/dockerfile_build_guidance.html>`_ or perform a custom installation according to the instructions below.
 
 .. list-table::
    :header-rows: 1
@@ -30,8 +30,10 @@ Deployment Guide
 1. Docker Image Acquisition, Build, and Usage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-You can obtain the relevant images from `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, or build them yourself from the Dockerfile. For details, refer to the
-:doc:`Ascend Image Guide <dockerfile_build_guidance>`.
+We recommend using the prebuilt images available from
+`quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ to reduce environment setup and dependency installation work.
+If you need a custom environment, you can build an image from the Dockerfile. For details on obtaining, building, and using images, refer to the
+`Ascend Image Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/dockerfile_build_guidance.html>`_.
 
 
 2. Custom Installation
@@ -130,12 +132,27 @@ vLLM Inference Backend Support
     git clone https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
     git checkout releases/v0.30.0
-    pip install -v -e . --no-build-isolation --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    git submodule update --init --recursive
+    pip install -r requirements.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    COMPILE_CUSTOM_KERNELS=1 pip install --no-build-isolation --no-deps -v -e .
     cd ..
 
 
 Megatron Training Backend Support
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. note::
+
+   Megatron-Bridge ``v0.5.0`` with the Transformers ``5.14.1`` environment used
+   here requires
+   `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_.
+   When Transformers already provides a native Qwen3-ASR configuration, the
+   patch skips the vendored AutoConfig, AutoModel, and AutoProcessor
+   registrations to avoid duplicate ``qwen3_asr`` registration errors during
+   import. The verl dependency installation commands below apply the patch
+   after cloning verl, if the Megatron-Bridge checkout exists. FSDP-only
+   installations skip this step. For Megatron, keep both checkouts in the same
+   parent directory.
 
 .. code:: bash
 
@@ -183,12 +200,20 @@ verl Dependency Installation
 
 .. code:: bash
 
-    git clone https://github.com/verl-project/verl.git
+    git clone --recursive https://github.com/verl-project/verl.git
+    # Apply the compatibility patch only if Megatron-Bridge was cloned
+    if [ -d Megatron-Bridge ]; then
+        git -C Megatron-Bridge apply --unidiff-zero \
+            "$(pwd)/verl/docker/ascend/patches/megatron_bridge_qwen3_asr.patch"
+    fi
     cd verl
     pip install -e .
     pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
     # Restore the Triton version required by vLLM
     pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    # Install the FLA NPU backend for Ascend 950 (required for both FSDP and Megatron).
+    pip install --no-deps "flash-linear-attention-npu-a5==26.9.1" \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
 
 Log Filtering

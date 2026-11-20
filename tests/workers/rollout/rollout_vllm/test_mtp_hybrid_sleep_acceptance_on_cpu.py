@@ -22,7 +22,7 @@ import pytest
 pytest.importorskip("ray")
 pytest.importorskip("vllm")
 
-from verl.trainer.ppo.ray_trainer import compute_spec_decode_metrics
+from verl.trainer.ppo.trainer_utils import compute_spec_decode_metrics
 from verl.workers.rollout.vllm_rollout import vllm_async_server
 
 
@@ -54,7 +54,9 @@ def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeyp
     monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
 
     server = object.__new__(vllm_async_server.vLLMHttpServer)
-    server.config = SimpleNamespace(mtp=SimpleNamespace(enable=True, enable_rollout=True))
+    server.config = SimpleNamespace(
+        mtp=SimpleNamespace(enable=True, enable_rollout=True), external_kv_cache_invalidation="reset"
+    )
     server.model_config = SimpleNamespace(lora_rank=0, lora={})
     server.engine = _FakeMtpEngine()
 
@@ -87,7 +89,7 @@ def test_lora_adapter_sleep_level_follows_resync_base(monkeypatch, lora, expecte
 def test_resync_base_sleep_depends_on_whether_the_trainer_reloads_weights(monkeypatch, mode, expected_level):
     monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
     server = object.__new__(vllm_async_server.vLLMHttpServer)
-    server.config = SimpleNamespace(free_cache_engine=True)
+    server.config = SimpleNamespace(free_cache_engine=True, external_kv_cache_invalidation="reset")
     server.model_config = SimpleNamespace(lora_rank=0, lora={"rank": 8, "resync_base": True})
     server.node_rank = 0
     server.rollout_mode = vllm_async_server.RolloutMode[mode]
@@ -101,19 +103,19 @@ def test_resync_base_sleep_depends_on_whether_the_trainer_reloads_weights(monkey
 
 
 def test_kv_cache_release_keeps_adapter_weights_with_resync_base(monkeypatch):
-    """The non-naive sync path does not re-send adapters, so releasing the KV cache must not discard them."""
+    """KV cache release preserves adapter weights and the salted external store."""
     monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
-    sleep_levels = []
+    sleep_calls = []
 
     class Engine:
-        async def sleep(self, level):
-            sleep_levels.append(level)
+        async def sleep(self, level, reset_connector=True):
+            sleep_calls.append((level, reset_connector))
 
         async def wake_up(self, tags):
             pass
 
     server = object.__new__(vllm_async_server.vLLMHttpServer)
-    server.config = SimpleNamespace(free_cache_engine=True)
+    server.config = SimpleNamespace(free_cache_engine=True, external_kv_cache_invalidation="salt")
     server.model_config = SimpleNamespace(lora_rank=0, lora={"rank": 8, "resync_base": True})
     server.node_rank = 0
     server.rollout_mode = vllm_async_server.RolloutMode.HYBRID
@@ -121,4 +123,4 @@ def test_kv_cache_release_keeps_adapter_weights_with_resync_base(monkeypatch):
 
     asyncio.run(server.release_kv_cache())
 
-    assert sleep_levels == [1]
+    assert sleep_calls == [(1, False)]

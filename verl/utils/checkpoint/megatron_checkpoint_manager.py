@@ -26,7 +26,6 @@ import torch.distributed
 from megatron.core import dist_checkpointing, mpu, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
 from packaging import version
-from transformers import GenerationConfig
 
 from verl.utils.device import get_device_name, get_torch_device, is_device_available
 from verl.utils.fs import is_non_local, local_mkdir_safe
@@ -42,6 +41,7 @@ from verl.utils.megatron_utils import (
     get_optimizer_dist_checkpoint_path,
     get_transformer_config_checkpoint_path,
 )
+from verl.utils.transformers_compat import copy_generation_config
 
 from .checkpoint_manager import BaseCheckpointManager
 
@@ -1005,11 +1005,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             self.processing_class.save_pretrained(hf_config_tokenizer_path)
         self.hf_config.save_pretrained(hf_config_tokenizer_path)
         if hasattr(self.hf_config, "name_or_path") and self.hf_config.name_or_path:
-            try:
-                generation_config = GenerationConfig.from_pretrained(self.hf_config.name_or_path)
-                generation_config.save_pretrained(hf_config_tokenizer_path)
-            except Exception:
-                pass
+            copy_generation_config(self.hf_config.name_or_path, hf_config_tokenizer_path)
         log_with_rank(
             f"Saved Huggingface config and tokenizer to {hf_config_tokenizer_path}",
             rank=self.rank,
