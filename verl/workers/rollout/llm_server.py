@@ -500,9 +500,20 @@ class LLMServerManager:
         else:
             await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
 
-        self.server_handles = [server._server_handle for server in self.rollout_replicas]
-        self.server_addresses = [server._server_address for server in self.rollout_replicas]
+        request_endpoints = [
+            endpoint for replica in self.rollout_replicas for endpoint in replica.get_request_server_endpoints()
+        ]
+        self.server_addresses = [address for address, _ in request_endpoints]
+        self.server_handles = [handle for _, handle in request_endpoints]
         print(f"LLMServerManager: {self.server_addresses}")
+
+        # Scrape targets may include engines that are not generation entries (PD decode).
+        metrics_addresses = []
+        metrics_labels = []
+        for replica in self.rollout_replicas:
+            for address, endpoint_labels in replica.get_metrics_server_endpoints():
+                metrics_addresses.append(address)
+                metrics_labels.append(endpoint_labels)
 
         # Update Prometheus / rl-insight metrics with server addresses
         needs_metrics = self.rollout_config.prometheus.enable or RLInsightLogger.enabled()
@@ -511,14 +522,12 @@ class LLMServerManager:
                 raise ValueError("Metrics monitoring requires disable_log_stats=False, but it is currently True.")
         if not self.rollout_config.disable_log_stats:
             if self.rollout_config.prometheus.enable:
-                update_prometheus_config(
-                    self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name
-                )
+                update_prometheus_config(self.rollout_config.prometheus, metrics_addresses, self.rollout_config.name)
             if RLInsightLogger.enabled():
                 RLInsightLogger.register_rollout_metrics(
-                    self.server_addresses,
+                    metrics_addresses,
                     self.rollout_config.name,
-                    labels=[{"replica": server.replica_rank} for server in self.rollout_replicas],
+                    labels=metrics_labels,
                 )
 
     async def _init_global_load_balancer(self) -> None:

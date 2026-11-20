@@ -44,7 +44,11 @@ from vllm.v1.metrics.loggers import PrometheusStatLogger
 
 from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
+from verl.utils.device import (
+    get_resource_name,
+    get_visible_devices_keyword,
+    is_torch_npu_available,
+)
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import (
     build_rollout_dist_profiler,
@@ -100,6 +104,41 @@ if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+
+def _build_mooncake_decode_kv_params(
+    prefill_kv_params: Optional[Mapping[str, Any]],
+    *,
+    remote_engine_id: str,
+    remote_bootstrap_addr: str,
+    transfer_id: str,
+) -> dict[str, Any]:
+    """Build decode-side Mooncake params from the completed prefill leg."""
+    params = dict(prefill_kv_params or {})
+    params.setdefault("remote_engine_id", remote_engine_id)
+    params.setdefault("remote_bootstrap_addr", remote_bootstrap_addr)
+    params.setdefault("transfer_id", transfer_id)
+
+    # A prefill request that stops before producing transferable blocks (for
+    # example, because its first sampled token is EOS) returns no
+    # remote_block_ids. Advertising a remote prefill in that case makes the
+    # Mooncake scheduler assert num_external_tokens == 0 and kills the engine.
+    # Fall back to computing the prompt locally on decode instead.
+    blocks = params.get("remote_block_ids") or ()
+    # A nonempty container of empty KV groups is not transferable. Block ID
+    # zero is valid, so do not use the truth value of each scalar block ID.
+    if any(bool(block) if isinstance(block, list | tuple) else True for block in blocks):
+        params["do_remote_prefill"] = True
+        params["do_remote_decode"] = False
+    else:
+        logger.warning(
+            "Mooncake prefill returned no remote blocks; decoding the prompt locally (engine_id=%s, transfer_id=%s)",
+            remote_engine_id,
+            transfer_id,
+        )
+        params["do_remote_prefill"] = False
+        params["do_remote_decode"] = False
+    return params
 
 
 class vLLMHttpServer:
@@ -851,6 +890,34 @@ class vLLMHttpServer:
         self._pd_peer_idx += 1
         return peer
 
+    def _build_pd_decode_kv_params(
+        self,
+        prefill_out: TokenOutput,
+        connector: str,
+        transfer_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Build decode KV parameters for NIXL, GPU Mooncake, or Ascend Mooncake."""
+        prefill_kv_params = prefill_out.extra_fields.get("kv_transfer_params")
+        if connector == "MooncakeConnector":
+            return {
+                "do_remote_decode": False,
+                "do_remote_prefill": True,
+                "remote_engine_id": self._pd_prefill_engine_id,
+                "remote_bootstrap_addr": (f"http://127.0.0.1:{self._pd_prefill_side_channel_port}"),
+                "transfer_id": transfer_id,
+            }
+        if connector == "MooncakeConnectorV1":
+            return _build_mooncake_decode_kv_params(
+                prefill_kv_params,
+                remote_engine_id=self._pd_prefill_engine_id,
+                remote_bootstrap_addr=(f"http://127.0.0.1:{self._pd_prefill_side_channel_port}"),
+                transfer_id=transfer_id,
+            )
+        if prefill_kv_params is None:
+            raise RuntimeError(f"PD prefill leg returned no kv_transfer_params (request_id={request_id})")
+        return dict(prefill_kv_params)
+
     def _dp_rank_for_session(self, session_id: Optional[str]) -> Optional[int]:
         """Pin a session to one DP engine for prefix-cache reuse; hash-based, so it ignores engine load."""
         dp_size = self.config.data_parallel_size
@@ -870,16 +937,16 @@ class vLLMHttpServer:
         priority: int = 0,
         session_id: Optional[str] = None,
     ) -> TokenOutput:
-        """Run prefill locally, then decode on a selected peer."""
+        """Select a round-robin decode peer, run prefill, then dispatch decode."""
         decode_peer = self._select_decode_peer()
         connector = (self._disaggregation_kv_transfer_config or {}).get("kv_connector", "")
-        is_mooncake = connector == "MooncakeConnector"
 
         # Prefill only materializes KV; discard its single generated token.
         prefill_sp = dict(sampling_params)
         prefill_sp.pop("max_tokens", None)
         prefill_sp.pop("max_new_tokens", None)
         prefill_sp["max_tokens"] = 1
+        prefill_sp["ignore_eos"] = True
         transfer_id = uuid.uuid4().hex
         prefill_kv_params = {
             "do_remote_decode": True,
@@ -899,20 +966,16 @@ class vLLMHttpServer:
             kv_transfer_params=prefill_kv_params,
             session_id=session_id,
         )
-        if is_mooncake:
-            # Mooncake does not return decode params from the prefill leg.
-            decode_kv_params = {
-                "do_remote_decode": False,
-                "do_remote_prefill": True,
-                "remote_engine_id": self._pd_prefill_engine_id,
-                # Single-node PD uses Mooncake's local bootstrap address.
-                "remote_bootstrap_addr": f"http://127.0.0.1:{self._pd_prefill_side_channel_port}",
-                "transfer_id": transfer_id,
-            }
-        else:
-            decode_kv_params = prefill_out.extra_fields.get("kv_transfer_params")
-            if decode_kv_params is None:
-                raise RuntimeError(f"PD prefill leg returned no kv_transfer_params (request_id={request_id})")
+        # An aborted prefill has no completed handoff; let the caller retry
+        # after resume instead of sending incomplete KV metadata to D.
+        if getattr(prefill_out, "stop_reason", None) in ("aborted", "abort"):
+            return prefill_out
+        decode_kv_params = self._build_pd_decode_kv_params(
+            prefill_out,
+            connector,
+            transfer_id,
+            request_id,
+        )
 
         return await decode_peer.generate.remote(
             prompt_ids,

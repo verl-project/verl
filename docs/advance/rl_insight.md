@@ -1,6 +1,6 @@
 # Use RL-Insight to Monitor Training
 
-Last updated: 07/15/2026.
+Last updated: 11/16/2026.
 
 [RL-Insight](https://github.com/verl-project/rl-insight) provides online observability for RL training. In verl, it can receive trainer scalar metrics, async rollout engine metrics, TransferQueue metrics, and rollout state traces, then show them in Grafana dashboards managed by the RL-Insight server.
 
@@ -107,6 +107,12 @@ python3 -m verl.trainer.main_ppo \
 ```
 
 When rollout replicas or TransferQueue metrics endpoints start, verl registers them with RL-Insight. The generation path is also wrapped with RL-Insight state traces for vLLM and SGLang rollout workers.
+
+For vLLM prefill/decode disaggregation (PD), startup registers every prefill and decode engine on both GPU and Ascend; no supplementary P/D registration script is needed for new runs. Each target has `pd_role` (`prefill` or `decode`) and `pd_index` labels. For example, replica 0 with one prefill and two decode engines has `replica` labels `0-prefill`, `0-decode0`, and `0-decode1`. These labels preserve the existing Ascend naming and also distinguish GPU P/D engines. Non-PD replicas keep their original single target and numeric replica label.
+
+These are monitoring targets: generation requests still enter through prefill. The standalone Prometheus integration also receives all P/D target addresses, but only RL-Insight registration receives these additional role labels. Keep the stats and RL-Insight settings above enabled, and ensure that the monitoring server can reach every engine's HTTP port. This registers engine metrics; GPU/NPU hardware exporters remain a separate setup.
+
+With [multi-prefill PD](vllm_multi_pd.md), each P also receives its own label, such as `0-prefill0` and `0-prefill1`. The existing `0-prefill` label is retained for a one-P group. Monitor all P/D targets; the generation router receives only P entries.
 
 ## Step 4: Add Hardware Metrics (Optional)
 
