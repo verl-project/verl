@@ -49,6 +49,33 @@ def test_shard_delta_indices_matches_bytewise_diff(dtype):
     )
 
 
+def test_lockstep_per_tensor_param_barriers_after_consumer(monkeypatch):
+    from verl.workers.engine.utils import lockstep_per_tensor_param
+
+    events = []
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "barrier", lambda: events.append("barrier"))
+
+    def export():
+        for name in ("a", "b"):
+            events.append(f"assemble:{name}")
+            yield name, torch.zeros(1)
+
+    for name, _ in lockstep_per_tensor_param(export()):
+        events.append(f"consume:{name}")
+
+    # the next tensor's assembly never starts before the barrier for the previous one
+    assert events == ["assemble:a", "consume:a", "barrier", "assemble:b", "consume:b", "barrier"]
+
+
+def test_lockstep_per_tensor_param_without_process_group(monkeypatch):
+    from verl.workers.engine.utils import lockstep_per_tensor_param
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    monkeypatch.setattr(torch.distributed, "barrier", lambda: pytest.fail("barrier without a process group"))
+    assert list(lockstep_per_tensor_param(iter([1, 2]))) == [1, 2]
+
+
 def test_shard_delta_indices_no_change_is_empty():
     shard = torch.randn(256, dtype=torch.bfloat16)
     gidx, gval = shard_delta_indices(shard.clone(), shard, offset=0)
