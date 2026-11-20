@@ -236,6 +236,17 @@ def response_to_nested(tensor: torch.Tensor, response_mask: torch.Tensor) -> tor
     return torch.nested.as_nested_tensor(response_list, layout=torch.jagged)
 
 
+def _has_compatible_jagged_layout(lhs: torch.Tensor, rhs: torch.Tensor) -> bool:
+    return (
+        lhs.is_nested
+        and rhs.is_nested
+        and lhs.layout == torch.jagged
+        and rhs.layout == torch.jagged
+        and lhs.values().shape == rhs.values().shape
+        and torch.equal(lhs.offsets(), rhs.offsets())
+    )
+
+
 def whiten_advantages(data: TensorDict, dp_group=None, eps: float = 1e-8) -> TensorDict:
     """Whiten ``data["advantages"]`` over valid tokens selected by ``data["response_mask"]``."""
     if "advantages" not in data or "response_mask" not in data:
@@ -244,21 +255,26 @@ def whiten_advantages(data: TensorDict, dp_group=None, eps: float = 1e-8) -> Ten
     advantages = data["advantages"]
     response_mask = data["response_mask"]
     adv_is_nested = advantages.is_nested
+    use_packed_nested = _has_compatible_jagged_layout(advantages, response_mask)
 
-    adv_padded = advantages.to_padded_tensor(0.0) if adv_is_nested else advantages
-    mask_padded = (response_mask.to_padded_tensor(0) if response_mask.is_nested else response_mask).to(
-        device=adv_padded.device, dtype=torch.bool
-    )
-    if mask_padded.shape[-1] > adv_padded.shape[-1]:
-        mask_padded = mask_padded[..., : adv_padded.shape[-1]]
-    elif mask_padded.shape[-1] < adv_padded.shape[-1]:
-        mask_padded = F.pad(mask_padded, (0, adv_padded.shape[-1] - mask_padded.shape[-1]), value=False)
+    if use_packed_nested:
+        adv_work = advantages.values()
+        mask_work = response_mask.values().to(device=adv_work.device, dtype=torch.bool)
+    else:
+        adv_work = advantages.to_padded_tensor(0.0) if adv_is_nested else advantages
+        mask_work = (response_mask.to_padded_tensor(0) if response_mask.is_nested else response_mask).to(
+            device=adv_work.device, dtype=torch.bool
+        )
+        if mask_work.shape[-1] > adv_work.shape[-1]:
+            mask_work = mask_work[..., : adv_work.shape[-1]]
+        elif mask_work.shape[-1] < adv_work.shape[-1]:
+            mask_work = F.pad(mask_work, (0, adv_work.shape[-1] - mask_work.shape[-1]), value=False)
 
-    stats_dtype = torch.float32 if adv_padded.device.type == "mps" else torch.float64
-    valid_values = torch.where(mask_padded, adv_padded.to(dtype=stats_dtype), 0.0)
+    stats_dtype = torch.float32 if adv_work.device.type == "mps" else torch.float64
+    valid_values = torch.where(mask_work, adv_work.to(dtype=stats_dtype), 0.0)
     local_sum = valid_values.sum()
     local_sumsq = valid_values.square().sum()
-    local_count = mask_padded.sum(dtype=stats_dtype)
+    local_count = mask_work.sum(dtype=stats_dtype)
     stats = torch.stack([local_sum, local_sumsq, local_count])
 
     if dp_group is not None:
@@ -280,14 +296,28 @@ def whiten_advantages(data: TensorDict, dp_group=None, eps: float = 1e-8) -> Ten
 
     total_sum, total_sumsq, total_count = stats[0], stats[1], stats[2]
     if float(total_count.item()) <= 1.0:
-        whitened = torch.zeros_like(adv_padded)
+        whitened = torch.zeros_like(adv_work)
     else:
         mean = total_sum / total_count
         var = torch.clamp((total_sumsq - total_sum * mean) / (total_count - 1.0), min=0.0)
-        whitened_f = (adv_padded.to(dtype=stats_dtype) - mean) * torch.rsqrt(var + eps)
-        whitened = torch.where(mask_padded, whitened_f, 0.0).to(dtype=adv_padded.dtype)
+        whitened_f = (adv_work.to(dtype=stats_dtype) - mean) * torch.rsqrt(var + eps)
+        whitened = torch.where(mask_work, whitened_f, 0.0).to(dtype=adv_work.dtype)
 
-    if adv_is_nested:
+    if use_packed_nested:
+        offsets = advantages.offsets()
+        min_seqlen = getattr(advantages, "_min_seqlen", None)
+        max_seqlen = getattr(advantages, "_max_seqlen", None)
+        if max_seqlen is None and offsets.numel() > 1:
+            seq_lens = offsets.diff()
+            min_seqlen = int(seq_lens.min().item())
+            max_seqlen = int(seq_lens.max().item())
+        whitened = torch.nested.nested_tensor_from_jagged(
+            whitened,
+            offsets=offsets,
+            min_seqlen=min_seqlen,
+            max_seqlen=max_seqlen,
+        )
+    elif adv_is_nested:
         lengths = advantages.offsets().diff().tolist()
         whitened = torch.nested.as_nested_tensor(
             [whitened[i, :length] for i, length in enumerate(lengths)],

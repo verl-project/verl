@@ -261,6 +261,7 @@ def test_training_worker_calls_whiten_once_per_mini_batch_chunk(monkeypatch):
     ],
 )
 def test_uses_advantage_whitening_selector_and_trainer_wiring(monkeypatch, estimator, expected):
+    import importlib.util
     import sys
     import types
 
@@ -269,40 +270,89 @@ def test_uses_advantage_whitening_selector_and_trainer_wiring(monkeypatch, estim
     if estimator is None:
         return
 
-    if "transfer_queue" not in sys.modules:
+    def _module_available(mod_name: str) -> bool:
+        try:
+            return importlib.util.find_spec(mod_name) is not None
+        except ModuleNotFoundError:
+            return False
+
+    trainer_mod_name = "verl.trainer.ppo.v1.trainer_base"
+    trainer_was_loaded = trainer_mod_name in sys.modules
+    stubbed_optional_deps = False
+
+    if "transfer_queue" not in sys.modules and not _module_available("transfer_queue"):
         fake_tq = types.ModuleType("transfer_queue")
         fake_tq.KVBatchMeta = object
         fake_tq.BatchMeta = object
         monkeypatch.setitem(sys.modules, "transfer_queue", fake_tq)
-    if "torchdata.stateful_dataloader" not in sys.modules:
-        fake_td = types.ModuleType("torchdata")
+        stubbed_optional_deps = True
+    if "torchdata.stateful_dataloader" not in sys.modules and not _module_available("torchdata.stateful_dataloader"):
+        if "torchdata" not in sys.modules and not _module_available("torchdata"):
+            monkeypatch.setitem(sys.modules, "torchdata", types.ModuleType("torchdata"))
         fake_td_sdl = types.ModuleType("torchdata.stateful_dataloader")
         fake_td_sdl.StatefulDataLoader = object
-        monkeypatch.setitem(sys.modules, "torchdata", fake_td)
         monkeypatch.setitem(sys.modules, "torchdata.stateful_dataloader", fake_td_sdl)
+        stubbed_optional_deps = True
 
-    from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+    try:
+        from verl.trainer.ppo.v1.trainer_base import PPOTrainer
 
-    trainer = SimpleNamespace()
-    trainer.config = OmegaConf.create(
-        {
-            "algorithm": {"adv_estimator": estimator.value if isinstance(estimator, AdvantageEstimator) else estimator},
-            "actor_rollout_ref": {
-                "actor": {
-                    "ppo_mini_batch_size": 4,
-                    "calculate_entropy": False,
-                    "entropy_coeff": 0.0,
-                    "ppo_epochs": 1,
-                    "data_loader_seed": 42,
-                    "shuffle": False,
-                    "policy_loss": {},
+        trainer = SimpleNamespace()
+        trainer.config = OmegaConf.create(
+            {
+                "algorithm": {
+                    "adv_estimator": estimator.value if isinstance(estimator, AdvantageEstimator) else estimator
                 },
-                "rollout": {"n": 1, "temperature": 1.0},
-            },
-        }
-    )
-    trainer.actor_rollout_wg = SimpleNamespace(update_actor=lambda b: {"metrics": {"mfu": 0.0, "pg_loss": [0.1]}})
+                "actor_rollout_ref": {
+                    "actor": {
+                        "ppo_mini_batch_size": 4,
+                        "calculate_entropy": False,
+                        "entropy_coeff": 0.0,
+                        "ppo_epochs": 1,
+                        "data_loader_seed": 42,
+                        "shuffle": False,
+                        "policy_loss": {},
+                    },
+                    "rollout": {"n": 1, "temperature": 1.0},
+                },
+            }
+        )
+        trainer.actor_rollout_wg = SimpleNamespace(update_actor=lambda b: {"metrics": {"mfu": 0.0, "pg_loss": [0.1]}})
 
-    batch = SimpleNamespace(extra_info={})
-    PPOTrainer._update_actor(trainer, batch, metrics={})
-    assert batch.extra_info["whiten_advantages"] is expected
+        batch = SimpleNamespace(extra_info={})
+        PPOTrainer._update_actor(trainer, batch, metrics={})
+        assert batch.extra_info["whiten_advantages"] is expected
+    finally:
+        if stubbed_optional_deps and not trainer_was_loaded:
+            sys.modules.pop(trainer_mod_name, None)
+
+
+def test_whiten_advantages_nested_jagged_avoids_padded_expansion(monkeypatch):
+    adv = torch.nested.as_nested_tensor(
+        [
+            torch.tensor([1.0, 2.0, 9.0], dtype=torch.float32),
+            torch.tensor([4.0, 8.0, 10.0, 12.0, 99.0], dtype=torch.float32),
+        ],
+        layout=torch.jagged,
+    )
+    mask = torch.nested.as_nested_tensor(
+        [
+            torch.tensor([1, 1, 0], dtype=torch.long),
+            torch.tensor([1, 1, 1, 1, 0], dtype=torch.long),
+        ],
+        layout=torch.jagged,
+    )
+
+    def _forbid_padding(*args, **kwargs):
+        raise AssertionError("to_padded_tensor should not be called for compatible jagged nested inputs")
+
+    monkeypatch.setattr(torch.Tensor, "to_padded_tensor", _forbid_padding)
+
+    td = TensorDict({"advantages": adv, "response_mask": mask}, batch_size=[2])
+    out = whiten_advantages(td)["advantages"]
+
+    assert out.is_nested and out.layout == torch.jagged
+    valid_vals = out.values()[mask.values().bool()]
+    assert torch.isclose(valid_vals.mean(), torch.tensor(0.0), atol=1e-6)
+    assert torch.isclose(valid_vals.var(correction=1), torch.tensor(1.0), atol=1e-5)
+    assert torch.all(out.values()[~mask.values().bool()] == 0.0)
