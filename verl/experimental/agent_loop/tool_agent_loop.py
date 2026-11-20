@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -286,7 +287,15 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.response_logprobs = response_logprobs
 
         if output.routed_experts is not None:
-            agent_data.routed_experts = output.routed_experts
+            if agent_data.routed_experts is None:
+                agent_data.routed_experts = output.routed_experts
+            else:
+                # Re-prefill may recompute old routes, but their logprobs still come from
+                # earlier turns. Preserve that prefix, including prompt/tool positions.
+                prefix_length = len(agent_data.routed_experts)
+                agent_data.routed_experts = np.concatenate(
+                    (agent_data.routed_experts, output.routed_experts[prefix_length:]), axis=0
+                )
 
         # Check termination conditions
         if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
@@ -395,6 +404,11 @@ class ToolAgentLoop(AgentLoopBase):
         )
         if len(response_mask) >= self.response_length:
             return AgentState.TERMINATED
+        if agent_data.routed_experts is not None and merge_result.removed_prefix_token_count:
+            # CT can remove a trailing boundary token. Drop only routes for removed
+            # positions; the last sampled token may not have a routing row yet.
+            prefix_length = len(agent_data.prompt_ids) - merge_result.removed_prefix_token_count
+            agent_data.routed_experts = agent_data.routed_experts[:prefix_length]
         agent_data.prompt_ids = merge_result.token_ids
         agent_data.response_mask = response_mask
         if agent_data.response_logprobs:
