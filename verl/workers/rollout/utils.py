@@ -108,28 +108,40 @@ async def ensure_async_iterator(iterable):
             yield item
 
 
-def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
-    """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
-    <|image_pad|> and <|video_pad|> token by image_data.
+def dedup_image_tokens(prompt_ids: list[int], processor):
+    """Deduplicate image tokens in prompt_ids, since vLLM will expand each image placeholder by image_data.
     For example,
     ```
+    Qwen2-VL, Qwen2.5-VL and Qwen3-VL (the same for <|video_pad|>):
     <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
     =>
     <|vision_start|><|image_pad|><|vision_end|>
+
+    Gemma4:
+    <|image><|image|><|image|>...<|image|><image|>
+    =>
+    <|image|>
     ```
     """
-    if (
-        processor is not None
-        and hasattr(processor, "image_processor")
-        and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__
-    ):
-        prompt_ids = np.array(prompt_ids)
-        mask = np.ones(len(prompt_ids), dtype=bool)
-        is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
-        mask[1:] &= ~(is_value[1:] & is_value[:-1])
-        return prompt_ids[mask].tolist()
-    else:
-        return prompt_ids
+    match processor.__class__.__name__:
+        case "Qwen2VLProcessor" | "Qwen2_5_VLProcessor" | "Qwen3VLProcessor":
+            prompt_ids = np.array(prompt_ids)
+            mask = np.ones(len(prompt_ids), dtype=bool)
+            is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
+            mask[1:] &= ~(is_value[1:] & is_value[:-1])
+            return prompt_ids[mask].tolist()
+        case "Gemma4Processor":
+            prompt_ids = np.array(prompt_ids)
+            is_image = prompt_ids == get_processor_token_id(processor, "image")
+            is_boi = prompt_ids == get_processor_token_id(processor, "boi")
+            is_eoi = prompt_ids == get_processor_token_id(processor, "eoi")
+            mask = np.ones(len(prompt_ids), dtype=bool)
+            mask[1:] &= ~(is_image[1:] & is_image[:-1])
+            mask[:-1] &= ~(is_boi[:-1] & is_image[1:])
+            mask[1:] &= ~(is_eoi[1:] & is_image[:-1])
+            return prompt_ids[mask].tolist()
+        case _:
+            return prompt_ids
 
 
 def get_vision_placeholder_token_ids(processor) -> list[int]:
