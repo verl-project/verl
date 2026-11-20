@@ -14,8 +14,8 @@
 """Rollout worker whose sessions share the preprocessing and the TransferQueue storage of their prompt.
 
 Everything prompt sharing adds to the rollout lives in ``AgentLoopWorkerTQShare``: with
-``rollout.agent.share_prompts`` off, ``AgentLoopManagerTQ`` runs the plain ``AgentLoopWorkerTQ``
-and this module is never imported.
+``rollout.agent.share_prompts`` off or a storage backend other than SimpleStorage,
+``AgentLoopManagerTQ`` runs the plain ``AgentLoopWorkerTQ`` and this module is never imported.
 """
 
 import asyncio
@@ -33,7 +33,6 @@ from verl.experimental.agent_loop.prompt_sharing import (
     PUBLIC_PARTITION,
     async_release_public_prompts,
     multi_modal_inputs_equal,
-    prompt_sharing_enabled,
     public_multi_modal_key,
     publish_public_prompts,
 )
@@ -63,7 +62,6 @@ class AgentLoopWorkerTQShare(AgentLoopWorkerTQ):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.share_prompt_fields = prompt_sharing_enabled(self.config)
         # uid => fields its trajectories link from the public prompt put under uid
         self.public_prompt_fields: dict[str, list[str]] = {}
         # uid => multi_modal_inputs the first finished session of uid put under public_multi_modal_key(uid)
@@ -73,15 +71,14 @@ class AgentLoopWorkerTQShare(AgentLoopWorkerTQ):
         self.shareable_multi_modal_keys = _shareable_multi_modal_keys(self.processor)
 
     async def generate_sequences(self, batch: TensorDict) -> None:
-        if self.share_prompt_fields:
-            # Freeing runs here because this is the point reached after a step cleared the trajectories
-            # that were linking the public prompts of the previous batch.
-            await async_release_public_prompts()
-            public_fields = await publish_public_prompts(batch)
-            # Registered per uid rather than carried into _run_prompt, which the next batch could outrun.
-            for uid in batch["uid"]:
-                self.public_prompt_fields[uid] = public_fields
-                self.public_multi_modal_inputs[uid] = _PublicMultiModalInputs()
+        # Freeing runs here because this is the point reached after a step cleared the trajectories
+        # that were linking the public prompts of the previous batch.
+        await async_release_public_prompts()
+        public_fields = await publish_public_prompts(batch)
+        # Registered per uid rather than carried into _run_prompt, which the next batch could outrun.
+        for uid in batch["uid"]:
+            self.public_prompt_fields[uid] = public_fields
+            self.public_multi_modal_inputs[uid] = _PublicMultiModalInputs()
         await super().generate_sequences(batch)
 
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:

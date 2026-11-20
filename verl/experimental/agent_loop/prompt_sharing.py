@@ -25,28 +25,24 @@ the one point that is reached after a step cleared the trajectories of the previ
 The trainer knows none of this: everything here is called from the TransferQueue rollout adapter.
 """
 
-from typing import Iterable
+from typing import Any, Iterable
 
 import torch
 import transfer_queue as tq
 from omegaconf import DictConfig
 from tensordict import NonTensorData, TensorDict
 
-PUBLIC_PARTITION = getattr(tq, "PUBLIC_PARTITION", "__public__")
+PUBLIC_PARTITION = tq.PUBLIC_PARTITION
 
 # Fields of a prompt batch that trajectories do not store, or that only async recovery reads from the prompt key.
 _PRIVATE_PROMPT_FIELDS = frozenset({"agent_name", "multi_modal_data", "__rollout_n__", "__do_sample__"})
 
 
-def prompt_sharing_requested(config: DictConfig) -> bool:
-    """Whether ``rollout.agent.share_prompts`` asks the trajectories of a prompt to share preprocessing."""
-    return bool(config.actor_rollout_ref.rollout.agent.get("share_prompts", True))
-
-
 def prompt_sharing_enabled(config: DictConfig) -> bool:
-    """Whether to store prompts once, which needs links (TransferQueue >= 0.1.12) on the configured storage backend."""
+    """Whether ``rollout.agent.share_prompts`` is on, which needs TransferQueue links on SimpleStorage."""
     storage_backend = config.transfer_queue.get("backend", {}).get("storage_backend", "SimpleStorage")
-    return prompt_sharing_requested(config) and hasattr(tq, "kv_link") and storage_backend == "SimpleStorage"
+    share_prompts = config.actor_rollout_ref.rollout.agent.get("share_prompts", True)
+    return bool(share_prompts) and storage_backend == "SimpleStorage"
 
 
 def shared_prompt_fields(batch: TensorDict) -> list[str]:
@@ -63,24 +59,18 @@ def public_multi_modal_key(uid: str) -> str:
     return f"{uid}-mm"
 
 
-def multi_modal_inputs_equal(a: dict, b: dict) -> bool:
-    if a.keys() != b.keys():
+def _values_equal(a: Any, b: Any) -> bool:
+    if a is b:
+        return True
+    if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
+        return a.dtype == b.dtype and torch.equal(a, b)
+    if isinstance(a, torch.Tensor) or isinstance(b, torch.Tensor):
         return False
-    for key, value in a.items():
-        other = b[key]
-        if value is other:
-            continue
-        if isinstance(value, torch.Tensor) or isinstance(other, torch.Tensor):
-            if not (
-                isinstance(value, torch.Tensor)
-                and isinstance(other, torch.Tensor)
-                and value.dtype == other.dtype
-                and torch.equal(value, other)
-            ):
-                return False
-        elif value != other:
-            return False
-    return True
+    return a == b
+
+
+def multi_modal_inputs_equal(a: dict, b: dict) -> bool:
+    return a.keys() == b.keys() and all(_values_equal(value, b[key]) for key, value in a.items())
 
 
 async def publish_public_prompts(batch: TensorDict) -> list[str]:
@@ -110,14 +100,12 @@ def release_public_prompts(uids: Iterable[str] = ()) -> None:
     ``uids`` are prompt groups that are given up on, so their public prompts are freed even if no
     trajectory ever linked them, e.g. a group whose sessions all failed.
     """
-    if hasattr(tq, "kv_clear_unlinked_public"):
-        tq.kv_clear_unlinked_public(stale_keys=_stale_public_keys(uids))
+    tq.kv_clear_unlinked_public(stale_keys=_stale_public_keys(uids))
 
 
 async def async_release_public_prompts(uids: Iterable[str] = ()) -> None:
     """``release_public_prompts`` for a caller that must not block its event loop."""
-    if hasattr(tq, "async_kv_clear_unlinked_public"):
-        await tq.async_kv_clear_unlinked_public(stale_keys=_stale_public_keys(uids))
+    await tq.async_kv_clear_unlinked_public(stale_keys=_stale_public_keys(uids))
 
 
 def _stale_public_keys(uids: Iterable[str]) -> list[str] | None:
