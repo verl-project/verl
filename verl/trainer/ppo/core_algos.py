@@ -110,6 +110,24 @@ class AdvantageEstimator(str, Enum):
     GDPO = "gdpo"
 
 
+WHITENED_ADVANTAGE_ESTIMATORS = frozenset(
+    {
+        AdvantageEstimator.GAE.value,
+        AdvantageEstimator.GDPO.value,
+        AdvantageEstimator.REINFORCE_PLUS_PLUS.value,
+        AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE.value,
+    }
+)
+
+
+def uses_advantage_whitening(name_or_enum: str | AdvantageEstimator | None) -> bool:
+    """Return whether the advantage estimator normalizes advantages with batch-level whitening."""
+    if name_or_enum is None:
+        return False
+    name = name_or_enum.value if isinstance(name_or_enum, Enum) else str(name_or_enum)
+    return name in WHITENED_ADVANTAGE_ESTIMATORS
+
+
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
 
 
