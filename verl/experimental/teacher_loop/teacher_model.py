@@ -198,8 +198,14 @@ class MultiTeacherModelManager:
         self.server_addresses: dict[str, list[str]] = {}
         self.server_handles: dict[str, list] = {}
         self.load_balancer_handle: dict[str, object] = {}
+        self.shared_fleet = None
 
-        self._initialize_teacher_model_managers()
+        if self.distillation_config.teacher_serving == "on_demand":
+            from .teacher_shared_fleet import SharedTeacherFleetManager
+
+            self.shared_fleet = SharedTeacherFleetManager(self.distillation_config, resource_pool)
+        else:
+            self._initialize_teacher_model_managers()
 
     def _initialize_teacher_model_managers(self):
         teacher_models = self.distillation_config.teacher_models
@@ -219,6 +225,8 @@ class MultiTeacherModelManager:
 
     def get_client(self) -> dict[str, LLMServerClient]:
         """Get the LLMServerClient for each teacher model."""
+        if self.shared_fleet is not None:
+            return self.shared_fleet.get_client(self.config)
         teacher_clients = {}
         for key, manager in self.teacher_model_managers.items():
             teacher_clients[key] = LLMServerClient(

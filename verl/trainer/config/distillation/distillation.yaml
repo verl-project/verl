@@ -66,6 +66,14 @@ n_gpus_per_node: 8
 # Number of nodes in the distillation teacher resource pool
 nnodes: 0
 
+# How teacher inference is served.
+# resident: one engine per teacher. on_demand: shared replica fleet, swap weights.
+teacher_serving: resident
+
+# On-demand weight cache: disk or shm.
+teacher_cache_backend: disk
+teacher_cache_dir: null
+
 # multi-teacher configs
 teacher_models:
 
