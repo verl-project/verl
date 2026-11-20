@@ -48,6 +48,8 @@ def _config(num_layers=48, moe_layer_freq=1, virtual_pipeline_model_parallel_siz
         fp8=None,
         moe_layer_freq=moe_layer_freq,
         moe_router_topk=2,
+        num_moe_experts=32,
+        expert_model_parallel_size=1,
         num_layers=num_layers,
         pipeline_model_parallel_size=2,
         virtual_pipeline_model_parallel_size=virtual_pipeline_model_parallel_size,
