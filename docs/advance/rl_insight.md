@@ -1,6 +1,6 @@
 # Use RL-Insight to Monitor Training
 
-Last updated: 07/15/2026.
+Last updated: 11/16/2026.
 
 [RL-Insight](https://github.com/verl-project/rl-insight) provides online observability for RL training. In verl, it can receive trainer scalar metrics, async rollout engine metrics, TransferQueue metrics, and rollout state traces, then show them in Grafana dashboards managed by the RL-Insight server.
 
@@ -16,7 +16,7 @@ Use RL-Insight when you want one monitor view for:
 
 ## Step 1: Install and Start RL-Insight
 
-Install RL-Insight in the environment where the monitor server runs. Prefer the latest source version:
+Install RL-Insight >= 0.4.0 in the server and training environments. Prefer the latest source version:
 
 ```bash
 pip install "git+https://github.com/verl-project/rl-insight.git"
@@ -25,7 +25,7 @@ pip install "git+https://github.com/verl-project/rl-insight.git"
 Or install a released package:
 
 ```bash
-pip install "rl-insight>=0.2.0"
+pip install "rl-insight>=0.4.0"
 ```
 
 ### Install monitor services

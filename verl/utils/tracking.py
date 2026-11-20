@@ -228,7 +228,7 @@ class RLInsightLogger:
     """Logger backend that exports scalar metrics and rl-insight runtime signals."""
 
     ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
-    MINIMUM_RL_INSIGHT_VERSION = Version("0.3.0")
+    MINIMUM_RL_INSIGHT_VERSION = Version("0.4.0")
     _init_done = False
     _rl_insight_module = None
     _registered_metrics: set[tuple[str | None, tuple[str, ...], str | None]] = set()
@@ -326,7 +326,7 @@ class RLInsightLogger:
             yield
             return
 
-        cls._ensure_rl_insight_init()
+        # RL-Insight >= 0.4.0 buffers early Ray states until formal initialization.
         with cls._get_rl_insight().trace_state(state_name, state_lane_id=state_lane_id, **labels):
             yield
 
