@@ -25,6 +25,7 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.device import is_npu_available
 from verl.utils.device import manual_seed as device_manual_seed
 from verl.utils.device import manual_seed_all as device_manual_seed_all
+from verl.utils.metric import Metric, materialize_scalars
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import rearrange_micro_batches, restore_dynamic_batch
 
@@ -249,6 +250,10 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
         if "metrics" in o:
             metrics = o["metrics"]
             append_to_dict(aggregated_metrics, metrics)
+
+    # Engines may keep each micro-batch's scalar loss and metrics on the device during the loop (a per-micro-batch
+    # ``.item()`` blocks the host before ``backward`` is dispatched). Read them all back here with one transfer.
+    materialize_scalars(losses, metrics=[m for m in aggregated_metrics.values() if isinstance(m, Metric)])
 
     output = {
         "model_output": model_output,

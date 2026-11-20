@@ -347,7 +347,10 @@ def distillation_loss(
             config=loss_config,
             rollout_is_weights=rollout_is_weights,
         )
-        pg_metrics = {f"distillation/{k[len('actor/') :]}": v for k, v in pg_metrics.items()}
+        # Same aggregation as ppo_loss uses for these metrics; Metric also keeps device-tensor values lazy.
+        pg_metrics = Metric.from_dict(
+            {f"distillation/{k[len('actor/') :]}": v for k, v in pg_metrics.items()}, aggregation=AggregationType.MEAN
+        )
         distillation_metrics.update(pg_metrics)
     else:
         # Directly backpropagate distillation loss as a supervised loss, as in https://arxiv.org/abs/2306.13649.
