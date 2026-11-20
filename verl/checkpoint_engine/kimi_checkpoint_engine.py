@@ -293,7 +293,9 @@ class KIMICheckpointEngine(CheckpointEngine):
 
         Args:
             rank (int): The rank of the current process.
-            world_size (int): The total number of processes.
+            actor_wg_world_size (int): The world size of the actor worker group.
+            rollout_world_size (int): The world size of the rollout worker group.
+            master_metadata (MasterMetadata): The master metadata used to reach the parameter server.
         """
         self.rank = rank
         self.actor_wg_world_size = actor_wg_world_size

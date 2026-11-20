@@ -149,9 +149,6 @@ class CheckpointEngine(ABC):
         2. [Optional] Register weight bucket for RDMA.
         3. Return metadata to build communication topology: master ip:port, register RDMA description, etc.
 
-        Args:
-            worker_group: The worker group that the checkpoint engine will be used.
-
         Returns:
             A dictionary that contains the metadata of the worker group.
         """
