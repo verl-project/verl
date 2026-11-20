@@ -19,7 +19,9 @@ import pytest
 import torch
 
 from verl.utils.kernel.npu.cann_linear_ce import (
+    CannLinearCrossEntropy,
     _chunked_ce_entropy_backward,
+    _chunked_entropy_stats,
     _resolve_vocab_range,
     should_use_cann_linear_ce,
 )
@@ -76,7 +78,8 @@ def test_should_use_cann_linear_ce_cann_backend_missing_apis(monkeypatch):
 
 @pytest.mark.parametrize("temperature", [1.0, 1.5])
 @pytest.mark.parametrize("chunk_size", [32, 128, 2048])
-def test_chunked_ce_entropy_backward_matches_torch(temperature, chunk_size):
+@pytest.mark.parametrize("token_chunk_size", [7, 256])
+def test_chunked_ce_entropy_backward_matches_torch(temperature, chunk_size, token_chunk_size):
     """Hybrid CE+H path must match autograd through matmul+CE+Shannon H."""
     torch.manual_seed(0)
     num_tokens, hidden_size, vocab_size = 24, 64, 96
@@ -111,6 +114,7 @@ def test_chunked_ce_entropy_backward_matches_torch(temperature, chunk_size):
             "none",
             vocab_start=0,
             chunk_size=chunk_size,
+            token_chunk_size=token_chunk_size,
         )
 
     torch.testing.assert_close(d_h, d_ref_h, atol=1e-4, rtol=1e-4)
@@ -177,3 +181,177 @@ def test_resolve_vocab_range_with_tp(monkeypatch):
     )
     start, end = _resolve_vocab_range(weight, group)
     assert (start, end) == (2048, 3072)
+
+
+@pytest.mark.parametrize("temperature", [0.5, 1.0, 1.5])
+@pytest.mark.parametrize("offset", [0.0, 10000.0])
+def test_entropy_stats_fp64_finite_difference(temperature, offset):
+    """Check stable tiled statistics against autograd and finite differences."""
+    torch.manual_seed(31)
+    h = torch.randn(5, 4, dtype=torch.float64, requires_grad=True)
+    w = torch.randn(11, 4, dtype=torch.float64, requires_grad=True)
+    with torch.no_grad():
+        h[:, 0] = 1
+        w[:, 0] = offset
+    labels = torch.tensor([0, 10, 3, 8, 1])
+    glp = torch.tensor([0.3, 0.0, -0.2, 0.7, 0.1], dtype=torch.float64)
+    gh = torch.tensor([-0.1, 0.0, 0.4, 0.2, -0.3], dtype=torch.float64)
+
+    def tiled(a, b):
+        m, s, q = _chunked_entropy_stats(a / temperature, b, chunk_size=4, token_chunk_size=2)
+        ent = s.log() - q / s
+        selected = ((a / temperature) * b[labels]).sum(-1)
+        lp = (selected - m) - s.log()
+        return (lp * glp + ent * gh).sum()
+
+    logits = (h / temperature) @ w.T
+    lp = logits.log_softmax(-1)
+    entropy = -(lp.exp() * lp).sum(-1)
+    reference = (lp[torch.arange(5), labels] * glp + entropy * gh).sum()
+    torch.testing.assert_close(tiled(h, w), reference, atol=1e-8, rtol=1e-6)
+    expected = torch.autograd.grad(reference, (h, w))
+    actual = torch.autograd.grad(tiled(h, w), (h, w))
+    for a, b in zip(actual, expected, strict=True):
+        torch.testing.assert_close(a, b, atol=1e-8, rtol=1e-6)
+    for tensor, grad in zip((h, w), actual, strict=True):
+        for index in [(0, 1), (tensor.shape[0] - 1, 3)]:
+            step = 1e-4
+            with torch.no_grad():
+                tensor[index] += step
+                plus = tiled(h, w)
+                tensor[index] -= 2 * step
+                minus = tiled(h, w)
+                tensor[index] += step
+            torch.testing.assert_close((plus - minus) / (2 * step), grad[index], atol=1e-7, rtol=1e-5)
+
+
+def test_entropy_stats_preserve_fp32_under_autocast():
+    """An enclosing model autocast must not downcast the entropy matmul."""
+    torch.manual_seed(23)
+    hidden = torch.randn(9, 8)
+    weight = torch.randn(19, 8)
+    expected = _chunked_entropy_stats(hidden, weight, chunk_size=5, token_chunk_size=4)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        actual = _chunked_entropy_stats(hidden, weight, chunk_size=5, token_chunk_size=4)
+    for value, reference in zip(actual, expected, strict=True):
+        assert value.dtype == torch.float32
+        torch.testing.assert_close(value, reference, atol=1e-6, rtol=1e-6)
+
+
+def test_entropy_stats_extreme_logits():
+    """Large common offsets and saturated distributions retain finite entropy."""
+    hidden = torch.eye(3, dtype=torch.float64)
+    weight = torch.tensor([[10000, 1000, -1000], [10000, -1000, 1000], [10000, 0, 0]], dtype=torch.float64)
+    _, s, q = _chunked_entropy_stats(hidden, weight, chunk_size=2, token_chunk_size=2)
+    logp = (hidden @ weight.T).log_softmax(-1)
+    torch.testing.assert_close(s.log() - q / s, -(logp.exp() * logp).sum(-1), atol=1e-10, rtol=1e-10)
+
+
+@pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
+@pytest.mark.parametrize("entropy_grad", [0.0, 0.7])
+@pytest.mark.parametrize("softmax_result", ["none", "empty", "present"])
+def test_cann_forward_backward_entropy_contract(monkeypatch, reduction, entropy_grad, softmax_result):
+    """An absent CANN softmax must not turn a differentiable entropy into zero."""
+    from verl.utils.kernel.npu import cann_linear_ce as module
+
+    torch.manual_seed(47)
+    h = (torch.randn(5, 4) * 0.2).to(torch.bfloat16).requires_grad_()
+    w = (torch.randn(11, 4) * 0.2).to(torch.bfloat16).requires_grad_()
+    labels = torch.tensor([0, 10, 1, 4, 9])
+    temperature = 1.5
+    scaled = (h.detach() / temperature).float()
+    logits = scaled @ w.detach().float().T
+    lp_ref = logits.log_softmax(-1)
+    ent_ref = -(lp_ref.exp() * lp_ref).sum(-1)
+    calls = []
+
+    def online(hidden, weight, target, start, end, return_logits):
+        z = hidden.float() @ weight.float().T
+        m = z.max(-1).values
+        s = (z - m[:, None]).exp().sum(-1)
+        selected = z[torch.arange(5), target.long()] - m
+        return m, s, selected, torch.empty(0), target, None
+
+    def ce(m, s, selected, **kwargs):
+        softmax = None
+        if softmax_result == "empty":
+            softmax = torch.empty(0)
+        elif softmax_result == "present":
+            softmax = lp_ref.exp()
+        return s.log() - selected, softmax
+
+    def backward(g, hidden, weight, mask, target, smoothing, m, s, softmax):
+        calls.append("cann")
+        p = (hidden.float() @ weight.float().T - m[:, None]).exp() / s[:, None]
+        p[torch.arange(5), target.long()] -= 1
+        dz = g[:, None] * p
+        return dz @ weight.float(), dz.T @ hidden.float()
+
+    monkeypatch.setattr(module, "_resolve_cann_apis", lambda: (online, ce, backward))
+    monkeypatch.delenv("VERL_NPU_LCE_RETURN_LOGITS", raising=False)
+    monkeypatch.setenv("VERL_NPU_LCE_CHUNK_SIZE", "4")
+    lp, entropy = CannLinearCrossEntropy.apply(h, w, labels, temperature, reduction)
+    expected_lp = lp_ref[torch.arange(5), labels]
+    if reduction != "none":
+        expected_lp = getattr(expected_lp, reduction)()
+    torch.testing.assert_close(lp, expected_lp)
+    torch.testing.assert_close(entropy, ent_ref, atol=1e-6, rtol=1e-6)
+    assert torch.all(entropy > 0)
+    mask = torch.tensor([1.0, 0.0, 1.0, 1.0, 0.0])
+    glp = mask if reduction == "none" else torch.tensor(0.3)
+    gent = mask * entropy_grad
+    dh, dw = torch.autograd.grad((lp, entropy), (h, w), (glp, gent))
+    hr = scaled.double().requires_grad_()
+    wr = w.detach().double().requires_grad_()
+    ref_lp = (hr @ wr.T).log_softmax(-1)
+    ref_ent = -(ref_lp.exp() * ref_lp).sum(-1)
+    selected = ref_lp[torch.arange(5), labels]
+    if reduction != "none":
+        selected = getattr(selected, reduction)()
+    rh, rw = torch.autograd.grad((selected, ref_ent), (hr, wr), (glp.double(), gent.double()))
+    torch.testing.assert_close(dh.float(), (rh / temperature).float(), atol=5e-4, rtol=1e-2)
+    torch.testing.assert_close(dw.float(), rw.float(), atol=5e-4, rtol=1e-2)
+    assert calls == (["cann"] if entropy_grad == 0 else [])
+
+
+@pytest.mark.parametrize("offset", [0.0, 32.0, 128.0])
+def test_entropy_gradient_is_independent_of_cann_ce_rounding(monkeypatch, offset):
+    """Entropy must use its own normalization when CANN rounds CE logits."""
+    from verl.utils.kernel.npu import cann_linear_ce as module
+
+    torch.manual_seed(42)
+    h = (torch.randn(5, 8) * 0.2).bfloat16()
+    w = (torch.randn(11, 8) * 0.2).bfloat16()
+    h[:, 0] = 1
+    w[:, 0] = offset
+    h.requires_grad_()
+    w.requires_grad_()
+    labels = torch.tensor([0, 10, 3, 1, 7])
+
+    def online(hidden, weight, target, start, end, return_logits):
+        z = (hidden.float() @ weight.float().T).bfloat16().float()
+        maximum = z.max(-1).values
+        partition = (z - maximum[:, None]).exp().sum(-1)
+        selected = z[torch.arange(5), target.long()] - maximum
+        return maximum, partition, selected, torch.empty(0), target, None
+
+    def ce(maximum, partition, selected, **kwargs):
+        return partition.log() - selected, None
+
+    def backward(*args):
+        raise AssertionError("Entropy-only backward must use the hybrid path")
+
+    monkeypatch.setattr(module, "_resolve_cann_apis", lambda: (online, ce, backward))
+    monkeypatch.delenv("VERL_NPU_LCE_RETURN_LOGITS", raising=False)
+    monkeypatch.setenv("VERL_NPU_LCE_CHUNK_SIZE", "4")
+    lp, entropy = CannLinearCrossEntropy.apply(h, w, labels)
+    g = torch.linspace(-0.2, 0.3, 5)
+    actual = torch.autograd.grad((lp, entropy), (h, w), (torch.zeros_like(lp), g))
+    hr = h.detach().double().requires_grad_()
+    wr = w.detach().double().requires_grad_()
+    logp = (hr @ wr.T).log_softmax(-1)
+    expected_entropy = -(logp.exp() * logp).sum(-1)
+    expected = torch.autograd.grad(expected_entropy, (hr, wr), g.double())
+    torch.testing.assert_close(entropy.double(), expected_entropy, atol=1e-5, rtol=1e-5)
+    for value, reference in zip(actual, expected, strict=True):
+        torch.testing.assert_close(value.double(), reference, atol=5e-4, rtol=1e-2)
