@@ -108,3 +108,28 @@ def test_checkpoint_worker_passes_global_steps_to_receive_and_rollout_update():
     assert checkpoint_engine.received_global_steps == 17
     assert server_adapter.global_steps == 17
     assert [name for name, _tensor in server_adapter.weights] == ["w"]
+
+
+class _EngineConsumingCheckpointEngine(_FakeCheckpointEngine):
+    consumes_training_engine = True
+
+    async def send_weights(self, weights, global_steps=None):
+        self.sent_global_steps = global_steps
+        self.sent_weights = weights
+        if self.events is not None:
+            self.events.append("send_weights_complete")
+
+
+def test_actor_worker_hands_its_training_engine_to_an_engine_consuming_checkpoint_engine():
+    events = []
+    checkpoint_engine = _EngineConsumingCheckpointEngine(events)
+    worker = ActorRolloutRefWorker.__new__(ActorRolloutRefWorker)
+    worker.config = SimpleNamespace(rollout=SimpleNamespace(checkpoint_engine=SimpleNamespace(backend="sharded")))
+    worker.actor = SimpleNamespace(engine=_FakeTrainerEngine(events))
+    worker.checkpoint_engine = checkpoint_engine
+
+    asyncio.run(ActorRolloutRefWorker.update_weights.__wrapped__(worker, global_steps=5, mode="auto"))
+
+    assert checkpoint_engine.sent_weights is worker.actor.engine  # not a generator of full tensors
+    assert checkpoint_engine.sent_global_steps == 5
+    assert events == ["send_weights_complete", "offload"]
