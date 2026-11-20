@@ -246,10 +246,26 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   env TRAINER_MODE=graph_trainer bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
 ```
 
-- **Fast compile, lower HBM, and large-batch MFU scaling (`16384`–`32768` tokens/chip):** `GRAPH_TRAINER_SPLIT_LAYERS=1` defaults to `memory_policy=default`, `fsdp_barrier_policy=none`, `enable_remat_barriers=false`, and `backward_partition_mode=fsdp_pipeline` (cuts compile time to ~1.5 min, saves ~10 GB HBM, and enables `@16384` on `tpu7x` / `@32768` on `v5p` where unsplit OOMs):
+- **Fast compile, lower HBM, and large-batch MFU scaling (`16384`–`32768` tokens/chip):** `GRAPH_TRAINER_SPLIT_LAYERS=1` defaults to `memory_policy=default`, `fsdp_barrier_policy=none`, `enable_remat_barriers=false`, and `backward_partition_mode=fsdp_pipeline` (cuts compile time to ~1.5 min, saves ~10 GB HBM, and enables `@16384` on `tpu7x` / `@32768` on `v5p` where unsplit OOMs). Raise the batch with the token budget so each chip's micro-batch is mostly real tokens:
 
 ```bash
+# TPU v7x (8 trainer chips), highest MFU in the table below
 ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   env TRAINER_MODE=graph_trainer GRAPH_TRAINER_SPLIT_LAYERS=1 MAX_TOKEN_LEN_PER_GPU=16384 \
   bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
+
+# TPU v5p 2x2x4 (16 trainer chips, RUNTIME_ENV as above), highest MFU in the table below
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env NNODES_TRAINER=4 N_CHIPS_TRAINER=4 NNODES_ROLLOUT=4 N_CHIPS_ROLLOUT=4 \
+  TRAIN_BATCH_SIZE=128 PPO_MINI_BATCH_SIZE=128 TRAINER_MODE=graph_trainer GRAPH_TRAINER_SPLIT_LAYERS=1 \
+  MAX_TOKEN_LEN_PER_GPU=32768 bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
 ```
+
+Best measured configurations (Qwen3-30B-A3B GSM8K GRPO, `MAX_RESPONSE_LEN=1024`, thinking off, `verify_parity=all`; `update_actor` and `perf/mfu/actor` are medians over steps 2-8, first step excluded). On v7x, `32 x 8 @8192` needs more than one micro-batch per rank, so its `8192` rows use `TRAIN_BATCH_SIZE=PPO_MINI_BATCH_SIZE=16`:
+
+| Hardware (trainer) | Batch @ tokens/chip | Settings | `update_actor` | MFU | Eager (`AC_SAVE_SPLASH_AND_ROUTING=True`), bf16 reduce |
+|---|---|---|---|---|---|
+| v5p 2x2x4 | 32 x 8 @8192 | `TRAINER_MODE=graph_trainer` (`prefetch`) | 3.29 s | 0.078 | 3.65 s / 0.072 |
+| v5p 2x2x4 | 128 x 8 @32768 | `+ GRAPH_TRAINER_SPLIT_LAYERS=1` | 9.03 s | 0.110 | 9.72 s / 0.101 |
+| v7x 2x2x1 | 16 x 8 @8192 | `TRAINER_MODE=graph_trainer` (`interleave`) | 2.02 s | 0.050 | 2.13 s / 0.047 |
+| v7x 2x2x1 | 32 x 8 @16384 | `+ GRAPH_TRAINER_SPLIT_LAYERS=1` | 2.86 s | 0.067 | 3.16 s / 0.059 |
