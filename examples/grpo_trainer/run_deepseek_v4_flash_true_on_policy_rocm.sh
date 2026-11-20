@@ -5,8 +5,10 @@
 # actor_rollout_ref.actor.engine.impl=ALIGNED_ACTOR_IMPL); VLLM_BATCH_INVARIANT alone selects the arm:
 #   VLLM_BATCH_INVARIANT=1 (default)  consistent arm: batch-invariant vLLM rollout (Triton MoE) and deterministic
 #                                     trainer, rollout log-probs == trainer log-probs bitwise.
-#   VLLM_BATCH_INVARIANT=0            native baseline: default vLLM kernels (AITER MoE), batch invariance and full
-#                                     determinism off, same trainer, layout and offload as the consistent arm.
+#   VLLM_BATCH_INVARIANT=0            native-rollout baseline: the vLLM rollout runs without batch invariance and full
+#                                     determinism, on its default kernels (AITER MoE); the trainer is the consistent
+#                                     arm's, unchanged (mLite impl=vllm supports only the batch-invariant kernels on
+#                                     ROCm), so the arms differ only in the rollout.
 # Algorithm, data, lengths, batch, optimizer hyper-parameters, trainer layout and rollout layout are shared by both
 # arms. For a Megatron-Core trainer, use run_deepseek_v4_flash_megatron_rocm.sh.
 # Modelled on verl-project/verl#7688 (examples/grpo_trainer/run_deepseek_v4_true_on_policy_preview_megatron.sh).
@@ -38,11 +40,14 @@ die() {
 }
 
 # --- Arm --------------------------------------------------------------------------------------------------------
-export VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT:-1}"
-case "${VLLM_BATCH_INVARIANT}" in
+ROLLOUT_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT:-1}"
+case "${ROLLOUT_BATCH_INVARIANT}" in
   0|1) ;;
-  *) die "VLLM_BATCH_INVARIANT must be 0 or 1, got '${VLLM_BATCH_INVARIANT}'" ;;
+  *) die "VLLM_BATCH_INVARIANT must be 0 or 1, got '${ROLLOUT_BATCH_INVARIANT}'" ;;
 esac
+# The trainer runs mLite impl=vllm's batch-invariant kernels in both arms; the native arm turns batch invariance off
+# for the rollout servers only (rollout.env_vars below).
+export VLLM_BATCH_INVARIANT=1
 PROFILE="${PROFILE:-full}"
 SEED="${SEED:-42}"
 # mLite engine implementation of the consistent arm (actor_rollout_ref.actor.engine.impl): `vllm` = the vLLM-aligned
@@ -113,21 +118,24 @@ fi
 runtime_config_root="$(mktemp -d "${TMPDIR:-/tmp}/ds4flash-rocm-config.XXXXXX")"
 trap 'rm -rf "${runtime_config_root}"' EXIT
 
-if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
+# Trainer: deterministic in both arms.
+export VERL_FULL_DETERMINISM=1
+# Row-count-dependent tiles for vLLM's batch-invariant GEMMs (patches/vllm-bi-13): same output bits on gfx950,
+# faster. The trainer reads it through the same vLLM module, so both sides use the same setting.
+export VLLM_BI_GEMM_TILES="${VLLM_BI_GEMM_TILES:-1}"
+ARM_ENV_NAMES+=(VLLM_BI_GEMM_TILES)
+if [[ "${ROLLOUT_BATCH_INVARIANT}" == 1 ]]; then
   ARM=consistent
-  FULL_DETERMINISM=True
-  export VERL_FULL_DETERMINISM=1
-  # Row-count-dependent tiles for vLLM's batch-invariant GEMMs (patches/vllm-bi-13): same output bits on gfx950,
-  # faster. The trainer reads it through the same vLLM module, so both sides use the same setting.
-  export VLLM_BI_GEMM_TILES="${VLLM_BI_GEMM_TILES:-1}"
-  ARM_ENV_NAMES+=(VLLM_BI_GEMM_TILES)
+  ROLLOUT_FULL_DETERMINISM=True
   : "${ROLLOUT_MOE_BACKEND:=triton}"
+  ROLLOUT_ENV_ARGS=()
 else
   ARM=native
-  # rollout.full_determinism=True makes verl's vLLM server export VLLM_BATCH_INVARIANT=1; it stays off here.
-  FULL_DETERMINISM=False
-  export VERL_FULL_DETERMINISM=0
+  # rollout.full_determinism=True makes verl's vLLM server export VLLM_BATCH_INVARIANT=1; it stays off here, and
+  # rollout.env_vars overrides the job-wide VLLM_BATCH_INVARIANT=1 for the rollout servers and their engines.
+  ROLLOUT_FULL_DETERMINISM=False
   : "${ROLLOUT_MOE_BACKEND:=aiter}"
+  ROLLOUT_ENV_ARGS=(+actor_rollout_ref.rollout.env_vars.VLLM_BATCH_INVARIANT='"0"')
 fi
 
 # --- Trainer: Megatron mLite, shared by both arms -----------------------------------------------------------------
@@ -181,12 +189,13 @@ ACTOR_ARGS=(
   +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
   +actor_rollout_ref.actor.optim.override_optimizer_config.decoupled_weight_decay=True
   +actor_rollout_ref.actor.engine.seed="${SEED}"
-  +actor_rollout_ref.actor.engine.full_determinism="${FULL_DETERMINISM}"
+  +actor_rollout_ref.actor.engine.full_determinism=True
 )
 ROLLOUT_ARM_ARGS=(
   # With full determinism: per-request sampling seeds derived from the request id (verl/workers/rollout/utils.py).
-  actor_rollout_ref.rollout.full_determinism="${FULL_DETERMINISM}"
+  actor_rollout_ref.rollout.full_determinism="${ROLLOUT_FULL_DETERMINISM}"
   actor_rollout_ref.rollout.seed="${SEED}"
+  "${ROLLOUT_ENV_ARGS[@]}"
 )
 
 # Dynamic batching: a sequence must fit one CP group's token budget.
@@ -306,8 +315,8 @@ COMMAND=(
   "${HYDRA_OVERRIDES[@]}"
 )
 
-printf 'ARM=%s VLLM_BATCH_INVARIANT=%s PROFILE=%s TOPOLOGY=%sx%s ACTOR=PP%s/CP%s/EP%s ROLLOUT=TP%s/DP%s/EP%s\n' \
-  "${ARM}" "${VLLM_BATCH_INVARIANT}" "${PROFILE}" "${NNODES}" "${NGPUS_PER_NODE}" \
+printf 'ARM=%s ROLLOUT_BATCH_INVARIANT=%s PROFILE=%s TOPOLOGY=%sx%s ACTOR=PP%s/CP%s/EP%s ROLLOUT=TP%s/DP%s/EP%s\n' \
+  "${ARM}" "${ROLLOUT_BATCH_INVARIANT}" "${PROFILE}" "${NNODES}" "${NGPUS_PER_NODE}" \
   "${ACTOR_PP}" "${ACTOR_CP}" "${ACTOR_EP}" "${ROLLOUT_TP}" "${ROLLOUT_DP}" "${ROLLOUT_EP}"
 
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
