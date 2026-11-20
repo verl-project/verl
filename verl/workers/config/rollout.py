@@ -248,6 +248,11 @@ class RolloutConfig(BaseConfig):
     # Ray max_concurrency of the rollout server actor.
     ray_actor_max_concurrency: int = 1024
 
+    # Extra environment variables for the vLLM rollout server actors and the engine processes they start. They take
+    # precedence over the job's runtime_env, so the rollout can differ from the trainer, e.g. VLLM_BATCH_INVARIANT=0
+    # for a rollout without batch invariance next to a trainer that keeps it.
+    env_vars: dict[str, str] = field(default_factory=dict)
+
     # note that the logprob computation should belong to the actor
     log_prob_micro_batch_size: Optional[int] = None
     log_prob_micro_batch_size_per_gpu: Optional[int] = None

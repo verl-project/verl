@@ -91,6 +91,10 @@ max_num_seqs: 256
 # can be starved.
 ray_actor_max_concurrency: 1024
 
+# Extra environment variables for the vLLM rollout server actors and the engine processes they start. They take
+# precedence over the job's runtime_env, so the rollout can differ from the trainer.
+env_vars: {}
+
 # may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
 enable_chunked_prefill: True
 

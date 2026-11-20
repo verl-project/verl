@@ -1617,6 +1617,7 @@ class vLLMReplica(RolloutReplica):
             env_vars = {
                 **{var: "1" for var in get_platform().ray_noset_envvars()},
                 **get_platform().rollout_env_vars(),
+                **{str(key): str(value) for key, value in (self.config.env_vars or {}).items()},
             }
 
             server = self.server_class.options(
