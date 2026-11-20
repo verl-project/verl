@@ -148,6 +148,7 @@ jobs:
         run: |
           $UV_RUN ray stop --force
           $UV_RUN pytest -s -x tests/workers/rollout/test_prefix_cache_versioning_on_cpu.py
+          $UV_RUN pytest -s -x tests/workers/rollout/rollout_sglang/test_submission_gate_on_cpu.py
           $UV_RUN pytest tests/workers/rollout/rollout_sglang/test_sglang_prefix_cache_versioning.py -v -s
 
   sgl_checkpoint_engine:
