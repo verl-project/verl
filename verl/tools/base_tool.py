@@ -21,6 +21,29 @@ from verl.utils.rollout_trace import rollout_trace_op
 from .schemas import OpenAIFunctionToolSchema, ToolResponse
 
 
+class RecoverableToolError(Exception):
+    """Base exception for transient BaseTool execution failures eligible for retry."""
+
+
+class ToolTimeoutError(RecoverableToolError, TimeoutError):
+    """Raised when a stateful tool or sandbox operation times out transiently."""
+
+
+class ToolConnectionError(RecoverableToolError, ConnectionError):
+    """Raised on transient network or endpoint errors talking to a tool backend."""
+
+
+class ToolSandboxCrashError(RecoverableToolError):
+    """Raised when a tool sandbox crashes or becomes unreachable mid-call."""
+
+
+RECOVERABLE_TOOL_ERRORS: tuple[type[Exception], ...] = (
+    RecoverableToolError,
+    TimeoutError,
+    ConnectionError,
+)
+
+
 class BaseTool:
     """Base class for tools.
 

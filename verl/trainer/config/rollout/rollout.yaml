@@ -247,6 +247,16 @@ multi_turn:
   # Number of repeat rollouts for each sample
   num_repeat_rollouts: null
 
+  # Opt-in bounded retry policy for recoverable BaseTool execution failures
+  tool_retry:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.workers.config.ToolRetryConfig
+
+    enable: False
+    max_retries: 1
+    retry_delay: 1.0
+
 # support logging rollout prob for debugging purpose
 # "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling
 calculate_log_probs: True
