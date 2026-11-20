@@ -52,29 +52,57 @@ def batch_data() -> DataProto:
     return DataProto.from_dict(tensors=tensors, non_tensors=non_tensors)
 
 
-def test_compute_advantage_for_single_trajectory(batch_data: DataProto):
+@pytest.mark.parametrize(
+    "adv_estimator",
+    [
+        AdvantageEstimator.GRPO,
+        AdvantageEstimator.GRPO_VECTORIZED,
+        AdvantageEstimator.RLOO,
+        AdvantageEstimator.RLOO_VECTORIZED,
+        AdvantageEstimator.GRPO_PASSK,
+        AdvantageEstimator.GPG,
+    ],
+)
+def test_compute_advantage_for_single_trajectory(batch_data: DataProto, adv_estimator: AdvantageEstimator):
+    config = {"norm_adv_by_std_in_grpo": True}
     result = compute_advantage_for_multi_trajectories(
         data=batch_data,
         batch_keys=[f"prompt_a_{i}_0" for i in range(len(batch_data))],
-        adv_estimator=AdvantageEstimator.GRPO,
+        adv_estimator=adv_estimator,
+        config=config,
     )
     expected = compute_advantage(
         batch_data,
-        adv_estimator=AdvantageEstimator.GRPO,
+        adv_estimator=adv_estimator,
+        config=config,
     )
-    assert torch.equal(result.batch["advantages"], expected.batch["advantages"])
-    assert torch.equal(result.batch["returns"], expected.batch["returns"])
+    torch.testing.assert_close(result.batch["advantages"], expected.batch["advantages"])
+    torch.testing.assert_close(result.batch["returns"], expected.batch["returns"])
 
 
-def test_compute_advantage_for_multi_trajectories(batch_data: DataProto):
+@pytest.mark.parametrize(
+    "adv_estimator",
+    [
+        AdvantageEstimator.GRPO,
+        AdvantageEstimator.GRPO_VECTORIZED,
+        AdvantageEstimator.RLOO,
+        AdvantageEstimator.RLOO_VECTORIZED,
+        AdvantageEstimator.GRPO_PASSK,
+        AdvantageEstimator.GPG,
+    ],
+)
+def test_compute_advantage_for_multi_trajectories(batch_data: DataProto, adv_estimator: AdvantageEstimator):
+    config = {"norm_adv_by_std_in_grpo": True}
     result = compute_advantage_for_multi_trajectories(
         data=batch_data,
         batch_keys=["prompt_a_0_0", "prompt_a_0_1", "prompt_a_2_0", "prompt_a_2_1", "prompt_a_3_0", "prompt_a_4_0"],
-        adv_estimator=AdvantageEstimator.GRPO,
+        adv_estimator=adv_estimator,
+        config=config,
     )
     expected = compute_advantage(
         batch_data.select_idxs([1, 3, 4, 5]),
-        adv_estimator=AdvantageEstimator.GRPO,
+        adv_estimator=adv_estimator,
+        config=config,
     )
     gather_row_indices = [0, 0, 1, 1, 2, 3]
     gather_col_indices = [0, 0, 1, 1, 0, 0]
@@ -82,5 +110,37 @@ def test_compute_advantage_for_multi_trajectories(batch_data: DataProto):
         expected.batch["advantages"][gather_row_indices, gather_col_indices].unsqueeze(-1)
         * result.batch["response_mask"]
     )
-    assert torch.equal(result.batch["advantages"], adv_expected)
-    assert torch.equal(result.batch["returns"], adv_expected)
+    torch.testing.assert_close(result.batch["advantages"], adv_expected)
+    torch.testing.assert_close(result.batch["returns"], adv_expected)
+
+
+@pytest.mark.parametrize("norm_adv_by_std_in_grpo", [True, False])
+def test_multi_trajectories_grpo_and_rloo_vectorized_equivalence(batch_data: DataProto, norm_adv_by_std_in_grpo: bool):
+    batch_keys = ["prompt_a_0_0", "prompt_a_0_1", "prompt_a_2_0", "prompt_a_2_1", "prompt_a_3_0", "prompt_a_4_0"]
+    grpo_res = compute_advantage_for_multi_trajectories(
+        data=batch_data,
+        batch_keys=batch_keys,
+        adv_estimator=AdvantageEstimator.GRPO,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+    )
+    grpo_vec_res = compute_advantage_for_multi_trajectories(
+        data=batch_data,
+        batch_keys=batch_keys,
+        adv_estimator=AdvantageEstimator.GRPO_VECTORIZED,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+    )
+    torch.testing.assert_close(grpo_res.batch["advantages"], grpo_vec_res.batch["advantages"])
+    torch.testing.assert_close(grpo_res.batch["returns"], grpo_vec_res.batch["returns"])
+
+    rloo_res = compute_advantage_for_multi_trajectories(
+        data=batch_data,
+        batch_keys=batch_keys,
+        adv_estimator=AdvantageEstimator.RLOO,
+    )
+    rloo_vec_res = compute_advantage_for_multi_trajectories(
+        data=batch_data,
+        batch_keys=batch_keys,
+        adv_estimator=AdvantageEstimator.RLOO_VECTORIZED,
+    )
+    torch.testing.assert_close(rloo_res.batch["advantages"], rloo_vec_res.batch["advantages"])
+    torch.testing.assert_close(rloo_res.batch["returns"], rloo_vec_res.batch["returns"])
