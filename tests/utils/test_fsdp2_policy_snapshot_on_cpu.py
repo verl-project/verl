@@ -21,8 +21,8 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import MixedPrecisionPolicy
-from torch.distributed.tensor import DTensor
+from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
+from torch.distributed.tensor import DTensor, Shard
 
 from verl.utils.fsdp_utils import apply_fsdp2, fsdp2_sharded_load_from_cpu, fsdp2_sharded_save_to_cpu
 from verl.workers.config import FSDPEngineConfig
@@ -121,6 +121,7 @@ def _check_restore(
             torch.testing.assert_close(model(ids), old_output)
 
         assert engine.mode is None
+        assert isinstance(model.layers[0].proj.weight, DTensor) == reshard_after_forward
         if save_after_eval:
             after_eval, _ = fsdp2_sharded_save_to_cpu(model)
             for name in old:
@@ -177,3 +178,68 @@ def test_mixed_precision_policy_switch(tmp_path):
         nprocs=2,
         join=True,
     )
+
+
+def _mixed_layout_model(mesh, submesh, mismatch=None):
+    model = torch.nn.Sequential(*(torch.nn.Linear(2, 2, bias=False) for _ in range(3)))
+    child_mesh = submesh if mismatch == "mesh" else mesh
+    child_dim = 0 if mismatch == "placement" else 1
+    fully_shard(model[1], mesh=child_mesh, shard_placement_fn=lambda _: Shard(child_dim), reshard_after_forward=False)
+    fully_shard(model[2], mesh=submesh)
+    fully_shard(model, mesh=mesh)
+    return model
+
+
+@torch.no_grad()
+def _check_mixed_layout(rank, rendezvous, mismatch):
+    torch.set_num_threads(1)
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{rendezvous}",
+        rank=rank,
+        world_size=2,
+        timeout=datetime.timedelta(seconds=60),
+    )
+    try:
+        torch.manual_seed(123)
+        grid = init_device_mesh("cpu", (2, 1), mesh_dim_names=("dp", "local"))
+        mesh, submesh = grid["dp"], grid["local"]
+        model = _mixed_layout_model(mesh, submesh)
+
+        if mismatch is None:
+            inputs = torch.tensor([[1.0, -2.0]])
+            expected = model(inputs)
+            model.reshard()
+            assert isinstance(model[0].weight, DTensor)
+            assert not isinstance(model[1].weight, DTensor)
+
+        state, spec = fsdp2_sharded_save_to_cpu(model)
+        assert spec.device_mesh == mesh and spec.placements == (Shard(0),)
+        assert state["1.weight"][1] is not None and state["1.weight"][1].placements == (Shard(1),)
+        assert state["2.weight"][1] is not None and state["2.weight"][1].device_mesh == submesh
+        if mismatch is None:
+            for param in model.parameters():
+                param.to_local().zero_()
+            fsdp2_sharded_load_from_cpu(model, state, spec)
+            for name, param in model.named_parameters():
+                torch.testing.assert_close(param.to_local(), state[name][0], rtol=0, atol=0)
+            torch.testing.assert_close(model(inputs), expected)
+            return
+
+        target = _mixed_layout_model(mesh, submesh, mismatch)
+        reason = "Sharding strategy" if mismatch == "placement" else "device_mesh"
+        for param in target.parameters():
+            param.to_local().fill_(-2)
+        with pytest.raises(AssertionError, match=rf"{reason} mismatch for parameter 1\.weight"):
+            fsdp2_sharded_load_from_cpu(target, state, spec)
+        for param in target.parameters():
+            assert torch.all(param.to_local() == -2)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "mismatch", [None, "placement", "mesh"], ids=["roundtrip", "changed-placement", "changed-mesh"]
+)
+def test_policy_snapshot_with_mixed_shard_layouts(tmp_path, mismatch):
+    mp.spawn(_check_mixed_layout, args=(str(tmp_path / "rendezvous"), mismatch), nprocs=2, join=True)
