@@ -279,7 +279,7 @@ class NPUProfiler(DistProfiler):
                 if not discrete_mode:
                     mark_range = mark_start_range(message=profile_name)
                 else:
-                    self.profile_npu = get_npu_profiler(
+                    profile_npu = get_npu_profiler(
                         contents=self.profile_contents,
                         profile_level=self.profile_level,
                         profile_save_path=self.profile_save_path,
@@ -287,8 +287,8 @@ class NPUProfiler(DistProfiler):
                         schedule=self._schedule_kwargs if scheduled else None,
                         role=role,
                     )
-                    self.profile_npu.start()
-                    NPUProfiler._active_prof = self.profile_npu
+                    profile_npu.start()
+                    NPUProfiler._active_prof = profile_npu
                     mark_range = mark_start_range(message=profile_name)
 
                 try:
@@ -297,10 +297,10 @@ class NPUProfiler(DistProfiler):
                     mark_end_range(mark_range)
                     if discrete_mode:
                         try:
-                            self.profile_npu.stop()
+                            profile_npu.stop()
                         finally:
-                            self.profile_npu = None
-                            NPUProfiler._active_prof = None
+                            if NPUProfiler._active_prof is profile_npu:
+                                NPUProfiler._active_prof = None
 
             return _wrap_with_profile_context(func, profile_context)
 

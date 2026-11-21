@@ -127,6 +127,8 @@ class PPOTrainer(ABC):
 
     def __init__(self, config: DictConfig):
         self.config = config
+        self._worker_profile_active = False
+        self._active_rollout_profile_managers = []
         self.checkpoint_callback = build_checkpoint_callback(config)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
@@ -432,7 +434,10 @@ class PPOTrainer(ABC):
         try:
             self._fit(agent_loop_manager)
         finally:
-            self.close_dataloaders()
+            try:
+                self._stop_profiling(force=True)
+            finally:
+                self.close_dataloaders()
 
     def _fit(self, agent_loop_manager: AgentLoopManager):
         """Run the training loop; fit owns custom reader cleanup."""
@@ -499,13 +504,14 @@ class PPOTrainer(ABC):
                 self.on_step_begin()
 
                 self._start_profiling()
+                step_completed = False
                 try:
-                    try:
-                        batch = self.step(metrics, self.timing_raw)
-                    except DataLoaderExhausted:
-                        logger.info("Custom training source exhausted at step %s; ending training.", self.global_steps)
-                        source_exhausted = True
-                        break
+                    batch = self.step(metrics, self.timing_raw)
+                except DataLoaderExhausted:
+                    logger.info("Custom training source exhausted at step %s; ending training.", self.global_steps)
+                    source_exhausted = True
+                    break
+                else:
                     last_completed_step = self.global_steps
 
                     # 2. save checkpoint
@@ -519,8 +525,9 @@ class PPOTrainer(ABC):
                     # and rank/step selection active until the update has completed.
                     self.on_step_end()
                     metrics.update(self._consume_sync_metrics())
+                    step_completed = True
                 finally:
-                    self._stop_profiling()
+                    self._stop_profiling(force=not step_completed)
 
             # 4. validate
             if self.config.trainer.test_freq > 0 and (
@@ -1497,13 +1504,19 @@ class PPOTrainer(ABC):
 
     def _start_rollout_profiling(self) -> None:
         """Start rollout profiling."""
+        active = getattr(self, "_active_rollout_profile_managers", [])
+        self._active_rollout_profile_managers = active
         for manager in self._rollout_server_managers():
-            manager.start_profile()
+            if all(manager is not started for started in active):
+                manager.start_profile()
+                active.append(manager)
 
     def _stop_rollout_profiling(self) -> None:
-        """Stop rollout profiling."""
-        for manager in self._rollout_server_managers():
-            manager.stop_profile()
+        """Stop each started rollout profiler once, including on early fit exit."""
+        active = getattr(self, "_active_rollout_profile_managers", [])
+        while active:
+            active[0].stop_profile()
+            active.pop(0)
 
     def _start_profiling(self) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
@@ -1525,6 +1538,7 @@ class PPOTrainer(ABC):
             # workers more than once would fire that hook once per alias and upload the same trace
             # file multiple times. Drive each distinct worker group exactly once.
             self.actor_rollout_wg.start_profile(role="train", profile_step=self.global_steps)
+            self._worker_profile_active = True
             seen = {id(self.actor_rollout_wg)}
             if self.use_reference_policy and id(self.ref_policy_wg) not in seen:
                 seen.add(id(self.ref_policy_wg))
@@ -1534,16 +1548,21 @@ class PPOTrainer(ABC):
                 self.critic_wg.start_profile(profile_step=self.global_steps)
             self._start_rollout_profiling()
 
-    def _stop_profiling(self) -> None:
-        """Stop profiling for all worker groups if profiling is enabled."""
+    def _stop_profiling(self, force: bool = False) -> None:
+        """Close selected windows; forced fit cleanup skips the finish command."""
+        if force:
+            self._stop_rollout_profiling()
+            if not getattr(self, "_worker_profile_active", False):
+                return
         this_step_profile = self.curr_step_profile
         self.next_step_profile = (
             self.global_steps + 1 in self.config.global_profiler.steps
             if self.config.global_profiler.steps is not None
             else False
         )
-        do_profile = (
-            self.curr_step_profile and not self.next_step_profile
+        is_last_step = self.global_steps >= self.total_training_steps
+        do_profile = force or (
+            self.curr_step_profile and (not self.next_step_profile or is_last_step)
             if self.config.global_profiler.profile_continuous_steps
             else self.curr_step_profile
         )
@@ -1556,9 +1575,11 @@ class PPOTrainer(ABC):
             # the accumulating directory every step. "Last" is the largest configured step, or the
             # run's final step if it ends earlier on a profiled step.
             profiled_steps = self.config.global_profiler.steps
-            is_last_step = self.global_steps >= self.total_training_steps
             run_command = bool(
-                this_step_profile and profiled_steps and (self.global_steps == max(profiled_steps) or is_last_step)
+                not force
+                and this_step_profile
+                and profiled_steps
+                and (self.global_steps == max(profiled_steps) or is_last_step)
             )
             # See _start_profiling: skip aliased worker groups so the finish hook (and any trace
             # upload it triggers) fires exactly once per distinct process, not once per role alias.
@@ -1570,6 +1591,7 @@ class PPOTrainer(ABC):
             if self.use_critic and id(self.critic_wg) not in seen:
                 seen.add(id(self.critic_wg))
                 self.critic_wg.stop_profile(run_command=run_command)
+            self._worker_profile_active = False
 
     def _fetch_one_gen_batch(self) -> TensorDict:
         """Fetch one ``gen_batch_size`` chunk from the dataloader."""

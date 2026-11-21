@@ -70,6 +70,7 @@ def backend(request, monkeypatch, tmp_path):
         save_file_prefix="actor",
         rank=0,
         _profile_step=2,
+        profile_npu=None,
         profile_contents=["cpu"],
         profile_level="level0",
         profile_save_path=str(tmp_path),
@@ -274,3 +275,92 @@ def test_npu_schedule_and_async_stage_cleanup(monkeypatch, outcome, scheduled):
     assert outer._impl.profile_npu is None
     assert module.NPUProfiler._active_prof is None
     outer.stop()
+
+
+@pytest.mark.parametrize("first_to_finish", [0, 1])
+@pytest.mark.parametrize("outcome", ["return", "error", "cancel"])
+def test_npu_discrete_calls_stop_only_their_own_collector(monkeypatch, first_to_finish, outcome):
+    """Mocked overlap tests handle ownership, not native concurrent profiler support."""
+    pytest.importorskip("torch_npu")
+    from verl.utils.profiler import mstx_profile as module
+    from verl.utils.profiler.config import NPUToolConfig, ProfilerConfig
+
+    collectors = [MagicMock(), MagicMock()]
+    monkeypatch.setattr(module, "get_npu_profiler", MagicMock(side_effect=collectors))
+    monkeypatch.setattr(module, "mark_start_range", lambda **kw: 1)
+    monkeypatch.setattr(module, "mark_end_range", lambda token: None)
+    monkeypatch.setattr(module.NPUProfiler, "_active_prof", None)
+    impl = module.NPUProfiler(0, ProfilerConfig(tool="npu"), NPUToolConfig(discrete=True))
+
+    async def run():
+        started = [asyncio.Event(), asyncio.Event()]
+        finish = [asyncio.Event(), asyncio.Event()]
+
+        @impl.annotate(role="update_weights")
+        async def stage(index):
+            started[index].set()
+            await finish[index].wait()
+            if outcome == "error":
+                raise RuntimeError("transfer failed")
+            if outcome == "cancel":
+                raise asyncio.CancelledError
+            return index
+
+        tasks = [asyncio.create_task(stage(0))]
+        await started[0].wait()
+        tasks.append(asyncio.create_task(stage(1)))
+        await started[1].wait()
+        finish[first_to_finish].set()
+        result = (await asyncio.gather(tasks[first_to_finish], return_exceptions=True))[0]
+        if outcome == "return":
+            assert result == first_to_finish
+        else:
+            assert isinstance(result, RuntimeError if outcome == "error" else asyncio.CancelledError)
+        collectors[first_to_finish].stop.assert_called_once()
+        collectors[1 - first_to_finish].stop.assert_not_called()
+        assert module.NPUProfiler._active_prof is (collectors[1] if first_to_finish == 0 else None)
+        finish[1 - first_to_finish].set()
+        await asyncio.gather(tasks[1 - first_to_finish], return_exceptions=True)
+
+    asyncio.run(run())
+    for collector in collectors:
+        collector.start.assert_called_once()
+        collector.stop.assert_called_once()
+    assert module.NPUProfiler._active_prof is None
+
+
+def test_npu_rejected_overlapping_start_preserves_running_collector(monkeypatch):
+    """A backend rejecting overlap must not lose the running call's collector."""
+    pytest.importorskip("torch_npu")
+    from verl.utils.profiler import mstx_profile as module
+    from verl.utils.profiler.config import NPUToolConfig, ProfilerConfig
+
+    running, rejected = MagicMock(), MagicMock()
+    rejected.start.side_effect = RuntimeError("profiler already running")
+    monkeypatch.setattr(module, "get_npu_profiler", MagicMock(side_effect=[running, rejected]))
+    monkeypatch.setattr(module, "mark_start_range", lambda **kw: 1)
+    monkeypatch.setattr(module, "mark_end_range", lambda token: None)
+    monkeypatch.setattr(module.NPUProfiler, "_active_prof", None)
+    impl = module.NPUProfiler(0, ProfilerConfig(tool="npu"), NPUToolConfig(discrete=True))
+
+    async def run():
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        @impl.annotate(role="update_weights")
+        async def stage():
+            started.set()
+            await finish.wait()
+
+        task = asyncio.create_task(stage())
+        await started.wait()
+        with pytest.raises(RuntimeError, match="profiler already running"):
+            await stage()
+        assert module.NPUProfiler._active_prof is running
+        running.stop.assert_not_called()
+        rejected.stop.assert_not_called()
+        finish.set()
+        await task
+
+    asyncio.run(run())
+    running.stop.assert_called_once()
+    assert module.NPUProfiler._active_prof is None
