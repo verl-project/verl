@@ -26,7 +26,6 @@ from veomni.arguments import AcceleratorConfig, FSDPConfig, MixedPrecisionConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
-from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
 from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
@@ -44,6 +43,8 @@ from verl.utils.ulysses import (
     set_ulysses_sequence_parallel_group,
     slice_input_tensor,
 )
+from verl.utils.veomni.frozen_ple import freeze_ple_tables, is_ple_table, prepare_ple_storage
+from verl.utils.veomni.ple_export import ple_export_shapes, trim_ple_export
 from verl.utils.veomni.router_replay import RouterReplayAction, VeOmniRouterReplay
 from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
 
@@ -59,6 +60,15 @@ from .utils import (
     offload_veomni_model_to_cpu,
     offload_veomni_optimizer,
 )
+
+try:
+    # Newer VeOmni main uses the checkpoint package (e.g. commit a8d357c).
+    from veomni.models.checkpoint import get_checkpoint_tensor_converter
+except ModuleNotFoundError as exc:
+    if exc.name != "veomni.models.checkpoint":
+        raise
+    # The VeOmni revision pinned by verl (10a26ac) uses the legacy module.
+    from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
 
 logger = logging.getLogger(__file__)
 
@@ -99,6 +109,14 @@ def _build_ops_implementation_config(engine_config: VeOmniEngineConfig) -> OpsIm
 
 class VeOmniEngine(FSDPEngine):
     _veomni_handles_position_ids = True
+
+    def _get_forward_autocast_context(self):
+        # Both LM and value heads must honor this setting, including when the
+        # caller already enabled AMP. Checkpoint recomputation needs the same
+        # activation dtype as the original forward pass.
+        if not self.engine_config.enable_autocast:
+            return torch.autocast(device_type=get_device_name(), enabled=False)
+        return super()._get_forward_autocast_context()
 
     def _apply_veomni_input_transforms(self, model_inputs: dict, micro_batch: TensorDict):
         """Apply VeOmni-specific input transforms shared by LM and value heads.
@@ -165,10 +183,25 @@ class VeOmniEngine(FSDPEngine):
             data_parallel_replicate_size = dp_size // fsdp_size
             data_parallel_shard_size = fsdp_size
 
+        # EP/PLE partitions span dp_shard_sp, including SP ranks but excluding HSDP replicas.
+        param_shard_size = data_parallel_shard_size * self.engine_config.ulysses_parallel_size
+        for name, size in {
+            "expert_parallel_size": self.engine_config.expert_parallel_size,
+            "ple_parallel_size": self.engine_config.ple_parallel_size,
+        }.items():
+            if param_shard_size % size:
+                raise ValueError(
+                    f"Parameter shard size (dp_shard_size * ulysses_parallel_size = {param_shard_size}) "
+                    f"must be divisible by {name} ({size})."
+                )
+
         accelerator = AcceleratorConfig(
             dp_replicate_size=data_parallel_replicate_size,
             dp_shard_size=data_parallel_shard_size,
             ep_size=self.engine_config.expert_parallel_size,
+            extra_parallel_sizes=[self.engine_config.ple_parallel_size],
+            extra_parallel_placement_innermost=[False],
+            extra_parallel_names=["ple"],
             ulysses_size=self.engine_config.ulysses_parallel_size,
             init_device=self.engine_config.init_device,
             fsdp_config=FSDPConfig(fsdp_mode=self.data_parallel_mode),
@@ -406,7 +439,14 @@ class VeOmniEngine(FSDPEngine):
             ep_sharded_stream_load=self.engine_config.ep_sharded_stream_load,
             fqn_to_index_mapping=load_safetensors_index(self.model_config.local_path),
         )
+        # VeOmni upcasts the model to FP32 during parallelization. Restore only
+        # the ignored, persistently sharded frozen tables before optimizer setup.
+        if self.engine_config.freeze_ple_embeddings:
+            prepare_ple_storage(module, self.engine_config.frozen_ple_dtype)
         log_gpu_memory_usage("After parallelize model", logger=logger)
+        if self.engine_config.freeze_ple_embeddings:
+            count, local_bytes = freeze_ple_tables(module)
+            logger.info("Frozen PLE: %d tables, %.3f GiB local on rank %d", count, local_bytes / 2**30, self.rank)
 
         if not self.engine_config.forward_only:
             # Initialize optimizer with model parameters and config settings
@@ -667,12 +707,15 @@ class VeOmniEngine(FSDPEngine):
         return self._quantize_for_rollout(per_tensor_param), peft_config
 
     def _get_hf_export_per_tensor_param(self):
-        """Full HF-format weights without the rollout weight quantizer: the checkpoint 'hf_model' export."""
+        """Full HF weights, including frozen PLE, for checkpoints and rollout sync."""
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
         # per-DTensor .to(device).full_tensor() in param_generator() below stages each
         # shard instead, so the manual whole-model move is unnecessary under CPU offload.
-        if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
+        # Under manual offload, state_dict must also be taken on CPU: otherwise
+        # its tensor references retain every device shard even after module offload.
+        # The generator stages just the current parameter for its collective.
+        if not self._is_offload_param and not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
             load_veomni_model_to_gpu(self.module)
 
         # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
@@ -681,7 +724,9 @@ class VeOmniEngine(FSDPEngine):
             return converter.export_weights(self.module), None
 
         params = self.module.state_dict()
-        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+        key_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        params = convert_weight_keys(params, key_model)
+        ple_shapes = convert_weight_keys(ple_export_shapes(self.module), key_model)
 
         if self._is_offload_param:
             offload_veomni_model_to_cpu(self.module)
@@ -694,9 +739,18 @@ class VeOmniEngine(FSDPEngine):
 
         def param_generator():
             for name, param in params.items():
+                # Full sync includes frozen PLE for every initialization format;
+                # freezing only excludes these parameters from optimizer updates.
                 unsharded_tensor = (
-                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+                    param.to(device, non_blocking=True).full_tensor()
+                    if isinstance(param, DTensor)
+                    else param.to(device, non_blocking=True)
                 )
+
+                # Gather first: slicing a local PLE partition would remove real rows.
+                # Rollout expects checkpoint boundaries, not ExtraParallel padding.
+                if is_ple_table(name):
+                    unsharded_tensor = trim_ple_export(name, unsharded_tensor, ple_shapes)
 
                 is_expert_layer = "mlp.experts." in name
                 is_proj = any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
@@ -708,12 +762,14 @@ class VeOmniEngine(FSDPEngine):
                         tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
                         torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ps.ep_group)
                         yield from process_func(name, tensor, expert_id_base=src_ep_rank * tensor.size(0))
+                    del tensor, buffer
 
                 else:
                     if is_expert_layer:
                         yield from process_func(name, unsharded_tensor, expert_id_base=0)
                     else:
                         yield name, unsharded_tensor
+                del unsharded_tensor
 
         # TODO: support VeOmni LoRA
         return param_generator(), None

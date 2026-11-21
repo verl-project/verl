@@ -40,6 +40,10 @@ VL_TYPE2INDEX = {
         "IMAGE_INPUT_INDEX": 248056,
         "VIDEO_INPUT_INDEX": 248057,
     },
+    "qwen4_exp": {
+        "IMAGE_INPUT_INDEX": 248056,
+        "VIDEO_INPUT_INDEX": 248057,
+    },
 }
 
 
