@@ -3,3 +3,4 @@ pre-commit
 py-spy
 pytest-asyncio
 pytest-rerunfailures
+transformers>=5.3.0
