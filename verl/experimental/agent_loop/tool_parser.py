@@ -753,8 +753,9 @@ class Gemma4ToolParser(ToolParser):
         self.tool_call_start_token = "<|tool_call>"
         self.tool_call_end_token = "<tool_call|>"
         self._stop_token_id = tokenizer.convert_tokens_to_ids("<tool_call|>")
-        self.tool_call_regex = regex.compile(r"<\|tool_call>call:(\w+)\{(.*?)\}<tool_call\|>", regex.DOTALL)
-        self.arg_regex = regex.compile(r'(\w+):(?:<\|"\|>(.*?)<\|"\|>|([^,}]*))')
+        # Tool names may contain "-" or "." (e.g. "get-weather").
+        self.tool_call_regex = regex.compile(r"<\|tool_call>call:([\w.-]+)\{(.*?)\}<tool_call\|>", regex.DOTALL)
+        self.string_delim = '<|"|>'
 
     @property
     def stop_token_ids(self) -> list[int]:
@@ -763,29 +764,74 @@ class Gemma4ToolParser(ToolParser):
         return [self._stop_token_id]
 
     def _parse_arguments(self, args_str: str) -> dict:
+        return self._parse_object(args_str, 0)[0]
+
+    @staticmethod
+    def _skip_separators(text: str, i: int) -> int:
+        while i < len(text) and text[i] in " \t\n,":
+            i += 1
+        return i
+
+    def _parse_object(self, text: str, i: int) -> tuple[dict, int]:
+        """Parse ``key:value`` pairs from ``text[i:]`` up to the closing ``}``.
+
+        Returns the dict and the index just past the ``}``.
+        """
         result = {}
-        for match in self.arg_regex.finditer(args_str):
-            key = match.group(1)
-            str_val, bare_val = match.group(2), match.group(3)
-            if str_val is not None:
-                result[key] = str_val
-            elif bare_val is not None:
-                bare_val = bare_val.strip()
-                if bare_val.lower() == "true":
-                    result[key] = True
-                elif bare_val.lower() == "false":
-                    result[key] = False
-                elif bare_val.lower() == "null":
-                    result[key] = None
-                else:
-                    try:
-                        result[key] = int(bare_val)
-                    except ValueError:
-                        try:
-                            result[key] = float(bare_val)
-                        except ValueError:
-                            result[key] = bare_val
-        return result
+        while (i := self._skip_separators(text, i)) < len(text) and text[i] != "}":
+            colon = text.find(":", i)
+            if colon == -1:
+                break
+            result[text[i:colon].strip()], i = self._parse_value(text, colon + 1)
+        return result, i + 1
+
+    def _parse_array(self, text: str, i: int) -> tuple[list, int]:
+        """Parse values from ``text[i:]`` up to the closing ``]``.
+
+        Returns the list and the index just past the ``]``.
+        """
+        items = []
+        while (i := self._skip_separators(text, i)) < len(text) and text[i] != "]":
+            item, next_i = self._parse_value(text, i)
+            if next_i == i:  # stray "}" inside an array, skip it
+                next_i += 1
+            else:
+                items.append(item)
+            i = next_i
+        return items, i + 1
+
+    def _parse_value(self, text: str, i: int) -> tuple[Any, int]:
+        while i < len(text) and text[i] in " \t\n":
+            i += 1
+        if text.startswith(self.string_delim, i):
+            start = i + len(self.string_delim)
+            end = text.find(self.string_delim, start)
+            if end == -1:
+                return text[start:], len(text)
+            return text[start:end], end + len(self.string_delim)
+        if text.startswith("{", i):
+            return self._parse_object(text, i + 1)
+        if text.startswith("[", i):
+            return self._parse_array(text, i + 1)
+
+        end = i
+        while end < len(text) and text[end] not in ",}]":
+            end += 1
+        bare_val = text[i:end].strip()
+        if bare_val.lower() == "true":
+            return True, end
+        if bare_val.lower() == "false":
+            return False, end
+        if bare_val.lower() == "null":
+            return None, end
+        try:
+            return int(bare_val), end
+        except ValueError:
+            pass
+        try:
+            return float(bare_val), end
+        except ValueError:
+            return bare_val, end
 
     @rollout_trace_op
     async def extract_tool_calls(
