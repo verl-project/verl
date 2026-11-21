@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import glob
 import logging
 import os
@@ -27,7 +26,7 @@ import nvtx
 from verl.plugin.platform import get_platform
 
 from .config import NsightToolConfig
-from .profile import DistProfiler, ProfilerConfig
+from .profile import DistProfiler, ProfilerConfig, _wrap_with_profile_context
 
 logger = logging.getLogger(__name__)
 
@@ -255,8 +254,8 @@ class NsightSystemsProfiler(DistProfiler):
         """
 
         def decorator(func):
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs_inner):
+            @contextmanager
+            def profile_context(*args, **kwargs_inner):
                 # Prefer the stage label (`role`, e.g. "actor_compute_log_prob"): it names both the
                 # role and the function, which the method name alone cannot do for a colocated
                 # worker. Fall back to the method name for stages that declare no role.
@@ -266,14 +265,13 @@ class NsightSystemsProfiler(DistProfiler):
                     get_platform().profiler_start()
                 mark_range = mark_start_range(message=profile_name, color=color, domain=domain, category=category)
 
-                result = func(*args, **kwargs_inner)
+                try:
+                    yield func
+                finally:
+                    mark_end_range(mark_range)
+                    if self.discrete:
+                        get_platform().profiler_stop()
 
-                mark_end_range(mark_range)
-                if self.discrete:
-                    get_platform().profiler_stop()
-
-                return result
-
-            return wrapper
+            return _wrap_with_profile_context(func, profile_context)
 
         return decorator

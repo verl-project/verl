@@ -479,6 +479,8 @@ def trainer_class(replay_types):
 def trainer_instance(trainer_class, cfg=None):
     cls, namespace = trainer_class
     trainer = cls()
+    # Profiling is outside this AST-isolated dataloader lifecycle harness.
+    trainer._stop_profiling = Mock()
     trainer.config = cfg if cfg is not None else config()
     trainer.trainer_mode = trainer.config.trainer.v1.trainer_mode
     trainer.parameter_sync_step = 2
@@ -697,7 +699,7 @@ def streaming_fit_trainer(
         "on_validate_end",
     ):
         setattr(trainer, name, Mock())
-    trainer._stop_profiling.side_effect = lambda: events.append(("profile-stop", trainer.global_steps))
+    trainer._stop_profiling.side_effect = lambda **kwargs: events.append(("profile-stop", trainer.global_steps))
     trainer._consume_sync_metrics = Mock(return_value={})
     trainer._save_checkpoint = Mock(side_effect=lambda: events.append(("save", trainer.global_steps)))
 

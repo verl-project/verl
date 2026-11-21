@@ -1,6 +1,6 @@
 # verl Profiler System
 
-Last updated: 09/07/2026.
+Last updated: 11/21/2026.
 
 ## Architecture
 
@@ -23,6 +23,27 @@ When some tool need to profile behavior of each role, configurations in role-lev
 For tool config in role-level, there are some detailed behavior needed to control, like the `discrete` mode in nsys profiler.
 
 Every role has a profiler config, and by default, rollout/ref/reward models follow the Actor's behavior.
+
+## Weight synchronization
+
+Training-worker traces label synchronization from the actor to rollout as
+`update_weights`, separately from the optimizer stage `actor_update`. The training
+profiler stays active through the step-end synchronization hook, then stops before
+validation. The initial weight synchronization during worker setup is outside the
+scheduled training-step window.
+
+For NPU discrete profiling, synchronization data is saved under
+`<save_path>/update_weights/`; non-discrete traces contain an `update_weights` MSTX
+range. The same role label is used by the torch and Nsight decorators. Async
+methods keep their profiling range open across awaits and close it on return,
+exception, or cancellation. Existing role enablement and rank/step selection apply.
+As with other stages, each worker trace records activity in that process; inference
+engines running in other processes produce their own traces.
+
+If training exits early because of an error or data-source exhaustion, active worker
+and rollout profiling windows are closed even when the next step was selected for
+continuous profiling. This forced cleanup does not run the configured finish command;
+normal completion retains the existing final-window finish-command behavior.
 
 ## CUDA/NPU memory snapshots
 
