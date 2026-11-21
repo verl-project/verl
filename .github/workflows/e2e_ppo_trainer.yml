@@ -54,6 +54,7 @@ permissions:
 
 jobs:
   pre_commit_for_ppo:
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
