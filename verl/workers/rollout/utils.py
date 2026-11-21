@@ -40,6 +40,24 @@ def get_max_position_embeddings(hf_config) -> int:
     return int(max_len)
 
 
+def get_node_visible_devices(worker_accelerator_ids: list[list[str]]) -> str:
+    """Join the accelerator ids of one node's rollout workers into a visible-devices string.
+
+    Each worker contributes its first accelerator id. Workers that hold no accelerator (e.g. on
+    platforms where the inference engine opens the devices itself) contribute nothing; if none of the
+    node's workers holds one, the result is an empty string.
+    """
+    num_with_ids = sum(1 for ids in worker_accelerator_ids if ids)
+    if num_with_ids == 0:
+        return ""
+    if num_with_ids != len(worker_accelerator_ids):
+        raise ValueError(
+            "Either all or none of a node's rollout workers must hold an accelerator, got accelerator ids "
+            f"{worker_accelerator_ids}"
+        )
+    return ",".join(str(ids[0]) for ids in worker_accelerator_ids)
+
+
 class _UvicornServerAutoPort(uvicorn.Server):
     """Uvicorn Server that reports the system-assigned port when port=0."""
 
@@ -136,6 +154,16 @@ def get_vision_placeholder_token_ids(processor) -> list[int]:
         if token_id is not None:
             token_ids.append(token_id)
     return token_ids
+
+
+def extract_sampled_logprobs(logprobs) -> list[float]:
+    """Sampled-token log-prob per generated token.
+
+    ``logprobs`` is a vLLM ``FlatLogprobs`` (``SamplingParams(flat_logprobs=True)``), whose row per position starts
+    with the sampled token. Reading that first entry gives ``logprobs[i][token_ids[i]].logprob`` without rebuilding a
+    Logprob dict per position, which indexing ``FlatLogprobs`` would do.
+    """
+    return [logprobs.logprobs[start] for start in logprobs.start_indices]
 
 
 def extract_response_topk_logprobs(logprobs, k: int) -> tuple[list[float], np.ndarray, np.ndarray]:

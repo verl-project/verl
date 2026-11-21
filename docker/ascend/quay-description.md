@@ -52,8 +52,8 @@ Release image names follow this pattern:
 
 **Device / CANN Base Image / Inference Backend / Image Tag / Dockerfile**
 
-- A2 — 9.0.0 — vLLM — `latest-vllm-910b-ubuntu` — [Dockerfile.ascend_9.1.0_a2](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2) 
-- A3 — 9.0.0 — vLLM — `latest-vllm-a3-ubuntu` — [Dockerfile.ascend_9.1.0_a3](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.1_a3) 
+- A2 — 9.2.1 — vLLM — `latest-vllm-910b-ubuntu` — [Dockerfile.ascend_9.2.1_a2](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.2.1_a2)
+- A3 — 9.2.1 — vLLM — `latest-vllm-a3-ubuntu` — [Dockerfile.ascend_9.2.1_a3](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.2.1_a3)
 - A2 — 8.5.0 — SGLang — `latest-sglang-910b-ubuntu` — [Dockerfile.ascend.sglang_8.5.0_a2](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2) 
 - A3 — 8.5.0 — SGLang — `latest-sglang-a3-ubuntu` — [Dockerfile.ascend.sglang_8.5.0_a3](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3) 
 
@@ -110,8 +110,8 @@ docker exec -it {your_docker_name} bash
 ```text
 | Chip Series | Product Examples                      | Architecture   |
 |-------------|---------------------------------------|----------------|
-| Ascend 910B | Atlas 200T A2 Box16, Atlas 900 A2 PoD | ARM64 / x86_64 |
-| Ascend A3   | Atlas 800T A3                         | ARM64 / x86_64 |
+| Ascend 910B | Atlas A2 training products              | ARM64 / x86_64 |
+| Ascend A3   | Atlas A3 training products              | ARM64 / x86_64 |
 ```
 ---
 

@@ -387,7 +387,6 @@ v1 trainer separate async 场景下在 NPU 的典型配置如下：
 
 ```bash
 # 设置 v1 trainer separate async 模式
-trainer.use_v1=True
 trainer.v1.trainer_mode=separate_async
 
 # 方式一：nccl 后端（NPU 上自动识别为 HCCL）

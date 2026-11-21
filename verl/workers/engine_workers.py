@@ -182,6 +182,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             mesh_name="train",
             dp_rank=self.engine.get_data_parallel_rank(),
             is_collect=self.engine.is_mp_src_rank_with_outputs(),
+            is_mp_src=self.engine.is_mp_src_rank(),
         )
 
         if hasattr(self.model_config, "hf_config"):
