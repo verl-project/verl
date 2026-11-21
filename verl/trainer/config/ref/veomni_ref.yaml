@@ -3,7 +3,7 @@ defaults:
   - ref
 
   # veomni engine config
-  - ../engine@veomni: veomni
+  - /engine@veomni: veomni
 
   # load the reference default config, then apply the fields in the current yaml
   - _self_

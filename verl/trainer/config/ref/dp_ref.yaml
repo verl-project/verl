@@ -5,7 +5,7 @@ defaults:
   - ref
   
   # fsdp engine config
-  - ../engine@fsdp_config: fsdp
+  - /engine@fsdp_config: fsdp
 
   # load the reference default config, then apply the fields in the current yaml
   - _self_

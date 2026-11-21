@@ -44,8 +44,11 @@ class TestCriticConfig:
         yaml_path = config_dir / "megatron_critic.yaml"
         assert yaml_path.exists(), f"Config file not found: {yaml_path}"
 
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/critic")):
-            test_config = compose(config_name="megatron_critic", overrides=["ppo_micro_batch_size_per_gpu=1"])
+        # Compose from the config root so that absolute defaults (e.g. /optim) resolve.
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
+            test_config = compose(
+                config_name="critic/megatron_critic", overrides=["critic.ppo_micro_batch_size_per_gpu=1"]
+            ).critic
 
         megatron_config_obj = omega_conf_to_dataclass(test_config)
 
@@ -75,8 +78,11 @@ class TestCriticConfig:
         yaml_path = config_dir / "dp_critic.yaml"
         assert yaml_path.exists(), f"Config file not found: {yaml_path}"
 
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/critic")):
-            test_config = compose(config_name="dp_critic", overrides=["ppo_micro_batch_size_per_gpu=1"])
+        # Compose from the config root so that absolute defaults (e.g. /optim) resolve.
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
+            test_config = compose(
+                config_name="critic/dp_critic", overrides=["critic.ppo_micro_batch_size_per_gpu=1"]
+            ).critic
 
         fsdp_config_obj = omega_conf_to_dataclass(test_config)
 
