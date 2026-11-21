@@ -16,6 +16,7 @@ Apply monkey-patch function to models
 """
 
 import sys
+from functools import wraps
 from types import SimpleNamespace
 from typing import Optional
 
@@ -243,7 +244,7 @@ def patch_forward_with_backends(
         use_fused_kernels (bool): Whether to use fused kernels.
         fused_kernels_backend (str): The backend to use for fused kernels.
     """
-    if not use_fused_kernels or fused_kernels_backend not in ["triton", "torch", "liger"]:
+    if not use_fused_kernels or fused_kernels_backend not in ["triton", "torch", "liger", "tilelang"]:
         print(
             f"Skipping monkey patch for {model.__class__.__name__} as use_fused_kernels is "
             f"{use_fused_kernels} or fused_kernels_backend is {fused_kernels_backend}"
@@ -279,16 +280,129 @@ def patch_forward_with_backends(
         forward_with_triton_backend_function = forward_with_triton_backend
 
     model._verl_fused_kernels_backend = fused_kernels_backend
-    if fused_kernels_backend == "triton":
+    if fused_kernels_backend in ("triton", "tilelang"):
         model.__class__.forward = forward_with_triton_backend_function
-        print(f"Using Triton backend for fused kernels in {model.__class__.__name__}")
+        print(f"Using {fused_kernels_backend.capitalize()} backend for fused kernels in {model.__class__.__name__}")
     elif fused_kernels_backend in ("torch", "liger"):
         model.__class__.forward = forward_with_torch_backend_function
         print(f"Using {fused_kernels_backend.capitalize()} backend for fused kernels in {model.__class__.__name__}")
     else:
         raise ValueError(
-            f"Unsupported fused_kernels_backend: {fused_kernels_backend}. Choose 'triton', 'torch', or 'liger'."
+            f"Unsupported fused_kernels_backend: {fused_kernels_backend}. "
+            "Choose 'triton', 'torch', 'liger', or 'tilelang'."
         )
+
+
+def patch_veomni_forward_with_backends(
+    model: PreTrainedModel,
+    use_fused_kernels: bool = False,
+    fused_kernels_backend: str = None,
+):
+    """Route VeOmni's fused output head through verl's fused-linear backends.
+
+    VeOmni model forwards already expose a loss-function hook and preserve
+    model-specific outputs, so replacing that hook is safer than replacing the
+    full forward with an HF adapter. The small forward wrapper only promotes
+    the auxiliary top-k result to the common ``output.topk_log_probs`` field.
+    """
+    if not use_fused_kernels:
+        return
+    if fused_kernels_backend not in ("triton", "torch", "liger", "tilelang"):
+        raise ValueError(
+            f"Unsupported fused_kernels_backend: {fused_kernels_backend}. "
+            "Choose 'triton', 'torch', 'liger', or 'tilelang'."
+        )
+    if getattr(model, "_verl_veomni_fused_linear_patched", False):
+        return
+
+    original_loss_function = model.loss_function
+
+    def fused_loss_function(
+        logits=None,
+        labels=None,
+        vocab_size=None,
+        num_items_in_batch=None,
+        ignore_index=-100,
+        shift_labels=None,
+        **kwargs,
+    ):
+        return_log_probs = kwargs.pop("return_log_probs", False)
+        if not return_log_probs:
+            return original_loss_function(
+                logits=logits,
+                labels=labels,
+                vocab_size=vocab_size,
+                num_items_in_batch=num_items_in_batch,
+                ignore_index=ignore_index,
+                shift_labels=shift_labels,
+                **kwargs,
+            )
+
+        hidden_states = kwargs.pop("hidden_states", None)
+        weights = kwargs.pop("weights", None)
+        topk_labels = kwargs.pop("topk_labels", None)
+        temperature = kwargs.pop("temperature", 1.0)
+        if hidden_states is None or weights is None:
+            raise ValueError("VeOmni fused log-prob computation requires hidden_states and weights")
+
+        if shift_labels is not None:
+            target_labels = shift_labels
+        elif labels is not None:
+            target_labels = torch.roll(labels, shifts=-1, dims=-1)
+        else:
+            raise ValueError("VeOmni fused log-prob computation requires labels or shift_labels")
+
+        kernel_labels = target_labels
+        if topk_labels is not None:
+            if topk_labels.shape[:-1] != target_labels.shape:
+                raise ValueError("topk_labels must have target_labels.shape as its leading dimensions")
+            kernel_labels = torch.cat((target_labels.unsqueeze(-1), topk_labels), dim=-1)
+
+        if topk_labels is None and fused_kernels_backend in ("torch", "liger"):
+            from verl.utils.experimental.torch_functional import FusedLinearForPPO
+
+            fused_linear = FusedLinearForPPO(impl_backend=fused_kernels_backend)
+            log_probs, entropy = fused_linear.forward(
+                hidden_states=hidden_states,
+                vocab_weights=weights,
+                input_ids=target_labels,
+                temperature=temperature,
+            )
+            topk_log_probs = None
+        else:
+            from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+
+            all_log_probs, entropy = linear_cross_entropy(
+                hidden_states,
+                weights,
+                kernel_labels,
+                temperature,
+                "none",
+                impl_backend=fused_kernels_backend,
+            )
+            log_probs = all_log_probs[..., 0] if topk_labels is not None else all_log_probs
+            topk_log_probs = all_log_probs[..., 1:] if topk_labels is not None else None
+
+        auxiliary_output = SimpleNamespace(
+            log_probs=log_probs,
+            topk_log_probs=topk_log_probs,
+            entropy=entropy,
+        )
+        return None, None, auxiliary_output
+
+    original_forward = model.forward
+
+    @wraps(original_forward)
+    def forward_with_fused_linear(*args, **kwargs):
+        output = original_forward(*args, **kwargs)
+        auxiliary_output = getattr(output, "fused_linear_aux", None)
+        if auxiliary_output is not None and auxiliary_output.topk_log_probs is not None:
+            output.topk_log_probs = auxiliary_output.topk_log_probs
+        return output
+
+    model.loss_function = fused_loss_function
+    model.forward = forward_with_fused_linear
+    model._verl_veomni_fused_linear_patched = True
 
 
 def apply_monkey_patch(

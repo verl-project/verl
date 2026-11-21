@@ -22,7 +22,16 @@ except ImportError:
     from torch.distributed._composable.fsdp import FSDPModule, register_fsdp_forward_method
 
 
-def _fused_forward(self, hidden_states, labels, temperature, backend, gather_weights=False, cast_hidden_states=False):
+def _fused_forward(
+    self,
+    hidden_states,
+    labels,
+    temperature,
+    backend,
+    gather_weights=False,
+    cast_hidden_states=False,
+    use_linear_cross_entropy=False,
+):
     weight = self.weight
     # Preserve the VLM adapters' non-FSDP DTensor handling. Under FSDP2,
     # the registered pre-forward hook has already materialized this weight.
@@ -30,10 +39,10 @@ def _fused_forward(self, hidden_states, labels, temperature, backend, gather_wei
         weight = weight.full_tensor().to(hidden_states.device)
     if cast_hidden_states:
         hidden_states = hidden_states.to(weight.dtype)
-    if backend == "triton":
+    if use_linear_cross_entropy or backend == "triton":
         from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
-        return linear_cross_entropy(hidden_states, weight, labels, temperature, "none")
+        return linear_cross_entropy(hidden_states, weight, labels, temperature, "none", impl_backend=backend)
 
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
@@ -43,7 +52,15 @@ def _fused_forward(self, hidden_states, labels, temperature, backend, gather_wei
 
 
 def fused_lm_head_forward(
-    lm_head, hidden_states, labels, temperature, backend, *, gather_weights=False, cast_hidden_states=False
+    lm_head,
+    hidden_states,
+    labels,
+    temperature,
+    backend,
+    *,
+    gather_weights=False,
+    cast_hidden_states=False,
+    use_linear_cross_entropy=False,
 ):
     """Run fused projection inside the head's FSDP2 forward/backward lifecycle.
 
@@ -52,7 +69,7 @@ def fused_lm_head_forward(
     separate entry point so ordinary ``lm_head(hidden_states)`` still returns
     logits and the head keeps its own FSDP communication group.
     """
-    args = (hidden_states, labels, temperature, backend, gather_weights, cast_hidden_states)
+    args = (hidden_states, labels, temperature, backend, gather_weights, cast_hidden_states, use_linear_cross_entropy)
     if isinstance(lm_head, FSDPModule):
         if not hasattr(lm_head, "_verl_fused_forward"):
             lm_head._verl_fused_forward = MethodType(_fused_forward, lm_head)

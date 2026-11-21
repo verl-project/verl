@@ -2,7 +2,7 @@
 
 **Author:** [Yingru Li](https://richardli.xyz/)
 
-Last updated: 09/23/2026.
+Last updated: 10/11/2026.
 
 ---
 
@@ -196,7 +196,7 @@ actor_rollout_ref:
 
 - `verl/trainer/ppo/rollout_corr_helper.py` - Contains `compute_rollout_correction_and_rejection_mask()` and `compute_offpolicy_metrics()`
 - `verl/trainer/ppo/core_algos.py` - Rollout Correction integration with PPO and REINFORCE modes (`compute_policy_loss_bypass_mode()`, `compute_policy_loss_reinforce()`)
-- `verl/trainer/ppo/ray_trainer.py` - Bypass mode implementation (skips `old_log_prob` computation)
+- `verl/trainer/ppo/v1/trainer_base.py` - Bypass mode implementation (skips `old_log_prob` computation)
 - `verl/workers/utils/losses.py` - `ppo_loss` loss function wired to actor `TrainingWorker` via `verl.workers.engine_workers.ActorRolloutRefWorker.init_model`
 - `verl/trainer/ppo/core_algos.py` - `@register_policy_loss("bypass_mode")` policy loss that invokes `compute_rollout_correction_and_rejection_mask` and emits off-policy metrics
 
@@ -299,7 +299,7 @@ Subtract the expected score under the sampler from every token's score
 - Requires `bypass_mode=True` and `loss_type="reinforce"` (raises `ValueError` otherwise)
 - Requires `rollout_is` to be `None` or `"token"` (raises `ValueError` for `"sequence"`) and `rollout_is_batch_normalize=False`
 - Requires `actor_rollout_ref.rollout.topk_log_probs > 0` (sampler top-k log-probs, vLLM only)
-- FSDP actor only; incompatible with `use_fused_kernels` and distillation; single-turn agent loop only
+- FSDP or Megatron actor; incompatible with `use_fused_kernels` and distillation; single-turn agent loop only
 
 Score centering automatically tries to align with the actual sampling support. When the
 rollout provider verifies that the recorded head covers it, the trainer is normalized over
@@ -671,8 +671,13 @@ algorithm:
           score_centering: true
   ```
 
-- Set `actor_rollout_ref.actor.use_fused_kernels: false` (incompatible with fused kernels)
-- v1 trainer (`trainer.use_v1: true`) with an FSDP actor only; single-turn agent loop only
+- Fused kernels are optional. Megatron score centering supports
+  `actor_rollout_ref.model.use_fused_kernels: true` with
+  `actor_rollout_ref.model.fused_kernel_options.impl_backend: tilelang`; use `false` for fused
+  backends that cannot return log-probs for the recorded top-k labels
+- Megatron static `pad_to_length` is supported; the sampler heads and router-replay tensors use
+  the same bucket padding as the student rows. Dynamic context parallelism remains unsupported
+- FSDP or Megatron actor; single-turn agent loop only. Under Megatron tensor parallelism the head log-probs are normalized over the vocab-parallel shards
 - Head payload: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB
   per position), plus one boolean completeness receipt per position
 - The trainer evaluates the head log-probs in chunks of 4096 positions, with an fp32 workspace of roughly `4096 × vocab × 4` bytes
@@ -927,6 +932,8 @@ These metrics cover both:
 
 - **Diagnostic metrics**: KL divergence, perplexity differences (measuring off-policy gap)
 - **Correction statistics**: IS weights, rejection rates (measuring correction applied)
+
+Statistics taken across sequences (means, standard deviations, extrema and fractions of per-sequence values) only count sequences with at least one valid token in `response_mask`, the same rule the rejection sampling metrics use. Rows without valid tokens, such as padding rows that keep micro-batch shapes fixed, do not change them.
 
 #### **Core IS Weight Metrics**
 

@@ -120,6 +120,13 @@ actor_rollout_ref:
           level: level0
           analysis: true
           discrete: false
+          schedule:
+            _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+            skip_first: 0
+            wait: 0
+            warmup: 0
+            active: 0
+            repeat: 0
         torch:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: []
@@ -142,16 +149,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    qat:
-      enable: false
-      mode: w4a16
-      group_size: 16
-      ignore_patterns:
-      - lm_head
-      - embed_tokens
-      - re:.*mlp.gate$
-      activation_observer: static_minmax
-      quantization_config_path: null
   ref:
     optim:
       _target_: verl.workers.config.TorchtitanOptimizerConfig
@@ -281,6 +278,7 @@ actor_rollout_ref:
     ray_actor_max_concurrency: 1024
     enable_chunked_prefill: true
     enable_prefix_caching: true
+    external_kv_cache_invalidation: reset
     logprobs_mode: processed_logprobs
     scheduling_policy: fcfs
     load_format: dummy
@@ -389,6 +387,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.RolloutQuantizationConfig
       linear: null
       moe: null
+      moe_activation: null
       ignore: []
       config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
@@ -497,6 +496,7 @@ data:
   custom_cls:
     path: null
     name: null
+  custom_dataloader: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
   mm_processor_kwargs: {}
@@ -593,6 +593,13 @@ critic:
         level: level0
         analysis: true
         discrete: false
+        schedule:
+          _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+          skip_first: 0
+          wait: 0
+          warmup: 0
+          active: 0
+          repeat: 0
       torch:
         _target_: verl.utils.profiler.config.TorchProfilerToolConfig
         contents: []
@@ -720,6 +727,7 @@ sandbox_fusion:
 reward:
   _target_: verl.workers.config.RewardConfig
   num_workers: 8
+  preset: null
   custom_reward_function:
     path: null
     name: compute_score
@@ -777,6 +785,7 @@ reward:
         _target_: verl.workers.config.RolloutQuantizationConfig
         linear: null
         moe: null
+        moe_activation: null
         ignore: []
         config_file: null
       mtp: null
@@ -946,6 +955,7 @@ trainer:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
       sync_refill_failed_groups: false
+      poll_interval: 2.0
       custom_sampler:
         path: null
         name: null
@@ -990,17 +1000,7 @@ global_profiler:
       strict: false
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
-  rollout:
-    enable: false
-    dump_dir: ~/.verl/rollout_dump
-    steps: []
-    action: cache
   rollout_tq:
-    enable: false
-    dump_dir: ~/.verl/rollout_dump
-    steps: []
-    action: cache
-  async_rollout:
     enable: false
     dump_dir: ~/.verl/rollout_dump
     steps: []

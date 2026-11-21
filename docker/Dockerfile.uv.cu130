@@ -128,16 +128,11 @@ ARG CUDA_VERSION
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
 
-# cuDNN / NCCL — see https://developer.nvidia.com/cudnn-downloads
-# These ARGs control the apt deb versions installed below and MUST match
-# whatever uv resolves into uv.lock. The backend extras don't pin cuDNN /
-# NCCL — torch's wheel pins them transitively (e.g. torch 2.13.0+cu130 ->
-# nvidia-cudnn-cu13==9.20.0.48, nvidia-nccl-cu13==2.29.7). After bumping a
-# torch pin and re-running `python manage_envs.py lock`, grep the resolved
-# versions out of the lockfile and update these ARGs:
-#
-#     grep -E 'nvidia-(cudnn|nccl)-cu13' uv.lock
-ARG NCCL_VERSION=2.29.7-1
+# Base-image NCCL packages published for CUDA 13.0 on both architectures.
+# Debian build suffixes are independent of the NCCL wheel version in uv.lock.
+ARG NCCL_VERSION=2.28.9-1+cuda13.0
+# Keep the system NVSHMEM version aligned with uv.lock.
+ARG NVSHMEM_VERSION=3.4.5
 
 # Source to build from. Override VERL_REF for tags / commits.
 ARG VERL_REPO=https://github.com/verl-project/verl.git
@@ -247,11 +242,8 @@ ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8
 
 # ---------------------------------------------------------------------------
-# cuDNN + NCCL — actively installed following https://developer.nvidia.com/cudnn-downloads
-# The base image is -devel (no cuDNN); we install it explicitly so the version
-# is visible, pinned, and reproducible. These system libs must match the
-# nvidia-cudnn-cu13 / nvidia-nccl-cu13 pip wheels that torch pins transitively
-# in uv.lock (CUDNN_VERSION / NCCL_VERSION ARGs above).
+# System cuDNN / NCCL development libraries for the CUDA base layer.
+# Training environments obtain their pinned runtime wheels from uv.lock.
 # ---------------------------------------------------------------------------
 RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) \
     && apt-get update && apt-get install -y --no-install-recommends --allow-downgrades --allow-change-held-packages \
@@ -259,8 +251,8 @@ RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) \
         libcudnn9-cuda-${CUDA_VERSION_MAJOR} \
         libcudnn9-dev-cuda-${CUDA_VERSION_MAJOR} \
         libcudnn9-headers-cuda-${CUDA_VERSION_MAJOR} \
-        libnccl2=${NCCL_VERSION}+cuda${CUDA_VERSION%.*} \
-        libnccl-dev=${NCCL_VERSION}+cuda${CUDA_VERSION%.*} \
+        libnccl2=${NCCL_VERSION} \
+        libnccl-dev=${NCCL_VERSION} \
     && rm -rf /var/lib/apt/lists/* \
     && echo "=== Installed cuDNN $(dpkg-query -W -f='${Version}' libcudnn9-cuda-${CUDA_VERSION_MAJOR}) ===" \
     && echo "=== Installed NCCL  $(dpkg-query -W -f='${Version}' libnccl2) ==="
@@ -285,6 +277,15 @@ RUN mkdir -p /tmp/gdrcopy && cd /tmp \
 
 # DeepEP IBGDA symlink fix (sglang base).
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
+
+# Make NVSHMEM available independently of runtime uv environments.
+ENV NVSHMEM_DIR=/usr/local/lib/python3.12/dist-packages/nvidia/nvshmem
+RUN python3 -m pip install --break-system-packages --no-cache-dir --no-deps \
+        --only-binary=:all: "nvidia-nvshmem-cu13==${NVSHMEM_VERSION}" \
+    && ln -sfn libnvshmem_host.so.3 "${NVSHMEM_DIR}/lib/libnvshmem_host.so" \
+    && printf '%s\n' "${NVSHMEM_DIR}/lib" > /etc/ld.so.conf.d/nvshmem.conf \
+    && ldconfig
+ENV LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:${LD_LIBRARY_PATH}"
 
 # ---------------------------------------------------------------------------
 # uv — single static binary. We bake the full uv cache from the committed
@@ -390,8 +391,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
 #     uv run --frozen --all-packages --extra sglang --extra megatron \
 #         python3 -m verl.trainer.main_ppo ...
 #
-# The cuDNN / NCCL pip wheels this installs (nvidia-cudnn-cu13 /
-# nvidia-nccl-cu13, from torch's transitive pins) must match the apt debs above.
+# The cuDNN / NCCL runtime wheels are pinned transitively by torch in uv.lock.
 # ---------------------------------------------------------------------------
 FROM prefetch AS final
 

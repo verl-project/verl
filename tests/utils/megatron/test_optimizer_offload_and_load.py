@@ -33,8 +33,12 @@ from verl.utils.megatron_utils import load_megatron_optimizer, offload_megatron_
 SEQUENCE_LENGTH = 64
 
 
-def init_model():
-    """Initialize a small GPT model for the test, wrapped in Megatron DDP."""
+def init_model(bf16_all: bool = False):
+    """Initialize a small GPT model for the test, wrapped in Megatron DDP.
+
+    With ``bf16_all=True`` the model is cast to bf16 in place, matching verl's
+    real pipeline (megatron Float16Module) where every model param is bf16 and
+    the DistributedOptimizer's fp32 shards are leaf copies."""
 
     transformer_config = TransformerConfig(
         num_layers=2,
@@ -50,6 +54,8 @@ def init_model():
         vocab_size=128,
         max_sequence_length=SEQUENCE_LENGTH,
     ).cuda()
+    if bf16_all:
+        gpt_model.bfloat16()
 
     ddp_config = DistributedDataParallelConfig(use_distributed_optimizer=True)
     model_chunk = McoreDDP(transformer_config, ddp_config, gpt_model)
@@ -148,6 +154,97 @@ def test_precision_aware_optimizer_offload_and_load(tmp_path):
             optimizer,
             torch.device("cuda:0"),
         )
+    finally:
+        # Tear down MPU state and torch.distributed.
+        mpu.destroy_model_parallel()
+        dist.destroy_process_group()
+
+
+def init_hdo_optimizer(model, fraction):
+    """Initialize a HybridDeviceOptimizer (HDO) with the given offload fraction."""
+
+    optimizer_config = OptimizerConfig(
+        optimizer="adam",
+        lr=1e-6,
+        min_lr=1e-6,
+        clip_grad=1.0,
+        weight_decay=0.0,
+        use_distributed_optimizer=True,
+        optimizer_cpu_offload=True,
+        optimizer_offload_fraction=fraction,
+        overlap_cpu_optimizer_d2h_h2d=True,
+        bf16=True,
+        params_dtype=torch.bfloat16,
+    )
+    return get_megatron_optimizer(optimizer_config, model)
+
+
+def gpu_sub_optimizer_state_ids(optimizer):
+    """Collect (object id, device) of the GPU sub-optimizer's Adam-moment state
+    tensors (``exp_avg`` / ``exp_avg_sq``) of an HDO — the tensors that must
+    stay on GPU across offload (issue #8237). ``master_param`` is excluded
+    deliberately: it is a weight shard that ``offload_megatron_copy_params``
+    legitimately offloads."""
+
+    opts = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
+    gpu_state = []
+    for opt in opts:
+        hdo = opt.optimizer
+        for sub in hdo.sub_optimizers:
+            for state in sub.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor) and v.is_cuda and k in ("exp_avg", "exp_avg_sq"):
+                        gpu_state.append((id(v), str(v.device)))
+    return gpu_state
+
+
+def test_hdo_optimizer_offload_leaves_gpu_state_untouched(tmp_path):
+    """Regression test for https://github.com/verl-project/verl/issues/8237.
+
+    With optimizer_cpu_offload=True and optimizer_offload_fraction < 1, the
+    HDO's GPU sub-optimizer (FusedAdam) state must stay on GPU across
+    offload_megatron_optimizer: moving it to CPU corrupts its device assumption
+    and crashes the next fused step. Note: this test requires a Megatron-LM
+    version where building a HybridDeviceOptimizer and stepping it works (on
+    megatron-core 0.16.1, a separate Float16Optimizer param_groups bug blocks
+    the first HDO step)."""
+
+    rendezvous_file = tmp_path / "rdzv_hdo"
+
+    torch.cuda.set_device(0)
+    dist.init_process_group(
+        backend="cpu:gloo,cuda:nccl",
+        init_method=f"file://{rendezvous_file}",
+        rank=0,
+        world_size=1,
+    )
+    mpu.initialize_model_parallel()
+    model_parallel_cuda_manual_seed(123)
+
+    try:
+        for fraction in (0.5, 0.0):
+            model_chunks = init_model(bf16_all=True)
+            optimizer = init_hdo_optimizer(model_chunks, fraction)
+
+            # Fully initialize optimizer state via a step on zeroed grads.
+            for model_chunk in model_chunks:
+                model_chunk.zero_grad_buffer()
+            optimizer.zero_grad(set_to_none=False)
+            update_successful, _, _ = optimizer.step()
+            assert update_successful
+
+            # GPU sub-optimizer state must exist on GPU before offload.
+            gpu_state_before = gpu_sub_optimizer_state_ids(optimizer)
+            assert len(gpu_state_before) > 0
+
+            # offload must NOT touch the GPU sub-optimizer's state (issue #8237).
+            offload_megatron_optimizer(optimizer)
+            assert gpu_sub_optimizer_state_ids(optimizer) == gpu_state_before
+
+            # The round trip must still restore the state to GPU after load.
+            load_megatron_optimizer(optimizer)
+            assert len(gpu_sub_optimizer_state_ids(optimizer)) == len(gpu_state_before)
+            assert all(device == "cuda:0" for _, device in gpu_sub_optimizer_state_ids(optimizer))
     finally:
         # Tear down MPU state and torch.distributed.
         mpu.destroy_model_parallel()

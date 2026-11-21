@@ -55,7 +55,7 @@ except ImportError:
             def _raise(*args, **kwargs):
                 raise RuntimeError(
                     f"transfer_queue is not installed. Cannot use tq.{name}(). "
-                    "Please install it by calling `pip install TransferQueue==0.1.11`"
+                    "Please install it by calling `pip install TransferQueue==0.1.12`"
                 )
 
             return _raise
@@ -252,7 +252,7 @@ def _compute_need_collect(dispatch_mode: "dict | Dispatch", args: list) -> bool:
         if collect_mesh_name is None:
             return True
 
-        return args[0].query_collect_info(collect_mesh_name)
+        return args[0].query_collect_info(collect_mesh_name).is_collect
     else:
         # If collect_fn is not a partial, we can't extract mesh_name information
         # Fall back to default behavior (collect data)

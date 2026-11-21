@@ -15,8 +15,11 @@
 import importlib.util
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
+
+import pytest
+import torch
 
 
 def _load_npu_vllm_patch_module():
@@ -28,24 +31,168 @@ def _load_npu_vllm_patch_module():
     return module
 
 
-def test_apply_npu_vllm_patches_accepts_modular_fused_moe(monkeypatch):
-    npu_vllm_patch = _load_npu_vllm_patch_module()
-    monkeypatch.setattr(npu_vllm_patch, "is_torch_npu_available", lambda check_device=False: True)
-    rotary_patch = Mock()
-    monkeypatch.setattr(npu_vllm_patch, "patch_vllm013_rotary_emb", rotary_patch)
+normalize_deepseek_v4_weight_names = _load_npu_vllm_patch_module().normalize_deepseek_v4_weight_names
 
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [
+        ("self_attn.q_a_proj.weight", "self_attn.wq_a.weight"),
+        ("self_attn.kv_proj.weight", "self_attn.wkv.weight"),
+        ("self_attn.kv_a_proj_with_mqa.weight", "self_attn.wkv.weight"),
+        ("self_attn.q_b_proj.weight", "self_attn.wq_b.weight"),
+        ("self_attn.o_a_proj.weight", "self_attn.wo_a.weight"),
+        ("self_attn.o_b_proj.weight", "self_attn.wo_b.weight"),
+        ("self_attn.q_a_norm.weight", "self_attn.q_norm.weight"),
+        ("self_attn.sinks", "self_attn.attn_sink"),
+        ("self_attn.compressor.kv_proj.weight", "self_attn.compressor.wkv.weight"),
+        ("self_attn.compressor.gate_proj.weight", "self_attn.compressor.wgate.weight"),
+        ("self_attn.compressor.kv_norm.weight", "self_attn.compressor.norm.weight"),
+        ("self_attn.compressor.position_bias", "self_attn.compressor.ape"),
+        ("self_attn.compressor.indexer.position_bias", "self_attn.indexer.compressor.ape"),
+        ("self_attn.compressor.indexer.kv_proj.weight", "self_attn.indexer.compressor.wkv.weight"),
+        ("self_attn.compressor.indexer.gate_proj.weight", "self_attn.indexer.compressor.wgate.weight"),
+        ("self_attn.compressor.indexer.q_b_proj.weight", "self_attn.indexer.wq_b.weight"),
+        ("self_attn.compressor.indexer.kv_norm.weight", "self_attn.indexer.compressor.norm.weight"),
+        ("self_attn.compressor.indexer.extra.weight", "self_attn.indexer.extra.weight"),
+        ("self_attn.indexer.scorer.weights_proj.weight", "self_attn.indexer.weights_proj.weight"),
+        ("attn_hc.fn", "hc_attn_fn"),
+        ("attn_hc.base", "hc_attn_base"),
+        ("attn_hc.scale", "hc_attn_scale"),
+        ("ffn_hc.fn", "hc_ffn_fn"),
+        ("ffn_hc.base", "hc_ffn_base"),
+        ("ffn_hc.scale", "hc_ffn_scale"),
+        ("mlp.experts.0.gate_proj.weight", "mlp.experts.0.gate_proj.weight"),
+    ],
+)
+def test_deepseek_v4_weight_name_mapping(source, target):
+    model = SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v4"))
+    tensor = torch.ones(2)
+    weights = [(f"model.layers.0.{source}", tensor)]
+
+    normalized = list(normalize_deepseek_v4_weight_names(model, weights))
+
+    assert normalized[0][0] == f"model.layers.0.{target}"
+    assert normalized[0][1] is tensor
+    assert weights[0][0] == f"model.layers.0.{source}"
+    assert list(normalize_deepseek_v4_weight_names(model, normalized))[0][0] == normalized[0][0]
+
+
+@pytest.mark.parametrize("prefix", ["", "model."])
+@pytest.mark.parametrize("suffix", ["fn", "base", "scale"])
+def test_deepseek_v4_hc_head_weight_name_mapping(prefix, suffix):
+    model = SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v4"))
+    tensor = torch.ones(2)
+
+    normalized = list(normalize_deepseek_v4_weight_names(model, [(f"{prefix}hc_head.hc_{suffix}", tensor)]))
+
+    assert normalized[0][0] == f"{prefix}hc_head_{suffix}"
+    assert normalized[0][1] is tensor
+
+
+@pytest.mark.parametrize("model_type", [None, "deepseek_v3", "qwen3"])
+def test_deepseek_v4_name_mapping_preserves_other_models(model_type):
+    model = SimpleNamespace(config=SimpleNamespace(model_type=model_type))
+    weights = [("model.layers.0.self_attn.q_a_proj.weight", torch.ones(2))]
+
+    assert normalize_deepseek_v4_weight_names(model, weights) is weights
+    assert normalize_deepseek_v4_weight_names(object(), weights) is weights
+
+
+@pytest.mark.parametrize("weight_count", [0, 3])
+def test_deepseek_v4_weight_name_mapping_consumes_weights_lazily(weight_count):
+    model = SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v4"))
+    tensor = torch.ones(2)
+    consumed = []
+
+    def weights():
+        for index in range(weight_count):
+            consumed.append(index)
+            yield f"model.layers.{index}.self_attn.q_a_proj.weight", tensor
+
+    normalized = iter(normalize_deepseek_v4_weight_names(model, weights()))
+    assert consumed == []
+    for index in range(weight_count):
+        name, normalized_tensor = next(normalized)
+        assert consumed == list(range(index + 1))
+        assert name == f"model.layers.{index}.self_attn.wq_a.weight"
+        assert normalized_tensor is tensor
+    with pytest.raises(StopIteration):
+        next(normalized)
+
+
+def test_deepseek_v4_load_weights_patch_is_idempotent_and_accepts_generators():
+    patch_module = _load_npu_vllm_patch_module()
+    observed = []
+
+    class Model:
+        config = SimpleNamespace(model_type="deepseek_v4")
+
+        def load_weights(self, weights, **kwargs):
+            observed.append((list(weights), kwargs))
+            return {"loaded"}
+
+    class OtherModel:
+        def load_weights(self, weights):
+            return weights
+
+    other_loader = OtherModel.load_weights
+    assert patch_module._patch_deepseek_v4_weight_loader(Model)
+    assert not patch_module._patch_deepseek_v4_weight_loader(Model)
+    tensor = torch.ones(2)
+    weights = iter([("model.layers.0.self_attn.q_a_proj.weight", tensor)])
+    assert Model().load_weights(weights, extra=True) == {"loaded"}
+    assert len(observed) == 1
+    assert observed[0][0][0][0] == "model.layers.0.self_attn.wq_a.weight"
+    assert observed[0][0][0][1] is tensor
+    assert observed[0][1] == {"extra": True}
+    assert OtherModel.load_weights is other_loader
+
+
+def test_deepseek_v4_load_weights_patch_preserves_lazy_consumption():
+    patch_module = _load_npu_vllm_patch_module()
+    consumed = []
+    tensor = torch.ones(2)
+
+    def weights():
+        for index in range(3):
+            consumed.append(index)
+            yield f"model.layers.{index}.self_attn.q_a_proj.weight", tensor
+
+    class Model:
+        config = SimpleNamespace(model_type="deepseek_v4")
+
+        def load_weights(self, weights):
+            assert consumed == []
+            name, loaded_tensor = next(iter(weights))
+            assert consumed == [0]
+            assert name == "model.layers.0.self_attn.wq_a.weight"
+            assert loaded_tensor is tensor
+            return {name}
+
+    assert patch_module._patch_deepseek_v4_weight_loader(Model)
+    assert Model().load_weights(weights()) == {"model.layers.0.self_attn.wq_a.weight"}
+    assert consumed == [0]
+
+
+def test_apply_npu_vllm_patches_installs_every_patch(monkeypatch):
+    patch_module = _load_npu_vllm_patch_module()
+    monkeypatch.setattr(patch_module, "is_torch_npu_available", lambda check_device=False: True)
+    patches = {}
+    for name in (
+        "patch_vllm_ascend_v030_sched_yield",
+        "patch_vllm_ascend_v030_fia_decode_mask",
+        "patch_vllm_ascend_deepseek_v4_weight_loader",
+        "patch_vllm030_rotary_emb",
+    ):
+        patches[name] = Mock()
+        monkeypatch.setattr(patch_module, name, patches[name])
+    monkeypatch.setattr(patch_module, "_glm52_patch_enabled", lambda: False)
     vllm = ModuleType("vllm")
-    model_executor = ModuleType("vllm.model_executor")
-    layers = ModuleType("vllm.model_executor.layers")
-    fused_moe = ModuleType("vllm.model_executor.layers.fused_moe")
-    fused_moe.FusedMoEFactory = lambda *args, **kwargs: None
-    layers.fused_moe = fused_moe
-
+    vllm.__version__ = "0.30.0"
     monkeypatch.setitem(sys.modules, "vllm", vllm)
-    monkeypatch.setitem(sys.modules, "vllm.model_executor", model_executor)
-    monkeypatch.setitem(sys.modules, "vllm.model_executor.layers", layers)
-    monkeypatch.setitem(sys.modules, "vllm.model_executor.layers.fused_moe", fused_moe)
 
-    npu_vllm_patch.apply_npu_vllm_patches()
+    patch_module.apply_npu_vllm_patches()
 
-    rotary_patch.assert_called_once_with()
+    for installed_patch in patches.values():
+        installed_patch.assert_called_once_with()

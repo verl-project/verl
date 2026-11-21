@@ -13,9 +13,11 @@
 # limitations under the License.
 import random
 
+import pytest
 import torch
 from tensordict import TensorDict
 
+from verl.utils import tensordict_utils as tu
 from verl.workers.utils.padding import (
     build_attention_mask_from_nested,
     embeds_padding_2_no_padding,
@@ -24,6 +26,60 @@ from verl.workers.utils.padding import (
     response_from_nested,
     response_to_nested,
 )
+
+
+@pytest.mark.parametrize("num_components", [None, 3, 4], ids=["text", "mrope3", "mrope4"])
+@pytest.mark.parametrize(
+    "lengths",
+    [(575,) * 8, (580,) * 8, (7, 11, 5), (575,), (8, 8)],
+    ids=["equal575", "equal580", "unequal", "single", "square"],
+)
+def test_position_ids_sequence_axis_survives_microbatch_selection(num_components, lengths):
+    """Unpadding and microbatch selection must preserve each sample's position IDs.
+
+    Equal-length mRoPE samples must pack along the token axis, including the
+    single-sample and square cases where inferring that axis is ambiguous.
+    """
+    batch_size = len(lengths)
+    width = max(lengths) + 4
+    input_ids = torch.arange(batch_size * width).reshape(batch_size, width)
+    attention_mask = torch.zeros(batch_size, width, dtype=torch.long)
+    for i, length in enumerate(lengths):
+        start = 1 + i % 3
+        attention_mask[i, start : start + length] = 1
+
+    if num_components is None:
+        position_ids = input_ids.clone()
+    else:
+        # Distinct values expose component/token transposes and sample reordering.
+        position_ids = torch.arange(batch_size * num_components * width).reshape(batch_size, num_components, width)
+    expected = [position_ids[i, ..., attention_mask[i].bool()].clone() for i in range(batch_size)]
+    data = TensorDict(
+        {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "response_mask": attention_mask.clone(),
+            "position_ids": position_ids,
+        },
+        batch_size=[batch_size],
+    )
+
+    data = left_right_2_no_padding(data)
+    # Follow the training path: the legacy metadata fix must not break unbind().
+    tu.maybe_fix_3d_position_ids(data)
+    order = [batch_size - 1, 0, batch_size - 1]
+    selected = tu.index_select_tensor_dict(data, order)
+    for actual, index in zip(selected["position_ids"].unbind(), order, strict=True):
+        torch.testing.assert_close(actual, expected[index])
+
+    positions = data["position_ids"]
+    assert positions.ndim == position_ids.ndim
+    assert positions.shape[0] == batch_size
+    if num_components is not None:
+        assert positions.shape[1] == num_components
+    assert positions.offsets().diff().tolist() == list(lengths)
+    for actual, wanted in zip(positions.unbind(), expected, strict=True):
+        torch.testing.assert_close(actual, wanted)
 
 
 def test_padding_conversion_with_log_probs():

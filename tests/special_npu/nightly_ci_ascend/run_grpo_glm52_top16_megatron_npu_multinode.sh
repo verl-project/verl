@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -x
 
+# Use the default HCCL executor with inter-node RoCE
+unset HCCL_OP_EXPANSION_MODE # workaround for https://gitcode.com/cann/hcomm/issues/1084
+export HCCL_INTER_HCCS_DISABLE=TRUE # workaround for https://gitcode.com/cann/hcomm/issues/1083
+
 # ---- user-adjustable ----
 # # 0. download HF checkpoint
-hf_weights=${HF_WEIGHTS:-${HOME}/.cache/modelscope/hub/models/glm52_top16_dapo_17k_tuned_weights}
+hf_weights=${HF_WEIGHTS:-${HOME}/.cache/modelscope/hub/models/lxb007981/GLM-5.2-top16-DAPO-17k-Tuned}
 
 echo "[info] hf_weights=${hf_weights}"
 
@@ -202,13 +206,17 @@ TRAINER=(
     trainer.balance_batch=${balance_batch}
     trainer.device=npu
     trainer.val_before_train=False
-    trainer.total_training_steps=15
+    trainer.total_training_steps=10
 )
 
 EXTRA=(
-    --config-name='ppo_megatron_trainer'
+    # Remove inherited HOST/AIV before Ray worker Python startup too.
+    "++ray_kwargs.ray_init.runtime_env.py_executable='env -u HCCL_OP_EXPANSION_MODE python3'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.HCCL_INTER_HCCS_DISABLE='TRUE'"
     "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_VLLM_ASCEND_GLM52_PATCH='1'"
     actor_rollout_ref.nccl_timeout=7200
+    +transfer_queue.backend.SimpleStorage.required_node_resource=CPU
+    --config-name='ppo_megatron_trainer' # need to be the last one, as it will split the positional overrides list
 )
 
 ########################### launch ###########################

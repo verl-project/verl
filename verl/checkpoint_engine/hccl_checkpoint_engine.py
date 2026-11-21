@@ -29,12 +29,8 @@ from verl.checkpoint_engine.base import (
     merge_weight_chunks,
     split_weight_chunks,
 )
-from verl.utils.device import is_torch_npu_available
 from verl.utils.distributed import stateless_init_process_group
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
-
-if not is_torch_npu_available(check_device=False):
-    raise ImportError("HCCLCheckpointEngine is unavailable because the torch.npu module is not available.")
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -149,7 +145,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
         """Destroy the HCCL process group if rebuild_group is True."""
         if self.rebuild_group:
             if self.rank >= 0:
-                self.pyhccl.destroyComm(self.pyhccl.comm)
+                self.pyhccl.close()
                 self.pyhccl = None
             self.rank = None
             self.world_size = None

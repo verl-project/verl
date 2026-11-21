@@ -85,7 +85,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev4"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev5"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -144,6 +144,11 @@ jobs:
           ENABLE_CONTINUOUS_TOKEN=1 ROLLOUT_NAME=sglang $UV_RUN pytest -svvv \
             tests/experimental/agent_loop/test_basic_agent_loop.py::test_single_turn \
             tests/experimental/agent_loop/test_basic_agent_loop.py::test_tool_agent
+      - name: Test SGLang salted external KV cache invalidation
+        run: |
+          $UV_RUN ray stop --force
+          $UV_RUN pytest -s -x tests/workers/rollout/test_prefix_cache_versioning_on_cpu.py
+          $UV_RUN pytest tests/workers/rollout/rollout_sglang/test_sglang_prefix_cache_versioning.py -v -s
 
   sgl_checkpoint_engine:
     needs: setup
