@@ -721,6 +721,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
 
+            # Determine sleep_level early so resume() knows what was released.
+            # sleep_level=1 (adapter path): only kv_cache is released during sleep,
+            # weights stay in GPU.  sleep_level=2 (default/merge): both released.
+            lora_rank = model_config.lora.get("rank", 0) or getattr(model_config, "lora_rank", 0)
+            lora_as_adapter = lora_rank > 0 and not self.peft_merge
+            if hasattr(self, "rollout") and lora_as_adapter:
+                self.rollout.sleep_level = 1
+
         # 4. build checkpoint engine
         if "actor" in self.role:
             checkpoint_engine_config = omega_conf_to_dataclass(self.config.rollout.checkpoint_engine)
@@ -853,7 +861,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:
-            self.rollout.sleep_level = 1
+            self.rollout.sleep_level = 1  # reinforce for subsequent iterations
             do_lora_base_sync = not self.base_sync_done
 
         # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
