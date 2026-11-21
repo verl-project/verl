@@ -5,7 +5,7 @@ Model Engine
 
 Author: `Chi Zhang <https://github.com/vermouth1992>`_
 
-Last updated: 09/25/2025.
+Last updated: 09/30/2026.
 
 Current Support Matrix
 ----------------------
@@ -27,6 +27,27 @@ Current Support Matrix
 -  We monkey patch attention function to support ulysses
 -  We monkey patch VLM models to support FSDP with mixed data with and
    without images
+
+FSDP compute precision
+----------------------
+
+For the ``fsdp`` and ``fsdp2`` model engines, ``engine.dtype`` (or
+``actor_rollout_ref.actor.fsdp_config.dtype`` in PPO) selects the mixed-precision
+parameter and autocast dtype. The default is ``bfloat16``. Setting it to
+``float16`` also enables gradient scaling; ``float32`` disables autocast.
+This is separate from ``model_dtype``, which controls model initialization.
+
+An explicit ``mixed_precision.param_dtype`` takes precedence over ``dtype``.
+An empty or partial ``mixed_precision`` mapping still inherits ``dtype`` for
+``param_dtype``. Reduction and buffer dtypes retain their ``float32`` defaults
+unless explicitly configured; the buffer dtype applies to FSDP1.
+
+For example, to select FP16 for both the FSDP actor and rollout:
+
+.. code-block:: bash
+
+   actor_rollout_ref.actor.fsdp_config.dtype=float16 \
+   actor_rollout_ref.rollout.dtype=float16
 
 Class Hierarchy
 ---------------
