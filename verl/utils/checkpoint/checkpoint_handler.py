@@ -119,7 +119,10 @@ class CheckpointHandler:
             dataloader_local_path = os.path.join(local_global_step_folder, f"data_{dp_rank}.pt")
 
             # Use StatefulDataLoader's built-in state dict functionality
-            dataloader_state_dict = self.train_dataloader.state_dict()
+            dataloader_state_dict = dict(self.train_dataloader.state_dict())
+            # Keep the saved epoch length with the state it describes. A resumed
+            # loader may have a different length after a batch-size/DP change.
+            dataloader_state_dict["_verl_steps_per_epoch"] = len(self.train_dataloader)
             torch.save(dataloader_state_dict, dataloader_local_path)
             print(f"Saved dataloader state to: {dataloader_local_path}")
 
@@ -162,19 +165,42 @@ class CheckpointHandler:
 
         # Use checkpoint manager to load model state
         self.engine.load_checkpoint(checkpoint_path)
-        # Always load dataloader state for StatefulDataLoader
-        self._load_dataloader_state(checkpoint_path)
+        # Restore the dataloader position unless the trainer starts a new epoch.
+        self._load_dataloader_state(checkpoint_path, resume_step)
 
         return resume_step
 
-    def _load_dataloader_state(self, checkpoint_path: str):
+    def _load_dataloader_state(self, checkpoint_path: str, resume_step: int):
         """Load dataloader state from checkpoint"""
         dp_rank = self.dp_rank
         dataloader_path = os.path.join(checkpoint_path, f"data_{dp_rank}.pt")
 
         if os.path.exists(dataloader_path):
-            # Use StatefulDataLoader's built-in state dict functionality
             dataloader_state_dict = torch.load(dataloader_path, map_location="cpu", weights_only=False)
+            saved_steps_per_epoch = dataloader_state_dict.pop("_verl_steps_per_epoch", None)
+            steps_per_epoch = len(self.train_dataloader)
+            if saved_steps_per_epoch == steps_per_epoch and steps_per_epoch > 0:
+                if resume_step > 0 and resume_step % steps_per_epoch == 0:
+                    # The trainer starts the next epoch; restoring an exhausted
+                    # iterator would skip that epoch without running any updates.
+                    return
+            else:
+                reason = (
+                    "No saved batches per epoch in the dataloader checkpoint"
+                    if saved_steps_per_epoch is None
+                    else f"The number of batches per epoch changed ({saved_steps_per_epoch} -> {steps_per_epoch})"
+                )
+                log_with_rank(
+                    f"{reason}; cannot infer an epoch boundary safely. Restoring the saved dataloader state "
+                    "with the existing loader semantics. Exact resumption with changed data or topology "
+                    "is not guaranteed.",
+                    logger=logger,
+                    rank=self.rank,
+                    level=logging.WARNING,
+                    log_only_rank_0=True,
+                )
+
+            # Use StatefulDataLoader's built-in state dict functionality
             self.train_dataloader.load_state_dict(dataloader_state_dict)
 
             log_with_rank(
