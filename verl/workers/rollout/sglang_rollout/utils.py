@@ -221,16 +221,6 @@ async def get_named_tensor_buckets(
     # tensor by its sibling -- nothing is dropped.
     staged: dict = {}
 
-    def _place(entries):
-        """Put an indivisible run of entries in a bucket, cutting before it if
-        it would not fit rather than partway through."""
-        nonlocal current_bucket, current_size
-        total = sum(sz for _, _, sz in entries)
-        if current_bucket and current_size + total > bucket_bytes:
-            out, current_bucket, current_size = current_bucket, [], 0
-            return out, entries
-        return None, entries
-
     async for name, tensor in ensure_async_iterator(iterable):
         tensor_size = tensor.element_size() * tensor.numel()
         match = _fusion_key(name, fusion_groups)
@@ -239,18 +229,30 @@ async def get_named_tensor_buckets(
             key = (prefix, group_index)
             slot = staged.setdefault(key, [])
             slot.append((name, _compact_for_bucket(tensor), tensor_size))
+            del tensor
             if len(slot) < expected_size:
+                del slot
                 continue
             entries = staged.pop(key)
+            del slot
+            total = sum(sz for _, _, sz in entries)
         else:
-            entries = [(name, _compact_for_bucket(tensor), tensor_size)]
+            entries = None
+            total = tensor_size
 
-        flushed, entries = _place(entries)
-        if flushed:
-            yield flushed
-        for n, t, sz in entries:
-            current_bucket.append((n, t))
-            current_size += sz
+        if current_bucket and current_size + total > bucket_bytes:
+            yield current_bucket
+            # The consumer has finished its IPC update. Drop the old bucket
+            # before compacting the next ordinary tensor or fetching more weights.
+            current_bucket = []
+            current_size = 0
+        if entries is None:
+            current_bucket.append((name, _compact_for_bucket(tensor)))
+            del tensor
+        else:
+            current_bucket.extend((n, t) for n, t, _ in entries)
+        current_size += total
+        del entries
 
     if staged:
         raise ValueError(f"fused parameter groups never completed in this sync: {sorted(staged)}")
