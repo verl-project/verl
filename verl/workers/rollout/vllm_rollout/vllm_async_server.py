@@ -732,7 +732,7 @@ class vLLMHttpServer:
         )
         if keep_namespace:
             if cache_salt is None:
-                cache_salt = str(start_global_steps)
+                cache_salt = f"{self.config.prefix_cache_namespace}:{start_global_steps}"
         else:
             cache_salt = prefix_cache_salt(self.config, start_global_steps)
         if cache_salt is not None:

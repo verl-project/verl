@@ -54,7 +54,7 @@ By default, weight synchronization aborts in-flight requests and retries them wi
 
 Tokens generated after a weight switch use the new weights with the retained historical KV. This is a mixed-version trajectory, not the result of recomputing the full context with the new weights. Existing routing records describe the original forwards; new tokens use the updated router. The reported minimum and maximum versions bound the request's lifetime, including time spent queued, rather than identifying an exact version for each token.
 
-When preserving KV, prefix caching stays enabled and `prefix_cache_mode: versioned` uses the weight version at the first generation as the task's cache namespace. New tasks after a weight update use a new namespace; existing tool-agent tasks keep theirs across turns. `shared` allows new tasks to reuse prefixes from earlier weight versions. Setting `enable_prefix_caching: False` disables sharing while still retaining each active request's KV. With `preserve_kv_cache: False`, prefix caching retains its existing behavior and `prefix_cache_mode` is unused.
+When preserving KV, prefix caching stays enabled and `prefix_cache_mode: versioned` uses the weight version at the first generation as the task's cache namespace. Namespaces are scoped to the run. New tasks after a weight update use a new namespace; existing tool-agent tasks keep theirs across turns. `shared` allows new tasks to reuse prefixes from earlier weight versions. Setting `enable_prefix_caching: False` disables sharing while still retaining each active request's KV. With `preserve_kv_cache: False`, prefix caching retains its existing behavior and `prefix_cache_mode` is unused.
 
 ```yaml
 actor_rollout_ref:

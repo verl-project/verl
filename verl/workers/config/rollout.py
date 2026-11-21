@@ -322,7 +322,7 @@ class RolloutConfig(BaseConfig):
     # "reset" or "salt"; see rollout.yaml.
     external_kv_cache_invalidation: str = "reset"
 
-    # Run-unique part of the cache salt under "salt", filled in by RolloutReplica. Internal.
+    # Run-unique part of the cache salt, filled in by RolloutReplica. Internal.
     prefix_cache_namespace: Optional[str] = None
 
     # Retain standalone vLLM requests and KV across weight updates.

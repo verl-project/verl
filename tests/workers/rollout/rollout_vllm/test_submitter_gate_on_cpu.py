@@ -500,6 +500,7 @@ def test_keep_pause_parks_late_arrivals_until_the_new_weights_are_live(monkeypat
             response_length=16,
             preserve_kv_cache=True,
             enable_prefix_caching=True,
+            prefix_cache_namespace="run",
         )
 
         await server.pause_generation()
@@ -516,7 +517,7 @@ def test_keep_pause_parks_late_arrivals_until_the_new_weights_are_live(monkeypat
 
         assert output.extra_fields["min_global_steps"] == 8
         assert output.extra_fields["max_global_steps"] == 8
-        assert output.extra_fields["cache_salt"] == "8"
+        assert output.extra_fields["cache_salt"] == "run:8"
 
     asyncio.run(main())
 
@@ -553,15 +554,16 @@ def test_prefix_cache_namespace_across_weight_updates(monkeypatch, mode, enabled
             preserve_kv_cache=True,
             enable_prefix_caching=enabled,
             prefix_cache_mode=mode,
+            prefix_cache_namespace="run",
         )
         first = await server.generate([1, 2, 3], {}, "first")
         salted = enabled and mode == "versioned"
-        assert first.extra_fields.get("cache_salt") == ("7" if salted else None)
+        assert first.extra_fields.get("cache_salt") == ("run:7" if salted else None)
         server.global_steps = 8
         await server.generate([1, 2, 3], {}, "new")
         await server.generate([1, 2, 3, 5], {}, "next-turn", cache_salt=first.extra_fields.get("cache_salt"))
         salts = [prompt.get("cache_salt") for prompt in server.engine.prompts]
-        assert salts == (["7", "8", "7"] if salted else [None, None, None])
+        assert salts == (["run:7", "run:8", "run:7"] if salted else [None, None, None])
 
     asyncio.run(main())
 

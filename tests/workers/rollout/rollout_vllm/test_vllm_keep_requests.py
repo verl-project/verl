@@ -530,9 +530,10 @@ async def _exercise_tool_loops(model_path):
     for turn in turns:
         sessions.setdefault(turn["session_id"], []).append(turn)
     assert len(sessions) == 5
+    namespace = replica.config.prefix_cache_namespace
     for index, session_turns in enumerate(sessions.values()):
         first, second = session_turns
-        expected_salt = "2" if index == 4 else "0"
+        expected_salt = f"{namespace}:2" if index == 4 else f"{namespace}:0"
         assert first["input_salt"] is None
         assert second["input_salt"] == first["cache_salt"] == second["cache_salt"] == expected_salt
         assert second["num_cached_tokens"] > 0
@@ -546,8 +547,8 @@ async def _exercise_tool_loops(model_path):
     for output in outputs:
         assert output.num_turns == 4
         assert sum(output.response_mask) == 512
-        assert output.extra_fields["cache_salt"] == "0"
+        assert output.extra_fields["cache_salt"] == f"{namespace}:0"
         assert output.extra_fields["min_global_steps"] == 0
         assert output.extra_fields["max_global_steps"] == 2
-    assert fresh.extra_fields["cache_salt"] == "2"
+    assert fresh.extra_fields["cache_salt"] == f"{namespace}:2"
     assert fresh.extra_fields["min_global_steps"] == fresh.extra_fields["max_global_steps"] == 2
