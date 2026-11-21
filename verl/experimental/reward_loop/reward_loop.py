@@ -267,7 +267,12 @@ class RewardLoopWorker:
         else:
             raise NotImplementedError(f"RewardLoopManager does not support {engine_name}")
 
-        return {"reward_score": rm_score}
+        # Return both fields required by the reward-manager result contract. The async
+        # consumer (AgentLoopWorker._compute_score) reads result["reward_extra_info"]
+        # unconditionally, so a DisRM, which has no extra metrics, must still return an
+        # empty dict here or async scoring raises KeyError and no training batch is
+        # produced (see issue #7368).
+        return {"reward_score": rm_score, "reward_extra_info": {}}
 
 
 class RewardLoopManager:
