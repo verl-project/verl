@@ -110,6 +110,14 @@ def _build_ops_implementation_config(engine_config: VeOmniEngineConfig) -> OpsIm
 class VeOmniEngine(FSDPEngine):
     _veomni_handles_position_ids = True
 
+    def _get_forward_autocast_context(self):
+        # Both LM and value heads must honor this setting, including when the
+        # caller already enabled AMP. Checkpoint recomputation needs the same
+        # activation dtype as the original forward pass.
+        if not self.engine_config.enable_autocast:
+            return torch.autocast(device_type=get_device_name(), enabled=False)
+        return super()._get_forward_autocast_context()
+
     def _apply_veomni_input_transforms(self, model_inputs: dict, micro_batch: TensorDict):
         """Apply VeOmni-specific input transforms shared by LM and value heads.
 
@@ -943,13 +951,6 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
 
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
-    def _get_forward_autocast_context(self):
-        # Disable inherited AMP too; Qwen4-Exp checkpoint recomputation must
-        # use the same activation dtype as its original forward pass.
-        if not self.engine_config.enable_autocast:
-            return torch.autocast(device_type=get_device_name(), enabled=False)
-        return super()._get_forward_autocast_context()
-
     def prepare_model_inputs(self, micro_batch: TensorDict):
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)

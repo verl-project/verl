@@ -28,3 +28,22 @@ def test_plain_fsdp_uses_its_own_dtype(monkeypatch, dtype):
     engine.engine_config = SimpleNamespace(enable_autocast=False)
     with engine._get_forward_autocast_context():
         assert torch.is_autocast_enabled("cpu") == (dtype == torch.bfloat16)
+
+
+@pytest.mark.parametrize("engine_name", ["VeOmniEngineWithLMHead", "VeOmniEngineWithValueHead"])
+@pytest.mark.parametrize("enable_autocast", [False, True])
+def test_veomni_heads_honor_autocast_setting_inside_outer_amp(monkeypatch, engine_name, enable_autocast):
+    pytest.importorskip("veomni")
+    from verl.workers.engine.veomni import transformer_impl as veomni
+
+    monkeypatch.setattr(fsdp, "get_device_name", lambda: "cpu")
+    monkeypatch.setattr(veomni, "get_device_name", lambda: "cpu")
+    engine = object.__new__(getattr(veomni, engine_name))
+    engine.engine_config = SimpleNamespace(enable_autocast=enable_autocast)
+    inputs = torch.ones(2, 2)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        with engine._get_forward_autocast_context():
+            output = inputs @ inputs
+            assert torch.is_autocast_enabled("cpu") == enable_autocast
+        assert torch.is_autocast_enabled("cpu")
+    assert output.dtype == (torch.bfloat16 if enable_autocast else torch.float32)
