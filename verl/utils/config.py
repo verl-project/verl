@@ -117,6 +117,109 @@ def _validate_score_centering_config(config: DictConfig) -> None:
         raise ValueError("score centering cannot be combined with distillation.")
 
 
+def _validate_parallel_and_memory_config(config: DictConfig, n_gpus: int) -> None:
+    """Catch common parallel-layout and memory misconfigurations before model load.
+
+    All checks are pure config arithmetic, so they fail fast (before any potentially
+    large weights are loaded) with actionable messages instead of deep engine errors.
+    """
+    # 1. basic topology sanity
+    n_gpus_per_node = config.trainer.n_gpus_per_node
+    nnodes = config.trainer.nnodes
+    if not (isinstance(n_gpus_per_node, int) and n_gpus_per_node >= 1):
+        raise ValueError(
+            f"[config] trainer.n_gpus_per_node must be a positive integer, got {n_gpus_per_node}. "
+            "Set it to the number of GPUs visible on each node (e.g. 1 for single-GPU runs)."
+        )
+    if not (isinstance(nnodes, int) and nnodes >= 1):
+        raise ValueError(
+            f"[config] trainer.nnodes must be a positive integer, got {nnodes}. Set it to 1 for single-node runs."
+        )
+
+    # 2. actor mini-batch must evenly split the prompt batch.
+    # Both trainers rescale ppo_mini_batch_size by rollout.n and use it to split
+    # train_batch_size * rollout.n samples, so train_batch_size must be a multiple
+    # of ppo_mini_batch_size.
+    train_batch_size = config.data.train_batch_size
+    mini_batch_size = config.actor_rollout_ref.actor.get("ppo_mini_batch_size", None)
+    if isinstance(train_batch_size, int) and isinstance(mini_batch_size, int) and mini_batch_size > 0:
+        if train_batch_size % mini_batch_size != 0:
+            raise ValueError(
+                f"[config] data.train_batch_size ({train_batch_size}) must be divisible by "
+                f"actor_rollout_ref.actor.ppo_mini_batch_size ({mini_batch_size}); "
+                f"{train_batch_size} % {mini_batch_size} = {train_batch_size % mini_batch_size}. "
+                "The actor update splits train_batch_size * rollout.n samples into chunks of "
+                "ppo_mini_batch_size * rollout.n, so pick a mini-batch size that divides the batch."
+            )
+
+    # 3. sequence parallelism must divide the total GPU budget
+    actor_cfg = config.actor_rollout_ref.actor
+    sp_candidates = [
+        actor_cfg.get("ulysses_sequence_parallel_size", 1),
+        actor_cfg.get("fsdp_config", {}).get("ulysses_sequence_parallel_size", 1),
+    ]
+    sp_size = max((v for v in sp_candidates if isinstance(v, int)), default=1)
+    if sp_size > 1:
+        if n_gpus % sp_size != 0:
+            raise ValueError(
+                f"[config] n_gpus ({n_gpus}) must be divisible by the actor ulysses sequence parallel size "
+                f"({sp_size}); {n_gpus} % {sp_size} != 0. Lower "
+                "actor_rollout_ref.actor.ulysses_sequence_parallel_size to a divisor of the GPU count "
+                "or add more GPUs."
+            )
+
+    # 4. rollout engine parallelism vs. device count (colocated hybrid engine only;
+    #    separate deployment topologies are validated by the v1 separate-async setup)
+    if config.actor_rollout_ref.get("hybrid_engine", True):
+        rollout_cfg = config.actor_rollout_ref.rollout
+        tp_size = rollout_cfg.get("tensor_model_parallel_size", 1)
+        dp_size = rollout_cfg.get("data_parallel_size", 1)
+        if isinstance(tp_size, int) and isinstance(dp_size, int):
+            if not (tp_size >= 1 and dp_size >= 1):
+                raise ValueError(
+                    f"[config] actor_rollout_ref.rollout.tensor_model_parallel_size ({tp_size}) and "
+                    f"data_parallel_size ({dp_size}) must both be >= 1."
+                )
+            if n_gpus % (tp_size * dp_size) != 0:
+                raise ValueError(
+                    f"[config] n_gpus ({n_gpus} = n_gpus_per_node {n_gpus_per_node} x nnodes {nnodes}) must be "
+                    f"divisible by actor_rollout_ref.rollout.tensor_model_parallel_size * data_parallel_size "
+                    f"({tp_size} * {dp_size} = {tp_size * dp_size}); otherwise the rollout engine cannot be "
+                    f"sharded across the GPUs. Use a tensor_model_parallel_size that divides {n_gpus} "
+                    "(e.g. 1 on a single GPU)."
+                )
+            if tp_size > n_gpus_per_node:
+                raise ValueError(
+                    f"[config] actor_rollout_ref.rollout.tensor_model_parallel_size ({tp_size}) must not exceed "
+                    f"trainer.n_gpus_per_node ({n_gpus_per_node}): one inference engine shard never spans "
+                    "multiple nodes. Lower tensor_model_parallel_size or raise n_gpus_per_node."
+                )
+
+    # 5. rollout memory share is a fraction in (0, 1], not a GB amount
+    util = config.actor_rollout_ref.rollout.get("gpu_memory_utilization", None)
+    if isinstance(util, int | float):
+        if not (0 < util <= 1):
+            raise ValueError(
+                f"[config] actor_rollout_ref.rollout.gpu_memory_utilization must be a fraction in (0, 1], "
+                f"got {util}. It is a share of total GPU memory (0.4 means 40%), not a GB value — "
+                "e.g. write 0.4 instead of 40."
+            )
+
+    # 6. max_model_len must fit prompt + response when explicitly set
+    max_model_len = config.actor_rollout_ref.rollout.get("max_model_len", None)
+    max_prompt_length = config.data.get("max_prompt_length", None)
+    max_response_length = config.data.get("max_response_length", None)
+    if max_model_len and isinstance(max_model_len, int):
+        if isinstance(max_prompt_length, int) and isinstance(max_response_length, int):
+            if max_model_len < max_prompt_length + max_response_length:
+                raise ValueError(
+                    f"[config] actor_rollout_ref.rollout.max_model_len ({max_model_len}) must be >= "
+                    f"data.max_prompt_length + data.max_response_length "
+                    f"({max_prompt_length} + {max_response_length} = {max_prompt_length + max_response_length}); "
+                    "otherwise generated responses are truncated by the inference engine before training."
+                )
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -131,6 +234,10 @@ def validate_config(
     """
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
+
+    # Fast-fail checks for common parallel-layout / memory misconfigurations,
+    # before anything expensive (model load) happens.
+    _validate_parallel_and_memory_config(config, n_gpus)
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if config.actor_rollout_ref.actor.strategy == "megatron":
