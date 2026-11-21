@@ -42,6 +42,9 @@ entropy_from_logits_chunk_size: 2048
 # recompute entropy
 entropy_checkpointing: False
 
+# fuse chunked logprobs and entropy with custom backward to avoid full-vocab intermediates
+use_fused_chunked_loss: False
+
 # round every packed micro-batch up to a fsdp_config.pad_to_length_bucket multiple, so kernel
 # shapes take only a few distinct values
 # oc.select: the default val for ref.pad_to_length
@@ -58,6 +61,9 @@ fsdp_config:
 
   # Whether to recompute entropy
   entropy_checkpointing: ${oc.select:actor_rollout_ref.actor.entropy_checkpointing,False}
+
+  # Whether to fuse chunked logprobs and entropy computation in forward and backward
+  use_fused_chunked_loss: ${oc.select:actor_rollout_ref.actor.use_fused_chunked_loss,False}
 
   # Whether to pad packed micro-batches to a bucket-aligned length
   pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}

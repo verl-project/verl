@@ -59,6 +59,9 @@ use_torch_compile: true
 # Whether to use entropy checkpointing in fsdp.
 entropy_checkpointing: false
 
+# Whether to fuse chunked logprobs and entropy computation in forward and backward.
+use_fused_chunked_loss: false
+
 # Whether to defer gradient synchronization until the final micro-batch. Disable this when the extra peak memory
 # from retaining unsharded gradients outweighs the communication savings.
 use_no_sync_for_gradient_accumulation: false

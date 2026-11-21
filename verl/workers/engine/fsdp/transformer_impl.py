@@ -1348,32 +1348,23 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     logits_rmpad = logits_rmpad.full_tensor()
                 # the vLLM sampler divides the fp32 logits by the temperature, so the sampler path takes them unscaled
                 unscaled_logits_rmpad = logits_rmpad
-                logits_rmpad = _scale_logits_by_temperature(
-                    logits_rmpad,
-                    temperature_rmpad.unsqueeze(-1),
-                    is_unit_temperature=temperature_is_one,
+                use_fused_chunked = (
+                    getattr(self.engine_config, "use_fused_chunked_loss", False)
+                    and not batch_invariant
+                    and not distillation_only
                 )
-
                 log_probs = None
-
+                need_scaled_logits = (
+                    not use_fused_chunked or calculate_sum_pi_squared or distillation_use_topk or score_centering
+                )
+                if need_scaled_logits:
+                    logits_rmpad = _scale_logits_by_temperature(
+                        logits_rmpad,
+                        temperature_rmpad.unsqueeze(-1),
+                        is_unit_temperature=temperature_is_one,
+                    )
                 if calculate_sum_pi_squared:
                     sum_pi_squared_rmpad = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
-
-                if calculate_entropy:
-                    if not self.engine_config.entropy_checkpointing:
-                        if self.engine_config.entropy_from_logits_with_chunking:
-                            entropy_rmpad = self.compute_entropy_from_logits(
-                                logits_rmpad,
-                                chunk_size=self.engine_config.entropy_from_logits_chunk_size,
-                            )  # ((total_nnz / sp) + pad)
-                        else:
-                            entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
-                    else:
-                        entropy_rmpad = torch.utils.checkpoint.checkpoint(
-                            self.compute_entropy_from_logits, logits_rmpad
-                        )
-
-                # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
                 if distillation_use_topk or score_centering:
                     outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
                     cu_seqlens = input_ids.offsets()
@@ -1384,18 +1375,39 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         )
                         v = self._gather_and_unpad_packed(v, output_args["pad_size"])
                         model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
-
-                if not distillation_only:
-                    # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
-                    # entropy and the score centering hook reuse the logits in their backward
-                    inplace_backward = not (calculate_entropy or score_centering)
-                    log_probs = logprobs_from_logits(
-                        logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
+                if use_fused_chunked:
+                    inplace_bwd = not (calculate_sum_pi_squared or distillation_use_topk or score_centering)
+                    log_probs, entropy_rmpad = verl_F.fused_chunked_logprobs_and_entropy(
+                        logits=unscaled_logits_rmpad,
                         labels=input_ids_rmpad_rolled,
-                        inplace_backward=inplace_backward,
-                        batch_invariant=batch_invariant,
                         temperature=None if temperature_is_one else temperature_rmpad,
+                        chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                        compute_entropy=calculate_entropy,
+                        inplace_backward=inplace_bwd,
                     )
+                else:
+                    if calculate_entropy:
+                        if not self.engine_config.entropy_checkpointing:
+                            if self.engine_config.entropy_from_logits_with_chunking:
+                                entropy_rmpad = self.compute_entropy_from_logits(
+                                    logits_rmpad,
+                                    chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                                )
+                            else:
+                                entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
+                        else:
+                            entropy_rmpad = torch.utils.checkpoint.checkpoint(
+                                self.compute_entropy_from_logits, logits_rmpad
+                            )
+                    if not distillation_only:
+                        inplace_backward = not (calculate_entropy or score_centering)
+                        log_probs = logprobs_from_logits(
+                            logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
+                            labels=input_ids_rmpad_rolled,
+                            inplace_backward=inplace_backward,
+                            batch_invariant=batch_invariant,
+                            temperature=None if temperature_is_one else temperature_rmpad,
+                        )
 
             # gather across the ulysses sp group and drop the packed-sequence padding
             pad_size = output_args["pad_size"]

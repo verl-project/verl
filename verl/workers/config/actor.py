@@ -304,6 +304,7 @@ class FSDPActorConfig(ActorConfig):
     entropy_from_logits_with_chunking: bool = False
     entropy_from_logits_chunk_size: int = 2048
     entropy_checkpointing: bool = False
+    use_fused_chunked_loss: bool = False
     pad_to_length: bool = False
     fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
     use_remove_padding: bool = False
