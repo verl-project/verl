@@ -807,22 +807,33 @@ def compute_gpg_outcome_advantage(
 
     with torch.no_grad():
         bsz = scores.shape[0]
-        m = torch.count_nonzero(scores)
-        alpha = bsz / m.clamp(min=1)
 
         for i in range(bsz):
             id2score[index[i]].append(scores[i])
 
+        num_valid = 0
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
                 id2std[idx] = torch.tensor(1.0)
+                # singleton groups are not mean-centered: the sample is valid iff its reward is non-zero
+                if id2score[idx][0] != 0:
+                    num_valid += 1
             elif len(id2score[idx]) > 1:
                 scores_tensor = torch.stack(id2score[idx])
                 id2mean[idx] = torch.mean(scores_tensor)
                 id2std[idx] = torch.std(scores_tensor)
+                # compare exactly: torch.std of identical float32 values is not always exactly 0
+                if torch.any(scores_tensor != scores_tensor[0]):
+                    num_valid += len(id2score[idx])
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
+
+        # alpha = B / (B - M) from the GPG paper (https://arxiv.org/abs/2504.02546), where M is the number of
+        # samples with zero advantage by construction: samples in groups of two or more responses whose rewards are
+        # all identical, and zero-reward singletons. alpha rescales the gradient to the B - M valid samples.
+        # If no sample is valid, all advantages are zero: do not rescale.
+        alpha = bsz / num_valid if num_valid > 0 else 1.0
         for i in range(bsz):
             scores[i] = alpha * (scores[i] - id2mean[index[i]]) / (f_norm)
         scores = scores.unsqueeze(-1) * response_mask
