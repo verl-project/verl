@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from datetime import timedelta
+
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -173,6 +175,33 @@ def _constraint_error_worker(rank, world_size, init_method, scenario):
     dist.destroy_process_group()
 
 
+def _dense_budget_worker(rank, world_size, init_method):
+    import verl.utils.seqlen_balancing as seqlen_balancing
+
+    dist.init_process_group(
+        backend="gloo", init_method=init_method, world_size=world_size, rank=rank, timeout=timedelta(seconds=60)
+    )
+    seqlen_balancing.get_device_name = lambda: "cpu"
+
+    lengths = torch.tensor([100, 100, 10, 10, 10, 10] if rank == 0 else [100, 100])
+    attention_mask = torch.arange(100) < lengths[:, None]
+    batch = DataProto.from_single_dict(
+        {"input_ids": torch.zeros_like(attention_mask, dtype=torch.long), "attention_mask": attention_mask}
+    ).batch
+
+    try:
+        _, indices = seqlen_balancing.rearrange_micro_batches(
+            batch,
+            max_token_len=200,
+            dp_group=dist.group.WORLD,
+            token_budget_mode=lambda: "dense" if rank == 0 else "valid",
+        )
+        assert len(indices) == 2
+        assert all(len(partition) * lengths[partition].max() <= 200 for partition in indices)
+    finally:
+        dist.destroy_process_group()
+
+
 def test_dataproto_split_uneven():
     """Test DataProto.split with uneven splits"""
     # Create test data with 10 items
@@ -261,6 +290,11 @@ def test_seqlen_balancing_distributed_constraint_errors(tmp_path):
             nprocs=world_size,
             join=True,
         )
+
+
+def test_dense_budget_distributed_repartition(tmp_path):
+    init_file = tmp_path / "dense_budget_dist_init"
+    mp.spawn(_dense_budget_worker, args=(2, init_file.as_uri()), nprocs=2, join=True)
 
 
 def test_group_balanced_partitions():

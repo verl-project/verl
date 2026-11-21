@@ -16,6 +16,7 @@
 import importlib.util
 import sys
 import types
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,8 @@ import pytest
 import torch
 
 import verl.utils.device as device_module
+from verl.utils import tensordict_utils as tu
+from verl.workers.engine.utils import prepare_micro_batches
 
 
 def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 1, cp_size: int = 1, cp_rank: int = 0):
@@ -184,6 +187,53 @@ def _nested(seqlens, *dense_shape, dtype=torch.float32):
     return torch.nested.as_nested_tensor(
         [torch.zeros(n, *dense_shape, dtype=dtype) for n in seqlens], layout=torch.jagged
     )
+
+
+@pytest.mark.parametrize(
+    "case,expected_batches",
+    [
+        ("text", 1),
+        ("packed-vlm", 1),
+        ("unlisted-vlm", 2),
+        ("old-bridge", 2),
+        ("missing-mrope", 2),
+        ("mixed-vpp", 2),
+        ("bshd-vlm", 2),
+        ("bshd-text", 2),
+    ],
+)
+def test_dense_token_budget_after_batch_selection(monkeypatch, case, expected_batches):
+    util = _load_mcore_util_with_stubbed_megatron(monkeypatch)
+    bridge = SimpleNamespace(Qwen3VLModel=SimpleNamespace)
+    if case != "old-bridge":
+        bridge._is_packed_input_pre_sharded = object()
+    monkeypatch.setitem(sys.modules, "megatron.bridge.models.qwen_vl.modelling_qwen3_vl", SimpleNamespace(model=bridge))
+    monkeypatch.setitem(sys.modules, "verl.utils.megatron_utils", SimpleNamespace(unwrap_model=lambda model: model))
+
+    config = SimpleNamespace(architectures=["UnlistedModel"])
+    if case not in ("text", "bshd-text"):
+        config.vision_config = {}
+    chunks = [object()] if case in ("text", "bshd-text", "unlisted-vlm") else [bridge.Qwen3VLModel()]
+    if case == "mixed-vpp":
+        chunks.append(object())
+
+    # Packed rows fit together. Padding both rows to 53 exceeds the budget of 80.
+    lengths = [17, 53]
+    tensors = {"input_ids": _nested(lengths, dtype=torch.long)}
+    if case != "missing-mrope":
+        tensors["position_ids"] = tu.nested_tensor_from_tensor_list([torch.arange(n).expand(4, n) for n in lengths])
+    data = tu.get_tensordict(tensors, {"max_token_len_per_gpu": 80})
+    batch = next(tu.make_iterator(data, mini_batch_size=len(lengths), epochs=1, seed=42, dataloader_kwargs={}))
+    tu.maybe_fix_3d_position_ids(batch)
+    budget_mode = partial(
+        util.get_token_budget_mode,
+        config,
+        chunks,
+        batch.get("position_ids"),
+        use_remove_padding=not case.startswith("bshd"),
+    )
+    micro_batches, _ = prepare_micro_batches(batch, token_budget_mode=budget_mode)
+    assert len(micro_batches) == expected_batches
 
 
 @pytest.mark.parametrize(

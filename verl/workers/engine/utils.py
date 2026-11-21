@@ -15,6 +15,7 @@
 import importlib
 import os
 import random
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -26,7 +27,7 @@ from verl.utils.device import is_npu_available
 from verl.utils.device import manual_seed as device_manual_seed
 from verl.utils.device import manual_seed_all as device_manual_seed_all
 from verl.utils.py_functional import append_to_dict
-from verl.utils.seqlen_balancing import rearrange_micro_batches, restore_dynamic_batch
+from verl.utils.seqlen_balancing import TokenBudgetMode, rearrange_micro_batches, restore_dynamic_batch
 
 
 def enable_full_determinism(seed: int):
@@ -136,6 +137,7 @@ def prepare_micro_batches(
     same_micro_num_in_dp=True,
     min_num_micro_batch=None,
     use_dynamic_bsz_balance=True,
+    token_budget_mode: TokenBudgetMode | Callable[[], TokenBudgetMode] = "valid",
 ):
     """
     Prepare micro batches from data.
@@ -158,6 +160,7 @@ def prepare_micro_batches(
             min_num_micro_batch=min_num_micro_batch,
             use_dynamic_bsz_balance=use_dynamic_bsz_balance,
             force_group_size=force_group_size,
+            token_budget_mode=token_budget_mode,
         )
     else:
         total_data_size = len(data)
