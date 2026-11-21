@@ -109,6 +109,8 @@ def _make_manager(
     bridge="auto",
     peft_cls=None,
     use_distributed_optimizer=False,
+    model=None,
+    optimizer=None,
 ):
     if save_contents is None:
         save_contents = ["model", "optimizer", "extra"]
@@ -121,9 +123,11 @@ def _make_manager(
         async_save=False,
     )
 
-    model = _make_mock_model()
-    optimizer = MagicMock()
-    optimizer.sharded_state_dict.return_value = {"step": 1, "param_state": MagicMock()}
+    if model is None:
+        model = _make_mock_model()
+    if optimizer is None:
+        optimizer = MagicMock()
+        optimizer.sharded_state_dict.return_value = {"step": 1, "param_state": MagicMock()}
     lr_scheduler = MagicMock()
     lr_scheduler.state_dict.return_value = {"last_epoch": 10}
 
@@ -151,6 +155,78 @@ def _make_manager(
         bridge=bridge,
         peft_cls=peft_cls,
     )
+
+
+class _TrackingModel:
+    """Model stand-in whose weights are real tensors, so perturbation is observable."""
+
+    def __init__(self, weight: torch.Tensor):
+        self.weight = weight
+
+    def sharded_state_dict(self, metadata=None, **kwargs):
+        return {"weight": self.weight}
+
+    def load_state_dict(self, state_dict, strict=True):
+        with torch.no_grad():
+            self.weight.copy_(state_dict["weight"])
+
+
+class _FakeHybridDeviceOptimizer:
+    """Mimics the parts of Megatron's ``HybridDeviceOptimizer`` that matter here.
+
+    ``dummy_step()`` is a real optimizer step: with a non-zero learning rate it
+    changes the parameter (in Megatron it updates the fp32 master weight and copies
+    it back into the bf16 parameter). With a zero learning rate it only allocates
+    optimizer state, which is the behaviour the fix relies on.
+    """
+
+    def __init__(self, param: torch.Tensor, lr: float = 1e-3):
+        self.param = param
+        self.state = {}
+        self.param_groups = [{"params": [param], "lr": lr}]
+
+    def update_fp32_param_by_new_param(self):
+        """Megatron refreshes its fp32 masters here; the fake has no separate copy."""
+
+    def step(self):
+        if self.param_groups[0]["lr"] != 0.0:
+            with torch.no_grad():
+                self.param.add_(1.0)
+        self.state[self.param] = {"step": 1, "exp_avg": torch.zeros_like(self.param)}
+
+    def zero_grad(self, set_to_none=False):
+        self.param.grad = None
+
+    def dummy_step(self):
+        self.param.grad = torch.randn_like(self.param)
+        try:
+            self.step()
+        finally:
+            self.zero_grad()
+
+
+class _FakeDistributedOptimizer:
+    """Mimics ``megatron.core.optimizer.DistributedOptimizer`` for this code path.
+
+    ``sharded_state_dict(is_loading=True)`` allocates state via
+    ``load_state_dict(state_dict())``, and ``load_state_dict`` calls
+    ``dummy_step()`` when the inner optimizer state is empty (Megatron 0.19.x).
+    """
+
+    def __init__(self, inner: _FakeHybridDeviceOptimizer):
+        self.optimizer = inner
+
+    def state_dict(self):
+        return {"optimizer": {"param_groups": [{"lr": self.optimizer.param_groups[0]["lr"]}], "state": {}}}
+
+    def load_state_dict(self, state_dict):
+        if len(self.optimizer.state) == 0:
+            self.optimizer.dummy_step()
+
+    def sharded_state_dict(self, model_sharded_state_dict, is_loading=False, **kwargs):
+        if is_loading:
+            self.load_state_dict(self.state_dict())
+        return {"optimizer": self.state_dict()}
 
 
 # ===========================================================================
@@ -436,6 +512,106 @@ def _load_calls_by_subdir(mock_load_dc):
         subdir = os.path.basename(os.path.dirname(os.path.normpath(kwargs["ckpt_dir"])))
         out[subdir] = kwargs["sharded_state_dict"]
     return out
+
+
+class TestOptimizerLoadKeepsModelWeights:
+    """Regression tests for issue #8765.
+
+    Resuming with optimizer state must not change the loaded model weights:
+    Megatron's state-dict pre-allocation used to run ``dummy_step()``, a real
+    optimizer step, after the model weights had already been loaded.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _tmpdir(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.ckpt_path = os.path.join(self.test_dir, "global_step_1")
+        os.makedirs(self.ckpt_path, exist_ok=True)
+        yield
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_optimizer_state_allocation_leaves_model_params_untouched(self):
+        weight = torch.zeros(3)
+        model = _TrackingModel(weight)
+        inner_optimizer = _FakeHybridDeviceOptimizer(weight)
+        mgr = _make_manager(
+            load_contents=["optimizer"],
+            model=[model],
+            optimizer=_FakeDistributedOptimizer(inner_optimizer),
+        )
+        before = weight.clone()
+
+        mgr._build_optimizer_state_dict({"weight": weight}, metadata={}, is_loading=True)
+
+        torch.testing.assert_close(weight, before, rtol=0, atol=0)
+        # State was allocated, so Megatron's own dummy_step is skipped.
+        assert len(inner_optimizer.state) == 1
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_load_checkpoint_with_optimizer_keeps_loaded_weights(self, mock_load_dc, _mock_meta):
+        """End-to-end resume: model weights are loaded, then optimizer state is
+        allocated. Before the fix the allocation step perturbed the weights."""
+        _make_v2_layout(self.ckpt_path, "model", "optimizer")
+
+        checkpoint_weight = torch.full((3,), 5.0)
+
+        def fake_load(sharded_state_dict, ckpt_dir):
+            if "model" in sharded_state_dict:
+                return {"model": {"weight": checkpoint_weight.clone()}}
+            if "optimizer" in sharded_state_dict:
+                return {"optimizer": {"param_groups": [{"lr": 1e-3}], "state": {}}}
+            return {}
+
+        mock_load_dc.side_effect = fake_load
+
+        weight = torch.zeros(3)
+        model = _TrackingModel(weight)
+        inner_optimizer = _FakeHybridDeviceOptimizer(weight)
+        mgr = _make_manager(
+            load_contents=["model", "optimizer"],
+            use_dist_checkpointing=True,
+            model=[model],
+            optimizer=_FakeDistributedOptimizer(inner_optimizer),
+        )
+
+        mgr.load_checkpoint(self.ckpt_path)
+
+        torch.testing.assert_close(weight, checkpoint_weight, rtol=0, atol=0)
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_load_checkpoint_hf_bridge_with_optimizer_keeps_loaded_weights(self, mock_load_dc, _mock_meta):
+        """Same guarantee when the model weights come from the HF bridge path."""
+        _make_v2_layout(self.ckpt_path, "optimizer")
+
+        checkpoint_weight = torch.full((3,), 7.0)
+
+        def fake_load(sharded_state_dict, ckpt_dir):
+            if "optimizer" in sharded_state_dict:
+                return {"optimizer": {"param_groups": [{"lr": 1e-3}], "state": {}}}
+            return {}
+
+        mock_load_dc.side_effect = fake_load
+
+        weight = torch.zeros(3)
+        model = _TrackingModel(weight)
+        inner_optimizer = _FakeHybridDeviceOptimizer(weight)
+        mgr = _make_manager(
+            load_contents=["model", "optimizer"],
+            bridge=MagicMock(),
+            model=[model],
+            optimizer=_FakeDistributedOptimizer(inner_optimizer),
+        )
+
+        def fake_bridge_load(hf_model_path):
+            with torch.no_grad():
+                weight.copy_(checkpoint_weight)
+
+        with patch.object(mgr, "_load_model_as_hf_via_bridge", side_effect=fake_bridge_load):
+            mgr.load_checkpoint(self.ckpt_path)
+
+        torch.testing.assert_close(weight, checkpoint_weight, rtol=0, atol=0)
 
 
 class TestLoadCheckpointDispatch:
