@@ -703,11 +703,11 @@ class VeOmniEngine(FSDPEngine):
     # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
-        per_tensor_param, peft_config = self._get_hf_export_per_tensor_param(for_rollout=True)
+        per_tensor_param, peft_config = self._get_hf_export_per_tensor_param()
         return self._quantize_for_rollout(per_tensor_param), peft_config
 
-    def _get_hf_export_per_tensor_param(self, *, for_rollout: bool = False):
-        """Full HF weights for checkpoints; optionally omit immutable PLE tables for rollout sync."""
+    def _get_hf_export_per_tensor_param(self):
+        """Full HF weights, including frozen PLE, for checkpoints and rollout sync."""
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
         # per-DTensor .to(device).full_tensor() in param_generator() below stages each
@@ -726,8 +726,7 @@ class VeOmniEngine(FSDPEngine):
         params = self.module.state_dict()
         key_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         params = convert_weight_keys(params, key_model)
-        skip_frozen_ple = for_rollout and self.engine_config.freeze_ple_embeddings
-        ple_shapes = {} if skip_frozen_ple else convert_weight_keys(ple_export_shapes(self.module), key_model)
+        ple_shapes = convert_weight_keys(ple_export_shapes(self.module), key_model)
 
         if self._is_offload_param:
             offload_veomni_model_to_cpu(self.module)
@@ -740,10 +739,8 @@ class VeOmniEngine(FSDPEngine):
 
         def param_generator():
             for name, param in params.items():
-                # Rollout loaded the identical immutable table from model.path.
-                # Do not all-gather or retransmit it on every policy update.
-                if skip_frozen_ple and is_ple_table(name):
-                    continue
+                # Full sync includes frozen PLE for every initialization format;
+                # freezing only excludes these parameters from optimizer updates.
                 unsharded_tensor = (
                     param.to(device, non_blocking=True).full_tensor()
                     if isinstance(param, DTensor)

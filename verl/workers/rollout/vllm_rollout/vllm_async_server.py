@@ -1556,6 +1556,8 @@ class vLLMHttpServer:
 
         MTP drafter-only weights are initialized by vLLM and are not guaranteed
         to be restored by actor weight sync after level 2 sleep discards them.
+        Qwen3.8-Flash-Next requires level 1 on Ascend to preserve runner-owned
+        state that actor weight synchronization does not restore.
         lora only update adapter weights, so set sleep level to 1.
         vllm-ascend < 0.30.0 requires sleep level 1 to avoid EP precision issues.
         """
@@ -1567,8 +1569,15 @@ class vLLMHttpServer:
         )
         if mtp_rollout_enabled or self.lora_as_adapter:
             return 1
-        if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
-            return 1
+        if is_torch_npu_available(check_device=False):
+            model_type = getattr(self.model_config.hf_config, "model_type", None)
+            # Qwen3.8-Flash-Next (qwen4_exp) requires level-1 sleep on Ascend:
+            # level 2 discards runner-owned ngram_context_offsets, which actor
+            # weight synchronization does not restore.
+            if model_type == "qwen4_exp":
+                return 1
+            if _VLLM_VERSION < version.parse("0.30.0"):
+                return 1
         return 2
 
     def _preprocess_sampling_params(self, sampling_params: dict[str, Any]) -> None:
@@ -1589,7 +1598,7 @@ class vLLMHttpServer:
         return output
 
     async def _sleep_hybrid(self):
-        """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
+        """HYBRID sleep: preserve state not restored by sync using the resolved sleep level.
 
         Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
         that sleep is properly propagated to all data-parallel worker processes.

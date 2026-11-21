@@ -90,7 +90,7 @@ def test_trainable_ple_export_trims_global_padding_and_rejects_local_shards():
 
 
 @pytest.mark.parametrize("freeze", [False, True])
-def test_hf_checkpoint_keeps_ple_while_rollout_skips_only_frozen_tables(monkeypatch, tmp_path, freeze):
+def test_hf_checkpoint_and_rollout_sync_keep_all_ple_tables(monkeypatch, tmp_path, freeze):
     pytest.importorskip("veomni")
     from safetensors.torch import load_file
 
@@ -113,7 +113,8 @@ def test_hf_checkpoint_keeps_ple_while_rollout_skips_only_frozen_tables(monkeypa
     engine._uses_fsdp2_cpu_offload_policy = True
     engine._rollout_weight_quantizer = None
     rollout_params = dict(engine.get_per_tensor_param()[0])
-    assert (name in rollout_params) == (not freeze)
+    assert name in rollout_params
+    torch.testing.assert_close(rollout_params[name], model.state_dict()[name][:5])
     assert "projection.weight" in rollout_params
 
     manager = object.__new__(FSDPCheckpointManager)

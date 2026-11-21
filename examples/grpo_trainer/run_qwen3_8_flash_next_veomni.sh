@@ -98,7 +98,8 @@ ACTOR_VEOMNI=(
 
 ROLLOUT=(
   "actor_rollout_ref.rollout.name=vllm"
-  "actor_rollout_ref.rollout.load_format=safetensors"
+  # Both dummy and safetensors use full weight sync; this model uses level-1 sleep on Ascend.
+  "actor_rollout_ref.rollout.load_format=dummy"
   "actor_rollout_ref.rollout.tensor_model_parallel_size=$infer_tp"
   "actor_rollout_ref.rollout.data_parallel_size=$infer_dp"
   "actor_rollout_ref.rollout.expert_parallel_size=$infer_ep"

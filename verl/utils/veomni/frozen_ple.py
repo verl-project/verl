@@ -25,23 +25,6 @@ def is_ple_table(name: str) -> bool:
     return _PLE_TABLE.search(name) is not None
 
 
-def validate_frozen_ple_rollout(freeze_ple_embeddings: bool, rollout_name: str, load_format: str) -> None:
-    """Require real initial PLE weights when frozen tables are excluded from sync.
-
-    The NPU hybrid rollout preserves its weights across level-1 sleep. Frozen
-    tables can therefore be loaded once from the actor's model checkpoint.
-    Dummy initialization never reads those tables and subsequent actor updates
-    deliberately do not transmit them.
-    """
-    if freeze_ple_embeddings and rollout_name == "vllm" and load_format not in ("auto", "safetensors"):
-        raise ValueError(
-            "freeze_ple_embeddings excludes PLE tables from actor-to-rollout weight sync; "
-            f"rollout.load_format={load_format!r} does not guarantee checkpoint initialization. "
-            "Use actor_rollout_ref.rollout.load_format=safetensors (or auto) so rollout "
-            "loads the same immutable PLE tables from model.path before the first weight sync."
-        )
-
-
 def prepare_ple_storage(model: torch.nn.Module, dtype: str | None) -> None:
     """Set table storage before freezing; leave all trainable weights unchanged."""
     if dtype is None:
