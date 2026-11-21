@@ -65,6 +65,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
 
         # 3. generate sequences
         metrics = {}
+        video_grid_thw = mm_inputs.get("video_grid_thw")
         with simple_timer("generate_sequences", metrics):
             request_id = f"det-{priority}" if getattr(self.rollout_config, "full_determinism", False) else uuid4().hex
             output: TokenOutput = await self.server_manager.generate(
@@ -76,6 +77,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 video_data=videos,
                 mm_processor_output=mm_processor_output,
                 mm_processor_kwargs=mm_processor_kwargs,
+                video_grid_thw=video_grid_thw,
                 priority=priority,
             )
         if metrics.get("num_preempted") is None:
