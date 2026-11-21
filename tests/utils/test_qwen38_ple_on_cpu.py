@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -86,3 +87,43 @@ def test_trainable_ple_export_trims_global_padding_and_rejects_local_shards():
     assert exported.data_ptr() == values.data_ptr()
     with pytest.raises(ValueError, match="Invalid PLE export shape"):
         trim_ple_export(name, values[:4], shapes)
+
+
+@pytest.mark.parametrize("freeze", [False, True])
+def test_hf_checkpoint_keeps_ple_while_rollout_skips_only_frozen_tables(monkeypatch, tmp_path, freeze):
+    pytest.importorskip("veomni")
+    from safetensors.torch import load_file
+
+    from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
+    from verl.workers.engine.veomni import transformer_impl as veomni
+
+    model = make_model()
+    name = "ple.ple_embedding.ngram_embedding.shard_0.weight"
+    if freeze:
+        freeze_ple_tables(model)
+    monkeypatch.setattr(veomni, "get_checkpoint_tensor_converter", lambda model: None)
+    monkeypatch.setattr(veomni, "convert_weight_keys", lambda params, model: params)
+    monkeypatch.setattr(veomni, "get_device_id", lambda: "cpu")
+    monkeypatch.setattr(veomni.parallel_state, "get_parallel_state", lambda: SimpleNamespace(ep_enabled=False))
+
+    engine = object.__new__(veomni.VeOmniEngineWithLMHead)
+    engine.module = model
+    engine.engine_config = SimpleNamespace(freeze_ple_embeddings=freeze)
+    engine._is_offload_param = False
+    engine._uses_fsdp2_cpu_offload_policy = True
+    engine._rollout_weight_quantizer = None
+    rollout_params = dict(engine.get_per_tensor_param()[0])
+    assert (name in rollout_params) == (not freeze)
+    assert "projection.weight" in rollout_params
+
+    manager = object.__new__(FSDPCheckpointManager)
+    manager.model = model
+    manager.rank = 0
+    manager.hf_export_dtype = None
+    manager.per_tensor_param_fn = engine._get_hf_export_per_tensor_param
+    monkeypatch.setattr(manager, "_get_tied_alias_names", lambda model: set())
+    manager._save_hf_weights_from_per_tensor_param(str(tmp_path), max_shard_bytes=64)
+    index = json.loads((tmp_path / "model.safetensors.index.json").read_text())
+    assert set(index["weight_map"]) == set(model.state_dict())
+    saved = load_file(tmp_path / index["weight_map"][name])[name]
+    torch.testing.assert_close(saved, model.state_dict()[name][:5])
