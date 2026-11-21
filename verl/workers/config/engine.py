@@ -295,6 +295,7 @@ class FSDPEngineConfig(EngineConfig):
     entropy_from_logits_chunk_size: int = 2048
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
+    use_fused_chunked_loss: bool = False
     use_no_sync_for_gradient_accumulation: bool = True
     strategy: str = "fsdp"
     pad_to_length: bool = False

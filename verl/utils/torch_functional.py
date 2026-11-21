@@ -302,6 +302,172 @@ def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 20
     return entropy
 
 
+def _prepare_inv_temperature_1d(
+    temperature: float | torch.Tensor | None,
+    orig_shape: torch.Size,
+    num_tokens: int,
+) -> tuple[torch.Tensor | None, float]:
+    """Normalize scalar or per-token/per-sample temperature into (inv_temp_1d, inv_temp_scalar)."""
+    if temperature is None:
+        return None, 1.0
+    if not isinstance(temperature, torch.Tensor):
+        t_val = float(temperature)
+        return (None, 1.0) if t_val == 1.0 else (None, 1.0 / max(t_val, 1e-8))
+    if temperature.numel() == 1:
+        t_val = float(temperature.item())
+        return (None, 1.0) if t_val == 1.0 else (None, 1.0 / max(t_val, 1e-8))
+    if temperature.numel() == num_tokens:
+        temp_1d = temperature.reshape(num_tokens)
+    elif len(orig_shape) >= 1 and temperature.numel() == orig_shape[0]:
+        view_shape = (orig_shape[0],) + (1,) * (len(orig_shape) - 1)
+        temp_1d = temperature.reshape(view_shape).expand(orig_shape).reshape(num_tokens)
+    else:
+        temp_1d = torch.broadcast_to(temperature, orig_shape).reshape(num_tokens)
+    return 1.0 / temp_1d.float().clamp(min=1e-8), 1.0
+
+
+class _FusedChunkedLogProbsEntropyFn(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        temperature: float | torch.Tensor | None = None,
+        chunk_size: int = 2048,
+        compute_entropy: bool = True,
+        inplace_backward: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        ctx.set_materialize_grads(False)
+        orig_shape = logits.shape[:-1]
+        vocab_size = logits.shape[-1]
+        logits_2d = logits.reshape(-1, vocab_size)
+        labels_1d = labels.reshape(-1)
+        num_tokens = logits_2d.shape[0]
+
+        inv_temp_1d, inv_temp_scalar = _prepare_inv_temperature_1d(temperature, orig_shape, num_tokens)
+
+        logprobs_out = torch.empty(num_tokens, dtype=torch.float32, device=logits.device)
+        lse_out = torch.empty(num_tokens, dtype=torch.float32, device=logits.device)
+        entropy_out = torch.empty(num_tokens, dtype=torch.float32, device=logits.device) if compute_entropy else None
+
+        for start in range(0, num_tokens, chunk_size):
+            end = min(start + chunk_size, num_tokens)
+            z_chunk = logits_2d[start:end].to(dtype=torch.float32, copy=True)
+            if inv_temp_1d is not None:
+                z_chunk.mul_(inv_temp_1d[start:end].unsqueeze(-1))
+            elif inv_temp_scalar != 1.0:
+                z_chunk.mul_(inv_temp_scalar)
+
+            m_chunk = z_chunk.max(dim=-1, keepdim=True).values
+            shifted = z_chunk.sub(m_chunk)
+            exp_shifted = shifted.exp()
+            sum_exp = exp_shifted.sum(dim=-1, keepdim=True)
+            log_sum_exp_shifted = sum_exp.log()
+            lse_chunk = (m_chunk + log_sum_exp_shifted).squeeze(-1)
+
+            target_z = z_chunk.gather(dim=-1, index=labels_1d[start:end].unsqueeze(-1)).squeeze(-1)
+            logprobs_out[start:end] = target_z - lse_chunk
+            lse_out[start:end] = lse_chunk
+
+            if compute_entropy:
+                exp_shifted.div_(sum_exp)
+                expected_shifted = exp_shifted.mul_(shifted).sum(dim=-1)
+                entropy_out[start:end] = log_sum_exp_shifted.squeeze(-1) - expected_shifted
+
+        ctx.save_for_backward(
+            logits,
+            labels_1d,
+            lse_out,
+            entropy_out if compute_entropy else torch.empty(0, device=logits.device),
+            inv_temp_1d if inv_temp_1d is not None else torch.empty(0, device=logits.device),
+        )
+        ctx.has_tensor_temp = inv_temp_1d is not None
+        ctx.inv_temp_scalar = inv_temp_scalar
+        ctx.chunk_size = int(chunk_size)
+        ctx.compute_entropy = bool(compute_entropy)
+        ctx.inplace_backward = bool(inplace_backward)
+
+        return logprobs_out.view(*orig_shape), (entropy_out.view(*orig_shape) if compute_entropy else None)
+
+    @staticmethod
+    def backward(ctx, grad_logprobs: torch.Tensor | None, grad_entropy: torch.Tensor | None):
+        logits, labels_1d, lse_out, entropy_saved, inv_temp_saved = ctx.saved_tensors
+        if not ctx.needs_input_grad[0]:
+            return None, None, None, None, None, None
+
+        orig_shape = logits.shape
+        vocab_size = orig_shape[-1]
+        logits_2d = logits.reshape(-1, vocab_size)
+        num_tokens = logits_2d.shape[0]
+        chunk_size = ctx.chunk_size
+        out_dtype = logits.dtype
+        inv_temp_1d = inv_temp_saved if ctx.has_tensor_temp else None
+        inv_temp_scalar = ctx.inv_temp_scalar
+
+        has_lp_grad = grad_logprobs is not None
+        has_ent_grad = ctx.compute_entropy and (grad_entropy is not None)
+
+        can_inplace = ctx.inplace_backward and logits.is_contiguous()
+        grad_logits_2d = logits.view(-1, vocab_size) if can_inplace else torch.empty_like(logits_2d)
+
+        if not has_lp_grad and not has_ent_grad:
+            grad_logits_2d.zero_()
+            return grad_logits_2d.view(orig_shape), None, None, None, None, None
+
+        g_lp_1d = grad_logprobs.reshape(-1).float() if has_lp_grad else None
+        g_ent_1d = grad_entropy.reshape(-1).float() if has_ent_grad else None
+
+        for start in range(0, num_tokens, chunk_size):
+            end = min(start + chunk_size, num_tokens)
+            z_chunk = logits_2d[start:end].to(dtype=torch.float32, copy=True)
+            inv_t_c = inv_temp_1d[start:end].unsqueeze(-1) if inv_temp_1d is not None else None
+            if inv_t_c is not None:
+                z_chunk.mul_(inv_t_c)
+            elif inv_temp_scalar != 1.0:
+                z_chunk.mul_(inv_temp_scalar)
+
+            log_p_chunk = z_chunk.sub_(lse_out[start:end].unsqueeze(-1))
+            p_chunk = log_p_chunk.exp()
+
+            if has_lp_grad and has_ent_grad:
+                g_lp_c = g_lp_1d[start:end].unsqueeze(-1)
+                g_ent_c = g_ent_1d[start:end].unsqueeze(-1)
+                log_p_chunk.add_(entropy_saved[start:end].unsqueeze(-1)).mul_(g_ent_c).add_(g_lp_c)
+                grad_z = p_chunk.mul_(log_p_chunk).neg_()
+                grad_z.scatter_add_(dim=-1, index=labels_1d[start:end].unsqueeze(-1), src=g_lp_c)
+            elif has_lp_grad:
+                g_lp_c = g_lp_1d[start:end].unsqueeze(-1)
+                grad_z = p_chunk.mul_(g_lp_c).neg_()
+                grad_z.scatter_add_(dim=-1, index=labels_1d[start:end].unsqueeze(-1), src=g_lp_c)
+            else:
+                g_ent_c = g_ent_1d[start:end].unsqueeze(-1)
+                log_p_chunk.add_(entropy_saved[start:end].unsqueeze(-1)).mul_(g_ent_c)
+                grad_z = p_chunk.mul_(log_p_chunk).neg_()
+
+            if inv_t_c is not None:
+                grad_z.mul_(inv_t_c)
+            elif inv_temp_scalar != 1.0:
+                grad_z.mul_(inv_temp_scalar)
+
+            grad_logits_2d[start:end] = grad_z.to(out_dtype)
+
+        return grad_logits_2d.view(orig_shape), None, None, None, None, None
+
+
+def fused_chunked_logprobs_and_entropy(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: float | torch.Tensor | None = None,
+    chunk_size: int = 2048,
+    compute_entropy: bool = True,
+    inplace_backward: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Compute per-token log-probabilities and optional Shannon entropy in bounded-memory chunks."""
+    return _FusedChunkedLogProbsEntropyFn.apply(
+        logits, labels, temperature, chunk_size, compute_entropy, inplace_backward
+    )
+
+
 def masked_sum(values: torch.Tensor, mask: torch.Tensor, axis: int | tuple[int, ...] | None = None) -> torch.Tensor:
     """Compute sum of tensor values where mask is True.
 
