@@ -24,6 +24,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import ipaddress
 import socket
 
@@ -68,6 +69,35 @@ def is_valid_ipv6_address(address: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def get_ranked_port_base(
+    namespace: str,
+    rank: int,
+    *,
+    min_port: int = 20000,
+    max_port: int = 60000,
+    rank_stride: int = 509,
+) -> int:
+    """Return a stable, rank-separated TCP port search starting point.
+
+    The caller still relies on its own availability check and fallback scan.
+    This function only gives concurrent services different places to begin
+    searching, reducing collisions during probe-then-bind handoffs.
+    """
+    if not namespace:
+        raise ValueError("namespace must be non-empty")
+    if rank < 0:
+        raise ValueError(f"rank must be non-negative, got {rank}")
+    if not (1024 <= min_port <= max_port <= 65535):
+        raise ValueError(f"invalid TCP port range: [{min_port}, {max_port}]")
+    if rank_stride <= 0:
+        raise ValueError(f"rank_stride must be positive, got {rank_stride}")
+
+    span = max_port - min_port + 1
+    digest = hashlib.blake2s(namespace.encode("utf-8"), digest_size=8).digest()
+    namespace_offset = int.from_bytes(digest, byteorder="big", signed=False)
+    return min_port + (namespace_offset + rank * rank_stride) % span
 
 
 def get_free_port(address: str, with_alive_sock: bool = False) -> tuple[int, socket.socket | None]:
