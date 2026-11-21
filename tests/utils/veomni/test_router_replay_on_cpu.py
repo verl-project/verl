@@ -361,6 +361,35 @@ def _make_veomni_stub():
     return stub, captured
 
 
+def test_rollout_targets_follow_mixed_text_decoder(ctrl, monkeypatch):
+    model = nn.Module()
+    model.base_model = nn.Module()
+    model.base_model.language_model = nn.Module()
+    layers = nn.ModuleList(nn.Module() for _ in range(4))
+    model.base_model.language_model.layers = layers
+    for i, layer in enumerate(layers):
+        layer.mlp = nn.Module()
+        if i in (1, 3):
+            layer.mlp.gate = nn.Identity()
+            layer.mlp.experts = nn.ModuleList()
+        else:
+            layer.mlp.gate_up_proj = nn.Identity()
+            layer.mlp.down_proj = nn.Identity()
+
+    stub, _ = _make_veomni_stub()
+    monkeypatch.setitem(sys.modules, "veomni.utils.moe_router_replay", stub)
+    ctrl.install(model)
+    targets = [torch.tensor([[i, i + 1]]).expand(_NNZ, -1) for i in range(4)]
+    ctrl.begin_replay()
+    ctrl.begin_microbatch(targets=ctrl.select_rollout_layers(targets))
+    for i in (1, 3, 3, 1):
+        actual = ctrl.on_router_forward(layers[i].mlp.gate, _scores(), _idx())
+        assert torch.equal(actual, targets[i])
+    assert ctrl.num_fired == ctrl.num_targets == 2
+    with pytest.raises(ValueError, match="expected 4 absolute"):
+        ctrl.select_rollout_layers(targets[:2])
+
+
 def test_install_uninstall_roundtrip(ctrl):
     """install() registers the controller in VeOmni's global slot and
     runs the model validator; uninstall() clears the slot back to None."""

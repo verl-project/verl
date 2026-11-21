@@ -255,6 +255,21 @@ class TestPrepareRouterReplayInputs:
         for r2, r3 in zip(targets_per_mode["R2"], targets_per_mode["R3"], strict=True):
             assert torch.equal(r2, r3)
 
+    @pytest.mark.parametrize("mode", ["R2", "R3"])
+    def test_mixed_decoder_uses_absolute_slots_only_for_r3(self, controller, mode):
+        controller._rollout_layer_mask = (False, True, False, True)
+        controller.begin_replay()
+        engine = _make_engine(controller, mode=mode)
+        absolute = torch.arange(24).reshape(3, 4, 2)
+        compact = absolute[:, [1, 3], :]
+        routed = absolute if mode == "R3" else compact
+        td = TensorDict({"routed_experts": routed}, batch_size=[])
+        engine._prepare_router_replay_inputs(td, {"pad_size": 1})
+        assert controller.num_targets == 2
+        for actual, expected in zip(controller._targets, compact.unbind(dim=1), strict=True):
+            assert torch.equal(actual[:-1], expected)
+            assert not actual[-1].any()
+
     def test_no_controller_is_a_noop(self):
         """If router_replay is disabled on the engine, the helper is a
         pure no-op even when the micro_batch is malformed."""

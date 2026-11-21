@@ -86,3 +86,12 @@ capture path only produces a correctly-sized buffer starting from **vLLM `>= 0.2
 an actionable error when `enable_rollout_routing_replay=True`, instead of crashing
 later inside vLLM.
 
+### VeOmni R3 layer indexing
+
+VeOmni expects rollout `routed_experts` in `[tokens, text decoder layers, top_k]`
+order. The layer axis uses zero-based absolute decoder indices and includes a
+slot for every dense layer. For example, a decoder with layers
+`[dense, MoE, dense, MoE]` has four rollout slots. The two routers replay
+slots 1 and 3. For recognized mixed decoders, VeOmni checks the full layer
+count before selecting these slots. R2 records one slot per router in forward
+order and replays those slots directly.

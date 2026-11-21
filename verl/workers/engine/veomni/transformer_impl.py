@@ -946,7 +946,10 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
         if self.use_ulysses_sp:
             targets = slice_input_tensor(targets, dim=0, padding=False)
 
-        rr.begin_microbatch(targets=list(targets.unbind(dim=1)))
+        per_layer = list(targets.unbind(dim=1))
+        if self._router_replay_mode == "R3":
+            per_layer = rr.select_rollout_layers(per_layer)
+        rr.begin_microbatch(targets=per_layer)
 
     def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
         """Attach this micro-batch's recorded MoE routing to the model output.
@@ -968,12 +971,8 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             if rr.num_fired != rr.num_targets:
                 raise RuntimeError(
                     f"router_replay REPLAY: {rr.num_fired} routers fired but routed_experts "
-                    f"carries {rr.num_targets} layer slots. Targets are matched to routers by "
-                    "fire order, so unequal counts mean every layer replayed the wrong slot. "
-                    "Rollout backends index this tensor by absolute decoder-layer index, so "
-                    "each decoder layer must contribute exactly one router that calls "
-                    "`maybe_replay_indices` -- check that no MoE variant in this model family "
-                    "(e.g. a hash-routed or dense layer) is left unhooked."
+                    f"carries {rr.num_targets} selected layer slots. Check the layer layout "
+                    "and that each routed layer calls `maybe_replay_indices`."
                 )
 
         return model_output

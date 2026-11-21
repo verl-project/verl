@@ -60,17 +60,12 @@ position. It also makes recompute detection free: a module that is
 already in the table is by definition not firing for the first time, so
 RECORD simply skips it.
 
-Fire order is only meaningful because of the contract it implies: slot
-``i`` of a ``routed_experts`` tensor must belong to the ``i``-th router to
-fire. Rollout backends fill that tensor by **absolute decoder-layer
-index** over all ``num_hidden_layers`` (vLLM sizes its capture buffer that
-way and writes at ``extract_layer_index(layer_name)``), so R3 replay is
-only correct when every decoder layer contributes exactly one hooked
-router. A model that hooks a subset -- e.g. DeepSeek-V4, whose first three
-layers are hash-routed -- silently shifts every layer's target unless its
-skipped layers are hooked too. :meth:`num_fired` vs :meth:`num_targets`
-lets the engine assert the contract after each forward instead of
-mis-routing quietly.
+R2 records one slot per router in forward order. R3 receives one slot
+per absolute text decoder-layer index from the rollout backend, including
+dense layers. Slot i contains the top-k expert IDs for decoder layer i
+when that layer is routed. vLLM and SGLang both use this layout.
+For a recognized mixed decoder, select the routed layers before replay.
+The engine checks that each selected slot corresponds to a router fire.
 
 Positions without recorded routing
 ----------------------------------
@@ -122,6 +117,40 @@ class VeOmniRouterReplay:
         # Env-gated shape sanity check.
         self._debug: bool = os.environ.get("VERL_ROUTER_REPLAY_DEBUG") == "1"
         self._installed: bool = False
+        self._rollout_layer_mask: tuple[bool, ...] = ()
+
+    @staticmethod
+    def _mixed_decoder_mask(model: nn.Module) -> tuple[bool, ...]:
+        """Identify mixed text decoders with routed experts and gated dense MLPs."""
+        model = getattr(model, "module", model)
+        base = getattr(model, "base_model", model)
+        decoder = getattr(base, "language_model", base)
+        mask = []
+        for layer in getattr(decoder, "layers", ()):
+            mlp = getattr(layer, "mlp", None)
+            if hasattr(mlp, "experts") and hasattr(mlp, "gate"):
+                mask.append(True)
+            elif (
+                not hasattr(mlp, "experts")
+                and not hasattr(mlp, "gate")
+                and hasattr(mlp, "down_proj")
+                and (hasattr(mlp, "gate_proj") or hasattr(mlp, "gate_up_proj"))
+            ):
+                mask.append(False)
+            else:
+                return ()
+        return tuple(mask) if any(mask) and not all(mask) else ()
+
+    def select_rollout_layers(self, targets: list[torch.Tensor]) -> list[torch.Tensor]:
+        """Convert absolute rollout layer slots to router forward order."""
+        if not self._rollout_layer_mask:
+            return targets
+        if len(targets) != len(self._rollout_layer_mask):
+            raise ValueError(
+                f"R3 routed_experts has {len(targets)} layer slots, expected "
+                f"{len(self._rollout_layer_mask)} absolute decoder-layer slots."
+            )
+        return [target for target, routed in zip(targets, self._rollout_layer_mask, strict=True) if routed]
 
     @property
     def action(self) -> RouterReplayAction:
@@ -154,6 +183,7 @@ class VeOmniRouterReplay:
         # Fail fast if this model family has not been wired for replay
         # (would otherwise surface as a cryptic mid-forward error).
         validate_model_for_replay(model)
+        self._rollout_layer_mask = self._mixed_decoder_mask(model)
         set_active_replay(self)
         self._installed = True
 
