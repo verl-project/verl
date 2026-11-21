@@ -298,6 +298,13 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def is_mp_src_rank(self):
+        """Whether this rank receives data before worker-side model-parallel dispatch.
+
+        Engines may override this when the input source rank differs from the rank that owns outputs.
+        """
+        return self.is_mp_src_rank_with_outputs()
+
     def disable_adapter(self) -> ContextManager:
         """
         Disable all adapters temporarily under the context in the model for LoRA

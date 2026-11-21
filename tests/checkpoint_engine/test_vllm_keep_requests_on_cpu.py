@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -27,6 +28,18 @@ from verl.workers.rollout.vllm_rollout import vllm_rollout
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 
 
+class _Ref:
+    """Awaitable from any event loop, like the object refs a worker group returns."""
+
+    def __init__(self, value=None):
+        self.value = value
+
+    def __await__(self):
+        return self.value
+        yield
+
+
+@pytest.mark.parametrize("publish", [False, True])
 @pytest.mark.parametrize(
     "mode,prefix_caching,multimodal,preserve,keep",
     [
@@ -37,13 +50,16 @@ from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, 
         (RolloutMode.STANDALONE, False, True, True, False),
     ],
 )
-def test_weight_sync_lifecycle(monkeypatch, mode, prefix_caching, multimodal, preserve, keep):
+def test_weight_sync_lifecycle(monkeypatch, mode, prefix_caching, multimodal, preserve, keep, publish):
     events = []
     replicas = []
     for rank in range(2):
         server = object.__new__(vLLMHttpServer)
         server.node_rank = 0
-        server.engine = SimpleNamespace(pause_generation=AsyncMock(), resume_generation=AsyncMock())
+        server.engine = SimpleNamespace(
+            pause_generation=AsyncMock(side_effect=lambda **kw: events.append("pause")),
+            resume_generation=AsyncMock(),
+        )
         server.close_submission_gate = AsyncMock()
         server.open_submission_gate = AsyncMock()
         handle = SimpleNamespace(
@@ -71,34 +87,45 @@ def test_weight_sync_lifecycle(monkeypatch, mode, prefix_caching, multimodal, pr
             pass
 
         def update_weights(self, **kwargs):
-            if keep:
-                assert all(s.engine.pause_generation.await_count == 1 for _, s in replicas)
-                assert kwargs == {"global_steps": 8, "preserve_kv_cache": True}
-            else:
-                assert kwargs == {"global_steps": 8}
+            # Only the receivers get the internal option.
+            assert kwargs == ({"global_steps": 8, "preserve_kv_cache": True} if keep else {"global_steps": 8})
             events.append("transfer")
-            return [None, None]
+            return [_Ref(), _Ref()]
 
         def execute_checkpoint_engine(self, methods):
             assert methods == ["finalize", "finalize"]
             events.append("finalize")
-            return [None, None]
+            return [_Ref(), _Ref()]
 
     monkeypatch.setattr(base, "RayWorkerGroup", WorkerGroup)
-    monkeypatch.setattr(base.ray, "get", lambda refs: refs)
     manager = object.__new__(base.CheckpointEngineManager)
     manager.backend = "nccl"
+    manager.backend_cls = SimpleNamespace(support_publish_weights=publish)
     manager.actor_wg = WorkerGroup()
-    # Sender never receives the internal receiver-only option.
-    manager.actor_wg.update_weights = lambda **kw: [dict(sent=kw)]
+    manager.actor_wg.update_weights = lambda **kw: [_Ref(dict(sent=kw))]
     manager.replicas = [r for r, _ in replicas]
     manager.build_process_group = lambda rollout: events.append("prepare")
+    manager._update_ticket = None
+    manager._background_loop = asyncio.new_event_loop()
+    manager._background_loop_ready = threading.Event()
+    manager._background_loop_thread = threading.Thread(target=manager._run_background_loop, daemon=True)
+    manager._background_loop_thread.start()
 
-    result = manager.update_weights(global_steps=8)
+    async def update():
+        ticket = await manager.submit_update(global_steps=8)
+        return await ticket.wait_committed()
+
+    try:
+        result = asyncio.run(update())
+    finally:
+        manager.close()
 
     assert result == {"sent": {"global_steps": 8, "mode": "nccl"}}
+    quiesce = ["pause"] * 2 if keep else ["abort"] * 2 + ["release"] * 2
+    # A backend that publishes weights builds its topology first and quiesces rollout when it commits.
+    expected = ["prepare", *quiesce] if publish else [*quiesce, "prepare"]
+    expected += ["transfer", "finalize", "finalize"]
     if keep:
-        assert events == ["prepare", "transfer", "finalize", "finalize"]
         for replica, server in replicas:
             replica.abort_all_requests.assert_not_awaited()
             replica.release_kv_cache.assert_not_awaited()
@@ -106,18 +133,8 @@ def test_weight_sync_lifecycle(monkeypatch, mode, prefix_caching, multimodal, pr
             server.engine.pause_generation.assert_awaited_once_with(mode="keep", clear_cache=False)
             server.engine.resume_generation.assert_awaited_once_with()
     else:
-        assert events == [
-            "abort",
-            "abort",
-            "release",
-            "release",
-            "prepare",
-            "transfer",
-            "finalize",
-            "finalize",
-            "restore",
-            "restore",
-        ]
+        expected += ["restore"] * 2
+    assert events == expected
 
 
 @pytest.mark.parametrize("preserve", [True, False])

@@ -58,7 +58,6 @@ fi
 experiment_name="$(basename "${MODEL_ID,,}")-v1-separate-async-${ACTOR_STRATEGY}-minimal"
 
 common_params=(
-    trainer.use_v1=True
     trainer.v1.trainer_mode=separate_async
     trainer.v1.separate_async.num_warmup_batches=1
     trainer.v1.separate_async.parameter_sync_step=${PARAMETER_SYNC_STEP}

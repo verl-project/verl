@@ -25,7 +25,7 @@ pass_configs = {
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
 }
 
-__all__ = ["MXFP4_GROUP_SIZE", "fp4_quant"]
+__all__ = ["MXFP4_GROUP_SIZE", "fp4_grouped_fake_quant", "fp4_quant"]
 
 MXFP4_GROUP_SIZE = 32
 
@@ -110,6 +110,100 @@ def _fp4_quant_kernel(
         return fp4_quant
 
     return kernel()
+
+
+@cache
+def _fp4_grouped_fake_quant_kernel(
+    num_groups: int,
+    rows: int,
+    cols: int,
+    in_dtype: str,
+):
+    """Compile MXFP4 QDQ over independently allocated expert matrices."""
+    tile_rows = 32
+    fp4_max = 6.0
+
+    @tilelang.jit(pass_configs=pass_configs)
+    def kernel():
+        @T.prim_func
+        def fp4_grouped_fake_quant(
+            X_ptrs: T.Tensor[(num_groups,), T.ptr],
+            Y: T.Tensor[(num_groups, rows, cols), in_dtype],
+        ):
+            with T.Kernel(
+                num_groups,
+                T.ceildiv(rows, tile_rows),
+                cols // MXFP4_GROUP_SIZE,
+                threads=128,
+            ) as (pid_g, pid_m, pid_n):
+                X = T.make_tensor(X_ptrs[pid_g], (rows, cols), in_dtype)
+                x_shared = T.alloc_shared((tile_rows, MXFP4_GROUP_SIZE), in_dtype)
+                y_shared = T.alloc_shared((tile_rows, MXFP4_GROUP_SIZE), in_dtype)
+                amax_local = T.alloc_fragment((tile_rows,), _FP32)
+                scale_local = T.alloc_fragment((tile_rows,), _FP32)
+                scale_shared = T.alloc_shared((tile_rows,), _FP32)
+
+                T.copy(X[pid_m * tile_rows, pid_n * MXFP4_GROUP_SIZE], x_shared, disable_tma=True)
+                T.reduce_absmax(x_shared, amax_local, dim=1)
+                for i in T.Parallel(tile_rows):
+                    scale_local[i] = _mxfp4_scale(amax_local[i])
+                T.copy(scale_local, scale_shared, disable_tma=True)
+
+                for i, j in T.Parallel(tile_rows, MXFP4_GROUP_SIZE):
+                    quantized = T.Cast(
+                        _FP4,
+                        T.clamp(x_shared[i, j] / scale_shared[i], -fp4_max, fp4_max),
+                    )
+                    y_shared[i, j] = T.Cast(in_dtype, T.Cast(_FP32, quantized) * scale_shared[i])
+
+                T.copy(
+                    y_shared,
+                    Y[pid_g, pid_m * tile_rows, pid_n * MXFP4_GROUP_SIZE],
+                    disable_tma=True,
+                )
+
+        return fp4_grouped_fake_quant
+
+    return kernel()
+
+
+def fp4_grouped_fake_quant(tensors: tuple[torch.Tensor, ...]) -> torch.Tensor:
+    """Fake-quantize separate expert matrices without first stacking their inputs."""
+    if not tensors:
+        raise ValueError("fp4_grouped_fake_quant expects at least one tensor")
+    first = tensors[0]
+    if first.ndim != 2:
+        raise ValueError(f"fp4_grouped_fake_quant expects 2D tensors, got shape {tuple(first.shape)}")
+    if not first.is_cuda:
+        raise ValueError("fp4_grouped_fake_quant expects CUDA tensors")
+    if first.dtype not in _TORCH_TO_TILELANG_DTYPE:
+        raise TypeError(f"fp4_grouped_fake_quant supports BF16, FP16, and FP32 inputs, got {first.dtype}")
+    if any(
+        tensor.shape != first.shape or tensor.dtype != first.dtype or tensor.device != first.device
+        for tensor in tensors
+    ):
+        raise ValueError("fp4_grouped_fake_quant requires tensors with identical shapes, dtypes, and devices")
+    if any(not tensor.is_contiguous() for tensor in tensors):
+        raise ValueError("fp4_grouped_fake_quant requires contiguous tensors")
+
+    rows, cols = first.shape
+    if cols == 0 or cols % MXFP4_GROUP_SIZE:
+        raise ValueError(f"the last dimension must be a nonzero multiple of {MXFP4_GROUP_SIZE}, got {cols}")
+
+    pointer_table = torch.tensor(
+        [tensor.data_ptr() for tensor in tensors],
+        dtype=torch.int64,
+        device=first.device,
+    )
+    output = torch.empty((len(tensors), rows, cols), dtype=first.dtype, device=first.device)
+    kernel = _fp4_grouped_fake_quant_kernel(
+        len(tensors),
+        rows,
+        cols,
+        _TORCH_TO_TILELANG_DTYPE[first.dtype],
+    )
+    kernel(pointer_table, output)
+    return output
 
 
 def fp4_quant(

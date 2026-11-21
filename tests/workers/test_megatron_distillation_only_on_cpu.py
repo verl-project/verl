@@ -52,10 +52,23 @@ def _make_engine_stub(tf_config=None):
 
 
 def _make_logits_processor(keys, packings=None):
-    def _proc(student_logits, data, data_format, quant_align_size=None, cp_layout="zigzag", local_cp_size=None):
+    def _proc(
+        student_logits,
+        data,
+        data_format,
+        quant_align_size=None,
+        pad_to_length_bucket=None,
+        cp_layout="zigzag",
+        local_cp_size=None,
+    ):
         if packings is not None:
             packings.append(
-                {"quant_align_size": quant_align_size, "cp_layout": cp_layout, "local_cp_size": local_cp_size}
+                {
+                    "quant_align_size": quant_align_size,
+                    "pad_to_length_bucket": pad_to_length_bucket,
+                    "cp_layout": cp_layout,
+                    "local_cp_size": local_cp_size,
+                }
             )
         n = student_logits.shape[1]
         return {k: torch.full((1, n), float(i + 1)) for i, k in enumerate(keys)}
@@ -82,6 +95,7 @@ def _run_logits_processor(eng, *, distillation_use_topk, distillation_only, logi
             calculate_entropy=False,
             distillation_use_topk=distillation_use_topk,
             distillation_only=distillation_only,
+            score_centering=False,
             logits_processor_func=logits_processor_func or _make_logits_processor(_DISTILLATION_KEYS),
             batch=batch,
             data_format="thd",
@@ -150,7 +164,14 @@ def test_megatron_logits_processor_passes_the_student_packing_to_topk_loss(
         logits_processor_func=_make_logits_processor(_DISTILLATION_KEYS, packings),
         **packing,
     )
-    assert packings == [{"quant_align_size": expected, "cp_layout": cp_layout, "local_cp_size": local_cp_size}]
+    assert packings == [
+        {
+            "quant_align_size": expected,
+            "pad_to_length_bucket": None,
+            "cp_layout": cp_layout,
+            "local_cp_size": local_cp_size,
+        }
+    ]
 
 
 def test_megatron_forward_step_gives_the_topk_loss_the_student_cp_split():

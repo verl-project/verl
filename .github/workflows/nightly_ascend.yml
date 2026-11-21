@@ -32,10 +32,6 @@
 name: nightly_ci_ascend
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  # For push, for now only anti-patterns are specified so it is more conservative
-  # and achieves higher coverage.
   schedule:
     - cron: "0 17 * * *"
     - cron: "0 18 * * *"
@@ -55,10 +51,10 @@ jobs:
   # Test ppo qwen3-8b fsdp vllm
   nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
-    runs-on: linux-aarch64-a3-800i-8
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -90,6 +86,11 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend
         run: |
           ray stop --force
@@ -107,7 +108,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 160g
     env:
@@ -141,6 +142,11 @@ jobs:
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend
         run: |
           ray stop --force
@@ -175,7 +181,7 @@ jobs:
   #   runs-on: linux-aarch64-a3-800i-8
   #   timeout-minutes: 180 # Increase this timeout value as needed
   #   container:
-  #     image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+  #     image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
   #     options: >-
   #       --shm-size 16g
   #   env:
@@ -230,7 +236,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 60g
     env:
@@ -265,6 +271,11 @@ jobs:
       - name: Preprocess GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend
         env:
           MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B-Instruct-2507
@@ -284,7 +295,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
         --shm-size 60g
     env:
@@ -316,6 +327,11 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           clean: true
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running nightlyCI_grpo-qwen3-30b-megatron-sglang_ascend
         env:
           MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B-Instruct-2507
@@ -335,7 +351,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 80g
     env:
@@ -367,6 +383,11 @@ jobs:
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend
         run: |
           ray stop --force
@@ -375,10 +396,10 @@ jobs:
   # Test grpo qwen3_5_2b fsdp_turbo vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
-    runs-on: linux-aarch64-a3-800i-8
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -403,6 +424,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
+          pip install transformers==5.21.0
       - name: Clone FSDPTurbo
         run: |
           git clone https://gitcode.com/Ascend/FSDPTurbo.git /FSDPTurbo
@@ -412,6 +434,11 @@ jobs:
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend
         run: |
           ray stop --force
@@ -424,7 +451,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 160g
     env:
@@ -458,6 +485,11 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running quick_start_qwen3_0_6b_fsdp2_vllm_ascend
         run: |
           ray stop --force
@@ -469,7 +501,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -495,6 +527,11 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running quick_start_qwen3_0_6b_megatron_vllm_ascend
         run: |
           ray stop --force
@@ -506,7 +543,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -532,6 +569,11 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running quick_start_qwen3_0_6b_megatron_sglang_ascend
         run: |
           ray stop --force
@@ -543,7 +585,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -569,6 +611,11 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running quick_start_qwen3_0_6b_fsdp2_sglang_ascend
         run: |
           ray stop --force
@@ -580,7 +627,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 60g
     env:
@@ -622,6 +669,11 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running nightlyCI_grpo-qwen3-30b-veomni-fsdp_ascend
         run: |
           ray stop --force
@@ -633,7 +685,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 160g
     env:
@@ -662,6 +714,11 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running nightlyCI_gspo-qwen3-8b-fsdp2-vllm_ascend
         run: |
           ray stop --force
@@ -679,7 +736,7 @@ jobs:
   #   runs-on: linux-aarch64-a3-800i-16
   #   timeout-minutes: 180 # Increase this timeout value as needed
   #   container:
-  #     image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+  #     image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
   #     options: >-
   #       --shm-size 16g
   #   env:

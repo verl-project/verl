@@ -377,6 +377,24 @@ def test_critic_engine(strategy, tmp_path):
     ray.shutdown()
 
 
+def create_tiny_actor_config(use_moe=False):
+    # Keep two layers for PP=2 and attention dimensions divisible by TP=2/SP=2.
+    kwargs = dict(
+        vocab_size=512,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2 if use_moe else 4,
+        head_dim=16,
+        max_position_embeddings=256,
+        tie_word_embeddings=False,
+    )
+    if use_moe:
+        return Qwen3MoeConfig(moe_intermediate_size=64, num_experts=4, num_experts_per_tok=2, **kwargs)
+    return Qwen3Config(**kwargs)
+
+
 def create_actor_model(tmp_path, config):
     model = AutoModelForCausalLM.from_config(config)
     path = os.path.join(tmp_path, "test_model")
@@ -454,7 +472,7 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
 
 
 @pytest.mark.parametrize("world_size", [8])
-@pytest.mark.parametrize("config", [Qwen3Config(num_hidden_layers=2), Qwen3MoeConfig(num_hidden_layers=2)])
+@pytest.mark.parametrize("config", [create_tiny_actor_config(), create_tiny_actor_config(use_moe=True)])
 @pytest.mark.parametrize("strategy", ["megatron", "fsdp", "fsdp2"])
 def test_per_tensor_generator(world_size, tmp_path, config, strategy):
     rendezvous_file = str(tmp_path / "rdzv_mask")
@@ -728,7 +746,7 @@ def test_fsdp_engine_split_forward_backward_and_optimizer_step(strategy, tmp_pat
 
 
 @pytest.mark.parametrize("world_size", [8])
-@pytest.mark.parametrize("config", [Qwen3Config(num_hidden_layers=2)])
+@pytest.mark.parametrize("config", [create_tiny_actor_config()])
 def test_fsdp2_autocast_dtype_honors_mixed_precision(world_size, tmp_path, config):
     rendezvous_file = str(tmp_path / "rdzv_autocast")
     os.makedirs(os.path.dirname(rendezvous_file), exist_ok=True)

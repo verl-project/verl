@@ -93,21 +93,20 @@ Entry function
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Code: https://github.com/verl-project/verl/blob/main/verl/trainer/main_ppo.py
 
-In this file, we define a remote function `main_task` that serves as the controller (driver) process as shown in the above figure. We also define a ``RewardManager``, where users can customize their reward function based on the data source in the dataset. Note that `RewardManager` should return the final token-level reward that is optimized by RL algorithms. Note that users can combine model-based rewards and rule-based rewards.
-The ``main_task`` constructs a RayPPOTrainer instance and launch the fit. Note that ``main_task`` **runs as a single process**.
-
-We highly recommend that the ``main_task`` is NOT scheduled on the head of the ray cluster because ``main_task`` will consume a lot of memory but the head usually contains very few resources.
+``TaskRunnerV1`` is the remote controller process. It initializes TransferQueue,
+selects a trainer using ``trainer.v1.trainer_mode``, initializes the workers,
+and creates ``AgentLoopManagerTQ`` before calling ``trainer.fit()``.
 
 Ray trainer
 ~~~~~~~~~~~~~~~~~~~~
-Code: https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py
+Code: https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/v1/trainer_base.py
 
-The RayPPOTrainer manages 
+The PPOTrainer manages
 
 - Worker and WorkerGroup construction
 - Runs the main loop of PPO algorithm
 
-Note that, the fit function of RayPPOTrainer **runs as a single process**.
+Note that, the fit function of PPOTrainer **runs as a single process**.
 
 Worker and WorkerGroup construction
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -216,7 +215,7 @@ Important code files in the repository are organized as below:
      trainer
        main_ppo.py  # the entrypoint for RL training
        ppo
-         ray_trainer.py  # the training loop for RL algorithms such as PPO
+         v1/  # PPO trainer implementations
        sft_trainer.py  # the SFT trainer with FSDP backend
      config
        generation.yaml  # configuration template for rollout

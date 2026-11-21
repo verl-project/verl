@@ -51,6 +51,7 @@ from verl.trainer.distillation.tail_kl import compute_tail_aware_logit_gradient
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.workers.config import DistillationLossConfig
+from verl.workers.engine.fsdp import transformer_impl as fsdp_transformer_impl
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
 compute_fsdp_forward_kl_topk_tail = partial(compute_fsdp_forward_kl_topk, include_tail=True)
@@ -74,8 +75,10 @@ def _make_engine_stub():
 
     class _EngineCfg:
         entropy_checkpointing = False
+        batch_invariant = False
 
     eng.engine_config = _EngineCfg()
+    eng.model_config = SimpleNamespace(fused_kernel_options=None)
     return eng
 
 
@@ -91,6 +94,75 @@ def _make_logits_processor(keys):
         return {k: torch.full((1, n), float(i + 1)) for i, k in enumerate(keys)}
 
     return _proc
+
+
+def test_fused_topk_outputs_always_use_common_log_probs_processor():
+    seq_lengths = torch.tensor([3, 2])
+    offsets = torch.cat((torch.tensor([0]), seq_lengths.cumsum(0)))
+    total_nnz = int(seq_lengths.sum())
+    input_ids = torch.nested.nested_tensor_from_jagged(
+        torch.arange(total_nnz, dtype=torch.long),
+        offsets=offsets,
+    )
+    topk_log_probs = torch.randn(1, total_nnz, 2)
+    output = SimpleNamespace(
+        log_probs=None,
+        entropy=None,
+        topk_log_probs=topk_log_probs,
+        fused_linear_aux=SimpleNamespace(
+            distillation_losses=torch.full((1, total_nnz), -123.0),
+            student_mass=torch.zeros(1, total_nnz),
+            teacher_mass=torch.zeros(1, total_nnz),
+        ),
+    )
+    micro_batch = TensorDict({"input_ids": input_ids}, batch_size=[])
+    tu.assign_non_tensor(
+        micro_batch,
+        use_remove_padding=True,
+        pad_mode=DatasetPadMode.NO_PADDING,
+        use_fused_kernels=True,
+        calculate_entropy=False,
+        calculate_sum_pi_squared=False,
+        distillation_use_topk=True,
+        distillation_only=True,
+    )
+    seen = []
+
+    def logits_processor(*, student_topk_log_probs, data):
+        seen.append(student_topk_log_probs)
+        return {"distillation_losses": student_topk_log_probs[..., 0]}
+
+    model_output = _make_engine_stub().prepare_model_outputs(
+        output,
+        {
+            "input_ids_rmpad_rolled": torch.arange(total_nnz),
+            "temperature_rmpad": torch.ones(total_nnz),
+            "pad_size": 0,
+        },
+        micro_batch,
+        logits_processor,
+    )
+
+    assert len(seen) == 1 and seen[0] is topk_log_probs
+    assert torch.equal(model_output["distillation_losses"].values(), topk_log_probs[0, :, 0])
+
+
+def test_ulysses_topk_slice_preserves_query_dimension():
+    labels = torch.arange(15).reshape(1, 5, 3)
+    seen = {}
+
+    def fake_slice(value, dim, padding):
+        seen.update(value=value, dim=dim, padding=padding)
+        return value[:, 3:]
+
+    with patch.object(fsdp_transformer_impl, "slice_input_tensor", side_effect=fake_slice):
+        result = fsdp_transformer_impl._slice_topk_labels_for_ulysses(labels, pad_size=1)
+
+    assert seen["value"].shape == (1, 6, 3)
+    assert seen["dim"] == 1 and seen["padding"] is False
+    torch.testing.assert_close(seen["value"][:, :5], labels)
+    torch.testing.assert_close(seen["value"][:, 5], torch.zeros(1, 3, dtype=labels.dtype))
+    assert result.shape == (1, 3, 3)
 
 
 @pytest.mark.parametrize("use_remove_padding", [True, False])
@@ -232,6 +304,58 @@ def test_forward_kl_topk_emits_overlap_metrics():
         dtype=output["overlap_token_advantage"].dtype,
     )
     torch.testing.assert_close(output["overlap_token_advantage"], expected_ota)
+
+
+@pytest.mark.parametrize("include_tail", [False, True])
+def test_precomputed_topk_matches_logits_path_with_gradient(include_tail):
+    torch.manual_seed(17)
+    logits = torch.randn(1, 4, 11, dtype=torch.float64)
+    ids_rows = [[2, 2, 7], [1, 5, 9], [0, 4, 8], [3, 6, 10]]
+    if include_tail:
+        # Tail mass is only a probability mass when the recorded support is unique.
+        ids_rows[0] = [2, 5, 7]
+    teacher_ids = _nested_from_rows(ids_rows).to(torch.int64)
+    teacher_logits = torch.randn(1, 4, 11, dtype=torch.float64)
+    teacher_log_probs = torch.log_softmax(teacher_logits, dim=-1).gather(-1, teacher_ids.values().unsqueeze(0))
+    teacher_log_probs = _nested_from_rows(teacher_log_probs.squeeze(0).tolist()).to(torch.float64)
+    config = SimpleNamespace(
+        distillation_loss=SimpleNamespace(
+            log_prob_min_clamp=None,
+            tail_mass_eps=1e-12,
+            use_chunked_topk=False,
+        )
+    )
+
+    eager_logits = logits.clone().requires_grad_(True)
+    eager = compute_fsdp_forward_kl_topk(
+        student_logits=eager_logits,
+        teacher_topk_log_probs=teacher_log_probs,
+        teacher_topk_ids=teacher_ids,
+        config=config,
+        data_format="thd",
+        include_tail=include_tail,
+    )
+    fused_logits = logits.clone().requires_grad_(True)
+    precomputed = torch.log_softmax(fused_logits, dim=-1).gather(-1, teacher_ids.values().unsqueeze(0))
+    fused = compute_fsdp_forward_kl_topk(
+        student_logits=None,
+        student_topk_log_probs=precomputed,
+        teacher_topk_log_probs=teacher_log_probs,
+        teacher_topk_ids=teacher_ids,
+        config=config,
+        data_format="thd",
+        include_tail=include_tail,
+    )
+
+    for key in ("distillation_losses", "student_mass", "teacher_mass"):
+        torch.testing.assert_close(fused[key], eager[key])
+    if include_tail:
+        torch.testing.assert_close(fused["tail_loss"], eager["tail_loss"])
+    assert "overlap_count" not in fused and "overlap_token_advantage" not in fused
+
+    eager["distillation_losses"].sum().backward()
+    fused["distillation_losses"].sum().backward()
+    torch.testing.assert_close(fused_logits.grad, eager_logits.grad)
 
 
 def test_forward_kl_topk_metric_aggregation_for_overlap_outputs():

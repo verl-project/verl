@@ -35,7 +35,7 @@ import pytest
 pytest.importorskip("ray")
 pytest.importorskip("vllm")
 
-from vllm.logprobs import Logprob
+from vllm.logprobs import FlatLogprobs, Logprob
 
 from verl.workers.config import RolloutConfig
 from verl.workers.rollout.vllm_rollout import vllm_async_server
@@ -54,10 +54,13 @@ class _FakeEngine:
         self.abort_calls = []
         self.drain_calls = 0
         self.reset_prefix_calls = 0
+        self.reset_connector_args = []
+        self.pause_kwargs = []
         self.outputs = []
         self.sampling_params = []
         self.prompts = []
         self.closed = 0
+        self.prompts = []
 
     async def add_request(self, request_id, prompt, params, lora_request=None, priority=0, data_parallel_rank=None):
         """Like AsyncLLM.add_request(): returns a collector that yields ``outputs``, the last one finished."""
@@ -97,10 +100,18 @@ class _FakeEngine:
 
     async def reset_prefix_cache(self, reset_connector=True):
         self.reset_prefix_calls += 1
+        self.reset_connector_args.append(reset_connector)
+
+    async def reset_mm_cache(self):
+        pass
+
+    async def reset_encoder_cache(self):
+        pass
 
 
 def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
     server = object.__new__(cls)
+    server.config = RolloutConfig(name="vllm")
     server.node_rank = node_rank
     server.global_steps = 7
     server.engine = _FakeEngine()
@@ -358,21 +369,23 @@ def _make_generating_server(monkeypatch, cls, outputs):
     return server
 
 
-def _request_output(token_ids, rows=None):
+def _request_output(token_ids, rows=None, *, finish_reason="stop"):
     completion = SimpleNamespace(
-        token_ids=token_ids, logprobs=rows, finish_reason="stop", routed_experts=None, num_preempted=0
+        token_ids=token_ids, logprobs=rows, finish_reason=finish_reason, routed_experts=None, num_preempted=0
     )
     return SimpleNamespace(outputs=[completion], num_cached_tokens=0, prompt_logprobs=None)
 
 
-def test_default_request_hooks_leave_generate_output_unchanged(monkeypatch):
+@pytest.mark.parametrize(("finish_reason", "stop_reason"), [("stop", "completed"), ("length", "length")])
+def test_default_request_hooks_leave_generate_output_unchanged(monkeypatch, finish_reason, stop_reason):
     async def main():
-        server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [_request_output([5, 9])])
+        request_output = _request_output([5, 9], finish_reason=finish_reason)
+        server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [request_output])
 
-        output = await server.generate([1, 2, 3], {"temperature": 1.0}, "r")
+        output = await server.generate([1, 2, 3], {"temperature": 1.0, "max_tokens": 2}, "r")
 
         assert server.engine.sampling_params[0].logprob_token_ids is None
-        assert output.token_ids == [5, 9] and output.stop_reason == "completed"
+        assert output.token_ids == [5, 9] and output.stop_reason == stop_reason
         assert output.extra_fields == {"global_steps": 7, "num_cached_tokens": 0}
         assert "cache_salt" not in server.engine.prompts[0]
         assert server.engine.closed == 1
@@ -597,7 +610,9 @@ def test_output_hook_runs_for_requests_aborted_with_empty_outputs(monkeypatch):
 
 def test_generate_retains_start_and_end_versions_and_original_sampling_records(monkeypatch):
     async def main():
-        rows = [{5: Logprob(logprob=-0.2, rank=1)}, {9: Logprob(logprob=-0.7, rank=1)}]
+        rows = FlatLogprobs()
+        rows.append({5: Logprob(logprob=-0.2, rank=1)})
+        rows.append({9: Logprob(logprob=-0.7, rank=1)})
         final = _request_output([5, 9], rows)
         routing = [[3], [4], [5], [6]]
         final.outputs[0].routed_experts = routing
@@ -665,5 +680,138 @@ def test_cancelled_request_releases_barrier_and_aborts_in_engine():
         assert server.engine.engine_aborts == [("r1-internal", True)], "cancellation must drop the request"
         assert server.engine.closed == 1
         assert server._admitting == 0
+
+    asyncio.run(main())
+
+
+def _salted(server):
+    server.config = RolloutConfig(
+        name="vllm",
+        max_model_len=64,
+        prompt_length=32,
+        response_length=16,
+        external_kv_cache_invalidation="salt",
+        prefix_cache_namespace="run",
+    )
+    return server
+
+
+def test_salt_request_parked_across_weight_update_uses_new_version(monkeypatch):
+    async def main():
+        server = _salted(_make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [_request_output([5])]))
+        await server.abort_all_requests()
+
+        task = asyncio.create_task(server.generate([1, 2, 3], {}, "parked"))
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        await server.set_global_steps(8)
+        await server.resume_generation()
+        await asyncio.wait_for(task, timeout=5)
+
+        assert server.engine.prompts[0]["cache_salt"] == "run:8"
+
+    asyncio.run(main())
+
+
+def test_salt_without_preservation_ignores_a_carried_salt(monkeypatch):
+    async def main():
+        server = _salted(_make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [_request_output([5])]))
+        first = await server.generate([1, 2, 3], {}, "first")
+        assert "cache_salt" not in first.extra_fields
+
+        server.global_steps = 8
+        await server.generate([1, 2, 3, 5], {}, "retry", cache_salt="run:7")
+
+        assert [prompt["cache_salt"] for prompt in server.engine.prompts] == ["run:7", "run:8"]
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("mode,clear_cache,reset_connector", [("reset", True, []), ("salt", False, [False])])
+def test_abort_keeps_external_kv_store_only_when_salted(mode, clear_cache, reset_connector):
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(name="vllm", external_kv_cache_invalidation=mode)
+
+        await server.abort_all_requests()
+
+        assert server.engine.pause_kwargs[0]["clear_cache"] is clear_cache
+        assert server.engine.reset_connector_args == reset_connector
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("mode,reset_connector", [("reset", True), ("salt", False)])
+def test_clear_kv_cache_resets_connector_only_in_reset_mode(mode, reset_connector):
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(name="vllm", external_kv_cache_invalidation=mode)
+
+        await server.clear_kv_cache()
+
+        assert server.engine.reset_connector_args == [reset_connector]
+
+    asyncio.run(main())
+
+
+def test_salt_barrier_timeout_fails_closed(monkeypatch):
+    # Under "salt" a straggling admission would run on the new weights with its old salt.
+    monkeypatch.setattr(vllm_async_server, "_GATE_BARRIER_TIMEOUT_S", 0.05)
+
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(name="vllm", external_kv_cache_invalidation="salt")
+        server._admitting = 1
+
+        with pytest.raises(RuntimeError, match="barrier timed out"):
+            await server.abort_all_requests()
+        assert server.engine.pause_calls == 0
+
+    asyncio.run(main())
+
+
+class _SleepEngine:
+    def __init__(self):
+        self.sleep_calls = []
+
+    async def sleep(self, level=1, mode="abort"):
+        self.sleep_calls.append({"level": level})
+
+    async def wake_up(self, tags=None):
+        pass
+
+    async def reset_encoder_cache(self):
+        pass
+
+
+class _SleepEngineKeepsConnector(_SleepEngine):
+    async def sleep(self, level=1, mode="abort", reset_connector=True):
+        self.sleep_calls.append({"level": level, "reset_connector": reset_connector})
+
+
+@pytest.mark.parametrize(
+    "rollout_mode,method", [("COLOCATED", "sleep"), ("HYBRID", "sleep"), ("STANDALONE", "release")]
+)
+@pytest.mark.parametrize(
+    "mode,engine_cls,expected_reset",
+    [
+        ("salt", _SleepEngineKeepsConnector, False),  # vLLM with reset_connector: keep the store
+        ("reset", _SleepEngineKeepsConnector, True),  # reset mode keeps vLLM's default
+        ("salt", _SleepEngine, "unsupported"),  # older vLLM: plain sleep, warned
+    ],
+)
+def test_sleep_keeps_external_kv_store_only_when_salted(rollout_mode, method, mode, engine_cls, expected_reset):
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(name="vllm", free_cache_engine=True, external_kv_cache_invalidation=mode)
+        server.rollout_mode = vllm_async_server.RolloutMode[rollout_mode]
+        server.model_config = SimpleNamespace(lora_rank=0, lora={})
+        server.engine = engine_cls()
+
+        await (server.release_kv_cache() if method == "release" else server.sleep())
+
+        (call,) = server.engine.sleep_calls
+        assert call.get("reset_connector", "unsupported") == expected_reset
 
     asyncio.run(main())

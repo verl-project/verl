@@ -188,9 +188,9 @@ Last updated: 05/13/2026.
 参考资料
 --------
 
-- `昇腾性能调优指南 <../dev_guide/performance/perf_tuning_on_ascend.rst>`_
-- `昇腾快速上手说明 <../get_start/quick_start.rst>`_
-- `NPU-CI 添加指导 <../contribution_guide/ascend_ci_guide.rst>`_
+- `昇腾性能调优指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/dev_guide/performance/perf_tuning_on_ascend.html>`_
+- `昇腾快速上手说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/quick_start.html>`_
+- `NPU-CI 添加指导 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/contribution_guide/ascend_ci_guide.html>`_
 - Ascend NPU 文档: https://www.hiascend.com/document
 - CANN 工具包文档: https://www.hiascend.com/software/cann
 

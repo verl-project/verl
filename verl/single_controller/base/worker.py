@@ -31,20 +31,15 @@ from verl.utils.device import (
 from .decorator import Dispatch, Execute, register
 
 
-@dataclass
-class DistRankInfo:
-    tp_rank: int
+@dataclass(frozen=True)
+class DispatchInfo:
     dp_rank: int
-    pp_rank: int
-    cp_rank: int
+    is_mp_src: bool
 
 
-@dataclass
-class DistGlobalInfo:
-    tp_size: int
-    dp_size: int
-    pp_size: int
-    cp_size: int
+@dataclass(frozen=True)
+class CollectInfo:
+    is_collect: bool
 
 
 class WorkerHelper:
@@ -83,7 +78,7 @@ class Worker(WorkerHelper):
 
     fused_worker_attr_name = "fused_worker_dict"
 
-    def _register_dispatch_collect_info(self, mesh_name: str, dp_rank: int, is_collect: bool):
+    def _register_dispatch_collect_info(self, mesh_name: str, dp_rank: int, is_collect: bool, is_mp_src: bool = True):
         """Register the dp_rank for a given mesh name. This function is meant to be called by the worker
 
         Args:
@@ -93,11 +88,13 @@ class Worker(WorkerHelper):
                 dp_rank to register for the given mesh name.
             is_collect (bool):
                 Whether the dp_rank is used for collect.
+            is_mp_src (bool):
+                Whether this rank is the source rank for worker-side model-parallel dispatch.
         """
-        if mesh_name in self.__dispatch_dp_rank or mesh_name in self.__collect_dp_rank:
+        if mesh_name in self.__dispatch_info or mesh_name in self.__collect_info:
             raise ValueError(f"mesh_name {mesh_name} has been registered")
-        self.__dispatch_dp_rank[mesh_name] = dp_rank
-        self.__collect_dp_rank[mesh_name] = is_collect
+        self.__dispatch_info[mesh_name] = DispatchInfo(dp_rank=dp_rank, is_mp_src=is_mp_src)
+        self.__collect_info[mesh_name] = CollectInfo(is_collect=is_collect)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def _query_dispatch_info(self, mesh_name: str):
@@ -108,12 +105,12 @@ class Worker(WorkerHelper):
                 Name of the mesh to query dispatch info for.
 
         Returns:
-            int:
-                The dp_rank for the given mesh name.
+            DispatchInfo:
+                The data-parallel rank and whether this rank is the model-parallel source.
         """
-        assert mesh_name in self.__dispatch_dp_rank, f"{mesh_name} is not registered in {self.__class__.__name__}"
-        # note that each rank store its own dp_rank
-        return self.__dispatch_dp_rank[mesh_name]
+        assert mesh_name in self.__dispatch_info, f"{mesh_name} is not registered in {self.__class__.__name__}"
+        # note that each rank stores its own dispatch info
+        return self.__dispatch_info[mesh_name]
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def _query_collect_info(self, mesh_name: str):
@@ -127,43 +124,46 @@ class Worker(WorkerHelper):
                 Name of the mesh to query collect info for.
 
         Returns:
-            bool:
-                Whether the dp_rank is used for collect.
+            CollectInfo:
+                Whether this rank contributes an output for collection.
         """
-        assert mesh_name in self.__collect_dp_rank, f"{mesh_name} is not registered in {self.__class__.__name__}"
-        return self.__collect_dp_rank[mesh_name]
+        assert mesh_name in self.__collect_info, f"{mesh_name} is not registered in {self.__class__.__name__}"
+        return self.__collect_info[mesh_name]
 
     def get_dispatch_collect(self):
-        """Get all registered dispatch and collect dp_ranks.
+        """Get all registered dispatch and collect information.
 
         Returns:
-            dict[str, int]:
-                A dictionary mapping mesh names to their dispatch dp_ranks.
-            dict[str, bool]:
-                A dictionary mapping mesh names to whether they are used for collect.
+            dict[str, DispatchInfo]:
+                A dictionary mapping mesh names to their dispatch information.
+            dict[str, CollectInfo]:
+                A dictionary mapping mesh names to their collect information.
         """
-        return {"dispatch_dp_rank": self.__dispatch_dp_rank, "collect_dp_rank": self.__collect_dp_rank}
+        return {"dispatch_info": self.__dispatch_info, "collect_info": self.__collect_info}
 
-    def set_dispatch_collect(self, mesh_name: str, dispatch_dp_rank: dict[str, int], collect_dp_rank: dict[str, bool]):
-        """Set the dispatch and collect dp_ranks for all registered meshes.
+    def set_dispatch_collect(
+        self,
+        mesh_name: str,
+        dispatch_info: dict[str, DispatchInfo],
+        collect_info: dict[str, CollectInfo],
+    ):
+        """Set the dispatch and collect information for a mesh.
 
         Args:
-            mesh_name (str): Mesh name to set dispatch and collect dp_ranks for.
-            dispatch_dp_rank (dict[str, int]):
-                A dictionary mapping mesh names to their dispatch dp_ranks.
-            collect_dp_rank (dict[str, bool]):
-                A dictionary mapping mesh names to whether they are used for collect.
+            mesh_name (str): Mesh name to set dispatch and collect information for.
+            dispatch_info (dict[str, DispatchInfo]):
+                A dictionary mapping source mesh names to their dispatch information.
+            collect_info (dict[str, CollectInfo]):
+                A dictionary mapping source mesh names to their collect information.
         """
-        assert mesh_name not in self.__dispatch_dp_rank, (
-            f"{mesh_name} is already registered, {self.__dispatch_dp_rank.keys()}"
+        assert mesh_name not in self.__dispatch_info, (
+            f"{mesh_name} is already registered, {self.__dispatch_info.keys()}"
         )
-        assert mesh_name not in self.__collect_dp_rank, (
-            f"{mesh_name} is already registered, {self.__collect_dp_rank.keys()}"
-        )
-        for dp_rank in dispatch_dp_rank.values():
-            self.__dispatch_dp_rank[mesh_name] = dp_rank
-        for is_collect in collect_dp_rank.values():
-            self.__collect_dp_rank[mesh_name] = is_collect
+        assert mesh_name not in self.__collect_info, f"{mesh_name} is already registered, {self.__collect_info.keys()}"
+        for info in dispatch_info.values():
+            self.__dispatch_info[mesh_name] = info
+        for info in collect_info.values():
+            self.__collect_info[mesh_name] = info
 
     @classmethod
     def env_keys(cls):
@@ -216,8 +216,8 @@ class Worker(WorkerHelper):
         self._configure_with_store(store=store)
 
         self.fused_worker_dict = {}
-        self.__dispatch_dp_rank = {}
-        self.__collect_dp_rank = {}
+        self.__dispatch_info = {}
+        self.__collect_info = {}
 
     def get_fused_worker_by_name(self, worker_name: str):
         """Get a fused worker by its name.

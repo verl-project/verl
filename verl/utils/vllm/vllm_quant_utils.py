@@ -33,14 +33,15 @@ import os
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import Any
+from unittest.mock import patch
 
 import torch
 from packaging import version
 
 from verl.utils.vllm.vllm_fp4_utils import (
     install_mxfp4_mxfp8_compressed_tensors_patch,
-    install_nvfp4_cutlass_compressed_tensors_patch,
     is_deepseek_v4_model,
     process_mxfp4_moe_weights_after_loading,
     process_nvfp4_moe_weights_after_loading,
@@ -276,12 +277,62 @@ def reset_uncalibrated_kv_cache_scales(model):
             set_default_quant_scales(module, register_buffer=False)
 
 
+def _reset_uncalibrated_kv_cache_scales_after_loading(process_weights_after_loading):
+    """Reset dummy-loaded compressed-tensors KV scales before engine warmup.
+
+    Blackwell's FlashInfer TRT-LLM backend copies q/k/v scales into host-side
+    ``bmm1_scale`` / ``bmm2_scale`` values during warmup. Resetting only after
+    the first live refit is too late because CUDA graphs have already captured
+    those values. Patch the initial compressed-tensors post-load hook so an
+    absent KV cache scheme means 1.0 from the start.
+    """
+
+    @wraps(process_weights_after_loading)
+    def wrapped(quant_method, layer, *args, **kwargs):
+        result = process_weights_after_loading(quant_method, layer, *args, **kwargs)
+        if getattr(quant_method.quant_config, "kv_cache_scheme", None) is not None:
+            return result
+
+        from vllm.model_executor.layers.attention.attention import set_default_quant_scales
+
+        with torch.no_grad():
+            set_default_quant_scales(layer, register_buffer=False)
+        return result
+
+    return wrapped
+
+
+def _build_compressed_tensors_kv_cache_scale_patcher():
+    """Patch compressed-tensors KV scale initialization when vLLM provides it."""
+    try:
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+            CompressedTensorsKVCacheMethod,
+        )
+    except ImportError:
+        logger.info("compressed-tensors KV cache method not found; skipping its startup scale patch")
+        return None
+
+    method_path = (
+        "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors."
+        "CompressedTensorsKVCacheMethod.process_weights_after_loading"
+    )
+    return patch(
+        method_path,
+        _reset_uncalibrated_kv_cache_scales_after_loading(CompressedTensorsKVCacheMethod.process_weights_after_loading),
+    )
+
+
 def load_quanted_weights(weights, model_runner, is_drafter=False):
     if is_drafter:
-        drafter = getattr(model_runner, "drafter", None)
-        model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
+        model = None
+        for attr in ("drafter", "speculator"):
+            owner = getattr(model_runner, attr, None)
+            model = getattr(owner, "model", None)
+            if model is not None:
+                break
         assert model is not None, (
-            "load_quanted_weights(is_drafter=True) requires model_runner.drafter.model "
+            "load_quanted_weights(is_drafter=True) requires model_runner.drafter.model or "
+            "model_runner.speculator.model "
             "to be present and non-None for FP8 weight loading."
         )
     else:
@@ -328,12 +379,16 @@ def apply_vllm_quant_patches():
     activations.
     """
     install_mxfp4_mxfp8_compressed_tensors_patch()
-    install_nvfp4_cutlass_compressed_tensors_patch()
     install_nvfp4_per_token_compressed_tensors_patch()
     if fp8_state.vllm_patches:
         logger.debug("vLLM quantization patches already applied")
         return
 
-    for patcher in build_fp8_method_patchers(_get_vllm_version()):
+    patchers = build_fp8_method_patchers(_get_vllm_version())
+    kv_cache_scale_patcher = _build_compressed_tensors_kv_cache_scale_patcher()
+    if kv_cache_scale_patcher is not None:
+        patchers.append(kv_cache_scale_patcher)
+
+    for patcher in patchers:
         patcher.start()
         fp8_state.vllm_patches.append(patcher)

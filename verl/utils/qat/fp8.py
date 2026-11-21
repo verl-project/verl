@@ -27,7 +27,7 @@ pass_configs = {
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
 }
 
-__all__ = ["fp8_quant"]
+__all__ = ["fp8_grouped_fake_quant", "fp8_quant"]
 
 _FP8 = "float8_e4m3"
 _E8M0 = "float8_e8m0fnu"
@@ -166,6 +166,111 @@ def _block_quant_kernel(
     return kernel()
 
 
+@cache
+def _grouped_row_fake_quant_kernel(
+    num_groups: int,
+    rows: int,
+    cols: int,
+    block_cols: int,
+    in_dtype: str,
+    scale_fmt: ScaleFormat | None,
+):
+    """Compile row-wise QDQ over independently allocated expert matrices."""
+    scale_cols = cols // block_cols
+    cta_rows = 32
+    fp8_max = 448.0
+
+    @tilelang.jit(pass_configs=pass_configs)
+    def kernel():
+        @T.prim_func
+        def grouped_row_fake_quant(
+            X_ptrs: T.Tensor[(num_groups,), T.ptr],
+            Y: T.Tensor[(num_groups, rows, cols), in_dtype],
+        ):
+            with T.Kernel(scale_cols, num_groups, T.ceildiv(rows, cta_rows), threads=128) as (
+                pid_n,
+                pid_g,
+                pid_m,
+            ):
+                X = T.make_tensor(X_ptrs[pid_g], (rows, cols), in_dtype)
+                x_shared = T.alloc_shared((cta_rows, block_cols), in_dtype)
+                y_shared = T.alloc_shared((cta_rows, block_cols), in_dtype)
+                amax_rows = T.alloc_fragment((cta_rows,), _FP32)
+                scale_local = T.alloc_fragment((cta_rows,), _FP32)
+                scale_shared = T.alloc_shared((cta_rows,), _FP32)
+
+                T.copy(X[pid_m * cta_rows, pid_n * block_cols], x_shared, disable_tma=True)
+                T.reduce_absmax(x_shared, amax_rows, dim=1)
+                for i in T.Parallel(cta_rows):
+                    scale_local[i] = _fp8_scale(amax_rows[i], scale_fmt)
+                T.copy(scale_local, scale_shared, disable_tma=True)
+
+                for i, j in T.Parallel(cta_rows, block_cols):
+                    quantized = T.Cast(_FP8, T.clamp(x_shared[i, j] / scale_shared[i], -fp8_max, fp8_max))
+                    y_shared[i, j] = T.Cast(in_dtype, T.Cast(_FP32, quantized) * scale_shared[i])
+
+                T.copy(
+                    y_shared,
+                    Y[pid_g, pid_m * cta_rows, pid_n * block_cols],
+                    disable_tma=True,
+                )
+
+        return grouped_row_fake_quant
+
+    return kernel()
+
+
+@cache
+def _grouped_block_fake_quant_kernel(
+    num_groups: int,
+    rows: int,
+    cols: int,
+    block_rows: int,
+    block_cols: int,
+    in_dtype: str,
+    scale_fmt: ScaleFormat | None,
+):
+    """Compile 2D block QDQ over independently allocated expert matrices."""
+    scale_rows = rows // block_rows
+    scale_cols = cols // block_cols
+    fp8_max = 448.0
+
+    @tilelang.jit(pass_configs=pass_configs)
+    def kernel():
+        @T.prim_func
+        def grouped_block_fake_quant(
+            X_ptrs: T.Tensor[(num_groups,), T.ptr],
+            Y: T.Tensor[(num_groups, rows, cols), in_dtype],
+        ):
+            with T.Kernel(scale_cols, num_groups, scale_rows, threads=128) as (pid_n, pid_g, pid_m):
+                X = T.make_tensor(X_ptrs[pid_g], (rows, cols), in_dtype)
+                x_shared = T.alloc_shared((block_rows, block_cols), in_dtype)
+                y_shared = T.alloc_shared((block_rows, block_cols), in_dtype)
+                amax_rows = T.alloc_fragment((block_rows,), _FP32)
+                scale_local = T.alloc_fragment((1,), _FP32)
+                scale_shared = T.alloc_shared((1,), _FP32)
+
+                T.copy(X[pid_m * block_rows, pid_n * block_cols], x_shared, disable_tma=True)
+                T.reduce_absmax(x_shared, amax_rows, dim=1)
+                T.reduce_absmax(amax_rows, scale_local, dim=0)
+                scale_local[0] = _fp8_scale(scale_local[0], scale_fmt)
+                T.copy(scale_local, scale_shared, disable_tma=True)
+
+                for i, j in T.Parallel(block_rows, block_cols):
+                    quantized = T.Cast(_FP8, T.clamp(x_shared[i, j] / scale_shared[0], -fp8_max, fp8_max))
+                    y_shared[i, j] = T.Cast(in_dtype, T.Cast(_FP32, quantized) * scale_shared[0])
+
+                T.copy(
+                    y_shared,
+                    Y[pid_g, pid_m * block_rows, pid_n * block_cols],
+                    disable_tma=True,
+                )
+
+        return grouped_block_fake_quant
+
+    return kernel()
+
+
 def _normalize_block_shape(block_shape: Sequence[int]) -> tuple[int, int]:
     if len(block_shape) != 2:
         raise ValueError(f"block_shape must contain two dimensions, got {tuple(block_shape)}")
@@ -173,6 +278,63 @@ def _normalize_block_shape(block_shape: Sequence[int]) -> tuple[int, int]:
     if block_rows <= 0 or block_cols <= 0:
         raise ValueError(f"block dimensions must be positive, got {(block_rows, block_cols)}")
     return block_rows, block_cols
+
+
+def fp8_grouped_fake_quant(
+    tensors: Sequence[torch.Tensor],
+    block_shape: Sequence[int] = (128, 128),
+    *,
+    scale_fmt: ScaleFormat | None = None,
+) -> torch.Tensor:
+    """Fake-quantize separate expert matrices without first stacking their inputs."""
+    if not tensors:
+        raise ValueError("fp8_grouped_fake_quant expects at least one tensor")
+    first = tensors[0]
+    if first.ndim != 2:
+        raise ValueError(f"fp8_grouped_fake_quant expects 2D tensors, got shape {tuple(first.shape)}")
+    if not first.is_cuda:
+        raise ValueError("fp8_grouped_fake_quant expects CUDA tensors")
+    if first.dtype not in _TORCH_TO_TILELANG_DTYPE:
+        raise TypeError(f"fp8_grouped_fake_quant supports BF16, FP16, and FP32 inputs, got {first.dtype}")
+    if scale_fmt not in (None, "e8m0", "ue8m0"):
+        raise ValueError(f"scale_fmt must be None, 'e8m0', or 'ue8m0', got {scale_fmt!r}")
+    if any(
+        tensor.shape != first.shape or tensor.dtype != first.dtype or tensor.device != first.device
+        for tensor in tensors
+    ):
+        raise ValueError("fp8_grouped_fake_quant requires tensors with identical shapes, dtypes, and devices")
+    if any(not tensor.is_contiguous() for tensor in tensors):
+        raise ValueError("fp8_grouped_fake_quant requires contiguous tensors")
+
+    block_rows, block_cols = _normalize_block_shape(block_shape)
+    rows, cols = first.shape
+    if rows % block_rows or cols % block_cols:
+        raise ValueError(f"matrix shape {(rows, cols)} is not divisible by block_shape {(block_rows, block_cols)}")
+
+    pointer_table = torch.tensor(
+        [tensor.data_ptr() for tensor in tensors],
+        dtype=torch.int64,
+        device=first.device,
+    )
+    output = torch.empty((len(tensors), rows, cols), dtype=first.dtype, device=first.device)
+    kernel_args = (len(tensors), rows, cols)
+    if block_rows == 1:
+        kernel = _grouped_row_fake_quant_kernel(
+            *kernel_args,
+            block_cols,
+            _TORCH_TO_TILELANG_DTYPE[first.dtype],
+            scale_fmt,
+        )
+    else:
+        kernel = _grouped_block_fake_quant_kernel(
+            *kernel_args,
+            block_rows,
+            block_cols,
+            _TORCH_TO_TILELANG_DTYPE[first.dtype],
+            scale_fmt,
+        )
+    kernel(pointer_table, output)
+    return output
 
 
 def fp8_quant(

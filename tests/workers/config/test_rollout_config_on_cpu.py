@@ -29,3 +29,15 @@ def test_max_num_batched_tokens_raised_when_chunked_prefill_disabled():
 def test_prefix_cache_mode_rejects_unknown_values():
     with pytest.raises(ValueError, match="prefix_cache_mode"):
         RolloutConfig(name="vllm", prefix_cache_mode="per_step")
+
+
+def test_prompt_length_must_be_positive():
+    import pytest
+
+    with pytest.raises(ValueError, match="prompt_length must be positive"):
+        RolloutConfig(prompt_length=0)
+    with pytest.raises(ValueError, match="prompt_length must be positive"):
+        RolloutConfig(prompt_length=-1)
+    # default and a sane value remain valid
+    assert RolloutConfig().prompt_length == 512
+    assert RolloutConfig(prompt_length=1).prompt_length == 1
