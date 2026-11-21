@@ -74,219 +74,286 @@ class TestReduceMetrics(unittest.TestCase):
 class TestMetric(unittest.TestCase):
     """Tests for the Metric class."""
 
+    # ================= init tests =================
     def test_init_with_string_aggregation(self):
         """Test Metric initialization with string aggregation type."""
         metric = Metric(aggregation="mean")
         self.assertEqual(metric.aggregation, AggregationType.MEAN)
-        self.assertEqual(metric.values, [])
+        self.assertEqual(metric.count, 0)
 
     def test_init_with_enum_aggregation(self):
         """Test Metric initialization with AggregationType enum."""
         metric = Metric(aggregation=AggregationType.SUM)
         self.assertEqual(metric.aggregation, AggregationType.SUM)
-        self.assertEqual(metric.values, [])
+        self.assertEqual(metric.count, 0)
 
     def test_init_with_value(self):
         """Test Metric initialization with an initial value."""
-        metric = Metric(aggregation="mean", value=5.0)
-        self.assertEqual(metric.values, [5.0])
+        x = 5.0
+        metric = Metric(aggregation="mean", value=x)
+        self.assertEqual(metric.count, 1)
+        self.assertEqual(metric.aggregate(), x)
 
     def test_init_with_invalid_aggregation(self):
         """Test Metric initialization with invalid aggregation type."""
         with self.assertRaises(ValueError):
             Metric(aggregation="invalid")
 
-    def test_append_float(self):
-        """Test appending float values."""
+    # ================= accumulate tests =================
+    def test_accumulate_float(self):
+        """Test accumulating float values."""
         metric = Metric(aggregation="mean")
-        metric.append(1.0)
-        metric.append(2.0)
-        self.assertEqual(metric.values, [1.0, 2.0])
+        x1, x2 = 1.0, 2.0
+        metric.accumulate(x1)
+        metric.accumulate(x2)
+        self.assertEqual(metric.count, 2)
+        self.assertEqual(metric.aggregate(), np.mean([x1, x2]))
 
-    def test_append_int(self):
-        """Test appending int values."""
+    def test_accumulate_int(self):
+        """Test accumulating int values."""
         metric = Metric(aggregation="mean")
-        metric.append(1)
-        metric.append(2)
-        self.assertEqual(metric.values, [1, 2])
+        x1, x2 = 1, 2
+        metric.accumulate(x1)
+        metric.accumulate(x2)
+        self.assertEqual(metric.count, 2)
+        self.assertEqual(metric.aggregate(), np.mean([x1, x2]))
 
-    def test_append_tensor(self):
-        """Test appending scalar tensor values."""
+    def test_accumulate_scalar_tensor(self):
+        """Test accumulating scalar tensor values."""
         metric = Metric(aggregation="mean")
-        metric.append(torch.tensor(3.0))
-        metric.append(torch.tensor(4.0))
-        self.assertEqual(metric.values, [3.0, 4.0])
+        x1, x2 = torch.tensor(3.0), torch.tensor(4.0)
+        metric.accumulate(x1)
+        metric.accumulate(x2)
+        self.assertEqual(metric.count, 2)
+        self.assertEqual(metric.aggregate(), np.mean([x1, x2]))
 
-    def test_append_non_scalar_tensor_raises(self):
-        """Test that appending non-scalar tensor raises ValueError."""
+    def test_accumulate_tensor_flattens(self):
+        """Test accumulating non-scalar tensors flattens their values."""
+        metric = Metric(aggregation="sum")
+        tensor = torch.tensor([1.0, 2.0])
+        metric.accumulate(tensor)
+        self.assertEqual(metric.count, 2)
+        self.assertEqual(metric.aggregate(), tensor.sum().item())
+
+    def test_accumulate_scalar_ndarray(self):
+        """Test accumulating scalar numpy array values."""
         metric = Metric(aggregation="mean")
-        with self.assertRaises(ValueError):
-            metric.append(torch.tensor([1.0, 2.0]))
+        x1, x2 = np.array(3.0), np.array(5.0)
+        metric.accumulate(x1)
+        metric.accumulate(x2)
+        self.assertEqual(metric.count, 2)
+        self.assertEqual(metric.aggregate(), np.mean([x1, x2]))
 
-    def test_append_metric(self):
-        """Test appending another Metric extends values."""
-        metric1 = Metric(aggregation="mean", value=1.0)
-        metric1.append(2.0)
+    def test_accumulate_ndarray_flattens(self):
+        """Test accumulating numpy arrays flattens their values."""
+        metric = Metric(aggregation="sum")
+        array = np.array([[1.0, 2.0], [3.0, 4.0]])
+        metric.accumulate(array)
+        self.assertEqual(metric.count, array.size)
+        self.assertEqual(metric.aggregate(), array.sum())
 
-        metric2 = Metric(aggregation="mean", value=3.0)
-        metric2.append(metric1)
-
-        self.assertEqual(metric2.values, [3.0, 1.0, 2.0])
-
-    def test_extend_with_list(self):
-        """Test extending with a list of values."""
+    def test_accumulate_list(self):
+        """Test accumulating a list of values."""
         metric = Metric(aggregation="mean")
-        metric.extend([1.0, 2.0, 3.0])
-        self.assertEqual(metric.values, [1.0, 2.0, 3.0])
+        ls = [1.0, 2.0, 3.0]
+        metric.accumulate(ls)
+        self.assertEqual(metric.count, len(ls))
+        self.assertEqual(metric.aggregate(), np.mean(ls))
 
-    def test_extend_with_metric(self):
-        """Test extending with another Metric."""
-        metric1 = Metric(aggregation="mean")
-        metric1.extend([1.0, 2.0])
+    def test_accumulate_metric(self):
+        """Test accumulating another Metric merges aggregate state."""
+        ls = [1.0, 2.0, 3.0]
+        metric1 = Metric(aggregation="mean", value=ls[0])
+        metric1.accumulate(ls[1:-1])
 
-        metric2 = Metric(aggregation="mean")
-        metric2.extend([3.0, 4.0])
-        metric2.extend(metric1)
+        metric2 = Metric(aggregation="mean", value=ls[-1])
+        metric2.accumulate(metric1)
 
-        self.assertEqual(metric2.values, [3.0, 4.0, 1.0, 2.0])
+        self.assertEqual(metric2.count, len(ls))
+        self.assertEqual(metric2.aggregate(), np.mean(ls))
 
-    def test_extend_aggregation_mismatch_raises(self):
-        """Test that extending with mismatched aggregation raises ValueError."""
+    def test_accumulate_aggregation_mismatch_raises(self):
+        """Test that accumulating mismatched aggregation raises ValueError."""
         metric1 = Metric(aggregation="mean")
         metric2 = Metric(aggregation="sum")
 
         with self.assertRaises(ValueError):
-            metric1.extend(metric2)
+            metric1.accumulate(metric2)
 
+    def test_accumulate_empty_list_is_noop(self):
+        """Test accumulating an empty list leaves metric empty."""
+        metric = Metric(aggregation="sum")
+        metric.accumulate([])
+        self.assertEqual(metric.count, 0)
+        self.assertTrue(np.isnan(metric.aggregate()))
+
+    def test_accumulate_tuple(self):
+        """Test accumulating a tuple of scalar values."""
+        metric = Metric(aggregation="sum")
+        tup = (1.0, 2.0, 3.0)
+        metric.accumulate(tup)
+        self.assertEqual(metric.count, len(tup))
+        self.assertEqual(metric.aggregate(), sum(list(tup)))
+
+    def test_accumulate_nested_list_raises(self):
+        """Test nested lists are rejected."""
+        metric = Metric(aggregation="mean")
+        with self.assertRaises(ValueError):
+            metric.accumulate([[1.0], [2.0]])
+
+    def test_accumulate_list_of_tensors_raises(self):
+        """Test Python sequences of tensors are rejected."""
+        metric = Metric(aggregation="mean")
+        with self.assertRaises(ValueError):
+            metric.accumulate([torch.tensor(1.0), torch.tensor(2.0)])
+
+    # ================= aggregate tests =================
     def test_aggregate_mean(self):
         """Test aggregation with mean."""
         metric = Metric(aggregation="mean")
-        metric.extend([1.0, 2.0, 3.0, 4.0])
-        self.assertEqual(metric.aggregate(), 2.5)
+        ls = [1.0, 2.0, 3.0, 4.0]
+        metric.accumulate(ls)
+        self.assertEqual(metric.aggregate(), np.mean(ls))
 
     def test_aggregate_sum(self):
         """Test aggregation with sum."""
         metric = Metric(aggregation="sum")
-        metric.extend([1.0, 2.0, 3.0, 4.0])
-        self.assertEqual(metric.aggregate(), 10.0)
+        ls = [1.0, 2.0, 3.0, 4.0]
+        metric.accumulate(ls)
+        self.assertEqual(metric.aggregate(), sum(ls))
 
     def test_aggregate_min(self):
         """Test aggregation with min."""
         metric = Metric(aggregation="min")
-        metric.extend([3.0, 1.0, 4.0, 2.0])
-        self.assertEqual(metric.aggregate(), 1.0)
+        ls = [3.0, 1.0, 4.0, 2.0]
+        metric.accumulate(ls)
+        self.assertEqual(metric.aggregate(), min(ls))
 
     def test_aggregate_max(self):
         """Test aggregation with max."""
         metric = Metric(aggregation="max")
-        metric.extend([3.0, 1.0, 4.0, 2.0])
-        self.assertEqual(metric.aggregate(), 4.0)
+        ls = [3.0, 1.0, 4.0, 2.0]
+        metric.accumulate(ls)
+        self.assertEqual(metric.aggregate(), max(ls))
 
-    def test_aggregate_dp_sum_mean(self):
-        """Test aggregate_dp with SUM and MEAN aggregations."""
-        # Test with SUM: mean over DP ranks, then sum
-        metric1 = Metric(aggregation="sum")
-        metric1.extend([1.0, 2.0])
+    def test_aggregate_empty_returns_nan(self):
+        """Test aggregating an empty metric returns NaN."""
+        self.assertTrue(np.isnan(Metric(aggregation="mean").aggregate()))
 
-        metric2 = Metric(aggregation="sum")
-        metric2.extend([3.0, 4.0])
+    # ================= union tests =================
+    def test_union_sum_mean(self):
+        """Test union with SUM and MEAN aggregations."""
+        ls1, ls2 = [1.0, 2.0], [3.0, 4.0]
+        metric1 = Metric(aggregation="sum", value=ls1)
+        metric2 = Metric(aggregation="sum", value=ls2)
+        self.assertEqual(Metric.union(metric1, metric2).aggregate(), sum(ls1 + ls2))
 
-        result = Metric.aggregate_dp([metric1, metric2])
+        metric4 = Metric(aggregation="mean", value=ls1)
+        metric5 = Metric(aggregation="mean", value=ls2)
+        self.assertEqual(Metric.union(metric4, metric5).aggregate(), np.mean(ls1 + ls2))
 
-        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
-        # mean over axis 0 = [2.0, 3.0]
-        # sum = 5.0
-        self.assertEqual(result, 5.0)
-
-        # Test with MEAN: mean over DP ranks, then mean
-        metric4 = Metric(aggregation="mean")
-        metric4.extend([1.0, 2.0])
-
-        metric5 = Metric(aggregation="mean")
-        metric5.extend([3.0, 4.0])
-
-        result = Metric.aggregate_dp([metric4, metric5])
-
-        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
-        # mean over axis 0 = [2.0, 3.0]
-        # mean = 2.5
-        self.assertEqual(result, 2.5)
-
-    def test_aggregate_dp_min_max(self):
-        """Test aggregate_dp with MIN and MAX aggregations."""
-        # Test with MAX: flatten, then max
+    def test_union_min_max(self):
+        """Test union with MIN and MAX aggregations."""
         metric1 = Metric(aggregation="max")
-        metric1.extend([1.0, 2.0])
+        ls1, ls2 = [1.0, 2.0], [3.0, 4.0]
+        metric1.accumulate(ls1)
 
         metric2 = Metric(aggregation="max")
-        metric2.extend([3.0, 4.0])
+        metric2.accumulate(ls2)
 
-        result = Metric.aggregate_dp([metric1, metric2])
+        self.assertEqual(Metric.union(metric1, metric2).aggregate(), max(ls1 + ls2))
 
-        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
-        # flatten = [1.0, 2.0, 3.0, 4.0]
-        # max = 4.0
-        self.assertEqual(result, 4.0)
-
-        # Test with MIN: flatten, then min
         metric4 = Metric(aggregation="min")
-        metric4.extend([1.0, 2.0])
+        metric4.accumulate(ls1)
 
         metric5 = Metric(aggregation="min")
-        metric5.extend([3.0, 4.0])
+        metric5.accumulate(ls2)
 
-        result = Metric.aggregate_dp([metric4, metric5])
+        self.assertEqual(Metric.union(metric4, metric5).aggregate(), min(ls1 + ls2))
 
-        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
-        # flatten = [1.0, 2.0, 3.0, 4.0]
-        # min = 1.0
-        self.assertEqual(result, 1.0)
-
-    def test_aggregate_dp_mismatched_lengths(self):
-        """Test aggregate_dp raises error with mismatched value lengths."""
-        metric1 = Metric(aggregation="sum")
-        metric1.extend([1.0, 2.0])
-
-        metric2 = Metric(aggregation="sum")
-        metric2.extend([3.0, 4.0, 5.0])  # Different length
-
+    def test_union_empty_raises(self):
+        """Test union raises on empty input."""
         with self.assertRaises(ValueError):
-            Metric.aggregate_dp([metric1, metric2])
+            Metric.union()
 
-    def test_from_dict(self):
-        """Test from_dict creates Metrics from dictionary."""
-        data = {"loss": 1.0, "accuracy": 0.9}
-        metrics = Metric.from_dict(data, aggregation="mean")
+    def test_union_aggregation_mismatch_raises(self):
+        """Test union raises on mismatched aggregations."""
+        metric1 = Metric(aggregation="sum")
+        metric2 = Metric(aggregation="mean")
+        with self.assertRaises(ValueError):
+            Metric.union(metric1, metric2)
 
-        self.assertIn("loss", metrics)
-        self.assertIn("accuracy", metrics)
-        self.assertEqual(metrics["loss"].values, [1.0])
-        self.assertEqual(metrics["accuracy"].values, [0.9])
-        self.assertEqual(metrics["loss"].aggregation, AggregationType.MEAN)
+    def test_union_does_not_mutate_inputs(self):
+        """Test union leaves input metrics unchanged."""
+        ls1, ls2 = [1.0, 2.0], [3.0, 4.0]
+        metric1 = Metric(aggregation="sum", value=ls1)
+        metric2 = Metric(aggregation="sum", value=ls2)
+        merged = Metric.union(metric1, metric2)
 
-    def test_init_list(self):
-        """Test init_list creates new empty Metric with same aggregation."""
-        metric = Metric(aggregation="max")
-        metric.extend([1.0, 2.0])
+        self.assertEqual(metric1.aggregate(), sum(ls1))
+        self.assertEqual(metric2.aggregate(), sum(ls2))
+        self.assertEqual(merged.aggregate(), sum(ls1 + ls2))
 
-        new_metric = metric.init_list()
+    def test_union_weighted_mean_across_unequal_counts(self):
+        """Test union computes weighted means across uneven local counts."""
+        ls1, ls2, ls3, ls4 = [1.0] * 25, [2.0] * 24, [3.0] * 25, [4.0] * 26
+        metric1 = Metric(aggregation="mean", value=ls1)
+        metric2 = Metric(aggregation="mean", value=ls2)
+        metric3 = Metric(aggregation="mean", value=ls3)
+        metric4 = Metric(aggregation="mean", value=ls4)
 
-        self.assertEqual(new_metric.aggregation, AggregationType.MAX)
-        self.assertEqual(new_metric.values, [])
+        self.assertEqual(Metric.union(metric1, metric2, metric3, metric4).aggregate(), np.mean(ls1 + ls2 + ls3 + ls4))
 
+    # ================= dp aggregate =================
+    def test_aggregate_dp_sum_averages_across_ranks(self):
+        """Test DP aggregation for SUM metrics averages rank contributions."""
+        ls1, ls2 = [1.0, 2.0], [3.0, 4.0]
+        metric1 = Metric(aggregation="sum", value=ls1)
+        metric2 = Metric(aggregation="sum", value=ls2)
+        self.assertEqual(Metric.aggregate_dp([metric1, metric2]), np.mean([sum(ls1), sum(ls2)]))
+
+    def test_aggregate_dp_mean_is_weighted(self):
+        """Test DP aggregation for MEAN metrics remains weighted by count."""
+        ls1, ls2, ls3, ls4 = [1.0] * 25, [2.0] * 24, [3.0] * 25, [4.0] * 26
+        metrics = [
+            Metric(aggregation="mean", value=ls1),
+            Metric(aggregation="mean", value=ls2),
+            Metric(aggregation="mean", value=ls3),
+            Metric(aggregation="mean", value=ls4),
+        ]
+        self.assertAlmostEqual(Metric.aggregate_dp(metrics), np.mean(ls1 + ls2 + ls3 + ls4))
+
+    def test_aggregate_dp_min_max(self):
+        """Test DP aggregation for MIN and MAX metrics uses global extrema."""
+        ls1, ls2 = [3.0, 1.0], [4.0, 2.0]
+        metric_min_1 = Metric(aggregation="min", value=ls1)
+        metric_min_2 = Metric(aggregation="min", value=ls2)
+        self.assertEqual(Metric.aggregate_dp([metric_min_1, metric_min_2]), min(ls1 + ls2))
+
+        metric_max_1 = Metric(aggregation="max", value=ls1)
+        metric_max_2 = Metric(aggregation="max", value=ls2)
+        self.assertEqual(Metric.aggregate_dp([metric_max_1, metric_max_2]), max(ls1 + ls2))
+
+    def test_aggregate_dp_empty_raises(self):
+        """Test DP aggregation raises on empty input."""
+        with self.assertRaises(ValueError):
+            Metric.aggregate_dp([])
+
+    # ================= reduce metrics tests =================
     def test_reduce_metrics_with_metric(self):
         """Test reduce_metrics correctly handles Metric objects."""
+        ls1, ls2 = [1.0, 2.0, 3.0], [4.0, 5.0, 6.0]
         metric = Metric(aggregation="mean")
-        metric.extend([1.0, 2.0, 3.0])
+        metric.accumulate(ls1)
 
         metrics = {
             "custom_metric": metric,
-            "list_metric": [4.0, 5.0, 6.0],
+            "list_metric": ls2,
         }
         result = reduce_metrics(metrics)
 
-        self.assertEqual(result["custom_metric"], 2.0)
-        self.assertEqual(result["list_metric"], 5.0)
+        self.assertEqual(result["custom_metric"], np.mean(ls1))
+        self.assertEqual(result["list_metric"], np.mean(ls2))
 
 
 class TestComputeDataMetrics(unittest.TestCase):

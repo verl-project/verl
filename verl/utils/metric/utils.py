@@ -11,15 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Metrics utils.
-"""
+"""Metrics utils."""
 
+import logging
+import os
 from enum import Enum
 from typing import Any, Optional, Union
 
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, Any]:
@@ -65,16 +68,16 @@ class AggregationType(Enum):
     MAX = "max"
 
 
-NumericType = int, float, torch.Tensor, np.ndarray
 Numeric = int | float | torch.Tensor | np.ndarray
 
 
 class Metric:
     """
-    A metric aggregator for collecting and aggregating numeric values.
+    A metric aggregator.
 
-    This class accumulates numeric values (int, float, or scalar tensors) and computes
-    an aggregate statistic based on the specified aggregation type (MEAN, SUM, MIN, or MAX).
+    This class stores metric states for specified aggregation type.
+    New values are added via `accumulate`, and multiple metrics can be merged via
+    `union` or by accumulating another Metric instance.
 
     Args:
         aggregation: The aggregation method to use. Can be a string ("mean", "sum", "min", "max")
@@ -83,8 +86,8 @@ class Metric:
 
     Example:
         >>> metric = Metric(aggregation="mean", value=1.0)
-        >>> metric.append(2.0)
-        >>> metric.append(3.0)
+        >>> metric.accumulate(2.0)
+        >>> metric.accumulate(3.0)
         >>> metric.aggregate()
         2.0
     """
@@ -96,68 +99,87 @@ class Metric:
             self.aggregation = aggregation
         if not isinstance(self.aggregation, AggregationType):
             raise ValueError(f"Unsupported aggregation type: {aggregation}")
-        self.values = []
+        self.count = 0
+        self.total = 0.0
+        self.value = float("inf") if self.aggregation == AggregationType.MIN else float("-inf")
         if value is not None:
-            self.append(value)
+            self.accumulate(value)
 
-    def append(self, value: Union[Numeric, "Metric"]) -> None:
-        if isinstance(value, Metric):
-            self.extend(value)
-            return
+    @staticmethod
+    def _flatten_values(value: Numeric | list[Numeric] | tuple[Numeric, ...]) -> list[float | int]:
+        if isinstance(value, int | float):
+            return [value]
         if isinstance(value, torch.Tensor):
-            if value.numel() != 1:
-                raise ValueError("Only scalar tensors can be converted to float")
-            value = value.detach().item()
-        if not isinstance(value, NumericType):
-            raise ValueError(f"Unsupported value type: {type(value)}")
-        self.values.append(value)
+            return value.detach().cpu().flatten().tolist()
+        if isinstance(value, np.ndarray):
+            return value.flatten().tolist()
+        if isinstance(value, list | tuple):
+            if not all(isinstance(item, int | float) for item in value):
+                raise ValueError("Lists and tuples passed to Metric.accumulate must contain only int or float values")
+            return list(value)
+        raise ValueError(f"Unsupported value type: {type(value)}")
 
-    def extend(self, values: Union["Metric", list[Numeric]]) -> None:
-        if isinstance(values, Metric):
-            if values.aggregation != self.aggregation:
-                raise ValueError(f"Aggregation type mismatch: {self.aggregation} != {values.aggregation}")
-            values = values.values
-        for value in values:
-            self.append(value)
+    def accumulate(self, value: Union[Numeric, "Metric", list[Numeric], tuple[Numeric, ...]]) -> None:
+        if isinstance(value, Metric):
+            if value.aggregation != self.aggregation:
+                raise ValueError(f"Aggregation type mismatch: {self.aggregation} != {value.aggregation}")
+            if value.count == 0:
+                return
+            match self.aggregation:
+                case AggregationType.SUM | AggregationType.MEAN:
+                    self.total += value.total
+                case AggregationType.MIN:
+                    self.value = min(self.value, value.value)
+                case AggregationType.MAX:
+                    self.value = max(self.value, value.value)
+            self.count += value.count
+            return
+
+        values = self._flatten_values(value)
+        if not values:
+            return
+        match self.aggregation:
+            case AggregationType.SUM | AggregationType.MEAN:
+                self.total += sum(values)
+            case AggregationType.MIN:
+                self.value = min(self.value, min(values))
+            case AggregationType.MAX:
+                self.value = max(self.value, max(values))
+        self.count += len(values)
 
     def aggregate(self) -> float:
-        return self._aggregate(self.values, self.aggregation)
-
-    @classmethod
-    def _aggregate(cls, values: list[Numeric], aggregation: AggregationType) -> float:
-        match aggregation:
+        if self.count == 0:
+            logging.warning("Aggregating metric with no values. Returning NaN.")
+            return float("nan")
+        match self.aggregation:
             case AggregationType.MEAN:
-                return np.mean(values)
+                return self.total / self.count
             case AggregationType.SUM:
-                return np.sum(values)
-            case AggregationType.MIN:
-                return np.min(values)
-            case AggregationType.MAX:
-                return np.max(values)
-
-    @classmethod
-    def aggregate_dp(cls, metric_lists: list["Metric"]) -> float:
-        if not metric_lists:
-            raise ValueError("Cannot aggregate an empty list of metrics.")
-        value_lists = [ml.values for ml in metric_lists]
-        if not all(len(ls) == len(value_lists[0]) for ls in value_lists):
-            raise ValueError(
-                f"All Metric instances must have the same number of values "
-                f"for dp aggregation: {[len(ls) for ls in value_lists]}"
-            )
-        value_arrays = np.array(value_lists)  # [num_dp, num_grad_accumulation]
-        aggregation = metric_lists[0].aggregation
-        match aggregation:
-            case AggregationType.SUM | AggregationType.MEAN:
-                return cls._aggregate(
-                    values=np.mean(value_arrays, axis=0), aggregation=aggregation
-                )  # mean over dp ranks
+                return self.total
             case AggregationType.MIN | AggregationType.MAX:
-                return cls._aggregate(values=value_arrays.flatten(), aggregation=aggregation)  # min/max over all values
+                return self.value
 
     @classmethod
-    def from_dict(cls, data: dict[str, Numeric], aggregation: str | AggregationType) -> dict[str, "Metric"]:
-        return {key: cls(value=value, aggregation=aggregation) for key, value in data.items()}
+    def union(cls, *metrics: "Metric") -> "Metric":
+        if not metrics:
+            raise ValueError("Cannot union an empty set of metrics.")
+        aggregation = metrics[0].aggregation
+        merged = cls(aggregation=aggregation)
+        for metric in metrics:
+            if metric.aggregation != aggregation:
+                raise ValueError(f"Aggregation type mismatch: {aggregation} != {metric.aggregation}")
+            merged.accumulate(metric)
+        return merged
 
-    def init_list(self) -> "Metric":
-        return Metric(aggregation=self.aggregation)
+    @classmethod
+    def aggregate_dp(cls, metrics: list["Metric"]) -> float:
+        """Aggregate a list of Metric instances across data parallel ranks.
+        For SUM metrics, this averages the contributions from each rank.
+        """
+        if not metrics:
+            raise ValueError("Cannot aggregate an empty set of metrics.")
+        merged = cls.union(*metrics)
+        result = merged.aggregate()
+        if merged.aggregation == AggregationType.SUM:
+            result /= len(metrics)
+        return result
