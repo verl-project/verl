@@ -32,6 +32,21 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def fast_pos_embed_interpolate(self, grid_thw):
+    """Bilinearly interpolate the learned position embeddings to each image/video grid.
+
+    Patched over ``fast_pos_embed_interpolate`` of the HF vision model. Differences from upstream: the
+    output stays on ``grid_thw.device`` even when FSDP2 CPU offload keeps ``self.pos_embed`` on CPU, and
+    the interpolation indices and weights are built as tensors and copied to the device once rather than
+    through Python lists. The result is bitwise identical to the list-based version.
+
+    Args:
+        self: The vision model, with ``pos_embed``, ``num_grid_per_side`` and ``config.spatial_merge_size``.
+        grid_thw (torch.Tensor): ``(num_images, 3)`` temporal, height and width patch counts per image/video.
+
+    Returns:
+        torch.Tensor: ``(sum(t * h * w), hidden_size)`` position embeddings, each grid repeated over ``t``
+        and reordered into ``spatial_merge_size`` x ``spatial_merge_size`` blocks to match the patch order.
+    """
     grid_thw_list = grid_thw.tolist()
     grid_ts = [row[0] for row in grid_thw_list]
     grid_hs = [row[1] for row in grid_thw_list]
@@ -72,11 +87,16 @@ def fast_pos_embed_interpolate(self, grid_thw):
         ]
 
         for i in range(4):
-            idx_list[i].extend(indices[i].tolist())
-            weight_list[i].extend(weights[i].tolist())
+            idx_list[i].append(indices[i])
+            weight_list[i].append(weights[i])
 
-    idx_tensor = torch.tensor(idx_list, dtype=torch.long, device=device)
-    weight_tensor = torch.tensor(weight_list, dtype=self.pos_embed.weight.dtype, device=device)
+    # Modification: concatenate the per-image tensors and copy them to the device once, instead of
+    # round-tripping every index and weight through Python lists. Cast on CPU before the copy so the
+    # dtype conversion matches the previous implementation bit for bit.
+    idx_tensor = torch.stack([torch.cat(parts) for parts in idx_list]).to(dtype=torch.long).to(device)
+    weight_tensor = (
+        torch.stack([torch.cat(parts) for parts in weight_list]).to(dtype=self.pos_embed.weight.dtype).to(device)
+    )
     pos_embeds = self.pos_embed(idx_tensor).to(device) * weight_tensor[:, :, None]
     patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
 
