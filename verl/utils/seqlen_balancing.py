@@ -487,7 +487,9 @@ def rearrange_micro_batches(
                 f"{min_num_groups} forced groups."
             )
         micro_bsz_group_idx = get_seqlen_balanced_partitions(workloads, num_micro_batches, equal_size=False)
-        if dense_partitions:
+        if use_dense_token_budget:
+            # Keep the workload-balanced partitions if they fit. Otherwise, reuse the width-based partitions
+            # that gave the minimum dense batch count and split to the required count. Workloads may be less balanced.
             if any(
                 len(partition) * max(group_token_lens[idx] for idx in partition) > max_token_len
                 for partition in micro_bsz_group_idx
