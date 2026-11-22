@@ -139,7 +139,9 @@ and ``/`` before the MTP part. Verl handles the differences from the
   (``verl/utils/megatron/dsv4_pipeline.py``). An even split can violate that,
   for example 16 layers on PP8. Leave the layout unset unless a specific one
   is required.
-* **Router replay.** Megatron-Core ``dev`` builds a ``RouterReplay`` for
+* **Router replay.** Only the ``E`` sublayers own a router, so
+  ``is_moe_layer`` reads ``hybrid_layer_pattern`` instead of
+  ``moe_layer_freq``. Megatron-Core ``dev`` builds a ``RouterReplay`` for
   each router itself. Verl unregisters that instance before creating its own,
   so each router is registered exactly once: a duplicate registration silently
   shifts every replayed route by one layer. The hash-router recorder forwards
