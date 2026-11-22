@@ -41,6 +41,20 @@ def test_prefix_cache_salt_combines_namespace_and_weight_version(mode, salts):
     assert [prefix_cache_salt(config, step) for step in (3, 4)] == salts
 
 
+@pytest.mark.parametrize(
+    "prefix_caching,mode,salt", [(True, "versioned", "run:3"), (True, "shared", None), (False, "versioned", None)]
+)
+def test_prefix_cache_salt_versions_preserved_prefix_caches(prefix_caching, mode, salt):
+    config = RolloutConfig(
+        name="vllm",
+        preserve_kv_cache=True,
+        enable_prefix_caching=prefix_caching,
+        prefix_cache_mode=mode,
+        prefix_cache_namespace="run",
+    )
+    assert prefix_cache_salt(config, 3) == salt
+
+
 class _Replica(RolloutReplica):
     async def launch_servers(self):
         pass

@@ -39,11 +39,13 @@ _PREFIX_CACHE_NAMESPACE = uuid.uuid4().hex
 def prefix_cache_salt(config: RolloutConfig, global_steps: Optional[int]) -> Optional[str]:
     """Engine cache_salt for a request served by weights of ``global_steps``.
 
-    None under ``external_kv_cache_invalidation="reset"``, where verl resets caches instead.
+    None where verl resets caches instead: under ``external_kv_cache_invalidation="reset"``,
+    unless ``preserve_kv_cache`` keeps a versioned prefix cache across weight updates.
     The server computes the salt after its pause gate, so a request parked across a weight
     update is salted with the weights it actually runs on.
     """
-    if config.external_kv_cache_invalidation != "salt":
+    versioned = config.preserve_kv_cache and config.enable_prefix_caching and config.prefix_cache_mode == "versioned"
+    if config.external_kv_cache_invalidation != "salt" and not versioned:
         return None
     # Set by RolloutReplica; without it, salts from different runs would collide in a shared store.
     assert config.prefix_cache_namespace, "prefix_cache_namespace is unset; servers must be launched by RolloutReplica"

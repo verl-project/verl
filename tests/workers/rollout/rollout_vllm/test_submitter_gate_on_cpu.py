@@ -626,6 +626,7 @@ def test_generate_retains_start_and_end_versions_and_original_sampling_records(m
             response_length=16,
             preserve_kv_cache=True,
             enable_rollout_routing_replay=True,
+            prefix_cache_namespace="run",
         )
         outputs = [_request_output([5], rows[:1]), final]
         outputs[0].finished = False

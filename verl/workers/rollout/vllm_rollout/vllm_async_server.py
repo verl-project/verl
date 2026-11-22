@@ -724,18 +724,11 @@ class vLLMHttpServer:
             return rejected
 
         start_global_steps = self.global_steps
-        # A task keeps the namespace of the weights it started on across turns and retries.
-        keep_namespace = (
-            self.config.preserve_kv_cache
-            and self.config.enable_prefix_caching
-            and self.config.prefix_cache_mode == "versioned"
-        )
-        if keep_namespace:
-            if cache_salt is None:
-                cache_salt = f"{self.config.prefix_cache_namespace}:{start_global_steps}"
-        else:
-            cache_salt = prefix_cache_salt(self.config, start_global_steps)
+        # A preserved task keeps the salt of the weights it started on across turns and retries.
+        carried_salt = cache_salt if self.config.preserve_kv_cache else None
+        cache_salt = prefix_cache_salt(self.config, start_global_steps)
         if cache_salt is not None:
+            cache_salt = carried_salt or cache_salt
             prompt["cache_salt"] = cache_salt
 
         with RLInsightLogger.trace_state(
@@ -759,7 +752,7 @@ class vLLMHttpServer:
                 min_global_steps=min(versions) if versions else None,
                 max_global_steps=max(versions) if versions else None,
             )
-        if keep_namespace:
+        if self.config.preserve_kv_cache and cache_salt is not None:
             extra_fields["cache_salt"] = cache_salt
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
