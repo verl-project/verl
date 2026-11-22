@@ -1551,7 +1551,13 @@ class vLLMHttpServer:
         return ["kv_cache", "weights"]
 
     def _has_separate_draft_model(self) -> bool:
-        """Return whether engine_kwargs configures speculative decoding with draft weights."""
+        """Return whether engine_kwargs configures speculative decoding with draft weights.
+
+        vLLM accepts the option both as the ``speculative_config`` engine kwarg and as
+        the ``--speculative-config`` CLI argument, so both spellings are read here.
+        When both are present, ``speculative_config`` wins because that is the
+        spelling verl itself sets in ``engine_kwargs``.
+        """
         engine_kwargs = getattr(self.config, "engine_kwargs", None)
         key = self._get_engine_kwargs_key()
         if isinstance(engine_kwargs, Mapping):
@@ -1560,8 +1566,12 @@ class vLLMHttpServer:
             vllm_kwargs = getattr(engine_kwargs, key, None)
         if isinstance(vllm_kwargs, Mapping):
             spec_config = vllm_kwargs.get("speculative_config")
+            if spec_config is None:
+                spec_config = vllm_kwargs.get("speculative-config")
         else:
             spec_config = getattr(vllm_kwargs, "speculative_config", None)
+            if spec_config is None:
+                spec_config = getattr(vllm_kwargs, "speculative-config", None)
         if spec_config is None:
             return False
         if isinstance(spec_config, str):

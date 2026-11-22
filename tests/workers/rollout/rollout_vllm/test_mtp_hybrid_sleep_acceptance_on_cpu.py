@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from packaging import version
 
 pytest.importorskip("ray")
 
@@ -237,6 +238,76 @@ def test_resolve_sleep_level_without_separate_draft_weights_returns_level_2(monk
     assert server._resolve_sleep_level() == 2
 
 
+@pytest.mark.parametrize(
+    "engine_kwargs",
+    [
+        # vLLM also accepts the dashed CLI spelling; a draft model set there must
+        # not be discarded by a level-2 sleep.
+        {"vllm": {"speculative-config": {"model": "Qwen/Qwen3-0.6B-Draft", "num_speculative_tokens": 3}}},
+        {"vllm": {"speculative-config": '{"model": "Qwen/Qwen3-0.6B-Draft", "num_speculative_tokens": 3}'}},
+        {"vllm": {"speculative-config": "eagle3"}},
+        SimpleNamespace(vllm=SimpleNamespace(**{"speculative-config": {"model": "Qwen/Qwen3-0.6B-Draft"}})),
+    ],
+)
+def test_hyphenated_speculative_config_selects_level_1(monkeypatch, engine_kwargs):
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace(
+        mtp=SimpleNamespace(enable=False, enable_rollout=False),
+        engine_kwargs=engine_kwargs,
+    )
+    server.model_config = SimpleNamespace(lora_rank=0, lora={})
+
+    assert server._resolve_sleep_level() == 1
+
+
+@pytest.mark.parametrize(
+    "engine_kwargs, expected",
+    [
+        # The underscore key is the one verl sets, so it wins when both are present.
+        (
+            {
+                "vllm": {
+                    "speculative_config": {"method": "ngram"},
+                    "speculative-config": {"model": "Qwen/Qwen3-0.6B-Draft"},
+                }
+            },
+            2,
+        ),
+        (
+            {
+                "vllm": {
+                    "speculative_config": {"model": "Qwen/Qwen3-0.6B-Draft"},
+                    "speculative-config": {"method": "ngram"},
+                }
+            },
+            1,
+        ),
+        (
+            SimpleNamespace(
+                vllm=SimpleNamespace(
+                    speculative_config={"method": "ngram"},
+                    **{"speculative-config": {"model": "Qwen/Qwen3-0.6B-Draft"}},
+                )
+            ),
+            2,
+        ),
+    ],
+)
+def test_underscore_speculative_config_takes_precedence(monkeypatch, engine_kwargs, expected):
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace(
+        mtp=SimpleNamespace(enable=False, enable_rollout=False),
+        engine_kwargs=engine_kwargs,
+    )
+    server.model_config = SimpleNamespace(lora_rank=0, lora={})
+
+    assert server._resolve_sleep_level() == expected
+
+
 def test_resolve_sleep_level_preserves_lora_and_npu_guards(monkeypatch):
     server = object.__new__(vllm_async_server.vLLMHttpServer)
     server.config = SimpleNamespace(
@@ -253,4 +324,10 @@ def test_resolve_sleep_level_preserves_lora_and_npu_guards(monkeypatch):
 
     monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: True)
     server.model_config = SimpleNamespace(lora_rank=0, lora={})
+    # vllm-ascend needs level 1 below 0.30.0; the guard no longer applies at/above
+    # 0.30.0. Pin the version explicitly so the test does not depend on whichever
+    # vLLM happens to be installed in the test environment.
+    monkeypatch.setattr(vllm_async_server, "_VLLM_VERSION", version.parse("0.29.0"))
     assert server._resolve_sleep_level() == 1
+    monkeypatch.setattr(vllm_async_server, "_VLLM_VERSION", version.parse("0.30.0"))
+    assert server._resolve_sleep_level() == 2
