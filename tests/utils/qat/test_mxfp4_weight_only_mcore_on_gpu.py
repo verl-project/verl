@@ -11,10 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Weight-only ``qat.mode=mxfp4`` (``qat.activation=none``) on a real Megatron-Core MoE (TE grouped-GEMM experts), single GPU.
+"""Weight-only ``qat.mode=mxfp4`` (``qat.activation=none``) on a real Megatron-Core MoE, single GPU.
 
-modelopt quantizes a TE grouped linear with one quantizer per expert (``...linear_fc1.weight_quantizer.{i}``),
-so this is the layout the DeepSeek-V4 recipe actually sees; the toy nn.Linear tests cannot reach it.
+The experts are TE grouped-GEMM linears, which modelopt quantizes with one quantizer per expert
+(``...linear_fc1.weight_quantizer.{i}``). This is the layout the DeepSeek-V4 recipe sees; the toy
+nn.Linear tests cannot reach it.
 """
 
 import re
@@ -44,7 +45,11 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a G
 
 NUM_LAYERS, NUM_EXPERTS, HIDDEN, SEQ, VOCAB = 2, 4, 256, 64, 128
 _QAT_CFG = SimpleNamespace(
-    enable=True, mode="mxfp4", activation="none", group_size=16, ignore_patterns=["lm_head", "embed_tokens", "re:.*mlp.gate$"]
+    enable=True,
+    mode="mxfp4",
+    activation="none",
+    group_size=16,
+    ignore_patterns=["lm_head", "embed_tokens", "re:.*mlp.gate$"],
 )
 
 
@@ -73,9 +78,11 @@ def moe_model(tmp_path):
             pipeline_dtype=torch.bfloat16,
         )
         spec = get_gpt_layer_with_transformer_engine_spec(num_experts=NUM_EXPERTS, moe_grouped_gemm=True)
-        model = GPTModel(
-            config=config, transformer_layer_spec=spec, vocab_size=VOCAB, max_sequence_length=SEQ
-        ).cuda().bfloat16()
+        model = (
+            GPTModel(config=config, transformer_layer_spec=spec, vocab_size=VOCAB, max_sequence_length=SEQ)
+            .cuda()
+            .bfloat16()
+        )
         yield model
     finally:
         mpu.destroy_model_parallel()
@@ -92,7 +99,7 @@ def test_grouped_gemm_experts_get_one_mxfp4_quantizer_per_expert(moe_model):
     assert len(enabled) == NUM_LAYERS * 2 * NUM_EXPERTS, (len(enabled), enabled[:5])
 
     fc1 = model.decoder.layers[0].mlp.experts.linear_fc1
-    w = getattr(fc1, "weight0").detach()
+    w = fc1.weight0.detach()
     fq = fc1.weight_quantizer[0](w)
     assert not torch.equal(fq, w), "random bf16 weights are not on the MXFP4 grid"
     assert torch.equal(fc1.weight_quantizer[0](fq), fq), "fake-quant must be idempotent on-grid"
