@@ -194,7 +194,7 @@ def _dense_budget_worker(rank, world_size, init_method):
             batch,
             max_token_len=200,
             dp_group=dist.group.WORLD,
-            token_budget_mode=lambda: "dense" if rank == 0 else "valid",
+            use_dense_token_budget=lambda: rank == 0,
         )
         assert len(indices) == 2
         assert all(len(partition) * lengths[partition].max() <= 200 for partition in indices)

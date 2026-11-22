@@ -25,7 +25,6 @@ from megatron.core import parallel_state as mpu
 from megatron.core.packed_seq_params import PackedSeqParams
 
 from verl.utils.device import is_npu_available
-from verl.utils.seqlen_balancing import TokenBudgetMode
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -842,15 +841,14 @@ def accepts_packed_thd_vlm_inputs(model) -> bool:
     )
 
 
-def get_token_budget_mode(hf_config, model_chunks, position_ids, *, use_remove_padding: bool) -> TokenBudgetMode:
-    """Estimate padding at micro-batch width for BSHD and the THD VLM dense fallback."""
+def requires_dense_token_budget(hf_config, model_chunks, position_ids, *, use_remove_padding: bool) -> bool:
+    """Whether to budget for BSHD inputs or a THD VLM dense fallback."""
     if not use_remove_padding:
-        return "dense"
-    if not hasattr(hf_config, "vision_config"):
-        return "valid"
-    if is_mrope_position_ids(position_ids) and all(accepts_packed_thd_vlm_inputs(chunk) for chunk in model_chunks):
-        return "valid"
-    return "dense"
+        return True
+    return hasattr(hf_config, "vision_config") and (
+        not is_mrope_position_ids(position_ids)
+        or any(not accepts_packed_thd_vlm_inputs(chunk) for chunk in model_chunks)
+    )
 
 
 def preprocess_vlm_thd_engine(

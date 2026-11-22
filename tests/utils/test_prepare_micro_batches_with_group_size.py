@@ -257,7 +257,7 @@ def test_nested_dense_token_budget():
     ids = torch.nested.as_nested_tensor([torch.full((n,), i) for i, n in enumerate(seq_lens)], layout=torch.jagged)
     batch = tu.get_tensordict({"input_ids": ids}, {"max_token_len_per_gpu": 200})
     assert len(prepare_micro_batches(batch)[0]) == 1  # Effective tokens fit, but the dense batch does not.
-    micro_batches, indices = prepare_micro_batches(batch, token_budget_mode="dense")
+    micro_batches, indices = prepare_micro_batches(batch, use_dense_token_budget=True)
     assert len(micro_batches) == 2
     for mb, partition in zip(micro_batches, indices, strict=True):
         assert len(partition) * max(seq_lens[i] for i in partition) <= 200
@@ -267,7 +267,9 @@ def test_nested_dense_token_budget():
 def test_static_chunking_skips_token_budget_selection():
     ids = torch.nested.as_nested_tensor([torch.arange(n) for n in [8, 8, 1, 1]], layout=torch.jagged)
     batch = tu.get_tensordict({"input_ids": ids}, {"use_dynamic_bsz": False, "micro_batch_size_per_gpu": 2})
-    micro_batches, indices = prepare_micro_batches(batch, token_budget_mode=lambda: pytest.fail("static budget lookup"))
+    micro_batches, indices = prepare_micro_batches(
+        batch, use_dense_token_budget=lambda: pytest.fail("static budget lookup")
+    )
 
     assert indices is None
     assert [len(micro_batch) for micro_batch in micro_batches] == [2, 2]
@@ -289,7 +291,7 @@ def test_dense_budget_partitions(group_lengths, group_size, budget_per_group, op
     max_token_len = budget_per_group * group_size
     batch = _make_batch(seq_lens, group_size, max_token_len)
 
-    _, indices = prepare_micro_batches(batch, token_budget_mode="dense", **options)
+    _, indices = prepare_micro_batches(batch, use_dense_token_budget=True, **options)
 
     assert len(indices) == expected_count
     _verify_group_integrity(indices, group_size, len(seq_lens))
@@ -300,7 +302,7 @@ def test_dense_budget_rejects_infeasible_vpp_partition():
     batch = _make_batch([100] * 5 + [10], force_group_size=1, max_token_len_per_gpu=140)
 
     with pytest.raises(ValueError, match="Cannot satisfy max_token_len"):
-        prepare_micro_batches(batch, num_batches_divided_by=4, token_budget_mode="dense")
+        prepare_micro_batches(batch, num_batches_divided_by=4, use_dense_token_budget=True)
 
 
 def test_dense_lower_bound_skips_impossible_counts():
@@ -308,7 +310,7 @@ def test_dense_lower_bound_skips_impossible_counts():
     with patch(
         "verl.utils.seqlen_balancing.get_seqlen_balanced_partitions", wraps=get_seqlen_balanced_partitions
     ) as partitioner:
-        _, indices = prepare_micro_batches(batch, token_budget_mode="dense")
+        _, indices = prepare_micro_batches(batch, use_dense_token_budget=True)
     partitioner.assert_called_once()
     assert len(indices) == 3
 
@@ -317,4 +319,4 @@ def test_force_group_exceeding_dense_token_limit_raises():
     batch = _make_batch(seq_lens=[100, 160], force_group_size=2, max_token_len_per_gpu=300)
 
     with pytest.raises(ValueError, match="forced group exceeds max_token_len"):
-        prepare_micro_batches(batch, token_budget_mode="dense")
+        prepare_micro_batches(batch, use_dense_token_budget=True)

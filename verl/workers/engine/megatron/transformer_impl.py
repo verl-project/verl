@@ -896,7 +896,7 @@ class MegatronEngine(BaseEngine):
             )
             indices = None
         else:
-            from verl.models.mcore.util import get_token_budget_mode
+            from verl.models.mcore.util import requires_dense_token_budget
 
             micro_batches, indices = prepare_micro_batches(
                 data=data,
@@ -904,7 +904,7 @@ class MegatronEngine(BaseEngine):
                 num_batches_divided_by=num_batches_divided_by,
                 same_micro_num_in_dp=True,
                 min_num_micro_batch=None,
-                token_budget_mode=lambda: get_token_budget_mode(
+                use_dense_token_budget=lambda: requires_dense_token_budget(
                     self.model_config.hf_config,
                     self.module,
                     data.get("position_ids", None),

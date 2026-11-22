@@ -225,14 +225,14 @@ def test_dense_token_budget_after_batch_selection(monkeypatch, case, expected_ba
     data = tu.get_tensordict(tensors, {"max_token_len_per_gpu": 80})
     batch = next(tu.make_iterator(data, mini_batch_size=len(lengths), epochs=1, seed=42, dataloader_kwargs={}))
     tu.maybe_fix_3d_position_ids(batch)
-    budget_mode = partial(
-        util.get_token_budget_mode,
+    use_dense_token_budget = partial(
+        util.requires_dense_token_budget,
         config,
         chunks,
         batch.get("position_ids"),
         use_remove_padding=not case.startswith("bshd"),
     )
-    micro_batches, _ = prepare_micro_batches(batch, token_budget_mode=budget_mode)
+    micro_batches, _ = prepare_micro_batches(batch, use_dense_token_budget=use_dense_token_budget)
     assert len(micro_batches) == expected_batches
 
 

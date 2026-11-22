@@ -16,7 +16,6 @@ import copy
 import heapq
 from collections.abc import Callable
 from itertools import chain, islice
-from typing import Literal
 
 import torch
 from torch import distributed as dist
@@ -347,9 +346,6 @@ def roundup_divisible(a: int, b: int) -> int:
     return ((a + b - 1) // b) * b
 
 
-TokenBudgetMode = Literal["valid", "dense"]
-
-
 def _split_to_count(partitions: list[list[int]], count: int) -> list[list[int]]:
     """Split budget-compliant partitions into the required number of nonempty pieces."""
     extra = count - len(partitions)
@@ -373,7 +369,7 @@ def rearrange_micro_batches(
     min_num_micro_batch=None,
     use_dynamic_bsz_balance=True,
     force_group_size=1,
-    token_budget_mode: TokenBudgetMode | Callable[[], TokenBudgetMode] = "valid",
+    use_dense_token_budget: bool | Callable[[], bool] = False,
 ):
     """
     Split a batch into micro-batches by total token count, with optional DP sync and padding.
@@ -387,8 +383,8 @@ def rearrange_micro_batches(
         min_num_micro_batch (int, optional): force at least this many splits (pads empty ones).
         use_dynamic_bsz_balance (bool, optional): balance the computational workload between micro-batches
         force_group_size (int, optional): force consecutive samples to be in the same micro-batch (for RM training).
-        token_budget_mode: Count valid tokens (default) or rows padded to the longest sequence
-            in each micro-batch ("dense"). A backend can supply a callable to select the mode.
+        use_dense_token_budget: Count rows padded to the longest sequence in each micro-batch.
+            Defaults to counting valid tokens. A backend can supply a callable.
 
     Returns:
         List[TensorDict]: the micro-batches.
@@ -413,8 +409,8 @@ def rearrange_micro_batches(
         f"Batch size {batch_size} must be divisible by force_group_size {force_group_size}"
     )
 
-    if callable(token_budget_mode):
-        token_budget_mode = token_budget_mode()
+    if callable(use_dense_token_budget):
+        use_dense_token_budget = use_dense_token_budget()
     # When force_group_size > 1, we work with groups instead of individual samples
     num_groups = batch_size // force_group_size
     # upcast to int64 to avoid potential overflow im `calculate_workload` computation.
@@ -427,7 +423,7 @@ def rearrange_micro_batches(
         workloads_per_sample_grouped = workloads_per_sample.view(num_groups, force_group_size)
         group_workloads = workloads_per_sample_grouped.sum(dim=1).cpu().tolist()
         group_lengths = seq_len_effective.view(num_groups, force_group_size)
-        if token_budget_mode == "dense":
+        if use_dense_token_budget:
             group_token_lens = (force_group_size * group_lengths.amax(dim=1)).cpu().tolist()
         else:
             group_token_lens = group_lengths.sum(dim=1).cpu().tolist()
@@ -438,11 +434,11 @@ def rearrange_micro_batches(
         group_token_lens = seq_len_effective.cpu().tolist()
 
     dense_partitions = []
-    if token_budget_mode == "valid":
+    if not use_dense_token_budget:
         total_seqlen = sum(group_token_lens)
         # NOTE: num_microbatches <= batch_size, so take the min of this two.
         num_micro_batches = min(num_groups, ceildiv(total_seqlen, max_token_len))
-    elif token_budget_mode == "dense":
+    else:
         order = sorted(range(num_groups), key=group_token_lens.__getitem__, reverse=True)
         # Widest first: fill each batch to its row capacity. Its cost also bounds the valid-token sum.
         start = 0
@@ -453,8 +449,6 @@ def rearrange_micro_batches(
             dense_partitions.append(order[start : start + capacity])
             start += capacity
         num_micro_batches = len(dense_partitions)
-    else:
-        raise ValueError(f"Unknown token budget mode: {token_budget_mode!r}")
     if min_num_micro_batch is not None:
         # used to support pp
         num_micro_batches = max(min_num_micro_batch, num_micro_batches)
