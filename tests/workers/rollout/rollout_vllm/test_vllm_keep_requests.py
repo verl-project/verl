@@ -321,7 +321,7 @@ async def _exercise_keep(model_path, prefix_cache_mode):
             await manager.update_weights(global_steps=start_version + offset)
         output = await pending
         replica.observe = False
-        assert output.stop_reason == "completed"
+        assert output.stop_reason == "length"
         assert len(output.token_ids) == len(output.log_probs) == 256
         if config.enable_rollout_routing_replay:
             assert output.routed_experts.shape == (len(prompt) + 255, 2, 2)
@@ -540,7 +540,7 @@ async def _exercise_tool_loops(model_path):
         assert second["min_global_steps"] == second["max_global_steps"] == 2
         for turn in session_turns:
             assert turn["output_tokens"] == 256
-            assert turn["stop_reason"] == "completed"
+            assert turn["stop_reason"] == "length"
         assert first["min_global_steps"] == (2 if index == 4 else 0)
         assert first["max_global_steps"] == 2
     assert list(sessions.values())[-1][0]["num_cached_tokens"] == 0
