@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import inspect
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from functools import partial
 from pathlib import Path
 from queue import Queue
-from threading import Lock
+from threading import Event, Lock
 
 from verl.utils.device import get_torch_device
 
@@ -45,21 +46,37 @@ class ThreadAsyncCaller:
         self._future: Future | None = None
 
     def schedule_async_call(self, request):
+        ready = Event()
+        agreed_write = None
+
+        def write_after_agreement():
+            ready.wait()
+            if agreed_write is not None:
+                agreed_write()
+
         try:
-            args = list(request.async_fn_args)
-            if request.preload_fn is not None:
-                args[1] = request.preload_fn()
-            self._synchronize()
-        except BaseException as error:
-            self._sync_failure(error)
-            raise
-        # Agree on staging before any rank starts I/O or joins the native queue.
-        self._sync_failure(None)
-        if request.async_fn is None:
-            self._future = Future()
-            self._future.set_result(None)
-        else:
-            self._future = self._executor.submit(request.async_fn, *args, **request.async_fn_kwargs)
+            try:
+                args = list(request.async_fn_args)
+                if request.preload_fn is not None:
+                    args[1] = request.preload_fn()
+                self._synchronize()
+                staged_write = None
+                if request.async_fn is None:
+                    future = Future()
+                    future.set_result(None)
+                else:
+                    staged_write = partial(request.async_fn, *args, **request.async_fn_kwargs)
+                    future = self._executor.submit(write_after_agreement)
+            except BaseException as error:
+                self._sync_failure(error)
+                raise
+            # Executor submission can fail while starting a thread. Agree on
+            # staging and submission before any rank starts checkpoint I/O.
+            self._sync_failure(None)
+            agreed_write = staged_write
+            self._future = future
+        finally:
+            ready.set()
 
     def is_current_async_call_done(self, blocking=False, no_dist=False):
         if self._future is None:
@@ -201,12 +218,22 @@ def _bundle_requests(requests, finalize_save_fn, metrics):
             contents.append((request.async_fn, args, request.async_fn_kwargs))
         return contents
 
+    def finalize():
+        # A rank-local role manifest failure must reach peers before the
+        # native queue enters its final all-reduce.
+        try:
+            finalize_save_fn()
+        except BaseException as error:
+            _raise_if_writer_failed(error)
+            raise
+        _raise_if_writer_failed(None)
+
     return requests[0]._replace(
         async_fn=_write_checkpoint_contents,
         async_fn_args=(None, None, None),
         async_fn_kwargs={},
         preload_fn=preload,
-        finalize_fns=[callback for request in requests for callback in request.finalize_fns] + [finalize_save_fn],
+        finalize_fns=[callback for request in requests for callback in request.finalize_fns] + [finalize],
     )
 
 

@@ -28,7 +28,7 @@ import torch.distributed as dist
 from verl.utils.checkpoint.megatron_thread_checkpoint import ThreadedCheckpointWriter, create_thread_checkpoint_queue
 
 
-def _check_staging_failure(rank, rendezvous):
+def _check_rank_local_failures(rank, rendezvous):
     from megatron.core.dist_checkpointing.strategies.async_utils import AsyncRequest
     from torch.distributed.checkpoint import CheckpointException
 
@@ -51,8 +51,20 @@ def _check_staging_failure(rank, rendezvous):
         queue = create_thread_checkpoint_queue(synchronize=synchronize)
         writer = ThreadedCheckpointWriter(queue=queue)
         request = AsyncRequest(lambda *_args: writes.append(rank), (rank, [], None), [], preload_fn=preload)
+        submitted = []
+        native_submit = queue._executor.submit
+
+        def submit(*args, **kwargs):
+            future = native_submit(*args, **kwargs)
+            submitted.append(future)
+            # An executor can enqueue its work item before thread startup fails.
+            if rank == 1 and failure_phase == "submit":
+                raise RuntimeError("rank 1 failed during submit")
+            return future
+
+        patch.setattr(queue._executor, "submit", submit)
         try:
-            for failure_phase in ("preload", "fence"):
+            for failure_phase in ("preload", "fence", "submit"):
                 with pytest.raises(CheckpointException, match=f"rank 1 failed during {failure_phase}") as captured:
                     writer.schedule([request], lambda: finalized.append(rank))
 
@@ -60,6 +72,8 @@ def _check_staging_failure(rank, rendezvous):
                 assert queue.get_num_unfinalized_calls() == 0
                 assert not writer.pending
                 assert writer.finalize()
+                for future in submitted:
+                    future.result(timeout=5)
                 assert not writes and not finalized
 
             failure_phase = None
@@ -67,15 +81,26 @@ def _check_staging_failure(rank, rendezvous):
             assert writer.pending
             assert writer.finalize()
             assert writes == [rank] and finalized == [rank]
+
+            def finalize_manifest():
+                if rank == 0:
+                    raise OSError("rank 0 failed to publish the role manifest")
+
+            writer.schedule([request], finalize_manifest)
+            with pytest.raises(CheckpointException, match="rank 0 failed to publish the role manifest") as captured:
+                writer.finalize()
+            assert set(captured.value.failures) == {0}
+            assert writer.pending and not writer.finalize()
+            assert writes == [rank, rank]
         finally:
             writer.close()
             dist.destroy_process_group()
 
 
-@pytest.mark.skipif(not dist.is_gloo_available(), reason="Gloo is required for a two-rank staging test")
-def test_one_rank_staging_failure_prevents_background_submission_on_every_rank(tmp_path):
+@pytest.mark.skipif(not dist.is_gloo_available(), reason="Gloo is required for two-rank checkpoint tests")
+def test_rank_local_scheduling_and_manifest_failures_reach_every_rank(tmp_path):
     pytest.importorskip("megatron.core", minversion="0.19.2")
-    torch.multiprocessing.spawn(_check_staging_failure, args=(f"file://{tmp_path / 'gloo'}",), nprocs=2)
+    torch.multiprocessing.spawn(_check_rank_local_failures, args=(f"file://{tmp_path / 'gloo'}",), nprocs=2)
 
 
 @pytest.fixture
