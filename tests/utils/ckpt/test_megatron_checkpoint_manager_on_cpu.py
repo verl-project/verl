@@ -174,22 +174,61 @@ class _TrackingModel:
 class _FakeHybridDeviceOptimizer:
     """Mimics the parts of Megatron's ``HybridDeviceOptimizer`` that matter here.
 
-    ``dummy_step()`` is a real optimizer step: with a non-zero learning rate it
-    changes the parameter (in Megatron it updates the fp32 master weight and copies
-    it back into the bf16 parameter). With a zero learning rate it only allocates
-    optimizer state, which is the behaviour the fix relies on.
+    Two Megatron behaviours are modelled so the tests can prove that both refresh
+    calls in the fix are necessary:
+
+    * with ``param_update_in_fp32`` the optimizer works on a **separate** fp32
+      master copy and a step post-hook copies it back into the model parameter;
+    * with parameter offloading the optimizer works on a separate CPU copy and a
+      step post-hook copies it back into the model parameter.
+
+    In both cases the copy-back runs on every ``step()``, including a zero
+    learning rate, so a copy that is not refreshed from the loaded parameter first
+    would overwrite it.
     """
 
-    def __init__(self, param: torch.Tensor, lr: float = 1e-3):
+    def __init__(
+        self,
+        param: torch.Tensor,
+        lr: float = 1e-3,
+        offloaded_cpu_copy: torch.Tensor | None = None,
+        fp32_master: torch.Tensor | None = None,
+    ):
         self.param = param
         self.state = {}
         self.param_groups = [{"params": [param], "lr": lr}]
+        self.param_to_fp32_param = {}
+        if fp32_master is not None:
+            self.param_to_fp32_param[param] = fp32_master
+        # Megatron keeps a separate CPU copy for offloaded parameters and registers
+        # a step post-hook that copies it back into the GPU parameter.
+        self.gpu_params_map_cpu_copy = {}
+        if offloaded_cpu_copy is not None:
+            self.gpu_params_map_cpu_copy[param] = offloaded_cpu_copy
 
     def update_fp32_param_by_new_param(self):
-        """Megatron refreshes its fp32 masters here; the fake has no separate copy."""
+        for model_param, fp32_master in self.param_to_fp32_param.items():
+            fp32_master.data.copy_(model_param.data)
 
     def step(self):
-        if self.param_groups[0]["lr"] != 0.0:
+        lr = self.param_groups[0]["lr"]
+        if self.param_to_fp32_param and not self.gpu_params_map_cpu_copy:
+            # GPU sub-optimizer updates the separate fp32 master, then the
+            # param_update_in_fp32 copy-back hook writes it into the parameter.
+            fp32_master = self.param_to_fp32_param[self.param]
+            if lr != 0.0:
+                with torch.no_grad():
+                    fp32_master.add_(1.0)
+            self.param.data.copy_(fp32_master.data)
+        elif self.gpu_params_map_cpu_copy:
+            # CPU sub-optimizer updates the CPU copy, then the offloaded-parameter
+            # copy-back hook writes it into the GPU parameter.
+            cpu_copy = self.gpu_params_map_cpu_copy[self.param]
+            if lr != 0.0:
+                with torch.no_grad():
+                    cpu_copy.add_(1.0)
+            self.param.data.copy_(cpu_copy.data)
+        elif lr != 0.0:
             with torch.no_grad():
                 self.param.add_(1.0)
         self.state[self.param] = {"step": 1, "exp_avg": torch.zeros_like(self.param)}
@@ -546,6 +585,40 @@ class TestOptimizerLoadKeepsModelWeights:
         torch.testing.assert_close(weight, before, rtol=0, atol=0)
         # State was allocated, so Megatron's own dummy_step is skipped.
         assert len(inner_optimizer.state) == 1
+
+    def test_optimizer_state_allocation_refreshes_fp32_master(self):
+        """The fp32 master is a separate copy: it must be refreshed from the loaded
+        parameter, otherwise the zero-LR dummy step copies the stale master back."""
+        weight = torch.full((3,), 5.0)
+        stale_master = torch.zeros(3)  # fp32 master created before the checkpoint load
+        inner_optimizer = _FakeHybridDeviceOptimizer(weight, fp32_master=stale_master)
+        mgr = _make_manager(
+            load_contents=["optimizer"],
+            model=[_TrackingModel(weight)],
+            optimizer=_FakeDistributedOptimizer(inner_optimizer),
+        )
+
+        mgr._build_optimizer_state_dict({"weight": weight}, metadata={}, is_loading=True)
+
+        torch.testing.assert_close(weight, torch.full((3,), 5.0), rtol=0, atol=0)
+        torch.testing.assert_close(stale_master, torch.full((3,), 5.0), rtol=0, atol=0)
+
+    def test_optimizer_state_allocation_refreshes_offloaded_cpu_copies(self):
+        """Offloaded parameters keep a CPU copy; the step copy-back hook must not
+        overwrite the loaded weight with a copy taken before the checkpoint load."""
+        weight = torch.full((3,), 5.0)
+        stale_cpu_copy = torch.zeros(3)  # snapshot taken when the optimizer was built
+        inner_optimizer = _FakeHybridDeviceOptimizer(weight, offloaded_cpu_copy=stale_cpu_copy)
+        mgr = _make_manager(
+            load_contents=["optimizer"],
+            model=[_TrackingModel(weight)],
+            optimizer=_FakeDistributedOptimizer(inner_optimizer),
+        )
+
+        mgr._build_optimizer_state_dict({"weight": weight}, metadata={}, is_loading=True)
+
+        torch.testing.assert_close(weight, torch.full((3,), 5.0), rtol=0, atol=0)
+        torch.testing.assert_close(stale_cpu_copy, torch.full((3,), 5.0), rtol=0, atol=0)
 
     @patch(_PATCH_LOAD_META, return_value=None)
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")

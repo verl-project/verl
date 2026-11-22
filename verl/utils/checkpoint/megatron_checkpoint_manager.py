@@ -427,8 +427,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         so the dummy step silently perturbs the resumed weights (issue #8765).
 
         Allocate the state here first, the same way Megatron does, but with the
-        fp32 copies refreshed from the current parameters and a zero learning rate
-        for the allocation step. Parameters are left unchanged, and Megatron then
+        optimizer-side copies (fp32 masters and offloaded CPU copies) refreshed
+        from the current parameters and a zero learning rate for the allocation
+        step. Parameters are left unchanged, and Megatron then
         skips its own ``dummy_step`` because the state is no longer empty. This
         mirrors the upstream Megatron-LM fix to ``dummy_step`` for versions of
         megatron-core that predate it.
@@ -446,6 +447,12 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             # refresh them from the current (loaded) parameters first.
             if hasattr(inner_optimizer, "update_fp32_param_by_new_param"):
                 inner_optimizer.update_fp32_param_by_new_param()
+            # Offloaded parameters keep a separate CPU copy that the fp32 refresh
+            # above does not cover (no fp32 master when ``param_update_in_fp32`` is
+            # false or the parameter is already fp32). The step post-hook copies
+            # that CPU copy back into the parameter, so refresh it as well.
+            for gpu_param, cpu_copy in getattr(inner_optimizer, "gpu_params_map_cpu_copy", {}).items():
+                cpu_copy.data.copy_(gpu_param.data)
 
             # Groups without an ``lr`` key keep the sub-optimizer default, as the
             # upstream fix does.
