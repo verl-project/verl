@@ -286,6 +286,25 @@ Recommended Configurations
   e.g. ``save_contents=['model', 'hf_model', 'optimizer', 'extra']`` to write both
   ``model/dist_ckpt/`` and ``model/huggingface/`` in one step.
 
+Trainer-owned threaded writes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Integrations that coordinate their own saves can call
+``MegatronCheckpointManager.enable_trainer_owned_threaded_checkpointing()`` on
+every rank during initialization. This requires ``async_save=True``, native
+Megatron shards on CUDA, and Megatron-Core's native async save API. Megatron-FSDP
+and Hugging Face weight export are outside this mode's supported save paths.
+``async_save=True`` alone continues to select verl's existing async path.
+
+Call ``save_checkpoint()`` on every rank for a new checkpoint directory. The
+call returns after staging the snapshot for background writes. Call
+``finalize_async_checkpoint()`` on the same ranks before the next save or
+before exiting. Successful finalization writes the role manifest in the
+existing native format. The caller owns upload, retention, and publication of
+the latest tracker after all associated trainer state has finished saving.
+Call ``close_threaded_checkpoint()`` on all ranks to release the writer before
+destroying the process group.
+
 Convert FSDP and Megatron Checkpoints to HuggingFace Format Model
 -----------------------------------------------------------------
 

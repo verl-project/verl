@@ -20,10 +20,12 @@ save_checkpoint / load_checkpoint dispatch, and edge cases.
 Uses real megatron.core with gloo backend on a single CPU process.
 """
 
+import json
 import os
 import shutil
 import tempfile
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from unittest.mock import MagicMock, patch, sentinel
 
 import pytest
 import torch
@@ -109,6 +111,7 @@ def _make_manager(
     bridge="auto",
     peft_cls=None,
     use_distributed_optimizer=False,
+    async_save=False,
 ):
     if save_contents is None:
         save_contents = ["model", "optimizer", "extra"]
@@ -118,7 +121,7 @@ def _make_manager(
     ckpt_config = CheckpointConfig(
         save_contents=list(save_contents),
         load_contents=list(load_contents),
-        async_save=False,
+        async_save=async_save,
     )
 
     model = _make_mock_model()
@@ -655,3 +658,77 @@ class TestModelShardedStateDictNotBuiltUnnecessarily:
 
         mgr.load_checkpoint(ckpt_path)
         mgr.model[0].sharded_state_dict.assert_called_once()
+
+
+def test_trainer_owned_threaded_save_finalizes_only_the_role_manifest(tmp_path):
+    manager = _make_manager(use_dist_checkpointing=True, async_save=True)
+    step_dir = tmp_path / "global_step_3" / "actor"
+    next_step_dir = tmp_path / "global_step_4" / "actor"
+    tracker = tmp_path / "latest_checkpointed_iteration.txt"
+    tracker.write_text("2\n")
+    manifest = step_dir / "ckpt_contents.json"
+    requests = [sentinel.model, sentinel.optimizer, sentinel.extra]
+
+    with (
+        patch("verl.utils.checkpoint.megatron_checkpoint_manager.is_cuda_available", True),
+        patch("verl.utils.checkpoint.megatron_checkpoint_manager.ThreadedCheckpointWriter") as writer_type,
+        patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing") as process_save,
+        patch.object(manager, "register_checkpoint") as register,
+    ):
+        writer = writer_type.return_value
+        writer.pending = False
+        writer.save_dist_checkpoint.side_effect = requests
+        writer.schedule.return_value = {"checkpoint/worker_snapshot_bytes": 16.0}
+        manager.enable_trainer_owned_threaded_checkpointing(cache_plans=True)
+        writer_type.assert_called_once_with(cache_plans=True)
+
+        manager.save_checkpoint(str(step_dir), global_step=3)
+        process_save.assert_not_called()
+        paths = [
+            Path(call.args[0]).relative_to(step_dir).as_posix() for call in writer.save_dist_checkpoint.call_args_list
+        ]
+        assert paths == ["model/dist_ckpt", "optimizer/dist_ckpt", "extra/dist_ckpt"]
+        scheduled, callback = writer.schedule.call_args.args
+        assert scheduled == requests
+        assert manager.threaded_checkpoint_metrics["checkpoint/worker_async_request_count"] == 3
+        assert not manifest.exists()
+
+        writer.pending = True
+        with pytest.raises(RuntimeError, match="Finalize the pending threaded checkpoint"):
+            manager.save_checkpoint(str(next_step_dir), global_step=4)
+        assert not next_step_dir.exists()
+        assert manager.previous_global_step == 3
+
+        writer.finalize.return_value = False
+        assert not manager.finalize_async_checkpoint(blocking=False)
+        assert not manifest.exists()
+
+        def finish(*, blocking):
+            assert blocking
+            callback()
+            return True
+
+        writer.finalize.side_effect = finish
+        assert manager.finalize_async_checkpoint()
+        assert json.loads(manifest.read_text())["global_step"] == 3
+        assert tracker.read_text() == "2\n"
+        register.assert_not_called()
+        manager.close_threaded_checkpoint()
+        writer.close.assert_called_once_with()
+
+
+def test_trainer_owned_threaded_save_rejects_manager_storage_options(tmp_path):
+    manager = _make_manager(use_dist_checkpointing=True, async_save=True)
+    step_dir = tmp_path / "global_step_1" / "actor"
+    with (
+        patch("verl.utils.checkpoint.megatron_checkpoint_manager.is_cuda_available", True),
+        patch("verl.utils.checkpoint.megatron_checkpoint_manager.ThreadedCheckpointWriter") as writer_type,
+    ):
+        writer_type.return_value.pending = False
+        manager.enable_trainer_owned_threaded_checkpointing()
+
+        with pytest.raises(ValueError, match="caller owns storage and retention"):
+            manager.save_checkpoint(str(step_dir), global_step=1, max_ckpt_to_keep=1)
+        with pytest.raises(ValueError, match="caller owns storage and retention"):
+            manager.save_checkpoint(str(step_dir), global_step=1, hdfs_path="hdfs://example/checkpoints")
+        assert not step_dir.exists()
