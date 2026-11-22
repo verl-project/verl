@@ -1,7 +1,7 @@
 Adding DeepSeek V4 support
 ==========================
 
-Last updated: 11/4/2026.
+Last updated: 11/22/2026.
 
 This guide describes the DeepSeek-V4-Flash integration for a Megatron actor and
 a vLLM rollout model. Most of the model-specific work is at two boundaries:
@@ -118,6 +118,51 @@ router replay:
   that tuple without changing the tensor-only behavior used by existing
   models.
 
+Megatron-Core dev and Megatron-Bridge 0.7
+-----------------------------------------
+
+Megatron-Bridge 0.7 builds DeepSeek V4 as a Megatron-Core ``HybridModel`` and
+needs a Megatron-Core ``dev`` build (validated with Megatron-LM ``dev``
+``4ceb3c4ea``, 2026-11-10). Each HF layer becomes two physical layers, an
+attention sublayer followed by a MoE sublayer, described by
+``hybrid_layer_pattern``. For example, ``WECEHE...`` with ``W``/``C``/``H``
+for the attention variants, ``E`` for MoE, ``|`` for pipeline-stage boundaries,
+and ``/`` before the MTP part. Verl handles the differences from the
+``GPTModel`` path as follows:
+
+* **Pipeline layout.** A ``pipeline_model_parallel_layout`` written in logical
+  layers no longer matches the hybrid model. When PP > 1 and no layout is
+  given, the Megatron engine derives one with Megatron-Bridge's
+  ``set_deepseek_v4_pipeline_model_parallel_layout``, which also splits
+  ``hybrid_layer_pattern``. The stage sizes keep every hash-routed MoE layer
+  on the embedding stage, the only stage that owns ``input_ids``
+  (``verl/utils/megatron/dsv4_pipeline.py``). An even split can violate that,
+  for example 16 layers on PP8. Leave the layout unset unless a specific one
+  is required.
+* **Router replay.** Only the ``E`` sublayers own a router, so
+  ``is_moe_layer`` reads ``hybrid_layer_pattern`` instead of
+  ``moe_layer_freq``. Megatron-Core ``dev`` also builds a ``RouterReplay``
+  itself, passing ``is_mtp_layer``. Verl registers each router exactly once:
+  a duplicate registration silently shifts every replayed route by one layer.
+  The hash-router recorder forwards the extra ``dense_output`` argument.
+* **Fused kernels.** The fused forward patches any model that exposes the
+  output-processor hook, including ``HybridModel``. A model that cannot be
+  patched falls back to the unfused forward with a warning.
+* **Imports.** Megatron-Core ``dev`` removed
+  ``dist_checkpointing.strategies.async_utils``. Verl's mcore 0.12 checkpoint
+  patch imports it only when that version is installed.
+* **Optimizer offload.** Megatron-Core ``dev`` requires
+  ``use_precision_aware_optimizer=True`` whenever the optimizer is offloaded to
+  the CPU (``HybridDeviceOptimizer``).
+* **Kernels.** The fused DSA attention path (``dsa_kernel_backend=cudnn``)
+  needs ``flash_mla`` from the ``nv_dev`` branch of
+  https://github.com/deepseek-ai/FlashMLA. The DSA indexer needs
+  ``fast-hadamard-transform`` built from source; the PyPI sdist has no CUDA
+  sources.
+* **Megatron-Bridge 0.7.0 on Megatron-Core dev.** Megatron-Core moved
+  ``te_checkpoint`` out of ``moe_layer`` (NVIDIA/Megatron-LM#7709), and
+  Megatron-Bridge 0.7.0 still imports it from there. Use a Megatron-Bridge
+  build that falls back to ``megatron.core.extensions.transformer_engine``.
 Verification
 ------------
 
