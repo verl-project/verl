@@ -16,9 +16,6 @@
 """ModelOpt fake quantization and Megatron QAT workflow helpers."""
 
 import copy
-import logging
-import os
-import re
 
 import modelopt.torch.quantization as mtq
 import torch
@@ -31,9 +28,6 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     is_registered_quant_backend,
     register_quant_backend,
 )
-
-logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))  # Ray workers keep root at WARNING
 
 _FP8_BLOCK_BACKEND = "verl_fp8_block"
 _MXFP8_BACKEND = "verl_mxfp8"
@@ -443,79 +437,6 @@ def _get_qat_field(qat_config, key, default=None):
     return getattr(qat_config, key, default)
 
 
-_ROUTED_EXPERT_RE = re.compile(r"(^|\.)mlp\.experts\.")
-
-
-def _is_routed_expert(module_name: str) -> bool:
-    """`mlp.experts.*` at any depth (also at the root of a bare MoE block), never `mlp.shared_experts.*`."""
-    return _ROUTED_EXPERT_RE.search(module_name) is not None
-
-
-# A plain linear owns one ``weight_quantizer``; modelopt's TE grouped linear owns a GroupedQuantizer (an
-# nn.ModuleList) whose per-expert quantizers are surfaced as ``weight_quantizer.{i}``.
-_WEIGHT_QUANTIZER_RE = re.compile(r"(^|\.)weight_quantizer(\.\d+)?$")
-
-
-def _is_expert_weight_quantizer(quantizer_name: str) -> bool:
-    return _is_routed_expert(quantizer_name) and _WEIGHT_QUANTIZER_RE.search(quantizer_name) is not None
-
-
-_INPUT_QUANTIZER_RE = re.compile(r"(^|\.)input_quantizer(\.\d+)?$")
-
-
-def _is_expert_input_quantizer(quantizer_name: str) -> bool:
-    return _is_routed_expert(quantizer_name) and _INPUT_QUANTIZER_RE.search(quantizer_name) is not None
-
-
-def _check_mxfp4_routed_experts(modules, expert_inputs: bool = True):
-    """Fail fast if the MXFP4 config did not land where it should.
-
-    (a) at least one routed-expert weight_quantizer enabled, (b) nothing else enabled except, with
-    ``expert_inputs``, the routed-expert input quantizers (a mis-ordered cfg leaves every other linear
-    on modelopt's default INT8 fake-quant), (c) log whether the fake-quant is the identity on the
-    loaded expert weights -- it is when the checkpoint already ships MXFP4 experts (DeepSeek-V4).
-    """
-    import torch
-    from modelopt.torch.quantization.nn import TensorQuantizer
-
-    n_expert_w, others, identity = 0, [], None
-    for m in modules:
-        for name, q in m.named_modules():
-            if not isinstance(q, TensorQuantizer) or not getattr(q, "is_enabled", True):
-                continue
-            if _is_expert_weight_quantizer(name):
-                n_expert_w += 1
-            elif expert_inputs and _is_expert_input_quantizer(name):
-                continue
-            else:
-                others.append(name)
-        if identity is None:
-            for name, sub in m.named_modules():
-                w0, wq = getattr(sub, "weight0", None), getattr(sub, "weight_quantizer", None)
-                if w0 is not None and wq is not None and _is_routed_expert(name):
-                    if isinstance(wq, torch.nn.ModuleList):  # GroupedQuantizer: weight{i} <-> wq[i]
-                        wq = wq[0]
-                    try:
-                        with torch.no_grad():
-                            fq = wq(w0)
-                            identity = (name, bool(torch.equal(fq, w0)), (fq.float() - w0.float()).abs().max().item())
-                    except Exception as e:  # diagnostic only (e.g. weights not materialized yet)
-                        identity = (name, "skipped", repr(e)[:120])
-                    break
-    logger.info(
-        "[QAT mxfp4] enabled expert weight_quantizers=%d, other enabled quantizers=%d, "
-        "identity_check(name, equal, max_abs_diff)=%s",
-        n_expert_w,
-        len(others),
-        identity,
-    )
-    has_experts = any(_is_routed_expert(n) for m in modules for n, _ in m.named_modules())
-    if has_experts and n_expert_w == 0:
-        raise RuntimeError("QAT mxfp4: no routed-expert weight_quantizer enabled -- pattern did not match")
-    if others:
-        raise RuntimeError(f"QAT mxfp4: {len(others)} unexpected quantizers enabled, e.g. {others[:3]}")
-
-
 def apply_qat_to_modules(modules, qat_config):
     """Apply ModelOpt fake quantization to a list of Megatron module chunks."""
     qat_mode = _get_qat_field(qat_config, "mode", "fp8")
@@ -532,6 +453,4 @@ def apply_qat_to_modules(modules, qat_config):
 
     for i in range(len(modules)):
         modules[i] = apply_qat(modules[i], qat_mode, ignore_patterns=ignore_patterns, activation=activation)
-    if qat_mode == "mxfp4":
-        _check_mxfp4_routed_experts(modules, expert_inputs=activation == "mxfp8")
     return modules

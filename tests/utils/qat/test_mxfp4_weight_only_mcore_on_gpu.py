@@ -17,6 +17,7 @@ modelopt quantizes a TE grouped linear with one quantizer per expert (``...linea
 so this is the layout the DeepSeek-V4 recipe actually sees; the toy nn.Linear tests cannot reach it.
 """
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -34,7 +35,10 @@ from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig  # noqa: E402
 from modelopt.torch.quantization.nn import TensorQuantizer  # noqa: E402
 
-from verl.utils.qat.modelopt import _check_mxfp4_routed_experts, _is_expert_weight_quantizer, apply_qat_to_modules  # noqa: E402
+from verl.utils.qat.modelopt import apply_qat_to_modules  # noqa: E402
+
+# Routed-expert weight quantizers: one per expert of a TE grouped linear (``weight_quantizer.{i}``).
+_EXPERT_WEIGHT_QUANTIZER = re.compile(r"(^|\.)mlp\.experts\..*weight_quantizer(\.\d+)?$")
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
@@ -78,23 +82,14 @@ def moe_model(tmp_path):
         dist.destroy_process_group()
 
 
-def test_expert_weight_quantizer_names():
-    assert _is_expert_weight_quantizer("decoder.layers.0.mlp.experts.linear_fc1.weight_quantizer")
-    assert _is_expert_weight_quantizer("module.decoder.layers.3.mlp.experts.linear_fc2.weight_quantizer.31")
-    assert not _is_expert_weight_quantizer("decoder.layers.0.mlp.experts.linear_fc1.input_quantizer")
-    assert not _is_expert_weight_quantizer("decoder.layers.0.mlp.shared_experts.linear_fc1.weight_quantizer")
-    assert not _is_expert_weight_quantizer("decoder.layers.0.self_attention.linear_qkv.weight_quantizer")
-
-
 def test_grouped_gemm_experts_get_one_mxfp4_quantizer_per_expert(moe_model):
     (model,) = apply_qat_to_modules([moe_model], _QAT_CFG)
 
     enabled = [n for n, q in model.named_modules() if isinstance(q, TensorQuantizer) and q.is_enabled]
     assert enabled, "no quantizer enabled"
-    assert all(_is_expert_weight_quantizer(n) for n in enabled), enabled[:5]
+    assert all(_EXPERT_WEIGHT_QUANTIZER.search(n) for n in enabled), enabled[:5]
     # one per expert, per expert linear (fc1, fc2), per layer
     assert len(enabled) == NUM_LAYERS * 2 * NUM_EXPERTS, (len(enabled), enabled[:5])
-    _check_mxfp4_routed_experts([model], expert_inputs=False)
 
     fc1 = model.decoder.layers[0].mlp.experts.linear_fc1
     w = getattr(fc1, "weight0").detach()

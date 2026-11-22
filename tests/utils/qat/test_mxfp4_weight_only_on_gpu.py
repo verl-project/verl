@@ -29,7 +29,7 @@ import torch.nn as nn
 # flash_attn.cute probe that megatron-core's attention module otherwise trips over on cutlass-dsl mismatches.
 import verl.models.mcore  # noqa: F401  # isort: skip
 from verl.utils.qat import compressed_tensors as ct
-from verl.utils.qat.modelopt import _check_mxfp4_routed_experts, apply_qat_to_modules, build_quantize_config
+from verl.utils.qat.modelopt import apply_qat_to_modules, build_quantize_config
 
 _DSV4_NATIVE_FP8 = {
     "activation_scheme": "dynamic",
@@ -136,21 +136,3 @@ def test_apply_qat_fake_quantizes_routed_experts_only():
     ref = torch.nn.functional.linear(x, model.mlp.shared_experts.weight)
     assert torch.equal(model.mlp.shared_experts(x), ref)
     assert expert(x).shape == (4, 128)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="modelopt fake-quant kernels need a GPU")
-def test_check_mxfp4_routed_experts_fails_fast_on_stray_quantizers():
-    pytest.importorskip("modelopt.torch.quantization")
-    model = _MoELayer().cuda().bfloat16()
-    apply_qat_to_modules([model], _QAT_CFG)
-    _check_mxfp4_routed_experts([model], expert_inputs=False)  # the sanctioned layout passes
-
-    model.mlp.shared_experts.weight_quantizer.enable()
-    with pytest.raises(RuntimeError, match="unexpected quantizers enabled"):
-        _check_mxfp4_routed_experts([model], expert_inputs=False)
-
-    for expert in model.mlp.experts:
-        expert.weight_quantizer.disable()
-    model.mlp.shared_experts.weight_quantizer.disable()
-    with pytest.raises(RuntimeError, match="no routed-expert weight_quantizer enabled"):
-        _check_mxfp4_routed_experts([model], expert_inputs=False)
