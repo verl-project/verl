@@ -22,6 +22,7 @@ import pytest
 # cpu_unit_tests skips this module; vllm.yml runs it in the vllm venv.
 pytest.importorskip("vllm")
 
+from verl.workers.rollout.vllm_rollout import vllm_async_server
 from verl.workers.rollout.vllm_rollout.utils import (
     _optional_bool_vllm_args,
     _resolve_vllm_weight_sync_local_rank,
@@ -322,6 +323,114 @@ class TestVllmColocateZmqHandle:
         handle = vLLMColocateWorkerExtension._get_zmq_handle(worker)
 
         assert handle == "ipc:///tmp/rl-colocate-zmq-job-123-replica-2-rank-3.sock"
+
+
+_DRAFT_SPEC_CONFIG = {"model": "Qwen/Qwen3-0.6B-Draft", "num_speculative_tokens": 3}
+_NGRAM_SPEC_CONFIG = {"method": "ngram"}
+_SPEC_KEYS = ("speculative_config", "speculative-config")
+_SPEC_DOTTED_PREFIXES = ("speculative_config.", "speculative-config.")
+
+
+class TestSpeculativeConfigLaunchParity:
+    """The launched --speculative-config must be the one the sleep resolver reads.
+
+    ``_resolve_sleep_level()`` picks level 1 whenever the engine starts separate
+    draft weights. These tests build the real CLI arguments from the normalized
+    engine kwargs and check that both the launch command and the resolver see the
+    same configuration, including the both-spellings and dotted-field cases.
+    """
+
+    @staticmethod
+    def _make_sleep_server(engine_kwargs):
+        server = object.__new__(vllm_async_server.vLLMHttpServer)
+        server.config = SimpleNamespace(
+            mtp=SimpleNamespace(enable=False, enable_rollout=False),
+            engine_kwargs=engine_kwargs,
+        )
+        server.model_config = SimpleNamespace(lora_rank=0, lora={})
+        return server
+
+    @staticmethod
+    def _launch_spec_values(args):
+        return [args[i + 1] for i, arg in enumerate(args) if arg in ("--speculative_config", "--speculative-config")]
+
+    @staticmethod
+    def _parse_launched_value(value):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return {"method": value}
+
+    @pytest.mark.parametrize(
+        "engine_kwargs, expected_level, expected_effective",
+        [
+            (
+                {"vllm": {"speculative_config": _NGRAM_SPEC_CONFIG, "speculative-config": _DRAFT_SPEC_CONFIG}},
+                2,
+                _NGRAM_SPEC_CONFIG,
+            ),
+            (
+                {"vllm": {"speculative-config": _DRAFT_SPEC_CONFIG, "speculative_config": _NGRAM_SPEC_CONFIG}},
+                2,
+                _NGRAM_SPEC_CONFIG,
+            ),
+            (
+                {"vllm": {"speculative_config": _DRAFT_SPEC_CONFIG, "speculative-config": _NGRAM_SPEC_CONFIG}},
+                1,
+                _DRAFT_SPEC_CONFIG,
+            ),
+            (
+                {
+                    "vllm": {
+                        "speculative_config.model": "Qwen/Qwen3-0.6B-Draft",
+                        "speculative_config.num_speculative_tokens": 3,
+                    }
+                },
+                1,
+                _DRAFT_SPEC_CONFIG,
+            ),
+            ({"vllm": {"speculative-config.model": "Qwen/Qwen3-0.6B-Draft"}}, 1, {"model": "Qwen/Qwen3-0.6B-Draft"}),
+            (
+                {
+                    "vllm": {
+                        "speculative_config": {"method": "eagle"},
+                        "speculative_config.model": "Qwen/Qwen3-0.6B-Draft",
+                    }
+                },
+                1,
+                {"method": "eagle", "model": "Qwen/Qwen3-0.6B-Draft"},
+            ),
+            ({"vllm": {"speculative_config.method": "ngram"}}, 2, _NGRAM_SPEC_CONFIG),
+            ({"vllm": {"speculative_config": _NGRAM_SPEC_CONFIG}}, 2, _NGRAM_SPEC_CONFIG),
+        ],
+    )
+    def test_launch_args_match_sleep_level(self, monkeypatch, engine_kwargs, expected_level, expected_effective):
+        monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+        server = self._make_sleep_server(engine_kwargs)
+        launched_kwargs = dict(engine_kwargs["vllm"])
+
+        server._apply_speculative_config_normalization(launched_kwargs)
+        spec_values = self._launch_spec_values(build_cli_args_from_config(launched_kwargs))
+
+        assert len(spec_values) == 1, spec_values
+        assert self._parse_launched_value(spec_values[0]) == expected_effective
+        # The engine really starts this configuration, so the resolver must agree.
+        assert server._effective_speculative_config() == expected_effective
+        assert server._has_separate_draft_model() == (expected_level == 1)
+        assert server._resolve_sleep_level() == expected_level
+
+    def test_launch_keeps_single_spelling_unchanged(self, monkeypatch):
+        monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+        engine_kwargs = {"vllm": {"speculative-config": _DRAFT_SPEC_CONFIG}}
+        server = self._make_sleep_server(engine_kwargs)
+        launched_kwargs = dict(engine_kwargs["vllm"])
+
+        server._apply_speculative_config_normalization(launched_kwargs)
+        args = build_cli_args_from_config(launched_kwargs)
+
+        assert "--speculative-config" in args
+        assert "--speculative_config" not in args
+        assert server._resolve_sleep_level() == 1
 
 
 if __name__ == "__main__":

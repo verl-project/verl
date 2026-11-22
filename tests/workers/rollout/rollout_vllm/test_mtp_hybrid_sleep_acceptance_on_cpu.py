@@ -308,6 +308,98 @@ def test_underscore_speculative_config_takes_precedence(monkeypatch, engine_kwar
     assert server._resolve_sleep_level() == expected
 
 
+_SPEC_KEYS = ("speculative_config", "speculative-config")
+_SPEC_DOTTED_PREFIXES = ("speculative_config.", "speculative-config.")
+
+
+def _make_sleep_server(monkeypatch, engine_kwargs):
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace(
+        mtp=SimpleNamespace(enable=False, enable_rollout=False),
+        engine_kwargs=engine_kwargs,
+    )
+    server.model_config = SimpleNamespace(lora_rank=0, lora={})
+    return server
+
+
+_DRAFT = {"model": "Qwen/Qwen3-0.6B-Draft", "num_speculative_tokens": 3}
+_NGRAM = {"method": "ngram"}
+
+
+@pytest.mark.parametrize(
+    "engine_kwargs, expected_level, expected_effective",
+    [
+        # both exact spellings must resolve to one value; underscore wins
+        ({"vllm": {"speculative_config": _NGRAM, "speculative-config": _DRAFT}}, 2, _NGRAM),
+        ({"vllm": {"speculative-config": _DRAFT, "speculative_config": _NGRAM}}, 2, _NGRAM),
+        ({"vllm": {"speculative_config": _DRAFT, "speculative-config": _NGRAM}}, 1, _DRAFT),
+        # dotted sub-fields are part of the effective configuration
+        (
+            {
+                "vllm": {
+                    "speculative_config.model": "Qwen/Qwen3-0.6B-Draft",
+                    "speculative_config.num_speculative_tokens": 3,
+                }
+            },
+            1,
+            _DRAFT,
+        ),
+        ({"vllm": {"speculative-config.model": "Qwen/Qwen3-0.6B-Draft"}}, 1, {"model": "Qwen/Qwen3-0.6B-Draft"}),
+        (
+            {"vllm": {"speculative_config": {"method": "eagle"}, "speculative_config.model": "Qwen/Qwen3-0.6B-Draft"}},
+            1,
+            {"method": "eagle", "model": "Qwen/Qwen3-0.6B-Draft"},
+        ),
+        ({"vllm": {"speculative_config.method": "ngram"}}, 2, _NGRAM),
+        # a plain weightless config keeps level 2
+        ({"vllm": {"speculative_config": _NGRAM}}, 2, _NGRAM),
+        # single dashed spelling is a valid configuration on its own
+        ({"vllm": {"speculative-config": _DRAFT}}, 1, _DRAFT),
+    ],
+)
+def test_normalized_speculative_config_drives_sleep_level(
+    monkeypatch, engine_kwargs, expected_level, expected_effective
+):
+    """Launch prep and sleep resolution read the same normalized configuration."""
+    server = _make_sleep_server(monkeypatch, engine_kwargs)
+    launched_kwargs = dict(engine_kwargs["vllm"])
+
+    server._apply_speculative_config_normalization(launched_kwargs)
+
+    spec_entries = [key for key in launched_kwargs if key in _SPEC_KEYS or key.startswith(_SPEC_DOTTED_PREFIXES)]
+    assert len(spec_entries) == 1
+    assert launched_kwargs[spec_entries[0]] == expected_effective
+    # The resolver reads the raw engine kwargs and must reach the same value.
+    assert server._effective_speculative_config() == expected_effective
+    assert server._resolve_sleep_level() == expected_level
+
+
+def test_single_spelling_configuration_is_not_rewritten(monkeypatch):
+    server = _make_sleep_server(monkeypatch, {"vllm": {"speculative-config": _DRAFT}})
+    launched_kwargs = dict(server.config.engine_kwargs["vllm"])
+
+    server._apply_speculative_config_normalization(launched_kwargs)
+
+    assert launched_kwargs == {"speculative-config": _DRAFT}
+
+
+def test_preprocess_engine_kwargs_collapses_both_spellings(monkeypatch):
+    server = _make_sleep_server(monkeypatch, {"vllm": {"speculative_config": _NGRAM, "speculative-config": _DRAFT}})
+    engine_kwargs = dict(server.config.engine_kwargs["vllm"])
+
+    server._preprocess_engine_kwargs(engine_kwargs)
+
+    # Other preprocessing steps (e.g. the old-vLLM multimodal workaround) may add
+    # unrelated keys; only the speculative-config spellings must be collapsed.
+    assert engine_kwargs["speculative_config"] == _NGRAM
+    assert not any(
+        key in _SPEC_KEYS or key.startswith(_SPEC_DOTTED_PREFIXES)
+        for key in engine_kwargs
+        if key != "speculative_config"
+    )
+
+
 def test_resolve_sleep_level_preserves_lora_and_npu_guards(monkeypatch):
     server = object.__new__(vllm_async_server.vLLMHttpServer)
     server.config = SimpleNamespace(

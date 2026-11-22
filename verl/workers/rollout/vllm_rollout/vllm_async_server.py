@@ -90,6 +90,12 @@ _VERL_MANAGED_VLLM_ARGS = {
     "enable_return_routed_experts": "rollout.enable_rollout_routing_replay",
 }
 
+# vLLM maps both spellings of the speculative-config option (and its dotted
+# sub-fields) onto the single --speculative-config argument, so verl normalizes
+# them before building the launch command and before resolving the sleep level.
+_SPECULATIVE_CONFIG_KEYS = ("speculative_config", "speculative-config")
+_SPECULATIVE_CONFIG_DOTTED_PREFIXES = ("speculative_config.", "speculative-config.")
+
 # Max wait for admissions already past the submission gate to reach the engine.
 _GATE_BARRIER_TIMEOUT_S = 60.0
 
@@ -1440,6 +1446,7 @@ class vLLMHttpServer:
 
     def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
         """Mutate engine_kwargs in-place before the CLI args dict is built."""
+        self._apply_speculative_config_normalization(engine_kwargs)
         managed = [key for key in engine_kwargs if key.replace("-", "_") in _VERL_MANAGED_VLLM_ARGS]
         if managed:
             raise ValueError(
@@ -1550,28 +1557,107 @@ class vLLMHttpServer:
         """Return the tags passed to engine.wake_up(). Default includes kv_cache."""
         return ["kv_cache", "weights"]
 
-    def _has_separate_draft_model(self) -> bool:
-        """Return whether engine_kwargs configures speculative decoding with draft weights.
-
-        vLLM accepts the option both as the ``speculative_config`` engine kwarg and as
-        the ``--speculative-config`` CLI argument, so both spellings are read here.
-        When both are present, ``speculative_config`` wins because that is the
-        spelling verl itself sets in ``engine_kwargs``.
-        """
-        engine_kwargs = getattr(self.config, "engine_kwargs", None)
-        key = self._get_engine_kwargs_key()
-        if isinstance(engine_kwargs, Mapping):
-            vllm_kwargs = engine_kwargs.get(key)
-        else:
-            vllm_kwargs = getattr(engine_kwargs, key, None)
+    @staticmethod
+    def _iter_vllm_kwarg_items(vllm_kwargs: Any) -> list[tuple[str, Any]]:
+        """Return the engine kwargs as (key, value) pairs, mapping or object shape."""
         if isinstance(vllm_kwargs, Mapping):
-            spec_config = vllm_kwargs.get("speculative_config")
-            if spec_config is None:
-                spec_config = vllm_kwargs.get("speculative-config")
-        else:
-            spec_config = getattr(vllm_kwargs, "speculative_config", None)
-            if spec_config is None:
-                spec_config = getattr(vllm_kwargs, "speculative-config", None)
+            return list(vllm_kwargs.items())
+        if hasattr(vllm_kwargs, "__dict__"):
+            return list(vars(vllm_kwargs).items())
+        return []
+
+    def _merge_speculative_config(self, base: Any, overlay: Mapping) -> dict[str, Any]:
+        """Merge dotted sub-fields on top of the whole speculative config value."""
+        if isinstance(base, str):
+            try:
+                base = json.loads(base)
+            except json.JSONDecodeError:
+                # A bare method name (e.g. "ngram") means {"method": <name>}.
+                base = {"method": base}
+        if not isinstance(base, Mapping):
+            base = dict(vars(base)) if hasattr(base, "__dict__") else {}
+        merged = dict(base)
+        for key, value in overlay.items():
+            if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+                merged[key] = self._merge_speculative_config(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    def _effective_speculative_config(self, engine_kwargs: Any = None) -> Any:
+        """Return the speculative config vLLM effectively receives.
+
+        vLLM exposes a single ``--speculative-config`` option but engine kwargs may
+        carry it under either spelling (``speculative_config`` / ``speculative-config``)
+        and as dotted sub-fields (``speculative_config.model``). All of them collapse
+        onto that one option, so this method applies one precedence rule: the
+        underscore exact key wins over the dashed one, and dotted sub-fields override
+        the corresponding fields of the exact value. Launch-argument preparation and
+        sleep-level detection both read this normalized value, so the engine cannot
+        start a configuration the resolver did not see.
+        """
+        if engine_kwargs is None:
+            engine_kwargs = getattr(self.config, "engine_kwargs", None)
+            key = self._get_engine_kwargs_key()
+            if isinstance(engine_kwargs, Mapping):
+                engine_kwargs = engine_kwargs.get(key)
+            else:
+                engine_kwargs = getattr(engine_kwargs, key, None)
+        if engine_kwargs is None:
+            return None
+
+        exact: dict[str, Any] = {}
+        dotted: dict[str, Any] = {}
+        for key, value in self._iter_vllm_kwarg_items(engine_kwargs):
+            if key in _SPECULATIVE_CONFIG_KEYS:
+                exact[key] = value
+                continue
+            for prefix in _SPECULATIVE_CONFIG_DOTTED_PREFIXES:
+                if key.startswith(prefix):
+                    parts = key[len(prefix) :].split(".")
+                    if not all(parts):
+                        break
+                    node = dotted
+                    for part in parts[:-1]:
+                        node = node.setdefault(part, {})
+                    node[parts[-1]] = value
+                    break
+
+        base = exact.get(_SPECULATIVE_CONFIG_KEYS[0], exact.get(_SPECULATIVE_CONFIG_KEYS[1]))
+        if not dotted:
+            return base
+        if base is None:
+            return dotted
+        return self._merge_speculative_config(base, dotted)
+
+    def _apply_speculative_config_normalization(self, engine_kwargs: dict) -> None:
+        """Collapse all speculative-config spellings onto one canonical entry.
+
+        ``build_cli_args_from_config()`` forwards every key, and vLLM maps both
+        spellings (and dotted sub-fields) onto the same ``--speculative-config``
+        argument, keeping the last value it sees. That lets the launched
+        configuration diverge from what the sleep resolver reads. Collapse the
+        spellings into a single ``speculative_config`` entry computed by
+        ``_effective_speculative_config()`` so the launch command and the resolver
+        agree. A single spelling without dotted fields is left untouched.
+        """
+        exact = [key for key in engine_kwargs if key in _SPECULATIVE_CONFIG_KEYS]
+        dotted = [
+            key
+            for key in engine_kwargs
+            if any(key.startswith(prefix) for prefix in _SPECULATIVE_CONFIG_DOTTED_PREFIXES)
+        ]
+        if not dotted and len(exact) <= 1:
+            return
+        effective = self._effective_speculative_config(engine_kwargs)
+        for key in exact + dotted:
+            engine_kwargs.pop(key, None)
+        if effective is not None:
+            engine_kwargs[_SPECULATIVE_CONFIG_KEYS[0]] = effective
+
+    def _has_separate_draft_model(self) -> bool:
+        """Return whether the effective engine configuration uses draft weights."""
+        spec_config = self._effective_speculative_config()
         if spec_config is None:
             return False
         if isinstance(spec_config, str):
