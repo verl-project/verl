@@ -178,7 +178,23 @@ def get_num_layers_to_build(config: TransformerConfig, vp_stage: int | None = No
     return num_layers_to_build
 
 
+def _hybrid_main_layer_pattern(tf_config) -> str | None:
+    """Decoder part of a Megatron-Core hybrid ``hybrid_layer_pattern`` (pipe separators and MTP suffix removed).
+
+    Hybrid models (e.g. DeepSeek-V4 via Megatron-Bridge >= 0.7) build one physical layer per symbol, so an
+    attention + MoE block is two layers and only the ``E`` positions own a router.
+    """
+    pattern = getattr(tf_config, "hybrid_layer_pattern", None)
+    if not isinstance(pattern, str) or not pattern:
+        return None
+    return pattern.split("/")[0].replace("|", "")
+
+
 def is_moe_layer(tf_config, layer_idx):
+    hybrid_pattern = _hybrid_main_layer_pattern(tf_config)
+    if hybrid_pattern is not None:
+        return 0 <= layer_idx < len(hybrid_pattern) and hybrid_pattern[layer_idx] == "E"
+
     moe_layer_freq = getattr(tf_config, "moe_layer_freq", None)
 
     if isinstance(moe_layer_freq, int):
