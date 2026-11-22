@@ -207,3 +207,31 @@ def test_eos_metrics_aggregate_across_dp_ranks_without_stops():
     count = Metric.aggregate_dp([stopped["distillation/eos_count"], truncated["distillation/eos_count"]])
     loss_sum = Metric.aggregate_dp([stopped["distillation/eos_loss_sum"], truncated["distillation/eos_loss_sum"]])
     assert loss_sum / count == pytest.approx(0.5)  # k1 at each stop: -0.5 - (-1.0)
+
+
+def _rollout_correction_config(**rollout_correction):
+    from omegaconf import OmegaConf
+
+    return OmegaConf.merge(
+        {
+            "algorithm": {"rollout_correction": {"bypass_mode": False, "rollout_is": None, "rollout_rs": None}},
+            "distillation": {"enabled": True, "distillation_loss": {"semantic_eos_token_ids": EOS}},
+        },
+        {"algorithm": {"rollout_correction": rollout_correction}},
+    )
+
+
+@pytest.mark.parametrize(
+    "rollout_correction", [{"bypass_mode": True}, {"rollout_is": "token"}, {"rollout_rs": "token_k1"}]
+)
+def test_config_rejects_rollout_correction_with_unmerged_rollout_log_probs(rollout_correction):
+    from verl.utils.config import _validate_semantic_eos_rollout_correction_config
+
+    with pytest.raises(ValueError, match="not merged over terminal tokens"):
+        _validate_semantic_eos_rollout_correction_config(_rollout_correction_config(**rollout_correction))
+
+
+def test_config_allows_default_decoupled_old_log_probs():
+    from verl.utils.config import _validate_semantic_eos_rollout_correction_config
+
+    _validate_semantic_eos_rollout_correction_config(_rollout_correction_config())

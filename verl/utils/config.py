@@ -119,6 +119,25 @@ def _validate_score_centering_config(config: DictConfig) -> None:
         raise ValueError("score centering cannot be combined with distillation.")
 
 
+def _validate_semantic_eos_rollout_correction_config(config: DictConfig) -> None:
+    distillation = config.get("distillation") or {}
+    if not distillation.get("enabled", False):
+        return
+    if not (distillation.get("distillation_loss") or {}).get("semantic_eos_token_ids"):
+        return
+    rollout_correction = config.algorithm.get("rollout_correction") or {}
+    enabled = [
+        key for key in ("bypass_mode", "rollout_is", "rollout_rs") if rollout_correction.get(key) not in (None, False)
+    ]
+    if enabled:
+        raise ValueError(
+            f"distillation.distillation_loss.semantic_eos_token_ids cannot be combined with "
+            f"algorithm.rollout_correction.{enabled[0]}: rollout log-probs come from the rollout engine "
+            "and are not merged over terminal tokens, so they disagree with the trainer's merged log-probs "
+            "at every stop."
+        )
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -203,6 +222,7 @@ def validate_config(
     actor_config.validate(n_gpus, config.data.train_batch_size, config.actor_rollout_ref.model)
     _validate_router_replay_config(actor_config, config.algorithm.get("rollout_correction", None))
     _validate_score_centering_config(config)
+    _validate_semantic_eos_rollout_correction_config(config)
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if use_reference_policy:

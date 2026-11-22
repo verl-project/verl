@@ -350,6 +350,10 @@ When set, e.g. `[151643,151645]`, rollouts stop on any of these tokens, and a
 sampled stop is scored by both student and teacher as the log-sum-exp over the
 whole set. Requires a single-sample estimator `loss_mode` (`k1`, `k3`, ...) and
 the FSDP engine with `use_remove_padding=True` and fused kernels disabled.
+It cannot be combined with `algorithm.rollout_correction.bypass_mode`,
+`rollout_is` or `rollout_rs`: those read the rollout engine's log-probs, which
+are not merged, so the trainer would compare a merged stop probability with an
+unmerged one.
 
 For example, at a position where the student samples `<|endoftext|>`:
 
