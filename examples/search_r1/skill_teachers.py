@@ -11,7 +11,6 @@ import re
 from pathlib import Path
 
 import torch
-from transformers.models.gpt2.tokenization_gpt2 import bytes_to_unicode
 
 TEACHERS = ("entity", "planning", "query")
 GUIDANCE = (
@@ -19,6 +18,23 @@ GUIDANCE = (
     "These are general procedures, not factual evidence. Do not write a critique or evaluate the response.\n"
 )
 TAG = re.compile(rb"</?(think|search|answer)>")
+
+
+def byte_level_decoder():
+    """Inverse GPT-2/Qwen byte alphabet, independent of Transformers internals.
+
+    Visible Latin-1 bytes keep their code points; the remaining bytes map to
+    consecutive code points starting at 256. Decode bytes before UTF-8 so even
+    tokens splitting a multibyte character retain their exact offsets.
+    """
+    visible = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
+    decoder = {chr(byte): byte for byte in visible}
+    next_codepoint = 256
+    for byte in range(256):
+        if byte not in visible:
+            decoder[chr(next_codepoint)] = byte
+            next_codepoint += 1
+    return decoder
 
 
 def load_bank(path):
@@ -79,7 +95,7 @@ def validate_settings(config):
 class SkillTokenCodec:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
-        self.byte_decoder = {char: byte for byte, char in bytes_to_unicode().items()}
+        self.byte_decoder = byte_level_decoder()
         self.special_ids = set(tokenizer.all_special_ids)
         self.start = tokenizer.convert_tokens_to_ids("<|im_start|>")
         self.end = tokenizer.convert_tokens_to_ids("<|im_end|>")

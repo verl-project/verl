@@ -18,6 +18,7 @@ from examples.search_r1.skill_teachers import (
     TEACHERS,
     SkillTokenCodec,
     beta_at_step,
+    byte_level_decoder,
     clipped_skill_loss,
     load_bank,
     teacher_masks,
@@ -64,6 +65,18 @@ def encoded(tokenizer, parts):
 
 def selected_bytes(codec, ids, mask):
     return b"".join(codec.token_bytes(token) for token, keep in zip(ids.tolist(), mask.tolist(), strict=True) if keep)
+
+
+def test_byte_alphabet_matches_tokenizers_backend():
+    from tokenizers.pre_tokenizers import ByteLevel
+
+    decoder = byte_level_decoder()
+    assert set(decoder) == set(ByteLevel.alphabet())
+    assert set(decoder.values()) == set(range(256))
+    pre_tokenizer = ByteLevel(add_prefix_space=False, use_regex=False)
+    text = "\x00\t\n abc café 法国 😀" + "".join(chr(i) for i in range(256))
+    encoded = "".join(piece for piece, _ in pre_tokenizer.pre_tokenize_str(text))
+    assert bytes(decoder[char] for char in encoded) == text.encode("utf-8")
 
 
 def test_masks_exclude_answers_tools_and_boundaries(tokenizer):
