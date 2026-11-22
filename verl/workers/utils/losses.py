@@ -25,6 +25,15 @@ from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
 
+def auxiliary_mask_counts(data, mask_names, device, dp_group):
+    """Count each auxiliary scope over a DP-wide optimizer mini-batch."""
+    counts = torch.stack(
+        [(data[name].values() if data[name].is_nested else data[name]).sum() for name in mask_names]
+    ).to(device=device, dtype=torch.float64)
+    torch.distributed.all_reduce(counts, group=dp_group)
+    return dict(zip(mask_names, counts.cpu().tolist(), strict=True))
+
+
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     pad_mode = tu.get_non_tensor_data(data=data, key="pad_mode", default=DatasetPadMode.NO_PADDING)
     dp_size = data["dp_size"]

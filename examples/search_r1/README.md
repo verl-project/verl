@@ -4,6 +4,10 @@ This recipe uses verl v0.9.1 (`1876b06`) and Qwen2.5-3B Base, with a BaseTool
 HTTP search client and separate assistant/tool messages. It remains a Search-R1
 control: no SD hindsight or self-distillation loss is enabled.
 
+For the experimental three-teacher skill-bank training task, see
+[SKILL_TEACHERS.md](SKILL_TEACHERS.md) and `run_skill_grpo.sh`. The baseline
+`run_grpo.sh` remains unchanged.
+
 ## Alignment reference
 
 The numerical reference is `sd-search/configs/paper_3b.yaml`, composed by its

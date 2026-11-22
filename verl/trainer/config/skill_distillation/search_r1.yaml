@@ -1,0 +1,25 @@
+# Static, shared-snapshot self-teachers for the synchronous Search-R1 recipe.
+enabled: true
+
+bank_path: examples/search_r1/skills/static_v1.json
+
+# split: E=think+query, P=think, Q=query; combined: one teacher with all rules;
+# all: three teachers each supervising every generated token (ablation only).
+mode: split
+
+beta: 0.01
+
+# Linear ramp, reaching beta at this training step; zero disables warmup.
+warmup_steps: 10
+
+weights:
+  entity: 1.0
+  planning: 1.0
+  query: 1.0
+  combined: 1.0
+
+# Teacher forwards run sequentially on the unchanged actor before any update.
+teacher_micro_batch_size_per_gpu: 4
+
+# Extra room for teacher-only rules; overlong sequences fail, never truncate.
+max_teacher_context_length: 6144

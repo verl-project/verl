@@ -173,6 +173,11 @@ def main(config):
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
 
+    if config.get("skill_distillation", {}).get("enabled", False):
+        from examples.search_r1.skill_teachers import validate_settings
+
+        validate_settings(config)
+
     # validate config
     validate_config(
         config=config,

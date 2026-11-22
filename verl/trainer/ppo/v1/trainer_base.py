@@ -133,6 +133,11 @@ class PPOTrainer(ABC):
 
     def __init__(self, config: DictConfig):
         self.config = config
+        self.skill_teacher_supervisor = None
+        if config.get("skill_distillation", {}).get("enabled", False):
+            from examples.search_r1.skill_distillation import SkillTeacherSupervisor
+
+            self.skill_teacher_supervisor = SkillTeacherSupervisor(config)
         self.checkpoint_callback = build_checkpoint_callback(config)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
@@ -235,6 +240,8 @@ class PPOTrainer(ABC):
         5. [Optional] MultiTeacherModelManager: LLM teacher servers for on-policy distillation.
         """
         self._setup()
+        if self.skill_teacher_supervisor is not None:
+            self.skill_teacher_supervisor.initialize(self)
         self.on_init_end()
 
     def _setup(self):
@@ -598,6 +605,12 @@ class PPOTrainer(ABC):
         # 4. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
             batch = self._compute_old_log_prob(batch, metrics=metrics)
+
+        # Re-score the same student tokens with static skill contexts while the
+        # actor still holds the old-policy snapshot, before any optimizer update.
+        if self.skill_teacher_supervisor is not None:
+            with marked_timer("skill_teachers", timing_raw, color="blue"):
+                batch = self.skill_teacher_supervisor.score(self, batch, metrics)
 
         # 5. [OPTIONAL] compute ref_log_prob
         if self.use_reference_policy:
@@ -1877,6 +1890,10 @@ class PPOTrainer(ABC):
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)
+
+        if self.skill_teacher_supervisor is not None:
+            batch.fields = None
+            self.skill_teacher_supervisor.update_metadata(batch, self.global_steps)
 
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
         output = rename_dict(output["metrics"], "actor/")

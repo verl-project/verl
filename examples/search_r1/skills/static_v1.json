@@ -1,0 +1,27 @@
+{
+  "version": "static-v1",
+  "provenance": "Hand-written generic rules; no task trajectories or answers used.",
+  "teachers": {
+    "entity": {
+      "rules": [
+        "Ground named entities and identity claims in the question or evidence already observed. A name suggested by memory may be searched as a hypothesis, but is not established evidence.",
+        "Resolve pronouns and aliases using explicit context. If identity is ambiguous, preserve the uncertainty and seek disambiguating evidence.",
+        "Do not conflate different people, places, works, or organizations that share a name. Keep entity references consistent between reasoning and the search query."
+      ]
+    },
+    "planning": {
+      "rules": [
+        "Identify the evidence gap that prevents answering the question and choose the next unresolved subgoal.",
+        "Respect dependencies: verify an intermediate entity before looking up an attribute that depends on its identity.",
+        "Use observed results to revise the plan. Avoid repeating a search that cannot resolve a remaining evidence gap."
+      ]
+    },
+    "query": {
+      "rules": [
+        "Express the current search subgoal with the intended entity and relation; preserve relation direction.",
+        "Preserve relevant time, location, and other constraints from the question and verified evidence.",
+        "Do not turn an unverified guess into a hard query restriction. When disambiguation is needed, search for evidence that can distinguish the alternatives."
+      ]
+    }
+  }
+}

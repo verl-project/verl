@@ -343,6 +343,19 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def train_batch(self, data: TensorDict) -> TensorDict:
         assert self.loss_fn is not None, "loss function can't be None when calling train_batch"
         assert not self.engine_config.forward_only, "Can't run `train_batch` when forward_only is in the engine config."
+        # Auxiliary objectives can have different token scopes. Count each mask
+        # over the actual optimizer mini-batch before micro-batching, across DP.
+        # This keeps their gradients invariant to DP and accumulation splits.
+        auxiliary_masks = tu.get(data, "auxiliary_loss_mask_names", default=[])
+        if auxiliary_masks:
+            from verl.workers.utils.losses import auxiliary_mask_counts
+
+            tu.assign_non_tensor(
+                data,
+                auxiliary_loss_mask_counts=auxiliary_mask_counts(
+                    data, auxiliary_masks, self.device_name, self.engine.get_data_parallel_group()
+                ),
+            )
         # global_token_num should be a list of number of tokens of each seq in this batch
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
