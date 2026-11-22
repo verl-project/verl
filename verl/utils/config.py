@@ -148,14 +148,25 @@ def validate_config(
                 model_parallel_size * config.actor_rollout_ref.actor.megatron.context_parallel_size
             )
             minimal_bsz = megatron_dp * config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu
+            batch_constraint = (
+                f"Megatron data-parallel size ({megatron_dp}) * "
+                f"actor.ppo_micro_batch_size_per_gpu ({config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu})"
+            )
         else:
             minimal_bsz = n_gpus
+            batch_constraint = f"total device count ({n_gpus})"
 
         # 1. Check total batch size for data correctness
         real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
         assert real_train_batch_size % minimal_bsz == 0, (
             f"real_train_batch_size ({real_train_batch_size}) must be divisible by minimal possible batch size "
-            f"({minimal_bsz})"
+            f"({minimal_bsz} = {batch_constraint}). "
+            f"data.train_batch_size ({config.data.train_batch_size}) * "
+            f"actor_rollout_ref.rollout.n ({config.actor_rollout_ref.rollout.n}); "
+            f"trainer.n_gpus_per_node ({config.trainer.n_gpus_per_node}) * "
+            f"trainer.nnodes ({config.trainer.nnodes}) = {n_gpus}. "
+            "Adjust train_batch_size or rollout.n so their product is divisible by the minimum batch size, "
+            "or review the device and parallelism configuration."
         )
 
     # A helper function to check "micro_batch_size" vs "micro_batch_size_per_gpu"
