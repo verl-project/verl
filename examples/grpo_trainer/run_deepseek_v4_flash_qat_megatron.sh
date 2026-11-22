@@ -106,6 +106,18 @@ ROLLOUT_KV_CACHE_DTYPE=${ROLLOUT_KV_CACHE_DTYPE:-fp8}
 # vLLM MoE kernel for the MXFP4 routed experts. Empty keeps verl's default (DeepGEMM, Blackwell-only for MXFP4);
 # on Hopper (H100/H200) use "marlin".
 ROLLOUT_MOE_BACKEND=${ROLLOUT_MOE_BACKEND:-}
+# Hopper: serve the MXFP4 experts as W4A8 (FP8 activations in dynamic 1x128 groups, the grouping of TE's FP8 GEMM in
+# training) with vLLM's Humming kernel instead of Marlin's W4A16. Blackwell's default DeepGEMM MXFP4 path is already
+# W4A8, so leave this False there.
+ROLLOUT_HUMMING_W4A8=${ROLLOUT_HUMMING_W4A8:-False}
+HUMMING_INPUT_QUANT_CONFIG='{"dtype":"float8e4m3","group_size":128,"scale_dtype":"float32","quant_mode":"dynamic_group"}'
+if [ "${ROLLOUT_HUMMING_W4A8}" = "True" ]; then
+    if [ -n "${ROLLOUT_MOE_BACKEND}" ] && [ "${ROLLOUT_MOE_BACKEND}" != "humming" ]; then
+        echo "ROLLOUT_HUMMING_W4A8=True needs ROLLOUT_MOE_BACKEND=humming (or unset), got ${ROLLOUT_MOE_BACKEND}" >&2
+        exit 1
+    fi
+    ROLLOUT_MOE_BACKEND=humming
+fi
 ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB=${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB:-512}
 ROUTER_REPLAY_MODE=${ROUTER_REPLAY_MODE:-R3}
 # Fused DSA attention kernels (dev Megatron-Core maps True -> dsa_kernel_backend=cudnn, which needs flash_mla from
@@ -274,6 +286,10 @@ ROLLOUT=(
 )
 if [ -n "${ROLLOUT_MOE_BACKEND}" ]; then
     ROLLOUT+=(+actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=${ROLLOUT_MOE_BACKEND})
+fi
+if [ "${ROLLOUT_HUMMING_W4A8}" = "True" ]; then
+    # vLLM reads the Humming activation schema from the environment of its workers.
+    ROLLOUT+=("+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_HUMMING_INPUT_QUANT_CONFIG='${HUMMING_INPUT_QUANT_CONFIG}'")
 fi
 
 REWARD=(
