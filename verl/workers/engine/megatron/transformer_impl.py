@@ -382,7 +382,6 @@ class MegatronEngine(BaseEngine):
             csa_compress_ratios = getattr(provider, "csa_compress_ratios", None)
             if csa_compress_ratios is not None:
                 provider_overrides["csa_compress_ratios"] = csa_compress_ratios[: provider.num_layers]
-        self._maybe_set_dsv4_hybrid_pipeline_layout(provider, provider_overrides)
         if self.enable_routing_replay:
             if hasattr(provider, "moe_enable_routing_replay"):
                 provider_overrides["moe_enable_routing_replay"] = True
@@ -492,51 +491,6 @@ class MegatronEngine(BaseEngine):
 
         return module
 
-    def _maybe_set_dsv4_hybrid_pipeline_layout(self, provider, provider_overrides) -> None:
-        """Derive the PP layout of a DeepSeek-V4 hybrid model when none is given.
-
-        Megatron-Bridge >= 0.7 builds DeepSeek-V4 as attention + MoE hybrid sublayers, so a PP layout has to
-        split ``hybrid_layer_pattern`` at stage boundaries too; a plain ``pipeline_model_parallel_layout`` string
-        written in logical layers no longer matches. Bridge's own recipes call this helper for that.
-        """
-        if self.model_config.hf_config.model_type != "deepseek_v4":
-            return
-        if not getattr(provider, "hybrid_layer_pattern", None):
-            return
-        if provider_overrides.get("pipeline_model_parallel_layout") is not None:
-            return
-        if (provider_overrides.get("pipeline_model_parallel_size") or 1) <= 1:
-            return
-        try:
-            from megatron.bridge.models.deepseek.deepseek_v4_bridge import (
-                set_deepseek_v4_pipeline_model_parallel_layout,
-            )
-        except ImportError:
-            return
-        from verl.utils.megatron.dsv4_pipeline import dsv4_logical_layers_per_stage
-
-        for key in ("pipeline_model_parallel_size", "virtual_pipeline_model_parallel_size", "mtp_num_layers"):
-            if key in provider_overrides:
-                setattr(provider, key, provider_overrides[key])
-        num_stages = provider.pipeline_model_parallel_size * (provider.virtual_pipeline_model_parallel_size or 1)
-        main_pattern = provider.hybrid_layer_pattern.split("/")[0].replace("|", "")
-        # Bridge resolves the hash-layer count from either HF config format (num_hash_layers / mlp_layer_types).
-        counts = dsv4_logical_layers_per_stage(
-            len(main_pattern) // 2, num_stages, getattr(provider, "moe_num_hash_layers", 0) or 0
-        )
-        set_deepseek_v4_pipeline_model_parallel_layout(provider, logical_layers_per_stage=counts)
-        provider_overrides["pipeline_model_parallel_layout"] = provider.pipeline_model_parallel_layout
-        provider_overrides["hybrid_layer_pattern"] = provider.hybrid_layer_pattern
-        logger.warning(
-            "DeepSeek-V4 hybrid PP layout: %s; hybrid_layer_pattern=%s",
-            provider.pipeline_model_parallel_layout,
-            provider.hybrid_layer_pattern,
-        )
-
-    def _qat_feeds_te_fp8(self) -> bool:
-        """Weight-only MXFP4 QAT, whose fake-quantized expert weights feed TE's real FP8 GEMM."""
-        return self._qat_config.mode == "mxfp4" and (getattr(self._qat_config, "activation", "mxfp8") == "none")
-
     def _maybe_enable_fused_kernels(self):
         if not self.engine_config.use_fused_kernels:
             return
@@ -551,13 +505,12 @@ class MegatronEngine(BaseEngine):
 
         from verl.models.mcore.model_forward_fused import patch_fused_forward
 
-        patched = [
-            patch_fused_forward(model, self.model_config, engine_config=self.engine_config) for model in self.module
-        ]
-        if not all(patched):
-            # Calling an unpatched model with the fused-forward kwargs fails deep inside its forward.
-            logger.warning_once("Fused kernels are not supported for this Megatron model; disabling.")
-            self.engine_config.use_fused_kernels = False
+        for model in self.module:
+            patch_fused_forward(model, self.model_config, engine_config=self.engine_config)
+
+    def _qat_feeds_te_fp8(self) -> bool:
+        """Weight-only MXFP4 QAT, whose fake-quantized expert weights feed TE's real FP8 GEMM."""
+        return self._qat_config.mode == "mxfp4" and (getattr(self._qat_config, "activation", "mxfp8") == "none")
 
     def _build_optimizer(self):
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
