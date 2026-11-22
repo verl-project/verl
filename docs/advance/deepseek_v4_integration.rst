@@ -139,18 +139,11 @@ and ``/`` before the MTP part. Verl handles the differences from the
   (``verl/utils/megatron/dsv4_pipeline.py``). An even split can violate that,
   for example 16 layers on PP8. Leave the layout unset unless a specific one
   is required.
-* **Router replay.** Only the ``E`` sublayers own a router, so
-  ``is_moe_layer`` reads ``hybrid_layer_pattern`` instead of
-  ``moe_layer_freq``. Megatron-Core ``dev`` also builds a ``RouterReplay``
-  itself, passing ``is_mtp_layer``. Verl registers each router exactly once:
-  a duplicate registration silently shifts every replayed route by one layer.
-  The hash-router recorder forwards the extra ``dense_output`` argument.
-* **Fused kernels.** The fused forward patches any model that exposes the
-  output-processor hook, including ``HybridModel``. A model that cannot be
-  patched falls back to the unfused forward with a warning.
-* **Imports.** Megatron-Core ``dev`` removed
-  ``dist_checkpointing.strategies.async_utils``. Verl's mcore 0.12 checkpoint
-  patch imports it only when that version is installed.
+* **Router replay.** Megatron-Core ``dev`` builds a ``RouterReplay`` for
+  each router itself. Verl unregisters that instance before creating its own,
+  so each router is registered exactly once: a duplicate registration silently
+  shifts every replayed route by one layer. The hash-router recorder forwards
+  the extra ``dense_output`` argument that Megatron-Core ``dev`` passes.
 * **Optimizer offload.** Megatron-Core ``dev`` requires
   ``use_precision_aware_optimizer=True`` whenever the optimizer is offloaded to
   the CPU (``HybridDeviceOptimizer``).

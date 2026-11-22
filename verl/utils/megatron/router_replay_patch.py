@@ -81,13 +81,8 @@ class RouterReplay:
         for router in RouterReplay.router_instances:
             router.clear_indices()
 
-    def __init__(self, is_mtp_layer: bool = False):
-        """Initializes a RouterReplay instance for a specific layer.
-
-        ``is_mtp_layer`` mirrors the Megatron-Core signature (NVIDIA/Megatron-LM#7310 passes it from
-        TopKRouter); every router is still registered, in instantiation order, as before.
-        """
-        self.is_mtp_layer = is_mtp_layer
+    def __init__(self):
+        """Initializes a RouterReplay instance for a specific layer."""
         self.target_topk_idx = None  # For replay
         self.target_replay_mask = None
         self.recorded_topk_idx = None  # For recording
@@ -471,7 +466,7 @@ def apply_router_replay_patch():
             RouterReplay.router_instances.remove(existing)
         self.router_replay = None
         if _router_replay_enabled(self.config):
-            self.router_replay = RouterReplay(is_mtp_layer=getattr(self, "is_mtp_layer", False))
+            self.router_replay = RouterReplay()
 
     # Step 4: Apply the patches
     TopKRouter.__init__ = patched_init
