@@ -39,6 +39,7 @@ on:
       - main
       - v0.*
     paths:
+      - "scripts/ascend_pytest.py"
       - "verl/**/*.py"
       # Entrypoints
       - ".github/workflows/model_ascend.yml"
@@ -102,7 +103,7 @@ jobs:
           }' /proc/meminfo
       - name: Running rmpad model tests on 8 NPUs
         run: |
-          PYTHONFAULTHANDLER=1 pytest -s tests/models/test_transformer.py
+          PYTHONFAULTHANDLER=1 python -m scripts.ascend_pytest -s tests/models/test_transformer.py
       - name: Running FSDP rmpad model tests on 8 NPUs
         run: |
           STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
@@ -117,7 +118,7 @@ jobs:
           VERL_USE_EXTERNAL_MODULES: megatron_adaptor
         run: |
           # Preload verl so Ascend patches run before test modules import Megatron.
-          pytest -p verl -s -x tests/models/test_model_forward_fused.py
+          python -m scripts.ascend_pytest -p verl -s -x tests/models/test_model_forward_fused.py
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # TODO: Move test_engine.py's check_dtype=False, when npu's vllm0.23.0 is ok, run pytest -s -x tests/models/test_engine.py::test_actor_engine[fsdp] check it
@@ -170,4 +171,4 @@ jobs:
           PYTEST_DEBUG_TEMPROOT: /root/.cache/temp
         run: |
           ray stop --force
-          PYTHONFAULTHANDLER=1 pytest tests/models/test_engine.py --override-ini tmp_path_retention_policy=none
+          PYTHONFAULTHANDLER=1 python -m scripts.ascend_pytest tests/models/test_engine.py --override-ini tmp_path_retention_policy=none
