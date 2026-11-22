@@ -1,0 +1,7 @@
+- name: search_r1
+  _target_: examples.search_r1.agent_loop.SearchR1AgentLoop
+  max_actions: 4
+  max_turn_tokens: 512
+  max_observation_tokens: 512
+  observation_tag: documents
+  max_generation_context_tokens: 4096

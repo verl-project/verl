@@ -1662,10 +1662,14 @@ class PPOTrainer(ABC):
             tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)
             return batch
 
+        # Old-policy entropy is a monitoring metric, independent of the entropy
+        # term computed from the current policy during the actor update.
+        log_entropy = self.config.trainer.get("log_old_policy_entropy", True)
+
         # 1. compute log probs
         batch.extra_info.update(
             {
-                "calculate_entropy": True,
+                "calculate_entropy": log_entropy,
                 "compute_loss": False,
                 "temperature": self.config.actor_rollout_ref.rollout.temperature,
             }
@@ -1673,33 +1677,35 @@ class PPOTrainer(ABC):
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
         assert len(output) == len(batch)
 
-        fields = ["entropy", "log_probs", "response_mask"]
+        fields = ["log_probs", "response_mask"]
+        if log_entropy:
+            fields.append("entropy")
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:
             fields.extend(["responses", "rollout_log_probs"])
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         # 2. write old_log_probs and entropy back to TransferQueue
         data["old_log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
-        data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
+        stored_fields = ["old_log_probs"]
+        if log_entropy:
+            data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
+            stored_fields.append("entropy")
         batch = tq.kv_batch_put(
-            keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
+            keys=batch.keys, partition_id=batch.partition_id, fields=data.select(*stored_fields)
         )
 
         data = DataProto(batch=data.to_padded_tensor())
 
-        # 3. calculate actor entroy metrics
-        actor_config = self.config.actor_rollout_ref.actor
-        entropy_agg = agg_loss(
-            loss_mat=data.batch["entropy"],
-            loss_mask=data.batch["response_mask"],
-            loss_agg_mode=actor_config.loss_agg_mode,
-            loss_scale_factor=actor_config.loss_scale_factor,
-        )
-        old_log_prob_metrics = {
-            "actor/entropy": entropy_agg.detach().item(),
-            # "perf/mfu/actor_infer": old_log_prob_mfu,
-        }
-        metrics.update(old_log_prob_metrics)
+        # 3. optionally calculate the actor entropy metric
+        if log_entropy:
+            actor_config = self.config.actor_rollout_ref.actor
+            entropy_agg = agg_loss(
+                loss_mat=data.batch["entropy"],
+                loss_mask=data.batch["response_mask"],
+                loss_agg_mode=actor_config.loss_agg_mode,
+                loss_scale_factor=actor_config.loss_scale_factor,
+            )
+            metrics["actor/entropy"] = entropy_agg.detach().item()
 
         # 4. calculate rollout vs actor logprobs diff
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:

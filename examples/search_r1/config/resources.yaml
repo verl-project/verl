@@ -1,0 +1,11 @@
+# Record of the user-selected single-node allocation; not a Hydra trainer config.
+gpus: 8
+cpus: 80
+charged_group: llmagent_gpu
+host_memory_gib: 880
+host_memory_mib: 901120
+training_and_retrieval_share_gpus: true
+retrieval_gpu_indices: [0, 1, 2, 3]
+image: registry.h.pjlab.org.cn/ailab-llmagent-llmagent_gpu_pool/verl-search:vllm024.dev2
+image_digest: sha256:476b81c1eeddca6ac68247e56840fac24a75cf20ab01803cec3d5e791ee92feb
+# Mounts and per-submission runtime limit still need to be provided.

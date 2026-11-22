@@ -1,0 +1,11 @@
+tools:
+  - class_name: examples.search_r1.search_tool.SearchTool
+    config:
+      type: native
+      retrieval_service_url: http://127.0.0.1:8000/retrieve
+      topk: 3
+      timeout: 120
+      max_concurrency: 4
+      batch_size: 64
+      batch_wait_ms: 2
+      max_query_chars: 4096
