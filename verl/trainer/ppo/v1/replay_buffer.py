@@ -541,9 +541,7 @@ class ReplayBufferAsync(ReplayBuffer):
             return set()
         prompt_global_steps = self.prompt_global_steps[partition_id]
         terminal_keys = self.finished_keys[partition_id]
-        return {
-            uid for uid in terminal_keys if self.is_stale(global_steps, prompt_global_steps.get(uid, global_steps))
-        }
+        return {uid for uid in terminal_keys if self.is_stale(global_steps, prompt_global_steps.get(uid, global_steps))}
 
     def _terminal_eviction_reasons(
         self, global_steps: int, partition_id: str

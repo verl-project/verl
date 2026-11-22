@@ -26,6 +26,8 @@ from pathlib import Path
 CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/utils/device.py",
     "verl/utils/torch_functional.py",  # import flash_attn only on cuda
+    "verl/utils/activation_offload.py",  # appear in the type of an offloaded tensor's copy event
+    "verl/utils/fsdp_utils.py",  # appear in the TF32 switch of the modules computed in fp32
     "verl/plugin/platform/platform_base.py",  # docstring mentions torch.cuda
     "verl/plugin/platform/platform_cuda.py",  # CUDA platform implementation
     "verl/plugin/platform/platform_rocm.py",  # ROCm platform reuses torch.cuda via hipify
