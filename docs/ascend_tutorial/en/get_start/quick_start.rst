@@ -1,7 +1,7 @@
 Ascend Quick Start Guide
 ==========================
 
-**Last updated:** 2026/07/14.
+**Last updated:** 2026/11/12.
 
 .. contents:: Table of Contents
    :local:
@@ -113,6 +113,19 @@ How to Run
 For detailed parameter descriptions within the scripts, see `Training Configuration Parameters and Metrics <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/dev_guide/model_dev/parameter_and_metrics.html>`_.
 
 For multi-node task launch, see the `Multi-Machine Task Startup Practice Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/model_support/examples/multi-machine_task_startup_practice.html>`_.
+
+More Training Examples
+---------------------------------
+
+For supported models, algorithms, training and rollout backends, and launch scripts, see
+`NPU Model and Algorithm Support <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/model_support/model_and_algorithm_support.html>`_.
+
+After completing the quick validation above, visit the
+`verl-ascend-recipe repository <https://github.com/verl-project/verl-ascend-recipe>`_
+for more model and algorithm training examples on Ascend.
+
+Choose an example for your target model and algorithm, and follow its documentation
+for version requirements, environment setup, and execution steps.
 
 Appendix
 -------------------------------------------

@@ -295,6 +295,7 @@ def get_metric_data_with_optional_routed_experts(
     accumulator: "RolloutMoELoadBalanceMetricsAccumulator",
     kv_batch_get: Callable[..., Any],
 ):
+    """Fetch metric fields, requesting routed experts when enabled and retrying without them if unavailable."""
     if moe_lb_metrics_interval <= 0 or not accumulator.should_request_routed_experts(global_steps):
         return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields)
 
@@ -315,6 +316,7 @@ def compute_moe_lb_metrics(
     global_steps: int,
     accumulator: "RolloutMoELoadBalanceMetricsAccumulator",
 ) -> dict[str, Any]:
+    """Accumulate rollout MoE load-balance statistics and emit them at the configured interval."""
     if moe_lb_metrics_interval <= 0:
         return {}
 
@@ -717,7 +719,7 @@ def compute_variance_proxy_metrics(batch: DataProto, gradient_norm: float = None
     response_mask = batch.batch["response_mask"]
 
     # Use pre-computed rollout IS weights from batch (for variance proxy consistency with training loss)
-    # IS weights are computed centrally in ray_trainer.py to avoid duplication
+    # IS weights are computed centrally in trainer_base.py to avoid duplication
     rollout_is_weights = None
     if "rollout_is_weights" in batch.batch:
         # Extract pre-computed IS weights from batch (already computed in trainer)
@@ -726,7 +728,7 @@ def compute_variance_proxy_metrics(batch: DataProto, gradient_norm: float = None
         # Scale W by (rollout IS weight)² for optimal baseline under biased estimation
         w_per_timestep = w_per_timestep * (rollout_is_weights**2).detach()
 
-        # Note: IS weight statistics and mismatch metrics are logged in ray_trainer.py
+        # Note: IS weight statistics and mismatch metrics are logged in trainer_base.py
 
     # Get scalar advantages (mean over timesteps)
     advantages = batch.batch["advantages"]
