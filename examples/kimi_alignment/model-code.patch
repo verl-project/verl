@@ -1,0 +1,78 @@
+--- a/dsa.py
++++ b/dsa.py
+@@ -202,6 +202,11 @@
+         # For Hidx=32,Didx=128 the combined multiplier is exactly 1/64,
+         # representable in BF16 without an additional rounding operation.
+         index_weights = index_weights * (self.indexer.num_heads * self.indexer.head_dim) ** -0.5
++        from dsa_trace import training_stage
++        training_stage(self, query_latent=query_latent, query=query, latent=latent,
++            key_rotary=key_rotary, query_absorbed=query_absorbed,
++            index_query=index_query, index_key=index_key, index_weights=index_weights,
++            key_projection=key_projection, value_projection=value_projection)
+         if cu_seqlens is not None:
+             # Remove global right padding, including documents entirely in it.
+             # All valid documents share one TND call and document-local indices.
+@@ -223,12 +228,17 @@
+                                              self.indexer.topk, cu_seqlens)
+             output, maximum, denominator = sparse_mla(query_part, key_part, query_rope_part,
+                                                        key_rope_part, indices, self.scaling, cu_seqlens)
++            training_stage(self, indices=indices, attention_core=output,
++                maximum=maximum, denominator=denominator,
++                query_part=query_part, key_part=key_part,
++                query_rope=query_rope_part, key_rope=key_rope_part)
+             if self.training:
+                 losses.append(lightning_indexer_kl_loss(index_query_part, index_key_part, weights_part,
+                                                          query_part.detach(), key_part.detach(), query_rope_part.detach(),
+                                                          key_rope_part.detach(), indices, maximum, denominator,
+                                                          self.scaling, cu_seqlens) * length)
+             output = torch.einsum("...hr,hdr->...hd", output, value_projection).reshape(1, length, self.num_heads, self.v_head_dim)
++            training_stage(self, value_output=output)
+             outputs.append(F.pad(output, (0, 0, 0, 0, 0, sequence - length)))
+         if self.training:
+             self.indexer_loss = sum(losses) / max(sum(lengths), 1) if losses else index_weights.float().sum() * 0
+--- a/moe.py
++++ b/moe.py
+@@ -237,6 +237,9 @@
+ 
+     def register_parameter(self, name: str, param: nn.Parameter | None) -> None:
+         """Record the model-owned EP transition to DTensor expert weights."""
++        previous = self._parameters.get(name)
++        if isinstance(param, DTensor) and previous is not None and not isinstance(previous, DTensor):
++            param.requires_grad_(previous.requires_grad)
+         super().register_parameter(name, param)
+         if name in {"gate_up_proj", "down_proj"} and isinstance(param, DTensor):
+             self._export_external_state_dict = True
+@@ -628,6 +631,24 @@
+             fused=True,
+         )
+ 
++    def ep_forward_mc2(
++        self,
++        hidden_states: torch.Tensor,
++        top_k_index: torch.Tensor,
++        top_k_weights: torch.Tensor,
++        *,
++        ep_group: Any,
++        fixed_router: bool,
++    ) -> torch.Tensor:
++        """Reuse K3's MC2 transport with K3.1's weights and SiTU activation."""
++
++        from fsdp_turbo.models.kimi.kimi_k3.kimi_moe_patch import PatchKimiMoeExperts
++
++        return PatchKimiMoeExperts.ep_forward_mc2(
++            self, hidden_states, top_k_index, top_k_weights,
++            ep_group=ep_group, fixed_router=fixed_router,
++        )
++
+     def _ep_forward(
+         self,
+         hidden_states: torch.Tensor,
+@@ -666,7 +687,7 @@
+             torch.zeros(self.num_global_experts, dtype=torch.int32, device=top_k_index.device),
+         )
+         indices, split_sizes = dispatch_preprocess(
+-            ep_group, top_k_index, self.num_global_experts, expert_ids_per_ep_rank
++            ep_group, top_k_index, self.num_global_experts, expert_ids_per_ep_rank, expert_module=self
+         )
+         if fused and (indices[0] == 0).any():
+             fused = False

@@ -1,0 +1,149 @@
+{
+  "run": "kimi31_4layer_alignment_423_20261123_193444",
+  "comparison": [
+    {
+      "comparison": "independent_actor_old_logprob_vs_rollout",
+      "valid_tokens": 1024,
+      "nonfinite_tokens": 0,
+      "different_tokens": 0,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0.0,
+      "first_difference": null,
+      "actor_dtype": "torch.float32",
+      "rollout_dtype": "torch.float32",
+      "passed": true
+    },
+    {
+      "comparison": "independent_actor_old_logprob_vs_rollout",
+      "valid_tokens": 1024,
+      "nonfinite_tokens": 0,
+      "different_tokens": 0,
+      "mean_abs_diff": 0.0,
+      "max_abs_diff": 0.0,
+      "first_difference": null,
+      "actor_dtype": "torch.float32",
+      "rollout_dtype": "torch.float32",
+      "passed": true
+    }
+  ],
+  "process_deviation": "Cross-framework debugging preceded completion of same-side A/A, BI and PD controls. End-to-end zero is recorded separately from those gates.",
+  "prefill_BI_observations": {
+    "190200": [
+      {
+        "model_input_embeddings_equal": true,
+        "requests": [
+          "576ff259bb3b49179b2a9ab7558bd565-be36672d",
+          "00da44c9961148dfa531fac84396031a-a9ef795b"
+        ],
+        "steps": [
+          0,
+          2
+        ],
+        "batch_sizes": [
+          1,
+          16
+        ],
+        "query_rows": [
+          273,
+          3250
+        ],
+        "logits_different": 0,
+        "text_ids_equal": true,
+        "media_identity_verified": false
+      }
+    ],
+    "192514": [
+      {
+        "model_input_embeddings_equal": true,
+        "requests": [
+          "d2e5c381e9d644aeba6b62333b1a1f77-9ffd514f",
+          "ef2aa5481694411e8f0f5b0b923bcfde-93069c6e"
+        ],
+        "steps": [
+          0,
+          1
+        ],
+        "batch_sizes": [
+          1,
+          2
+        ],
+        "query_rows": [
+          148,
+          149
+        ],
+        "logits_different": 0,
+        "text_ids_equal": true,
+        "media_identity_verified": false
+      }
+    ]
+  },
+  "decode_BI": "pending",
+  "whole_model_PD": "pending",
+  "nonzero_policy_update": "pending",
+  "fixed_trajectory": {
+    "same_prompt": true,
+    "same_response_through_target": true,
+    "same_pixels": true,
+    "same_actor_layer_outputs": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "before": {
+      "request": "02af46524fd74eaa8342bfb2688aeed0",
+      "file": "1795433556055573350_old.pt",
+      "step": 3,
+      "position": 150,
+      "response_index": 3,
+      "rollout_logprob": -5.048770427703857,
+      "cpu_logprob": -5.048768997192383,
+      "layers": {
+        "0": {
+          "different": 0,
+          "maximum": 0.0
+        },
+        "1": {
+          "different": 1966,
+          "maximum": 0.000244140625
+        },
+        "2": {
+          "different": 4039,
+          "maximum": 0.0009765625
+        },
+        "3": {
+          "different": 5145,
+          "maximum": 0.00390625
+        }
+      }
+    },
+    "after": {
+      "request": "d12b0612f87e43d0a3f3243f8937304b",
+      "file": "1795434070587265190_old.pt",
+      "step": 3,
+      "position": 150,
+      "response_index": 3,
+      "rollout_logprob": -5.04941987991333,
+      "cpu_logprob": -5.049417495727539,
+      "layers": {
+        "0": {
+          "different": 0,
+          "maximum": 0.0
+        },
+        "1": {
+          "different": 0,
+          "maximum": 0.0
+        },
+        "2": {
+          "different": 0,
+          "maximum": 0.0
+        },
+        "3": {
+          "different": 0,
+          "maximum": 0.0
+        }
+      }
+    }
+  },
+  "followup": "attempt33: same-weights same-side prefix replay"
+}

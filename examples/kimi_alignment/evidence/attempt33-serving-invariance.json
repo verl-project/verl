@@ -1,0 +1,30 @@
+{
+  "prefill_BI": {
+    "batches": [
+      1,
+      1
+    ],
+    "total_queries": [
+      152,
+      152
+    ],
+    "batch_size_changed": false,
+    "logits": {
+      "different": 0,
+      "finite_mask_diff": 0,
+      "nan_count": 0,
+      "maximum": 0.0
+    }
+  },
+  "full_prefill_vs_decode": {
+    "matched": true,
+    "logits": {
+      "different": 0,
+      "finite_mask_diff": 0,
+      "nan_count": 0,
+      "maximum": 0.0
+    }
+  },
+  "chunked_prefill": "pending",
+  "decode_BI": "pending"
+}
