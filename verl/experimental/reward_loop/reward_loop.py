@@ -24,6 +24,7 @@ from omegaconf import DictConfig, open_dict
 from ray.actor import ActorHandle
 from tensordict import TensorDict
 
+from verl.plugin.platform import get_platform
 from verl.protocol import DataProto, pad_dataproto_to_divisor
 from verl.single_controller.ray.base import RayResourcePool
 from verl.trainer.ppo.reward import load_reward_manager, resolve_reward_manager_cls
@@ -356,7 +357,11 @@ class RewardLoopManager:
                 role="reward_loop",
             )
             if nsight_options is not None:
-                actor_options["runtime_env"] = {"nsight": nsight_options}
+                # The CUDA profiler API needs device visibility even without a GPU allocation.
+                actor_options["runtime_env"] = {
+                    "nsight": nsight_options,
+                    "env_vars": {name: "1" for name in get_platform().ray_noset_envvars()},
+                }
             self.reward_loop_workers.append(
                 self.reward_loop_workers_class.options(
                     **actor_options,

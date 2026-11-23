@@ -18,7 +18,7 @@
 import copy
 from dataclasses import is_dataclass, replace
 
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 
 def _count_capture_ranges(profile_steps, profile_continuous_steps: bool, *, discrete: bool = False) -> int:
@@ -134,7 +134,8 @@ def resolve_ray_actor_profiler_config(profiler_config, config):
     if isinstance(resolved, dict):
         resolved["ray_actor_nsight_options"] = options_template
     elif OmegaConf.is_config(resolved):
-        OmegaConf.update(resolved, "ray_actor_nsight_options", options_template, force_add=True)
+        with open_dict(resolved):
+            resolved.ray_actor_nsight_options = options_template
     else:
         resolved.ray_actor_nsight_options = options_template
     return resolved

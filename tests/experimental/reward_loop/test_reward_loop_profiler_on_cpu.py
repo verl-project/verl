@@ -35,7 +35,16 @@ def manager():
 
 @pytest.mark.parametrize(
     "options, expected_runtime_env",
-    [({"o": "rendered_%p"}, {"nsight": {"o": "rendered_%p"}}), (None, None)],
+    [
+        (
+            {"o": "rendered_%p"},
+            {
+                "nsight": {"o": "rendered_%p"},
+                "env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"},
+            },
+        ),
+        (None, None),
+    ],
     ids=["nsight", "no-nsight"],
 )
 def test_worker_creation_attaches_nsight_options(manager, options, expected_runtime_env):
@@ -52,7 +61,9 @@ def test_worker_creation_attaches_nsight_options(manager, options, expected_runt
             reward_loop, "resolve_ray_actor_profiler_config", return_value=sentinel.profiler_config
         ) as resolve,
         patch.object(reward_loop, "build_ray_actor_nsight_launch_options", return_value=options) as build_options,
+        patch.object(reward_loop, "get_platform") as platform,
     ):
+        platform.return_value.ray_noset_envvars.return_value = ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"]
         manager._init_reward_loop_workers()
 
     resolve.assert_called_once_with(manager.config.reward.profiler, manager.config)
