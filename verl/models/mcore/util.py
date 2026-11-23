@@ -91,6 +91,17 @@ def build_deepseek_v41_image_inputs(multi_modal_inputs: dict, input_ids: torch.T
     return images
 
 
+def prepare_deepseek_v41_thd_images(
+    multi_modal_inputs: dict, input_ids: torch.Tensor, packed_seq_params: PackedSeqParams
+):
+    """Set logical THD offsets for CSA2 and build the per-sample image inputs."""
+    padded_offsets = packed_seq_params.cu_seqlens_q_padded
+    logical_offsets = input_ids.offsets().to(device=padded_offsets.device, dtype=padded_offsets.dtype)
+    packed_seq_params.cu_seqlens_q = logical_offsets
+    packed_seq_params.cu_seqlens_kv = logical_offsets
+    return build_deepseek_v41_image_inputs(multi_modal_inputs, input_ids)
+
+
 # Older Megatron-core releases have no ``cp_partition_mode`` field on PackedSeqParams; they
 # support only the zigzag CP layout. Inspect ``__init__`` rather than dataclass fields so that
 # duck-typed replacements (e.g. test stubs taking ``**kwargs``) also count as supporting it.

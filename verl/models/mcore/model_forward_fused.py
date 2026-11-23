@@ -45,6 +45,7 @@ from verl.models.mcore.util import (
     get_thd_min_local_rows,
     get_thd_quant_align_size,
     language_model_forward_kwargs,
+    prepare_deepseek_v41_thd_images,
     preprocess_thd_engine,
     preprocess_thd_full_stream,
     preprocess_vlm_thd_engine,
@@ -358,10 +359,10 @@ def fused_forward_model_engine(vision_model: bool = False):
         auxiliary_logits_processor=None,
         distillation_only: bool = False,
     ):
-        pre_process = unwrap_model(model).pre_process
-        post_process = unwrap_model(model).post_process
-
-        config = unwrap_model(model).config
+        unwrapped_model = unwrap_model(model)
+        post_process = unwrapped_model.post_process
+        config = unwrapped_model.config
+        deepseek_v41 = getattr(config, "dsv4_version", None) == "v4.1"
         quant_align_size = get_thd_quant_align_size(config)
         min_local_rows = get_thd_min_local_rows(config, local_cp_size, use_fused_kernels=True)
 
@@ -372,12 +373,12 @@ def fused_forward_model_engine(vision_model: bool = False):
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
         )
-        input_ids_rmpad, packed_seq_params, _ = preprocess_thd_engine(
-            input_ids, pre_process=pre_process or vision_model, **thd_kwargs
+        input_ids_rmpad, packed_seq_params, packed_position_ids = preprocess_thd_engine(
+            input_ids, pre_process=unwrapped_model.pre_process or vision_model or deepseek_v41, **thd_kwargs
         )
         attention_mask = None
-        position_ids_rmpad = None
-        if vision_model:
+        position_ids_rmpad = packed_position_ids if deepseek_v41 else None
+        if vision_model and not deepseek_v41:
             input_ids_rmpad, attention_mask, position_ids_rmpad = preprocess_vlm_thd_engine(
                 model, input_ids, input_ids_rmpad, packed_seq_params, position_ids, pad_token_id, **thd_kwargs
             )
@@ -386,16 +387,16 @@ def fused_forward_model_engine(vision_model: bool = False):
         model_kwargs = {}
         if router_padding_mask is not None:
             model_kwargs["padding_mask"] = router_padding_mask
-        if "pixel_values" in multi_modal_inputs:
-            model_kwargs["pixel_values"] = multi_modal_inputs["pixel_values"].to(input_ids.device)
-        if "image_grid_thw" in multi_modal_inputs:
-            model_kwargs["image_grid_thw"] = multi_modal_inputs["image_grid_thw"].to(input_ids.device)
-        if "pixel_values_videos" in multi_modal_inputs:
-            model_kwargs["pixel_values_videos"] = multi_modal_inputs["pixel_values_videos"].to(input_ids.device)
-        if "video_grid_thw" in multi_modal_inputs:
-            model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
+        if deepseek_v41:
+            images = prepare_deepseek_v41_thd_images(multi_modal_inputs, input_ids, packed_seq_params)
+            if images is not None:
+                model_kwargs["images"] = images
+        else:
+            for key in ("pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"):
+                if key in multi_modal_inputs:
+                    model_kwargs[key] = multi_modal_inputs[key].to(input_ids.device)
 
-        full_stream_model = vision_model and takes_full_packed_thd_vlm_inputs(model)
+        full_stream_model = vision_model and not deepseek_v41 and takes_full_packed_thd_vlm_inputs(model)
         if full_stream_model:
             # The model selects its CP shard of the labels together with the token stream.
             labels_rmpad = preprocess_thd_full_stream(labels, packed_seq_params, need_roll=True)

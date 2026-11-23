@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import inspect
+import sys
+from collections import namedtuple
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -112,6 +114,53 @@ def test_engine_disables_fused_kernels_when_a_chunk_is_unsupported(monkeypatch):
 
     assert engine.engine_config.use_fused_kernels is False
     assert unpatched == engine.module
+
+
+@pytest.mark.parametrize("pre_process", [True, False])
+def test_deepseek_v41_fused_forward_builds_images_and_logical_offsets(monkeypatch, pre_process):
+    # Released Core builds may lack the V4.1 wrapper. Use its ImageInput contract.
+    image_processing = SimpleNamespace(
+        TEXT=-1, IMAGE=1, ImageInput=namedtuple("ImageInput", "start patches n_vit_h n_vit_w types")
+    )
+    monkeypatch.setitem(sys.modules, "megatron.core.models.deepseek_v41.image_processing", image_processing)
+    monkeypatch.setattr(mff.parallel_state, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(mff.parallel_state, "get_context_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(mff.parallel_state, "get_context_parallel_rank", lambda: 0)
+
+    class Model:
+        post_process = False
+        config = SimpleNamespace(dsv4_version="v4.1", experimental_attention_variant="dsv4_hybrid", csa_window_size=8)
+
+        def __call__(self, **kwargs):
+            return kwargs
+
+    model = Model()
+    model.pre_process = pre_process
+    setattr(model, mff._FUSED_FORWARD_MODE_ATTR, mff._HOOK_MODE)
+    input_ids = torch.nested.nested_tensor([torch.arange(3), torch.arange(6)], layout=torch.jagged)
+    pixels = torch.arange(4).reshape(1, 4)
+    multimodal = {
+        "pixel_values": pixels,
+        "image_grid_hws": torch.tensor([[1, 1]]),
+        "vision_token_types": torch.tensor([[-1] * 6, [-1, 0, 1, 2, 3, -1]]),
+    }
+
+    calls = registry.get_mcore_forward_fused_model_engine_fn(SimpleNamespace(architectures=["DeepseekV4ForCausalLM"]))(
+        model, input_ids, input_ids, multimodal, 1.0, False, 0, pad_to_length_bucket=16
+    )
+
+    assert calls["output_processor"] is mff.fused_output_processor
+    text_images, vision_images = calls["images"]
+    assert "pixel_values" not in calls
+    assert not text_images
+    (image,) = vision_images
+    assert (image.start, image.n_vit_h, image.n_vit_w) == (1, 1, 1)
+    assert image.types.tolist() == [0, 1, 2, 3]
+    torch.testing.assert_close(image.patches, pixels)
+    assert calls["position_ids"][0, :9].tolist() == [0, 1, 2, 0, 1, 2, 3, 4, 5]
+    assert calls["packed_seq_params"].cu_seqlens_q.tolist() == [0, 3, 9]
+    assert calls["packed_seq_params"].cu_seqlens_kv.tolist() == [0, 3, 9]
+    assert calls["packed_seq_params"].cu_seqlens_q_padded.tolist() == [0, 3, 16]
 
 
 def test_engine_hands_hook_and_mtp_choice_to_language_model_of_full_stream_vlm(monkeypatch):

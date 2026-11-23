@@ -29,6 +29,7 @@ from .util import (
     language_model_forward_kwargs,
     postprocess_bshd_engine,
     postprocess_thd_engine,
+    prepare_deepseek_v41_thd_images,
     preprocess_bshd_engine,
     preprocess_thd_engine,
     preprocess_thd_full_stream,
@@ -178,15 +179,7 @@ def gptmodel_forward_model_engine(
             input_ids, pre_process=True, **thd_kwargs
         )
         if deepseek_v41_multimodal:
-            # CSA2 uses logical lengths to exclude each sequence's physical padding
-            # from compression, routing, and sparse-attention indexing.
-            logical_cu_seqlens = input_ids.offsets().to(
-                device=packed_seq_params.cu_seqlens_q_padded.device,
-                dtype=packed_seq_params.cu_seqlens_q_padded.dtype,
-            )
-            packed_seq_params.cu_seqlens_q = logical_cu_seqlens
-            packed_seq_params.cu_seqlens_kv = logical_cu_seqlens
-            images = build_deepseek_v41_image_inputs(multi_modal_inputs, input_ids_rmpad, batch_size=batch_size)
+            images = prepare_deepseek_v41_thd_images(multi_modal_inputs, input_ids, packed_seq_params)
             if images is not None:
                 model_kwargs["images"] = images
         full_stream_model = vision_model and takes_full_packed_thd_vlm_inputs(model)
