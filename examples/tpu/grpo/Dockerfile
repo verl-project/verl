@@ -16,8 +16,8 @@ ARG TORCHTITAN_COMMIT=d0f0316e9ecbe1c78a24b0a5824fdf72e666ec01
 # and configurable TPU_MOE_REQUANT_CHUNK_BYTES; built against vLLM v0.33.0).
 ARG VLLM_TORCHTPU_COMMIT=b6afeff56d0bc1991b4d61ff8a15a121056e66c3
 ARG VLLM_VERSION=0.33.0
-# Optional GKE Agent Sandbox & SWE-Bench extras for verl-recipe/deepswe_tpu (--build-arg INSTALL_GKE_SANDBOX=true).
-ARG INSTALL_GKE_SANDBOX=false
+# GKE Agent Sandbox & SWE-Bench extras for verl-recipe/deepswe_tpu (pass --build-arg INSTALL_GKE_SANDBOX=false to skip).
+ARG INSTALL_GKE_SANDBOX=true
 ARG AGENT_SANDBOX_COMMIT=9afee7039342f18fa9ad402929cabf8b66eebaa7
 
 USER root
