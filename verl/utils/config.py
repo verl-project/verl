@@ -136,6 +136,13 @@ _PROFILER_ROLES = (
     ("critic.profiler.enable", "critic.enable"),
 )
 
+# In the hybrid engine the reference runs in the actor/rollout worker group, so the scheduled
+# start_profile call reaches a worker whose profiler block is `actor.profiler`
+# (trainer_base.py::_start_profiling drives ref_policy_wg only when it is a distinct group). A
+# `ref.profiler.enable` on its own therefore cannot catch the scheduled steps. It still counts for a
+# standalone reference worker, which the caller signals through `use_reference_policy`.
+_HYBRID_ALIASED_ROLES = frozenset({"actor_rollout_ref.ref.profiler.enable"})
+
 
 def _select_profiler_field(config: DictConfig, key: str, default: Any) -> Any:
     """Read a profiler config value, tolerating schemas that do not define it at all."""
@@ -143,6 +150,16 @@ def _select_profiler_field(config: DictConfig, key: str, default: Any) -> Any:
         return OmegaConf.select(config, key, default=default)
     except Exception:  # unresolvable interpolation or missing parent node
         return default
+
+
+def _effective_tool(config: DictConfig, enable_key: str) -> Any:
+    """The tool a role's own worker ends up with, after resolving what it inherits.
+
+    A role block interpolates `tool: ${oc.select:global_profiler.tool,null}`, so resolving the key
+    gives the value the worker reads -- the global default when the role does not override it, and
+    the role's own value (including an explicit null) when it does.
+    """
+    return _select_profiler_field(config, enable_key.removesuffix(".enable") + ".tool", None)
 
 
 def _validate_profiler_config(config: DictConfig, use_reference_policy: bool, use_critic: bool) -> None:
@@ -177,6 +194,15 @@ def _validate_profiler_config(config: DictConfig, use_reference_policy: bool, us
         if not active_roles.get(key, True):
             logger.warning("%s is set, but that role does not run in this job; it will not profile.", key)
             continue
+        if key in _HYBRID_ALIASED_ROLES:
+            # Colocated: the scheduled call lands on the actor's block, not this one.
+            logger.warning(
+                "%s is set, but the reference is colocated in the actor/rollout worker group, whose "
+                "profiler block is actor_rollout_ref.actor.profiler; this flag alone will not catch the "
+                "scheduled steps.",
+                key,
+            )
+            continue
         enabled_roles.append(key)
 
     if not enabled_roles:
@@ -190,16 +216,16 @@ def _validate_profiler_config(config: DictConfig, use_reference_policy: bool, us
         )
         return
 
-    # A role block may set its own tool; `global_profiler.tool` is only the default it inherits, so
-    # the job collects something as long as *either* names a tool.
-    global_tool = _select_profiler_field(config, "global_profiler.tool", None)
-    role_tools = {_select_profiler_field(config, key.removesuffix(".enable") + ".tool", None) for key in enabled_roles}
-    if global_tool is None and all(tool is None for tool in role_tools):
+    # Warn when every enabled role's *effective* tool is null. The role block interpolates
+    # `global_profiler.tool` as its default but overrides it with its own value -- including an
+    # explicit null -- so the global setting alone does not decide what the worker gets.
+    effective_tools = {_effective_tool(config, key) for key in enabled_roles}
+    if all(tool is None for tool in effective_tools):
         warnings.warn(
-            "global_profiler.tool is null while profiling is enabled and steps are configured, and no "
-            "enabled role sets a profiler tool of its own. DistProfiler falls back to a no-op backend "
-            "for an unknown tool, so those steps produce no trace. Set global_profiler.tool to one of: "
-            "nsys, npu, torch, torch_memory, precision_debugger.",
+            "Profiling is enabled and steps are configured, but the effective profiler tool is null for "
+            "every enabled role. DistProfiler falls back to a no-op backend for an unknown tool, so those "
+            "steps produce no trace. Set global_profiler.tool to one of: nsys, npu, torch, torch_memory, "
+            "precision_debugger.",
             stacklevel=2,
         )
 
