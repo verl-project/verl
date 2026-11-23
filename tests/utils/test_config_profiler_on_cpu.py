@@ -19,6 +19,7 @@
 the whole run a silent no-op, which is what these tests pin down.
 """
 
+import logging
 import warnings
 
 import pytest
@@ -33,37 +34,48 @@ _CRITIC = "critic.profiler.enable"
 _ALL_ROLES = (_ACTOR, _REF, _ROLLOUT, _CRITIC)
 
 
-def _config(*, tool="npu", steps=(1,), enabled=()):
+def _config(*, tool="npu", steps=(1,), enabled=(), role_tools=None):
     """Build a config where every role is off unless its key is listed in ``enabled``."""
     state = dict.fromkeys(_ALL_ROLES, False)
     state.update(dict.fromkeys(enabled, True))
+    role_tools = role_tools or {}
+
+    def block(key):
+        # In the real configs every role block carries a `tool` (interpolated from global). Only add
+        # one here when a test overrides it, so an unset key stays absent rather than becoming an
+        # explicit null the check would have to special-case.
+        profiler = {"enable": state[key]}
+        if key in role_tools:
+            profiler["tool"] = role_tools[key]
+        return profiler
+
     return OmegaConf.create(
         {
             "global_profiler": {"tool": tool, "steps": None if steps is None else list(steps)},
             "actor_rollout_ref": {
-                "actor": {"profiler": {"enable": state[_ACTOR]}},
-                "ref": {"profiler": {"enable": state[_REF]}},
-                "rollout": {"profiler": {"enable": state[_ROLLOUT]}},
+                "actor": {"profiler": block(_ACTOR)},
+                "ref": {"profiler": block(_REF)},
+                "rollout": {"profiler": block(_ROLLOUT)},
             },
-            "critic": {"profiler": {"enable": state[_CRITIC]}},
+            "critic": {"profiler": block(_CRITIC)},
         }
     )
 
 
-def _warnings(config):
+def _run(config, *, use_reference_policy=False, use_critic=False):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        _validate_profiler_config(config)
+        _validate_profiler_config(config, use_reference_policy=use_reference_policy, use_critic=use_critic)
     return [str(item.message) for item in caught]
 
 
 def test_steps_without_any_enabled_role_names_the_missing_half():
     # The issue's first repro: global_profiler alone. The trainer calls start/stop_profile on every
     # profiled step, every worker drops the call, and the run finishes with an empty save_path.
-    messages = _warnings(_config())
+    messages = _run(_config())
 
     assert len(messages) == 1
-    assert "global_profiler.steps=[1] schedules profiling but no role enables it" in messages[0]
+    assert "global_profiler.steps=[1] schedules profiling but no active role enables it" in messages[0]
     assert f"{_ACTOR}, {_REF}, {_ROLLOUT}, {_CRITIC} are all False" in messages[0]
     assert "actor_rollout_ref.actor.profiler.enable=True" in messages[0]
 
@@ -73,40 +85,82 @@ def test_enabled_role_without_a_trigger_stays_quiet(steps):
     # The documented code-instrumentation setup: the user drives the profiler from their own script
     # and keeps global_profiler.steps null so verl does not open a second, conflicting profiler.
     # examples/ascend_extras/grpo_trainer/run_qwen3_30b_a3b_megatron.sh relies on this.
-    assert _warnings(_config(steps=steps, enabled=(_ACTOR, _ROLLOUT))) == []
+    assert _run(_config(steps=steps, enabled=(_ACTOR, _ROLLOUT))) == []
 
 
 def test_null_tool_with_a_trigger_is_reported():
     # DistProfiler silently falls back to a no-op impl for an unrecognised tool, so a null tool
     # collects nothing even though the trigger and the enable flag both line up.
-    messages = _warnings(_config(tool=None, enabled=(_ACTOR,)))
+    messages = _run(_config(tool=None, enabled=(_ACTOR,)))
 
     assert len(messages) == 1
     assert "global_profiler.tool is null" in messages[0]
 
 
+def test_role_level_tool_satisfies_the_tool_check():
+    # global_profiler.tool is only the default a role block inherits. A role that names its own tool
+    # profiles fine, so warning about the null default would be a false positive.
+    assert _run(_config(tool=None, enabled=(_ACTOR,), role_tools={_ACTOR: "npu"})) == []
+
+
+def test_profiler_enable_on_an_inactive_critic_is_not_a_trigger():
+    # critic.enable=False means no critic worker exists. Its profiler.enable flag then gates nothing,
+    # so treating it as "someone collects" would hide exactly the no-op this check exists to report.
+    config = _config(enabled=(_CRITIC,))
+    config.critic.enable = False
+
+    messages = _run(config, use_critic=False)
+
+    assert len(messages) == 1
+    assert "no active role enables it" in messages[0]
+
+
+def test_inactive_role_is_named_in_the_driver_log(caplog):
+    config = _config(enabled=(_CRITIC,))
+    config.critic.enable = False
+
+    with caplog.at_level(logging.WARNING, logger="verl.utils.config"):
+        messages = _run(config, use_critic=False)
+
+    assert len(messages) == 1
+    assert f"{_CRITIC} is set, but that role does not run in this job" in caplog.text
+
+
+def test_active_critic_counts_as_a_trigger():
+    # The mirror of the previous test: when the critic does run, its profiler block is a real one.
+    config = _config(enabled=(_CRITIC,))
+    config.critic.enable = True
+
+    assert _run(config, use_critic=True) == []
+
+
 @pytest.mark.parametrize("role", _ALL_ROLES)
-def test_any_single_role_satisfies_the_trigger(role):
+def test_any_single_active_role_satisfies_the_trigger(role):
     # Each role block is read by a different worker; enabling one is enough for profiling to happen.
-    assert _warnings(_config(enabled=(role,))) == []
+    if role == _REF:
+        assert _run(_config(enabled=(role,)), use_reference_policy=True) == []
+    elif role == _CRITIC:
+        assert _run(_config(enabled=(role,)), use_critic=True) == []
+    else:
+        assert _run(_config(enabled=(role,))) == []
 
 
 def test_fully_configured_profiler_is_silent():
-    assert _warnings(_config(enabled=(_ACTOR,))) == []
+    assert _run(_config(enabled=(_ACTOR,))) == []
 
 
 def test_disabled_profiler_is_silent():
     # Default run: no steps, nothing enabled. This is the common path and must stay quiet.
-    assert _warnings(_config(tool=None, steps=None)) == []
+    assert _run(_config(tool=None, steps=None)) == []
 
 
 def test_schema_without_profiler_blocks_is_read_as_disabled():
     # A schema from an older release may have no role profiler node at all; the check must treat
     # that as "not enabled" rather than raising.
-    messages = _warnings(OmegaConf.create({"global_profiler": {"tool": "npu", "steps": [1]}}))
+    messages = _run(OmegaConf.create({"global_profiler": {"tool": "npu", "steps": [1]}}))
 
     assert len(messages) == 1
-    assert "no role enables it" in messages[0]
+    assert "no active role enables it" in messages[0]
 
 
 def test_unresolvable_interpolation_is_read_as_disabled():
@@ -119,4 +173,4 @@ def test_unresolvable_interpolation_is_read_as_disabled():
         }
     )
 
-    assert len(_warnings(config)) == 1
+    assert len(_run(config)) == 1

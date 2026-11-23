@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import warnings
 from dataclasses import is_dataclass
 from typing import Any, Optional
@@ -19,6 +20,8 @@ from typing import Any, Optional
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 __all__ = ["omega_conf_to_dataclass", "validate_config"]
+
+logger = logging.getLogger(__name__)
 
 
 def omega_conf_to_dataclass(config: DictConfig | dict, dataclass_type: Optional[type[Any]] = None) -> Any:
@@ -118,14 +121,19 @@ def _validate_score_centering_config(config: DictConfig) -> None:
         raise ValueError("score centering cannot be combined with distillation.")
 
 
-# Role profiler blocks that a worker can read. `global_profiler` only says *when* and *with which
-# tool* to collect; each role's own `profiler.enable` is what decides *whether* it does. A run that
-# sets only one side starts, trains to completion, and produces no trace and no error.
-_PROFILER_ROLE_KEYS = (
-    "actor_rollout_ref.actor.profiler.enable",
-    "actor_rollout_ref.ref.profiler.enable",
-    "actor_rollout_ref.rollout.profiler.enable",
-    "critic.profiler.enable",
+# Role profiler blocks that a worker can read, with the role-level switch that decides whether that
+# role runs at all. `global_profiler` only says *when* and *with which tool* to collect; each role's
+# own `profiler.enable` is what decides *whether* it does. A run that sets only one side starts,
+# trains to completion, and produces no trace and no error.
+#
+# The role switch matters for the check: a `profiler.enable=True` on a role that is itself off
+# profiles nothing, so counting it as "somebody collects" would suppress the warning exactly when it
+# is most needed. `None` means the role is always present (the actor and its rollout).
+_PROFILER_ROLES = (
+    ("actor_rollout_ref.actor.profiler.enable", None),
+    ("actor_rollout_ref.ref.profiler.enable", "actor_rollout_ref.actor.use_kl_loss"),
+    ("actor_rollout_ref.rollout.profiler.enable", None),
+    ("critic.profiler.enable", "critic.enable"),
 )
 
 
@@ -137,7 +145,7 @@ def _select_profiler_field(config: DictConfig, key: str, default: Any) -> Any:
         return default
 
 
-def _validate_profiler_config(config: DictConfig) -> None:
+def _validate_profiler_config(config: DictConfig, use_reference_policy: bool, use_critic: bool) -> None:
     """Warn about profiler configurations that silently collect nothing.
 
     ``global_profiler.steps`` and the per-role ``profiler.enable`` are two halves of one switch that
@@ -152,28 +160,46 @@ def _validate_profiler_config(config: DictConfig) -> None:
     conflicting profiler.
     """
     steps = _select_profiler_field(config, "global_profiler.steps", None)
-    tool = _select_profiler_field(config, "global_profiler.tool", None)
     # An empty step list schedules nothing, exactly like null.
     has_steps = bool(steps)
-    enabled_roles = [key for key in _PROFILER_ROLE_KEYS if bool(_select_profiler_field(config, key, False))]
-
     if not has_steps:
         # Manual instrumentation, or not profiling at all. Both are valid.
         return
 
+    active_roles = {
+        "actor_rollout_ref.ref.profiler.enable": use_reference_policy,
+        "critic.profiler.enable": use_critic,
+    }
+    enabled_roles = []
+    for key, _ in _PROFILER_ROLES:
+        if not bool(_select_profiler_field(config, key, False)):
+            continue
+        if not active_roles.get(key, True):
+            logger.warning("%s is set, but that role does not run in this job; it will not profile.", key)
+            continue
+        enabled_roles.append(key)
+
     if not enabled_roles:
+        names = ", ".join(key for key, _ in _PROFILER_ROLES)
         warnings.warn(
-            f"global_profiler.steps={list(steps)} schedules profiling but no role enables it: "
-            f"{', '.join(_PROFILER_ROLE_KEYS)} are all False, so every worker skips the trainer's "
-            "start/stop_profile calls and no trace is written. Set "
-            "actor_rollout_ref.actor.profiler.enable=True (rollout and ref follow the actor) to collect.",
+            f"global_profiler.steps={list(steps)} schedules profiling but no active role enables it: "
+            f"{names} are all False, so every worker skips the trainer's start/stop_profile calls and "
+            "no trace is written. Set actor_rollout_ref.actor.profiler.enable=True (rollout and ref "
+            "follow the actor) to collect.",
             stacklevel=2,
         )
-    elif tool is None:
+        return
+
+    # A role block may set its own tool; `global_profiler.tool` is only the default it inherits, so
+    # the job collects something as long as *either* names a tool.
+    global_tool = _select_profiler_field(config, "global_profiler.tool", None)
+    role_tools = {_select_profiler_field(config, key.removesuffix(".enable") + ".tool", None) for key in enabled_roles}
+    if global_tool is None and all(tool is None for tool in role_tools):
         warnings.warn(
-            "global_profiler.tool is null while profiling is enabled and steps are configured. "
-            "DistProfiler falls back to a no-op backend for an unknown tool, so those steps produce no "
-            "trace. Set global_profiler.tool to one of: nsys, npu, torch, torch_memory, precision_debugger.",
+            "global_profiler.tool is null while profiling is enabled and steps are configured, and no "
+            "enabled role sets a profiler tool of its own. DistProfiler falls back to a no-op backend "
+            "for an unknown tool, so those steps produce no trace. Set global_profiler.tool to one of: "
+            "nsys, npu, torch, torch_memory, precision_debugger.",
             stacklevel=2,
         )
 
@@ -308,6 +334,6 @@ def validate_config(
 
         get_vllm_max_lora_rank(lora_rank)
 
-    _validate_profiler_config(config)
+    _validate_profiler_config(config, use_reference_policy=use_reference_policy, use_critic=use_critic)
 
     print("[validate_config] All configuration checks passed successfully!")
