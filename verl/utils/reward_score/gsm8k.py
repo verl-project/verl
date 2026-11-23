@@ -28,12 +28,14 @@ def extract_solution(solution_str, method="strict"):
 
     if method == "strict":
         # this also tests the formatting of the model
-        solutions = re.findall("#### (\\-?[0-9\\.\\,]+)", solution_str)
+        # Markdown emphasis or code (e.g. "#### **18**") and a "$" sign before the number are formatting.
+        # Without this, a formatted final answer is skipped and an earlier "#### N" draft is scored instead.
+        solutions = re.findall("#### (?:[*_]{1,2}|`)?\\$?(\\-?[0-9\\.\\,]+)", solution_str)
         if len(solutions) == 0:
             final_answer = None
         else:
-            # take the last solution
-            final_answer = solutions[-1].replace(",", "").replace("$", "")
+            # take the last solution; a trailing "." ends the sentence, it is not part of the number
+            final_answer = solutions[-1].replace(",", "").rstrip(".")
     elif method == "flexible":
         answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
         final_answer = None
@@ -44,6 +46,7 @@ def extract_solution(solution_str, method="strict"):
             invalid_str = ["", "."]
             # find the last number that is not '.'
             for final_answer in reversed(answer):
+                final_answer = final_answer.rstrip(".")
                 if final_answer not in invalid_str:
                     break
     return final_answer
