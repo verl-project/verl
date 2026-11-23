@@ -198,12 +198,14 @@ def test_resolve_nsight_capture_options_returns_independent_dict(options):
     "profiler_config, expected_options",
     [
         (
-            ProfilerConfig(tool="nsys", ray_actor_nsight_options={"o": "role"}),
-            {"o": "role"},
+            ProfilerConfig(tool="nsys", ray_actor_nsight_options={"o": "role", "trace": "cuda"}),
+            {"o": "role", "trace": "cuda"},
         ),
         (
-            OmegaConf.create({"tool": "nsys", "ray_actor_nsight_options": {"o": "role"}}),
-            {"o": "role"},
+            OmegaConf.create(
+                {"tool": "nsys", "ray_actor_nsight_options": {"o": "role", "trace": "cuda"}}, flags={"struct": True}
+            ),
+            {"o": "role", "trace": "cuda"},
         ),
         (
             ProfilerConfig(tool="nsys"),
@@ -242,7 +244,10 @@ def test_resolve_ray_actor_profiler_config(profiler_config, expected_options):
     resolve_options.assert_called_once_with(expected_options, [1], False)
     assert type(result) is type(profiler_config)
     assert result is not profiler_config
+    # The resolver result replaces the full option mapping, including removed fields.
     assert result.ray_actor_nsight_options == {"o": "resolved"}
+    if OmegaConf.is_config(result):
+        assert OmegaConf.is_struct(result) == OmegaConf.is_struct(profiler_config)
     result.ray_actor_nsight_options["o"] = "changed"
     assert profiler_config == original_role
     assert config == original_global
