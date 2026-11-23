@@ -205,6 +205,9 @@ class McoreEngineConfig(EngineConfig):
     override_transformer_config: dict[str, Any] = field(default_factory=dict)
     override_mcore_model_config: dict[str, Any] = field(default_factory=dict)
     use_mbridge: bool = True
+    # Dotted path invoked after MindSpeed repatch and before Megatron parallel init.
+    # Empty leaves the Megatron operators unchanged.
+    custom_init_path: Optional[str] = None
     use_megatron_fsdp: bool = False
     strategy: str = "megatron"
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import logging
 import os
 
@@ -53,6 +54,16 @@ def _mindspeed_repatch(engine_config):
         repatch(repatch_config)
 
 
+def _run_custom_init(engine_config) -> None:
+    path = getattr(engine_config, "custom_init_path", None)
+    if not path:
+        return
+    module_name, separator, qualname = str(path).rpartition(".")
+    if not separator or not module_name or not qualname:
+        raise ValueError(f"custom_init_path must be module.qualname, got {path!r}")
+    getattr(importlib.import_module(module_name), qualname)(None)
+
+
 @EngineRegistry.register(model_type="language_model", backend="megatron", device="npu")
 class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
     def __init__(
@@ -71,6 +82,7 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
         # verl passes CP size via hydra config rather than --context-parallel-size CLI arg,
         # so the CP ring-rank initialization wrapper is not registered on the first pass.
         _mindspeed_repatch(self.engine_config)
+        _run_custom_init(self.engine_config)
         super()._init_device_mesh()
 
     def to(self, device: str, model: bool = True, optimizer: bool = True, grad: bool = True):
@@ -105,4 +117,5 @@ class MindspeedEngineWithValueHead(MegatronEngineWithValueHead):
         # verl passes CP size via hydra config rather than --context-parallel-size CLI arg,
         # so the CP ring-rank initialization wrapper is not registered on the first pass.
         _mindspeed_repatch(self.engine_config)
+        _run_custom_init(self.engine_config)
         super()._init_device_mesh()
