@@ -271,9 +271,19 @@ def test_worker_group_profile_kwargs_requires_nsight_options():
             ProfilerConfig(tool="nsys"),
             {"o": "global"},
         ),
+        (
+            OmegaConf.create({"tool": "nsys"}, flags={"struct": True}),
+            {"o": "global"},
+        ),
         (ProfilerConfig(tool="nsys", ray_actor_nsight_options={}), {}),
     ],
-    ids=["role-options-dataclass", "role-options-omegaconf", "global-fallback", "empty-role-options"],
+    ids=[
+        "role-options-dataclass",
+        "role-options-omegaconf",
+        "global-fallback",
+        "structured-global-fallback",
+        "empty-role-options",
+    ],
 )
 def test_resolve_ray_actor_profiler_config(profiler_config, expected_options):
     config = OmegaConf.create(

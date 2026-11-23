@@ -27,6 +27,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 # os.environ['TORCH_COMPILE_DISABLE'] = '1'
 
 import asyncio
+import copy
 from pprint import pprint
 
 import pandas as pd
@@ -34,13 +35,16 @@ from omegaconf import OmegaConf
 from openai.types.chat import ChatCompletion
 
 from verl.utils.hdfs_io import makedirs
+from verl.utils.profiler.nsight import resolve_ray_actor_profiler_config
 from verl.workers.rollout.replica import get_rollout_replica_class
 
 
 async def start_server(config):
     tp_size = config.actor_rollout_ref.rollout.tensor_model_parallel_size
     num_replicas = (config.trainer.n_gpus_per_node * config.trainer.nnodes) // tp_size
-    rollout_config = config.actor_rollout_ref.rollout
+    rollout_config = copy.deepcopy(config.actor_rollout_ref.rollout)
+    if rollout_config.get("profiler") is not None:
+        rollout_config.profiler = resolve_ray_actor_profiler_config(rollout_config.profiler, config)
     model_config = config.actor_rollout_ref.model
     # create standalone rollout server
     rollout_server_class = get_rollout_replica_class(config.actor_rollout_ref.rollout.name)

@@ -61,12 +61,14 @@ def test_config_init():
         assert config.get("non_existing_key", 1) == profiler_config.get("non_existing_key", 1)
 
 
-def test_role_configs_inherit_global_finish_hook():
-    """Global finish-hook settings must reach each role's profiler configuration."""
+def test_role_configs_inherit_global_profiler_settings():
+    """Global profiler settings must reach each role's profiler configuration."""
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
         cfg = compose(
             config_name="ppo_trainer",
             overrides=[
+                "global_profiler.tool=nsys",
+                "global_profiler.save_path=outputs/custom-profile",
                 "global_profiler.finish_hook_cmd=upload.sh",
                 "global_profiler.finish_hook_all_ranks=True",
                 "global_profiler.finish_hook_ranks=[0,8]",
@@ -78,7 +80,10 @@ def test_role_configs_inherit_global_finish_hook():
         cfg.actor_rollout_ref.rollout.profiler,
         cfg.actor_rollout_ref.ref.profiler,
         cfg.critic.profiler,
+        cfg.reward.profiler,
     ]:
+        assert config.tool == "nsys"
+        assert config.save_path == "outputs/custom-profile"
         assert config.finish_hook_cmd == "upload.sh"
         assert config.finish_hook_all_ranks is True
         assert list(config.finish_hook_ranks) == [0, 8]
