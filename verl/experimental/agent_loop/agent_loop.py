@@ -45,7 +45,6 @@ from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
-from verl.experimental.agent_loop.preprocess_cache import PromptPreprocessCache
 from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
@@ -813,15 +812,8 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),
             )
-            preprocess_cache = self._get_preprocess_cache(kwargs)
-            if preprocess_cache is not None:
-                preprocess_cache.attach(agent_loop)
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
-
-    def _get_preprocess_cache(self, sample_kwargs: dict[str, Any]) -> Optional[PromptPreprocessCache]:
-        """Cache that the sessions of this sample's prompt share, or None to preprocess every session alone."""
-        return None
 
     def _pad_token_ids(
         self,
