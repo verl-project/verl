@@ -110,6 +110,8 @@ def resolve_ray_actor_profiler_config(profiler_config, config):
     resolved = copy.deepcopy(profiler_config)
     if isinstance(resolved, dict):
         resolved["ray_actor_nsight_options"] = options_template
+    elif OmegaConf.is_config(resolved):
+        OmegaConf.update(resolved, "ray_actor_nsight_options", options_template, force_add=True)
     else:
         resolved.ray_actor_nsight_options = options_template
     return resolved
