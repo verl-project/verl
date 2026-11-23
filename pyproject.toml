@@ -146,7 +146,7 @@ fsdp = [
     # override below settles the version (5.12.1). See override-dependencies.
 ]
 
-# apex / TE / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
+# apex / TE / flash-attn come prebuilt from the wheelhouse;
 # megatron-core is git-sourced (built at sync time). onnxscript: works around an
 # undeclared TE import.
 megatron = [
@@ -164,8 +164,8 @@ megatron = [
     "matplotlib",
     "liger-kernel==0.8.4",
     # Megatron-Bridge is imported as megatron.bridge and installed deps-free — see
-    # [[tool.uv.dependency-metadata]] below. The wheelhouse builds tag v0.6.2.
-    "megatron-bridge==0.6.2",
+    # [[tool.uv.dependency-metadata]] below. PyPI hosts the upstream pure-Python wheel.
+    "megatron-bridge==0.7.1",
     "megatron-core",
     # Native MoE dispatcher, built against this extra's torch 2.13 / CUDA 13.0.
     "deep-ep==1.2.1",
@@ -442,22 +442,17 @@ override-dependencies = [
 
 # Skip lock-time metadata builds for git-source packages with no [project] /
 # dynamic version (the sync-time source build still runs). Versions track
-# [tool.uv.sources] below; bump together. (Wheelhouse packages read metadata from
-# the wheel — no entry needed, except megatron-bridge, whose wheel metadata we
-# deliberately discard; see below.)
+# [tool.uv.sources] below; bump together.
 [[tool.uv.dependency-metadata]]
 name = "megatron-core"
-version = "0.19.2"
+version = "0.20.1"
 requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
 
-# megatron-bridge 0.6.2 comes prebuilt from the wheelhouse (upstream tag v0.6.2),
-# pairing with megatron-core 0.19.2. The wheel's real metadata pulls a
-# conflicting transformers + NeMo stack (plus its own flashinfer pins), so we
-# declare EMPTY requires-dist (like `pip install --no-deps`) — the megatron extra
-# already provides torch / megatron-core / TE.
+# The Bridge wheel also declares dependencies for its standalone training stack.
+# The megatron extra provides the libraries used by verl, including torch, Core and TE.
 [[tool.uv.dependency-metadata]]
 name = "megatron-bridge"
-version = "0.6.2"
+version = "0.7.1"
 requires-dist = []
 
 # veomni 0.1.12 (pulled by BOTH the standalone `veomni` training backend and the
@@ -497,10 +492,7 @@ version = "1.2.1"
 requires-dist = []
 
 # Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.13
-# / cp312, built for x86_64 AND aarch64) — no source build here. megatron-bridge
-# rides along (pure-python wheel off the same wheelhouse, so no git clone / build
-# either), and being py3-none-any it is the one wheelhouse component with a single
-# arch-independent build.
+# / cp312, built for x86_64 AND aarch64).
 #
 # The inference engines are deliberately NOT routed: upstream publishes cu130 /
 # torch-2.13 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
@@ -513,13 +505,10 @@ deep-ep              = { index = "verl-wheelhouse" }
 apex                 = { index = "verl-wheelhouse" }
 flash-attn           = { index = "verl-wheelhouse" }
 transformer-engine   = { index = "verl-wheelhouse" }
-megatron-bridge      = { index = "verl-wheelhouse" }
 veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "10a26aca258f91a7af3e698cc0db8c6c51705989" }
 
-# megatron-core isn't in the wheelhouse; git-sourced (built at sync
-# time). The wheelhouse megatron-bridge 0.6.2 (v0.6.2 tag) pairs with
-# megatron-core core_v0.19.2 — bump the two together.
-megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",          tag = "core_v0.19.2" }
+# Keep the Core release tag aligned with the Megatron-Bridge pin above.
+megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",          tag = "core_v0.20.1" }
 
 # Per-extra routing to the matching pytorch wheel index.
 torch = [

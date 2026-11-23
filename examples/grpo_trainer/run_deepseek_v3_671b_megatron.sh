@@ -5,7 +5,7 @@
 #   CUDA_DEVICE_MAX_CONNECTIONS=1
 #   NCCL_NVLS_ENABLE=0
 #   VLLM_USE_V1=1
-#   CUDA environment from uv.lock: Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2.
+#   CUDA environment from uv.lock: Megatron-Core 0.20.1 / Megatron-Bridge 0.7.1.
 #   The launcher selects the vllm and megatron extras for the driver and workers.
 # Also: remove `quantization_config` from DeepSeek-V3 config.json and set
 # `num_nextn_predict_layers=0` (this example runs with MTP disabled).

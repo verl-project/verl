@@ -17,7 +17,7 @@ Choices of Backend Engines
 
 1. Training:
 
-We recommend using the **FSDP / FSDP2** backend to investigate, research and prototype different models, datasets and RL algorithms. For users who pursue better scalability, we recommend the **Megatron-LM** backend. Currently, we support `Megatron-LM v0.13.1 <https://github.com/NVIDIA/Megatron-LM/tree/core_v0.13.1>`_. Both backends are served through the same unified worker layer – see :doc:`Engine Workers<../workers/engine_workers>` for the worker-level API and :doc:`Model Engine<../workers/model_engine>` for the engine-level design.
+We recommend using the **FSDP / FSDP2** backend to investigate, research and prototype different models, datasets and RL algorithms. For users who pursue better scalability, we recommend the **Megatron-LM** backend. The CUDA uv environment uses `Megatron-Core 0.20.1 <https://github.com/NVIDIA/Megatron-LM/tree/core_v0.20.1>`_. Both backends are served through the same unified worker layer – see :doc:`Engine Workers<../workers/engine_workers>` for the worker-level API and :doc:`Model Engine<../workers/model_engine>` for the engine-level design.
 
 
 2. Inference:
@@ -62,9 +62,8 @@ shell, a Docker cache bake); see `Managing environments explicitly`_.
 
 .. note::
 
-   uv never compiles a native package from source. ``apex``,
-   ``transformer-engine``, ``flash-attn`` and ``deep-ep`` — plus the pure-python
-   ``megatron-bridge`` — are pulled **prebuilt** from the verl wheelhouse index
+   uv installs **prebuilt** wheels for ``apex``, ``transformer-engine``,
+   ``flash-attn`` and ``deep-ep`` from the verl wheelhouse index
    (`verl-project.github.io/verl-wheelhouse
    <https://verl-project.github.io/verl-wheelhouse/simple/>`_, wired in
    ``pyproject.toml`` under ``[tool.uv.index]`` / ``[tool.uv.sources]``); those
@@ -73,9 +72,9 @@ shell, a Docker cache bake); see `Managing environments explicitly`_.
    ``TORCH_CUDA_ARCH_LIST`` ``9.0;10.0``, the only CUDA parts an arm64 host
    has). The inference engines
    (``vllm``, ``sglang``, ``sglang-kernel``) come straight from PyPI, whose
-   wheels for the pinned versions are already cu130 / torch-2.13 builds. Only the
-   git-sourced ``megatron-core`` (``core_v0.19.2``, paired with
-   ``megatron-bridge`` 0.6.2) is built when the environment is first materialized.
+   wheels for the pinned versions are already cu130 / torch-2.13 builds. uv also
+   installs the ``megatron-bridge`` 0.7.1 wheel from PyPI and builds
+   ``megatron-core`` from the ``core_v0.20.1`` tag on first use.
 
 DeepEP with Megatron
 :::::::::::::::::::::

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 ################################################### environment ###################################################
-# CUDA baseline: uv.lock (Python 3.12, Megatron-Core 0.19.2, Megatron-Bridge 0.6.2).
-# Bridge v0.6.2 registers NemotronHForCausalLM with a HybridModel provider.
+# CUDA baseline: uv.lock (Python 3.12, Megatron-Core 0.20.1, Megatron-Bridge 0.7.1).
+# Bridge v0.7.1 registers NemotronHForCausalLM with a HybridModel provider.
 # Also build the SSM kernels for the active torch/CUDA environment:
 # MAX_JOBS=32 pip install git+https://github.com/Dao-AILab/causal-conv1d.git --no-build-isolation --no-cache-dir
 # MAX_JOBS=32 pip install git+https://github.com/state-spaces/mamba.git --no-build-isolation --no-cache-dir

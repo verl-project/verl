@@ -9,7 +9,7 @@
 #       source .venv/bin/activate
 #
 # CUDA dependencies from the current uv.lock (Python 3.12):
-#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.5.2.
+#   Megatron-Core 0.20.1 / Megatron-Bridge 0.7.1; flash-linear-attention 0.5.2.
 #
 # Qwen3.5 architecture notes:
 #   This example uses BSHD compute format:

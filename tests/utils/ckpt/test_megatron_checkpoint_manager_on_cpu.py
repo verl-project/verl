@@ -29,6 +29,7 @@ import pytest
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state as mpu
+from megatron.core.optimizer import distrib_optimizer
 
 from verl.trainer.config import CheckpointConfig
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
@@ -521,6 +522,62 @@ class TestLoadCheckpointDispatch:
         assert "optimizer" in calls["optimizer"]
         assert "rng_state" not in calls["optimizer"]
         mgr.optimizer.load_state_dict.assert_called_once()
+
+    @pytest.mark.skipif(not hasattr(distrib_optimizer, "get_legacy_grad_dtypes"), reason="requires MCore format 3.1")
+    @pytest.mark.parametrize(
+        ("bucket_types", "expected"),
+        [
+            (
+                ["(torch.bfloat16, torch.float32)"],
+                {
+                    "checkpoint_version": 3.0,
+                    "legacy_grad_dtypes": {
+                        "torch.bfloat16": "torch.float32",
+                    },
+                },
+            ),
+            (["param_torch:bfloat16"], {}),
+            (["(torch.bfloat16, torch.float32)", "param_torch:float32"], {}),
+        ],
+    )
+    def test_unversioned_optimizer_bucket_keys(self, bucket_types, expected):
+        _make_v2_layout(self.ckpt_path, "model", "optimizer")
+        mgr = _make_manager(load_contents=["optimizer"], use_distributed_optimizer=True)
+        metadata = {"distrib_optim_sharding_type": "dp_reshardable"}
+        tensors = {
+            f"optimizer.distributed.dp_group_idx_0.gbuf_idx_{i}.dtype_{dtype}.bucket_idx_0.exp_avg": None
+            for i, dtype in enumerate(bucket_types)
+        }
+        with (
+            patch(_PATCH_LOAD_META, return_value=metadata),
+            patch("megatron.core.dist_checkpointing.load_tensors_metadata", return_value=tensors) as read_index,
+            patch(
+                "verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing",
+                return_value={"optimizer": {}},
+            ),
+        ):
+            mgr.load_checkpoint(self.ckpt_path)
+        read_index.assert_called_once_with(os.path.join(self.ckpt_path, "optimizer", "dist_ckpt"))
+        assert mgr.optimizer.sharded_state_dict.call_args.kwargs["metadata"] == {
+            "distrib_optim_sharding_type": "dp_reshardable",
+            **expected,
+        }
+        assert "checkpoint_version" not in metadata
+
+    def test_explicit_current_checkpoint_version_skips_optimizer_index(self):
+        mgr = _make_manager(load_contents=["optimizer"], use_distributed_optimizer=True)
+        _make_v2_layout(self.ckpt_path, "optimizer")
+        metadata = {"distrib_optim_sharding_type": "dp_reshardable", "checkpoint_version": 3.1}
+        with (
+            patch(_PATCH_LOAD_META, return_value=metadata),
+            patch("megatron.core.dist_checkpointing.load_tensors_metadata") as read_index,
+            patch(
+                "verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing",
+                return_value={"optimizer": {}},
+            ),
+        ):
+            mgr.load_checkpoint(self.ckpt_path)
+        read_index.assert_not_called()
 
     @patch(_PATCH_LOAD_META, return_value=None)
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
