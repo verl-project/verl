@@ -26,7 +26,7 @@ vLLM-engine tests behind ``@pytest.mark.skipif(not CUDA_AVAILABLE)``.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, OrderedDict
 from unittest.mock import patch
 
 import pytest
@@ -186,6 +186,7 @@ def _build_kv_cfg(
     engine_id: str = "test-eid",
     transfer_backend: str = "nixl",
     mooncake_protocol=None,
+    mori_info=None,
 ):
     # Lazy import: only meaningful when vllm-rollout deps are importable.
     pytest.importorskip("vllm")
@@ -196,6 +197,7 @@ def _build_kv_cfg(
         engine_id=engine_id,
         transfer_backend=transfer_backend,
         mooncake_protocol=mooncake_protocol,
+        mori_info=mori_info,
     )
 
 
@@ -223,6 +225,56 @@ def test_build_kv_transfer_config_mooncake_backend(role, expected_role):
     cfg = _build_kv_cfg(role=role, transfer_backend="mooncake")
     assert cfg["kv_connector"] == "MooncakeConnector"
     assert cfg["kv_role"] == expected_role
+
+
+@pytest.mark.parametrize("mode,expected", [("read", "true"), ("write", "false")])
+def test_build_kv_transfer_config_mori_mode(mode, expected):
+    info = {"host": "h", "handshake_port": 1, "notify_port": 2, "tp_size": 1, "backend": "xgmi", "mode": mode}
+    cfg = _build_kv_cfg(role="prefill", transfer_backend="mori", mori_info=info)
+    assert cfg["kv_connector_extra_config"]["read_mode"] == expected
+
+
+def test_disaggregation_config_conditional_disaggregation_needs_write_mode():
+    """READ-mode decode engines decode plain requests on missing KV, so the combination is rejected."""
+    with pytest.raises(ValueError, match="mori_mode=write"):
+        DisaggregationConfig(enabled=True, transfer_backend="mori", mori_mode="read", min_remote_prefill_tokens=1024)
+    with pytest.raises(ValueError, match="transfer_backend=mori"):
+        DisaggregationConfig(enabled=True, transfer_backend="nixl", min_remote_prefill_tokens=1024)
+    cfg = DisaggregationConfig(enabled=True, transfer_backend="mori", mori_mode="write", min_remote_prefill_tokens=1024)
+    assert cfg.min_remote_prefill_tokens == 1024
+
+
+def test_disaggregation_config_mori_mode_default_and_validation():
+    assert DisaggregationConfig(enabled=True, transfer_backend="mori").mori_mode == "read"
+    with pytest.raises(ValueError, match="mori_mode"):
+        DisaggregationConfig(enabled=True, transfer_backend="mori", mori_mode="push")
+
+
+@pytest.mark.parametrize("role,expected_role", [("prefill", "kv_producer"), ("decode", "kv_consumer")])
+def test_build_kv_transfer_config_mori_backend(role, expected_role):
+    info = {
+        "host": "10.0.0.1",
+        "handshake_port": 6301,
+        "notify_port": 6105,
+        "tp_size": 1,
+        "backend": "xgmi",
+        "mode": "read",
+    }
+    cfg = _build_kv_cfg(role=role, transfer_backend="mori", mori_info=info)
+    assert cfg["kv_connector"] == "MoRIIOConnector"
+    assert cfg["kv_role"] == expected_role
+    extra = cfg["kv_connector_extra_config"]
+    # No proxy: empty proxy_ip disables MoRI's discovery heartbeat.
+    assert extra["proxy_ip"] == ""
+    assert extra["host_ip"] == "10.0.0.1"
+    assert extra["handshake_port"] == "6301"
+    assert extra["notify_port"] == "6105"
+    assert extra["backend"] == "xgmi"
+
+
+def test_disaggregation_config_rejects_bad_mori_backend():
+    with pytest.raises(ValueError, match="mori_backend"):
+        DisaggregationConfig(enabled=True, transfer_backend="mori", mori_backend="tcp")
 
 
 def test_build_kv_transfer_config_mooncake_protocol_pinned():
@@ -377,8 +429,42 @@ def test_pd_replica_init_accepts_mooncake(patched_replica_cls):
 
 
 def test_pd_replica_init_rejects_unsupported_backend(patched_replica_cls):
-    cfg = _make_pd_config(transfer_backend="mori")
+    cfg = _make_pd_config(transfer_backend="ascend")
     with pytest.raises(NotImplementedError, match="transfer_backend in"):
+        patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
+
+
+def test_pd_replica_init_accepts_mori_without_sleep_mode(patched_replica_cls):
+    cfg = _make_pd_config(transfer_backend="mori", enable_sleep_mode=False, free_cache_engine=False)
+    replica = patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
+    assert replica.config.disaggregation.transfer_backend == "mori"
+    assert replica.config.disaggregation.mori_backend == "xgmi"
+
+
+def test_pd_replica_mori_ports_are_fixed_blocks_outside_ephemeral_range(patched_replica_cls):
+    """MoRI binds its ports minutes after reservation, so they must not come from the ephemeral range."""
+    cfg = _make_pd_config(transfer_backend="mori", enable_sleep_mode=False, free_cache_engine=False, decode_replicas=2)
+    replica = patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
+    replica.name_suffix = ""
+    socks: list = []
+    try:
+        infos = [replica._reserve_mori_ports("127.0.0.1", 2, socks, server_index=i) for i in range(3)]
+    finally:
+        for sock in socks:
+            sock.close()
+    used: set[int] = set()
+    for info in infos:
+        # MoRI binds handshake_port + tp_rank and notify_port + tp_rank.
+        ports = {info[key] + tp_rank for key in ("handshake_port", "notify_port") for tp_rank in range(2)}
+        assert len(ports) == 4 and all(20000 <= port < 30000 for port in ports)
+        assert not (ports & used)
+        used |= ports
+
+
+def test_pd_replica_init_mori_rejects_sleep_mode(patched_replica_cls):
+    """vLLM sleep mode puts the KV cache in VMM memory, which MoRI-IO cannot export."""
+    cfg = _make_pd_config(transfer_backend="mori", enable_sleep_mode=True)
+    with pytest.raises(ValueError, match="enable_sleep_mode=False"):
         patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
 
 
@@ -459,6 +545,16 @@ def test_select_decode_peer_round_robin_cycles():
     assert stub._pd_peer_idx == 7
 
 
+def test_select_decode_peer_idx_sticks_to_session():
+    """MoRI-IO dispatch keeps every turn of a session on the same decode peer (prefix-cache reuse)."""
+    server_cls = _import_http_server()
+    stub = _DispatchStub(decode_peers=["peer0", "peer1", "peer2"])
+    picks = {sid: {server_cls._select_decode_peer_idx(stub, sid) for _ in range(5)} for sid in ("a", "b", "c", "d")}
+    assert all(len(p) == 1 for p in picks.values())
+    assert stub._pd_peer_idx == 0  # sticky picks do not advance the round-robin counter
+    assert [server_cls._select_decode_peer_idx(stub)[1] for _ in range(3)] == ["peer0", "peer1", "peer2"]
+
+
 def test_select_decode_peer_single_peer_returns_same():
     server_cls = _import_http_server()
     stub = _DispatchStub(decode_peers=["only_peer"])
@@ -477,6 +573,111 @@ def test_select_decode_peer_distribution_balanced_at_32_with_3_peers():
         f"expected (10, 11, 11) hit counts under strict round-robin, got {dict(counts)}"
     )
     assert max(counts.values()) - min(counts.values()) <= 1
+
+
+def _make_moriio_stub(decode_peer, read_mode: bool):
+    """_DispatchStub wired for the MoRI-IO path (peer addresses + read/write mode)."""
+    server_cls = _import_http_server()
+    stub = _DispatchStub(decode_peers=[decode_peer], connector="MoRIIOConnector")
+    stub._disaggregation_kv_transfer_config["kv_connector_extra_config"] = {
+        "read_mode": "true" if read_mode else "false"
+    }
+    stub._pd_prefill_mori_info = {"host": "10.0.0.1", "handshake_port": 20000, "notify_port": 20016, "tp_size": 2}
+    stub._pd_decode_mori_infos = [{"host": "10.0.0.2", "handshake_port": 20032, "notify_port": 20048, "tp_size": 2}]
+    stub._select_decode_peer_idx = lambda session_id=None: server_cls._select_decode_peer_idx(stub, session_id)
+    stub._moriio_read_mode = lambda: server_cls._moriio_read_mode(stub)
+    stub._pd_dispatch_moriio = lambda *a, **kw: server_cls._pd_dispatch_moriio(stub, *a, **kw)
+    stub._pd_remember_session = lambda *a, **kw: server_cls._pd_remember_session(stub, *a, **kw)
+    stub._pd_min_remote_prefill_tokens = 0
+    stub._pd_session_tokens = OrderedDict()
+    return server_cls, stub
+
+
+@pytest.mark.asyncio
+async def test_pd_dispatch_moriio_conditional_disaggregation():
+    """With min_remote_prefill_tokens set, a session's first turn goes through the prefill engine and a
+    later turn with a short new tail goes straight to the decode peer without kv_transfer_params."""
+    from unittest.mock import MagicMock
+
+    from verl.workers.rollout.replica import TokenOutput
+
+    decode_peer = MagicMock()
+    decode_peer.generate.remote = MagicMock(side_effect=lambda *a, **kw: _make_awaitable_token_output([7, 8, 9]))
+    prefill_calls = []
+
+    async def fake_generate(prompt_ids, sampling_params, request_id, **kw):
+        prefill_calls.append(request_id)
+        returned = {"remote_engine_id": "eid-p", "remote_block_ids": [[1]], "transfer_id": "tx"}
+        return TokenOutput(token_ids=[1], stop_reason="completed", extra_fields={"kv_transfer_params": returned})
+
+    server_cls, stub = _make_moriio_stub(decode_peer, read_mode=False)
+    stub.generate = fake_generate
+    stub._pd_min_remote_prefill_tokens = 100
+
+    turn1 = list(range(500))  # new session: 500 new tokens -> remote prefill
+    await server_cls._pd_dispatch(stub, turn1, {"max_tokens": 8}, "t1", session_id="s")
+    assert prefill_calls == ["t1_P"]
+    assert "kv_transfer_params" in decode_peer.generate.remote.call_args.kwargs
+    assert stub._pd_session_tokens["s"] == 503  # prompt + 3 generated tokens
+
+    turn2 = list(range(550))  # 47 tokens on top of what the decode peer holds -> local prefill
+    await server_cls._pd_dispatch(stub, turn2, {"max_tokens": 8}, "t2", session_id="s")
+    assert prefill_calls == ["t1_P"]
+    assert "kv_transfer_params" not in decode_peer.generate.remote.call_args.kwargs
+    assert decode_peer.generate.remote.call_args.args[2] == "t2_D"
+
+    turn3 = list(range(900))  # 347 new tokens -> remote prefill again
+    await server_cls._pd_dispatch(stub, turn3, {"max_tokens": 8}, "t3", session_id="s")
+    assert prefill_calls == ["t1_P", "t3_P"]
+
+    # Without a session id the request always disaggregates.
+    await server_cls._pd_dispatch(stub, turn2, {"max_tokens": 8}, "t4")
+    assert prefill_calls == ["t1_P", "t3_P", "t4_P"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_mode", [True, False])
+async def test_pd_dispatch_moriio_read_and_write_modes(read_mode):
+    """READ mode forwards the prefill leg's block ids to the decode leg; WRITE mode sends the
+    decode leg without them. Both legs always carry the peer's MoRI-IO address."""
+    from unittest.mock import MagicMock
+
+    from verl.workers.rollout.replica import TokenOutput
+
+    decode_peer = MagicMock()
+    decode_peer.generate.remote = MagicMock(return_value=_make_awaitable_token_output([7, 8, 9]))
+    prefill_calls = []
+
+    async def fake_generate(prompt_ids, sampling_params, request_id, **kw):
+        prefill_calls.append({"sampling_params": dict(sampling_params), "request_id": request_id, **kw})
+        returned = {"remote_engine_id": "eid-p", "remote_block_ids": [[3, 4]], "transfer_id": "tx-from-prefill"}
+        return TokenOutput(token_ids=[1], stop_reason="completed", extra_fields={"kv_transfer_params": returned})
+
+    server_cls, stub = _make_moriio_stub(decode_peer, read_mode)
+    stub.generate = fake_generate
+
+    result = await server_cls._pd_dispatch(stub, [1, 2, 3], {"max_tokens": 64}, "req", session_id="s1")
+    assert result.token_ids == [7, 8, 9]
+
+    prefill = prefill_calls[0]
+    assert prefill["sampling_params"]["max_tokens"] == 1
+    assert prefill["request_id"] == "req_P"
+    assert prefill["kv_transfer_params"]["do_remote_decode"] is True
+    assert prefill["kv_transfer_params"]["remote_host"] == "10.0.0.2"
+    assert prefill["kv_transfer_params"]["remote_handshake_port"] == 20032
+
+    decode_args, decode_kwargs = decode_peer.generate.remote.call_args
+    assert decode_args[1] == {"max_tokens": 64} and decode_args[2] == "req_D"
+    decode_kv = decode_kwargs["kv_transfer_params"]
+    assert decode_kv["do_remote_prefill"] is True
+    assert decode_kv["remote_host"] == "10.0.0.1" and decode_kv["remote_notify_port"] == 20016
+    if read_mode:
+        assert decode_kv["remote_block_ids"] == [[3, 4]]
+        assert decode_kv["remote_engine_id"] == "eid-p"
+        assert decode_kv["transfer_id"] == "tx-from-prefill"
+    else:
+        assert decode_kv["remote_block_ids"] is None
+        assert decode_kv["transfer_id"] == prefill["kv_transfer_params"]["transfer_id"]
 
 
 @pytest.mark.asyncio

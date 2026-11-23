@@ -20,6 +20,7 @@ import os
 import time
 import uuid
 import zlib
+from collections import OrderedDict
 from collections.abc import Mapping
 from pprint import pprint
 from typing import Any, Callable, Optional
@@ -101,6 +102,9 @@ if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
+# Sessions tracked for conditional PD disaggregation (oldest dropped first).
+_PD_MAX_TRACKED_SESSIONS = 65536
+
 
 class vLLMHttpServer:
     """vLLM http server in single node, this is equivalent to launch server with command line:
@@ -149,6 +153,12 @@ class vLLMHttpServer:
         self._pd_prefill_side_channel_port: Optional[int] = None
         self._pd_prefill_engine_id: Optional[str] = None
         self._pd_peer_idx: int = 0
+        # MoRI-IO peer addresses ({host, handshake_port, notify_port, tp_size}), set by set_pd_peer.
+        self._pd_prefill_mori_info: Optional[dict] = None
+        self._pd_decode_mori_infos: list[Optional[dict]] = []
+        # Conditional disaggregation: tokens each session's decode engine holds after its last turn.
+        self._pd_min_remote_prefill_tokens: int = 0
+        self._pd_session_tokens: OrderedDict[str, int] = OrderedDict()
 
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
@@ -283,6 +293,9 @@ class vLLMHttpServer:
         decode_peers: list,
         prefill_side_channel_port: int,
         prefill_engine_id: str,
+        prefill_mori_info: Optional[dict] = None,
+        decode_mori_infos: Optional[list[Optional[dict]]] = None,
+        min_remote_prefill_tokens: int = 0,
     ) -> None:
         assert self._disaggregation_role == "prefill", (
             f"set_pd_peer must be called on the prefill server (got role={self._disaggregation_role!r})"
@@ -291,6 +304,10 @@ class vLLMHttpServer:
         self._pd_decode_peers = list(decode_peers)
         self._pd_prefill_side_channel_port = prefill_side_channel_port
         self._pd_prefill_engine_id = prefill_engine_id
+        self._pd_prefill_mori_info = prefill_mori_info
+        self._pd_decode_mori_infos = list(decode_mori_infos or [None] * len(decode_peers))
+        assert len(self._pd_decode_mori_infos) == len(self._pd_decode_peers)
+        self._pd_min_remote_prefill_tokens = min_remote_prefill_tokens
 
     async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
         if self.node_rank != 0:
@@ -315,7 +332,14 @@ class vLLMHttpServer:
         logger.info(f"override_generation_config: {override_generation_config}")
 
         logger.info(f"enable_sleep_mode: {self.config.enable_sleep_mode}")
-        if not self.config.enable_sleep_mode:
+        if self._is_moriio():
+            # MoRI-IO must export the KV cache via hipIpcGetMemHandle / ibv_reg_mr, which fails on
+            # expandable-segment (VMM) allocations; drop it before vLLM spawns its EngineCore.
+            for var in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF"):
+                if "expandable_segments" in os.environ.get(var, ""):
+                    logger.warning(f"MoRI-IO PD: unsetting {var}={os.environ[var]!r}")
+                    os.environ.pop(var)
+        elif not self.config.enable_sleep_mode:
             from verl.utils.device import set_expandable_segments
 
             set_expandable_segments(True)
@@ -851,12 +875,140 @@ class vLLMHttpServer:
         self._pd_peer_idx += 1
         return peer
 
+    def _select_decode_peer_idx(self, session_id: Optional[str] = None) -> tuple[int, ActorHandle]:
+        """Pick a decode peer and return ``(index, handle)``.
+
+        Turns of one session stick to one decode peer (hash of ``session_id``), so multi-turn
+        rollouts reuse that peer's prefix cache and only the new tail of the KV has to move.
+        Requests without a session id fall back to round-robin.
+        """
+        n = len(self._pd_decode_peers)
+        if session_id is not None:
+            idx = zlib.crc32(str(session_id).encode()) % n
+        else:
+            idx = self._pd_peer_idx % n
+            self._pd_peer_idx += 1
+        return idx, self._pd_decode_peers[idx]
+
+    def _moriio_read_mode(self) -> bool:
+        extra = (self._disaggregation_kv_transfer_config or {}).get("kv_connector_extra_config") or {}
+        return str(extra.get("read_mode", "false")).lower() in ("true", "1")
+
+    def _is_moriio(self) -> bool:
+        return (self._disaggregation_kv_transfer_config or {}).get("kv_connector", "") == "MoRIIOConnector"
+
     def _dp_rank_for_session(self, session_id: Optional[str]) -> Optional[int]:
         """Pin a session to one DP engine for prefix-cache reuse; hash-based, so it ignores engine load."""
         dp_size = self.config.data_parallel_size
         if session_id is None or dp_size <= 1:
             return None
         return zlib.crc32(str(session_id).encode()) % dp_size
+
+    async def _pd_dispatch_moriio(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        priority: int = 0,
+        session_id: Optional[str] = None,
+    ) -> TokenOutput:
+        """MoRI-IO PD dispatch, mirroring vLLM's ``moriio_toy_proxy_server.py`` without a proxy.
+
+        WRITE mode runs both legs concurrently: the decode leg allocates blocks and notifies the
+        prefill leg, which pushes KV layer by layer. READ mode is sequential: the prefill leg
+        returns its block ids, then the decode leg pulls the KV. Each leg names its peer explicitly
+        in ``kv_transfer_params`` (``remote_host`` / ``remote_handshake_port`` /
+        ``remote_notify_port``), so request ids keep verl's format.
+        """
+        idx, decode_peer = self._select_decode_peer_idx(session_id)
+        prefill_info = self._pd_prefill_mori_info
+        decode_info = self._pd_decode_mori_infos[idx]
+        assert prefill_info is not None and decode_info is not None, "MoRI-IO peer info missing; see set_pd_peer"
+        transfer_id = f"tx-{uuid.uuid4()}"
+
+        prefill_sp = dict(sampling_params)
+        prefill_sp.pop("max_tokens", None)
+        prefill_sp.pop("max_new_tokens", None)
+        prefill_sp["max_tokens"] = 1
+        prefill_kv_params = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+            "transfer_id": transfer_id,
+            "remote_engine_id": None,
+            "remote_block_ids": None,
+            "remote_host": decode_info["host"],
+            "remote_handshake_port": decode_info["handshake_port"],
+            "remote_notify_port": decode_info["notify_port"],
+            "remote_tp_size": decode_info["tp_size"],
+            "remote_dp_size": 1,
+        }
+        decode_kv_params = {
+            "do_remote_decode": False,
+            "do_remote_prefill": True,
+            "transfer_id": transfer_id,
+            "remote_engine_id": None,
+            "remote_block_ids": None,
+            "remote_host": prefill_info["host"],
+            "remote_handshake_port": prefill_info["handshake_port"],
+            "remote_notify_port": prefill_info["notify_port"],
+            "remote_tp_size": prefill_info["tp_size"],
+            "remote_dp_size": 1,
+            "remote_dp_rank": 0,
+        }
+        mm_kwargs = dict(
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
+            mm_processor_kwargs=mm_processor_kwargs,
+            priority=priority,
+            session_id=session_id,
+        )
+        if self._pd_min_remote_prefill_tokens > 0 and session_id is not None:
+            # A READ-mode decode engine would decode a plain request on missing KV (see DisaggregationConfig).
+            assert not self._moriio_read_mode(), "conditional disaggregation requires mori_mode=write"
+            new_tokens = len(prompt_ids) - self._pd_session_tokens.get(session_id, 0)
+            if new_tokens < self._pd_min_remote_prefill_tokens:
+                # Short tail on top of what the decode engine already caches: let it prefill locally.
+                decode_out = await decode_peer.generate.remote(
+                    prompt_ids, dict(sampling_params), f"{request_id}_D", **mm_kwargs
+                )
+                self._pd_remember_session(session_id, prompt_ids, decode_out)
+                return decode_out
+        prefill_coro = self.generate(
+            prompt_ids, prefill_sp, f"{request_id}_P", kv_transfer_params=prefill_kv_params, **mm_kwargs
+        )
+        if not self._moriio_read_mode():
+            decode_ref = decode_peer.generate.remote(
+                prompt_ids, dict(sampling_params), f"{request_id}_D", kv_transfer_params=decode_kv_params, **mm_kwargs
+            )
+            _, decode_out = await asyncio.gather(prefill_coro, decode_ref)
+            self._pd_remember_session(session_id, prompt_ids, decode_out)
+            return decode_out
+        prefill_out = await prefill_coro
+        returned = prefill_out.extra_fields.get("kv_transfer_params")
+        if returned is None:
+            raise RuntimeError(f"PD prefill leg returned no kv_transfer_params (request_id={request_id})")
+        for key in ("remote_engine_id", "remote_block_ids", "transfer_id", "tp_size"):
+            if key in returned:
+                decode_kv_params[key] = returned[key]
+        decode_out = await decode_peer.generate.remote(
+            prompt_ids, dict(sampling_params), f"{request_id}_D", kv_transfer_params=decode_kv_params, **mm_kwargs
+        )
+        self._pd_remember_session(session_id, prompt_ids, decode_out)
+        return decode_out
+
+    def _pd_remember_session(self, session_id: Optional[str], prompt_ids: list[int], decode_out: TokenOutput) -> None:
+        """Record how many tokens the session's decode engine now holds (prompt + response)."""
+        if self._pd_min_remote_prefill_tokens <= 0 or session_id is None:
+            return
+        self._pd_session_tokens[session_id] = len(prompt_ids) + len(decode_out.token_ids or [])
+        self._pd_session_tokens.move_to_end(session_id)
+        while len(self._pd_session_tokens) > _PD_MAX_TRACKED_SESSIONS:
+            self._pd_session_tokens.popitem(last=False)
 
     async def _pd_dispatch(
         self,
@@ -871,8 +1023,20 @@ class vLLMHttpServer:
         session_id: Optional[str] = None,
     ) -> TokenOutput:
         """Run prefill locally, then decode on a selected peer."""
-        decode_peer = self._select_decode_peer()
         connector = (self._disaggregation_kv_transfer_config or {}).get("kv_connector", "")
+        if connector == "MoRIIOConnector":
+            return await self._pd_dispatch_moriio(
+                prompt_ids,
+                sampling_params,
+                request_id,
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+                priority=priority,
+                session_id=session_id,
+            )
+        decode_peer = self._select_decode_peer()
         is_mooncake = connector == "MooncakeConnector"
 
         # Prefill only materializes KV; discard its single generated token.
@@ -982,6 +1146,8 @@ class vLLMHttpServer:
         # are unreachable through their old salt, so the store, which other replicas may
         # still be reading and writing, is left intact.
         await self.engine.reset_prefix_cache(reset_connector=self.config.external_kv_cache_invalidation == "reset")
+        # Conditional PD (MoRI-IO): the decode engines drop their prefix caches at the same points.
+        self._pd_session_tokens.clear()
 
     @RLInsightLogger.trace_state_decorator(
         "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
