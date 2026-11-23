@@ -187,6 +187,23 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
 ```
 
+**Best measured graph-mode configuration (Qwen3.5-35B-A3B, v7x `2x2x1` trainer + `2x2x1` rollout).** This adds the Tokamax KDA kernels for the GatedDeltaNet layers (`MODEL_KERNELS=moe,kda,lce`) and the trainer libtpu flags of TorchTitan's `qwen35_moe_35b_split_tokamax_benchmark` recipe to the command above. Measured: `update_actor` 4.45-4.51 s per step and `perf/mfu/actor` 0.104 on average (0.085-0.128, it follows the real token count of the step) over 10 steps, against 21.96 s / 0.0107 for the best eager configuration; the first step traces and compiles in about 220 s. It needs:
+
+1. The image built with the TorchTitan commit the numbers were measured with (`tpu_flags` and the Tokamax KDA kernels): `docker buildx build -t <IMAGE> --push --build-arg TORCHTITAN_COMMIT=c56f441fca0f3349014622d02cc2165e25957d95 examples/tpu/grpo`.
+2. A `verl-hardware-plugin` with the graph-mode KDA document budget, [verl-project/verl-hardware-plugin#184](https://github.com/verl-project/verl-hardware-plugin/pull/184) (not merged yet): `git -C ../verl-hardware-plugin fetch origin pull/184/head:graph-trainer-kda && git -C ../verl-hardware-plugin checkout graph-trainer-kda`. Without it, graph mode rejects `kda`.
+
+```bash
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env MODEL_NAME=Qwen3.5-35B-A3B TRAINER_MODE=graph_trainer GRAPH_TRAINER_SPLIT_LAYERS=2 MODEL_KERNELS=moe,kda,lce \
+  USE_KL_LOSS=False PARAM_DTYPE=bfloat16 OPTIM_IMPL=fused \
+  SPARSECORE_OFFLOAD=True TRAINER_SCOPED_VMEM_LIMIT_KIB=65472 TRAINER_EXTRA_LIBTPU_INIT_ARGS=--xla_tpu_dvfs_p_state=7 \
+  TRAIN_BATCH_SIZE=32 PPO_MINI_BATCH_SIZE=32 ROLLOUT_N=4 \
+  USE_DYNAMIC_BSZ=True MAX_TOKEN_LEN_PER_GPU=32768 STATIC_MICRO_BATCH_LEN=32768 STATIC_MAX_RESPONSE_LEN=2048 \
+  bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
+```
+
+Each rank trains one 32K-token micro-batch per step (16 sequences), so the whole mini-batch must fit: raise `MAX_TOKEN_LEN_PER_GPU` / `STATIC_MICRO_BATCH_LEN` together if the run reports more than one micro-batch. The KDA document budget is pinned on the first step from the most sequences per micro-batch; set `+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.kda_document_budget=<N>` if a later step packs more.
+
 ### Qwen3.5-397B-A17B (expert parallelism)
 
 Expert parallelism (`EXPERT_PARALLEL_SIZE > 1`) needs torchtitan from [google-pytorch/torchtitan#142](https://github.com/google-pytorch/torchtitan/pull/142), which enables Qwen3.5 with EP on TPU. Build the image at its head commit:
