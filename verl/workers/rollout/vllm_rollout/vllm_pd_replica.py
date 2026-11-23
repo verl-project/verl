@@ -252,6 +252,12 @@ class vLLMPDReplica(vLLMReplica):
             cfg["kv_connector_extra_config"] = {"mooncake_protocol": mooncake_protocol}
         return cfg
 
+    def get_weight_transfer_targets(self) -> list[tuple[ActorHandle, int]]:
+        """Return (server_handle, world_size) for prefill and every decode server."""
+        return [(s, self._prefill_tp) for s in self._prefill_servers] + [
+            (s, self._decode_tp) for s in self._decode_servers
+        ]
+
     def _spawn_pd_server(
         self,
         role: str,

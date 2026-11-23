@@ -278,6 +278,34 @@ class vLLMHttpServer:
             kwargs=kwargs,
         )
 
+    async def init_weight_transfer_engine(self, init_info: dict[str, Any]):
+        """Initialize vLLM's native weight transfer engine across all workers."""
+        from vllm.distributed.weight_transfer.base import WeightTransferInitRequest
+
+        return await self.engine.init_weight_transfer_engine(WeightTransferInitRequest(init_info=init_info))
+
+    async def shutdown_weight_transfer_engine(self):
+        """Release vLLM's native weight transfer engine resources."""
+        return await self.engine.shutdown_weight_transfer_engine()
+
+    async def start_weight_update(self):
+        """Begin a native weight update session."""
+        return await self.engine.start_weight_update()
+
+    async def start_draft_weight_update(self):
+        """Begin a native speculative draft weight update session."""
+        return await self.engine.start_draft_weight_update()
+
+    async def update_weights(self, update_info: dict[str, Any] | list[dict[str, Any]]):
+        """Deliver one native weight update payload."""
+        from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
+
+        return await self.engine.update_weights(WeightTransferUpdateRequest(update_info=update_info))
+
+    async def finish_weight_update(self, weight_version: str | None = None):
+        """Finalize the active native weight update session."""
+        return await self.engine.finish_weight_update(weight_version)
+
     async def set_pd_peer(
         self,
         decode_peers: list,
@@ -1460,55 +1488,28 @@ class vLLMHttpServer:
             # See: https://github.com/vllm-project/vllm/pull/43001/
             engine_kwargs.setdefault("mm_processor_cache_gb", 0)
 
+        from verl.checkpoint_engine.vllm_weight_transfer import resolve_vllm_weight_transfer_backend
+
         checkpoint_config = getattr(self.config, "checkpoint_engine", None)
-        if getattr(checkpoint_config, "backend", None) == "delta_sharded":
-            from verl.workers.rollout.vllm_rollout.delta_weight_transfer import (
-                VERL_DELTA_WEIGHT_TRANSFER_BACKEND,
-                is_moe_model,
-                require_vllm_delta_support,
-            )
-
-            require_vllm_delta_support()
-            delta_engine_kwargs = getattr(checkpoint_config, "engine_kwargs", {}).get("delta_sharded", {})
-            if int(delta_engine_kwargs.get("verify_every", 0)) > 0:
-                raise NotImplementedError("delta_sharded with vLLM does not support verify_every > 0")
-            if self.config.data_parallel_size != 1:
-                raise NotImplementedError("delta_sharded with vLLM requires data_parallel_size=1")
-            if self.config.disaggregation.enabled:
-                raise NotImplementedError("delta_sharded with vLLM does not support PD disaggregation")
-            # config.pipeline_model_parallel_size > 1 is already rejected globally and
-            # engine_kwargs cannot set TP/DP (see _VERL_MANAGED_VLLM_ARGS); close the
-            # remaining pipeline override that would bypass VERL's worker and IPC mapping.
-            if int(engine_kwargs.get("pipeline_parallel_size") or 1) > 1:
-                raise NotImplementedError("delta_sharded with vLLM requires pipeline_parallel_size=1")
-
-            if is_moe_model(self.model_config.hf_config):
-                moe_backend = engine_kwargs.get("moe_backend")
-                if moe_backend not in {None, "auto", "triton"}:
-                    raise NotImplementedError(
-                        f"delta_sharded with vLLM MoE requires moe_backend='triton'; got {moe_backend!r}"
+        wt_backend = resolve_vllm_weight_transfer_backend(
+            getattr(checkpoint_config, "backend", None),
+            engine_kwargs,
+        )
+        if wt_backend is not None:
+            existing_wtc = dict(engine_kwargs.get("weight_transfer_config") or {})
+            existing_wtc["backend"] = wt_backend
+            engine_kwargs["weight_transfer_config"] = existing_wtc
+            if wt_backend == "sharded_rdt":
+                exec_backend = engine_kwargs.get("distributed_executor_backend")
+                if exec_backend not in {None, "ray"}:
+                    raise ValueError(
+                        f"weight_transfer_config backend='sharded_rdt' requires distributed_executor_backend='ray'; "
+                        f"got {exec_backend!r}"
                     )
-                engine_kwargs["moe_backend"] = "triton"
-                if engine_kwargs.get("enable_eplb", False):
-                    raise NotImplementedError("delta_sharded with vLLM MoE does not support EPLB")
+                engine_kwargs["distributed_executor_backend"] = "ray"
 
-            weight_transfer_config = engine_kwargs.get("weight_transfer_config")
-            if weight_transfer_config is None:
-                weight_transfer_backend = None
-            elif isinstance(weight_transfer_config, Mapping):
-                weight_transfer_backend = weight_transfer_config.get("backend")
-            else:
-                raise TypeError("weight_transfer_config must be a mapping when using delta_sharded")
-
-            if weight_transfer_backend not in {None, VERL_DELTA_WEIGHT_TRANSFER_BACKEND}:
-                raise ValueError(
-                    "checkpoint_engine.backend='delta_sharded' requires vLLM "
-                    f"weight transfer backend {VERL_DELTA_WEIGHT_TRANSFER_BACKEND!r}, "
-                    f"but got {weight_transfer_backend!r}"
-                )
-            engine_kwargs["weight_transfer_config"] = {"backend": VERL_DELTA_WEIGHT_TRANSFER_BACKEND}
-        if not is_torch_npu_available(check_device=False):
-            # refits update the weights in place (direct reload), never layerwise
+        if not is_torch_npu_available(check_device=False) and wt_backend != "sharded_rdt":
+            # refits update the weights in place (direct reload); sharded_rdt uses layerwise reload
             os.environ.setdefault("VLLM_RELOAD_MODE", "direct")
 
     def _get_override_generation_config(self) -> dict:
@@ -1568,7 +1569,13 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        if mtp_rollout_enabled or self.lora_as_adapter:
+        checkpoint_backend = getattr(getattr(self.config, "checkpoint_engine", None), "backend", None)
+        vllm_engine_kwargs = (self.config.get("engine_kwargs", {}) or {}).get(self._get_engine_kwargs_key(), {}) or {}
+        wtc = vllm_engine_kwargs.get("weight_transfer_config")
+        sparse_update = checkpoint_backend == "vllm_sparse_nccl" or (
+            isinstance(wtc, Mapping) and wtc.get("backend") == "sparse_nccl"
+        )
+        if mtp_rollout_enabled or self.lora_as_adapter or sparse_update:
             return 1
         if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
             return 1
@@ -1795,6 +1802,10 @@ class vLLMReplica(RolloutReplica):
     # -----------------------------------------------------------------------
     # Hook methods for subclass overrides
     # -----------------------------------------------------------------------
+
+    def get_weight_transfer_targets(self) -> list[tuple[ActorHandle, int]]:
+        """Return (server_handle, world_size) pairs for native weight transfer."""
+        return [(self.servers[0], self.world_size)]
 
     def _get_server_name_prefix(self) -> str:
         """Return the Ray actor name prefix (e.g. 'vllm_')."""

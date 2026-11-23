@@ -816,17 +816,29 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # Resolve mode: "auto" falls back to config, explicit values take precedence
         effective_mode = mode if mode != "auto" else self.config.rollout.checkpoint_engine.backend
 
-        # 0. send_weights only for async training with disaggregated trainer and rollout
+        # 0. send_weights for disaggregated or vLLM-native checkpoint engines
         if effective_mode != "naive":
-            if effective_mode == "delta_sharded":
-                # the delta engine owns the sync state machine (seed vs steady,
-                # snapshot prime), so it drives the training engine itself.
-                metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
-            else:
-                per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
-                metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
-            if self.actor.engine.is_param_offload_enabled:
-                self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+            is_colocated = bool(getattr(self.checkpoint_engine, "is_colocated", False))
+            if is_colocated:
+                set_expandable_segments(False)
+                get_torch_device().empty_cache()
+            try:
+                if getattr(self.checkpoint_engine, "requires_engine", False) or effective_mode == "delta_sharded":
+                    # engines owning the sync state machine or vLLM WeightSource drive the training engine directly.
+                    metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
+                else:
+                    per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+                    metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+                if self.actor.engine.is_param_offload_enabled:
+                    self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+                if is_colocated:
+                    get_torch_device().synchronize()
+                    get_torch_device().empty_cache()
+                    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+                        await asyncio.to_thread(torch.distributed.barrier)
+            finally:
+                if is_colocated:
+                    set_expandable_segments(True)
             return metrics or {}
 
         set_expandable_segments(False)
