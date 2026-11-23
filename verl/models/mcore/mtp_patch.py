@@ -133,10 +133,14 @@ def _megatron_gptmodel_postprocess(
 
     if mtp_in_postprocess and labels is not None:
         mtp_kwargs = dict(extra_block_kwargs or {})
-        if not hasattr(self.mtp, "_forward_has_padding_mask"):
-            self.mtp._forward_has_padding_mask = "padding_mask" in signature(self.mtp.forward).parameters
-        if self.mtp._forward_has_padding_mask:
+        if not hasattr(self.mtp, "_forward_mask_params"):
+            self.mtp._forward_mask_params = {"padding_mask", "mtp_input_mask"}.intersection(
+                signature(self.mtp.forward).parameters
+            )
+        if "padding_mask" in self.mtp._forward_mask_params:
             mtp_kwargs["padding_mask"] = padding_mask
+        if "mtp_input_mask" in self.mtp._forward_mask_params:
+            mtp_kwargs["mtp_input_mask"] = mtp_input_mask
         if mhc_multistream is not None:
             mtp_kwargs["mhc_multistream"] = mhc_multistream
         hidden_states = self.mtp(
@@ -151,7 +155,6 @@ def _megatron_gptmodel_postprocess(
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
             embedding=self.embedding,
-            mtp_input_mask=mtp_input_mask,
             **mtp_kwargs,
         )
 

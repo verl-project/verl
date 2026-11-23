@@ -46,7 +46,7 @@ def _model(**overrides):
     )
 
 
-def _postprocess(model, packed_seq_params):
+def _postprocess(model, packed_seq_params, **kwargs):
     return mtp_patch._megatron_gptmodel_postprocess(
         model,
         hidden_states=torch.arange(8, dtype=torch.float32).reshape(2, 1, 4),
@@ -58,7 +58,43 @@ def _postprocess(model, packed_seq_params):
         rotary_pos_sin=None,
         loss_mask=torch.ones(1, 4),
         packed_seq_params=packed_seq_params,
+        **kwargs,
     )
+
+
+@pytest.mark.parametrize("supports_mtp_input_mask", [False, True])
+def test_mtp_forward_passes_supported_masks(supports_mtp_input_mask):
+    captured_masks = {}
+
+    class LegacyMTP(torch.nn.Module):
+        def forward(self, *, hidden_states, padding_mask, **kwargs):
+            assert "mtp_input_mask" not in kwargs
+            captured_masks["padding_mask"] = padding_mask
+            return hidden_states
+
+    class CurrentMTP(LegacyMTP):
+        def forward(self, *, padding_mask, mtp_input_mask, **kwargs):
+            captured_masks["mtp_input_mask"] = mtp_input_mask
+            return super().forward(padding_mask=padding_mask, **kwargs)
+
+    model = _model()
+    model.post_process = False
+    model.embedding = None
+    model.mtp = CurrentMTP() if supports_mtp_input_mask else LegacyMTP()
+    padding_mask = torch.zeros(1, 4, dtype=torch.bool)
+    mtp_input_mask = torch.ones(1, 4, dtype=torch.bool)
+
+    _postprocess(
+        model,
+        None,
+        mtp_in_postprocess=True,
+        padding_mask=padding_mask,
+        mtp_input_mask=mtp_input_mask,
+    )
+
+    assert captured_masks["padding_mask"] is padding_mask
+    if supports_mtp_input_mask:
+        assert captured_masks["mtp_input_mask"] is mtp_input_mask
 
 
 def test_process_mtp_loss_uses_dynamic_group_and_token_scale(monkeypatch):
