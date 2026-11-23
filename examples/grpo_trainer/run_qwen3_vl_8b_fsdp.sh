@@ -23,6 +23,8 @@ ENTROPY_COEFF=${ENTROPY_COEFF:-0}
 
 ROLLOUT_TP=${ROLLOUT_TP:-2}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-}
+# Keep the vLLM context within the Geo3K token budget by default. Set this to null to use the model limit.
+ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}
 ROLLOUT_N=${ROLLOUT_N:-5}
 SP_SIZE=${SP_SIZE:-1}
 
@@ -93,6 +95,7 @@ ACTOR=(
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.max_model_len=${ROLLOUT_MAX_MODEL_LEN}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
