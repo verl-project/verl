@@ -182,6 +182,9 @@ To enable profiling for specific components and steps, modify your ppo_trainer.y
 
 ### Enable profiler and multiple databases for one training step
 
+Keep the role-level `enable: True` and rank settings from the preceding example,
+and change the global settings as follows:
+
 ```yaml
     global_profiler:
         tool: nsys
