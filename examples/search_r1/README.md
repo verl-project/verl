@@ -305,3 +305,10 @@ Metrics: `sd/alpha`, `sd/query_tokens`, `sd/groups`,
 latency as well as auxiliary timing; GPU memory and rollout telemetry use the
 same observers as the EM baseline. A two-step acceptance run with warmup=0
 checks the active algorithm before a separate fresh 200-step run with warmup=50.
+
+SD controls are reattached immediately before actor dispatch because the
+advantage writer returns a new KVBatchMeta without prior extra_info. Active
+steps require a finite actor/sd/jsd metric; absence raises instead of silently
+performing GRPO alone. The SD job uses collect_sd_telemetry.py: an NVML command
+timeout records an error sample and HTTP metric collection continues. Gaps in
+GPU samples remain visible and must be considered when estimating memory peaks.

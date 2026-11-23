@@ -233,3 +233,97 @@ def test_driver_grouping_after_balance_and_padding(monkeypatch, tmp_path, contai
     assert stored["fields"][MASK].values().sum() == 4
     assert stored["fields"]["sd_0_weights"].unbind()[4].sum() == 0
     assert all(stored["fields"]["sd_0_weights"].unbind()[i].sum() == pytest.approx(1) for i in range(4))
+
+
+@pytest.mark.parametrize("reported_jsd", [0.03, None])
+def test_actor_handoff_restores_metadata_after_advantage(reported_jsd):
+    """Execute the actual trainer method without importing GPU-only driver deps."""
+    import ast
+    from pathlib import Path
+
+    import numpy as np
+
+    from examples.search_r1.sd_search import MASK, HindsightSupervisor
+
+    path = Path(__file__).resolve().parents[3] / "verl/trainer/ppo/v1/trainer_base.py"
+    tree = ast.parse(path.read_text())
+    trainer = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PPOTrainer")
+    method = next(n for n in trainer.body if isinstance(n, ast.FunctionDef) and n.name == "_update_actor")
+    method.returns = None
+    for arg in method.args.args:
+        arg.annotation = None
+    env = {
+        "TensorDict": object,
+        "np": np,
+        "is_distillation_enabled": lambda c: False,
+        "rename_dict": lambda d, p: {p + k: v for k, v in d.items()},
+        "reduce_metrics": lambda x: x,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), str(path), "exec"), env)
+    supervisor = object.__new__(HindsightSupervisor)
+    supervisor.c = SimpleNamespace(alpha=0.001, warmup_steps=50, slots=4, top_k=50, teacher_micro_batch_size_per_gpu=4)
+    # This is the fresh object returned by advantage kv_batch_put: SD controls are gone.
+    batch = SimpleNamespace(extra_info={}, fields=["advantages", "returns"])
+
+    def update(batch):
+        assert batch.fields is None
+        assert batch.extra_info["sd_alpha"] == 0.001
+        assert batch.extra_info["auxiliary_loss_mask_names"] == [MASK]
+        assert batch.extra_info["sd_slots"] == 4
+        return {"metrics": {"mfu": 0, **({"sd/jsd": reported_jsd} if reported_jsd is not None else {})}}
+
+    actor = SimpleNamespace(
+        ppo_mini_batch_size=256,
+        calculate_entropy=False,
+        entropy_coeff=0,
+        ppo_epochs=1,
+        data_loader_seed=42,
+        shuffle=True,
+    )
+    config = SimpleNamespace(
+        actor_rollout_ref=SimpleNamespace(actor=actor, rollout=SimpleNamespace(n=5, temperature=1)), get=lambda k: None
+    )
+    fake = SimpleNamespace(
+        config=config,
+        skill_teacher_supervisor=None,
+        turn_hidden_supervisor=None,
+        hindsight_supervisor=supervisor,
+        global_steps=51,
+        actor_rollout_wg=SimpleNamespace(update_actor=update),
+    )
+    if reported_jsd is None:
+        with pytest.raises(RuntimeError, match="finite JSD"):
+            env["_update_actor"](fake, batch, {})
+    else:
+        metrics = {}
+        env["_update_actor"](fake, batch, metrics)
+        assert metrics["actor/sd/jsd"] == reported_jsd
+
+
+def test_gpu_sampling_timeout_does_not_disable_http_metrics(monkeypatch, tmp_path):
+    import json
+    import signal
+    import subprocess
+    import sys
+
+    from examples.search_r1 import collect_sd_telemetry as collector
+
+    (tmp_path / "runtime.json").write_text(json.dumps({"gpus": [{"uuid": "GPU-test"}]}))
+    (tmp_path / "worker.log").write_text("LLMServerManager: ['127.0.0.1:1234']\n")
+    handlers = {}
+    monkeypatch.setattr(signal, "signal", lambda sig, fn: handlers.update({sig: fn}))
+    monkeypatch.setattr(sys, "argv", ["collector", str(tmp_path), "--interval", "0.001"])
+
+    def fail(*args):
+        raise subprocess.TimeoutExpired("nvidia-smi", 10)
+
+    monkeypatch.setattr(collector, "gpu_sample", fail)
+
+    def scrape(address, _):
+        handlers[signal.SIGTERM]()
+        return {"endpoint": address, "metrics": {"vllm:num_requests_running": [{"value": 1}]}}
+
+    monkeypatch.setattr(collector, "scrape", scrape)
+    collector.main()
+    assert "TimeoutExpired" in json.loads((tmp_path / "gpu-memory.jsonl").read_text())["error"]
+    assert json.loads((tmp_path / "vllm-metrics.jsonl").read_text())["endpoint"] == "127.0.0.1:1234"

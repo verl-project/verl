@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import json
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -43,6 +44,7 @@ for kind, steps, freq in [("acceptance", 2, -1), ("formal", 200, 20)]:
         )
     )
     run = Path(result["run_dir"])
+    shutil.copy2(root / "verl/examples/search_r1/collect_sd_telemetry.py", run / "collect_rollout_telemetry.py")
     runs[kind] = str(run)
     script = (
         (run / "run.sh")

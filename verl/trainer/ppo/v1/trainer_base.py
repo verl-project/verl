@@ -1920,10 +1920,21 @@ class PPOTrainer(ABC):
         if self.turn_hidden_supervisor is not None:
             self.turn_hidden_supervisor.update_metadata(batch)
 
+        if self.hindsight_supervisor is not None:
+            self.hindsight_supervisor.update_metadata(batch, self.global_steps)
+
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
         output = rename_dict(output["metrics"], "actor/")
         output["perf/mfu/actor"] = output.pop("actor/mfu")
         actor_metrics = reduce_metrics(output)
+        if self.hindsight_supervisor is not None:
+            from examples.search_r1.sd_losses import sd_coefficient
+
+            sd = self.hindsight_supervisor.c
+            if sd_coefficient(self.global_steps - 1, sd.warmup_steps, sd.alpha) > 0:
+                value = actor_metrics.get("actor/sd/jsd")
+                if value is None or not np.isfinite(value):
+                    raise RuntimeError("SD enabled but actor did not report a finite JSD; refusing silent GRPO fallback")
         metrics.update(actor_metrics)
 
         return batch

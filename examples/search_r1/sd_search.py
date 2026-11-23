@@ -95,6 +95,21 @@ class HindsightSupervisor:
             raise ValueError("Run has different SD settings")
         path.write_text(json.dumps(manifest, indent=2))
 
+    def update_metadata(self, batch, step):
+        """Reattach controls after advantage calculation replaces KVBatchMeta."""
+        alpha = sd_coefficient(step - 1, self.c.warmup_steps, self.c.alpha)
+        batch.extra_info.update(sd_alpha=alpha)
+        if alpha:
+            batch.fields = None
+            names = list(batch.extra_info.get("auxiliary_loss_mask_names", []))
+            batch.extra_info.update(
+                sd_slots=self.c.slots,
+                sd_top_k=self.c.top_k,
+                sd_micro_batch=self.c.teacher_micro_batch_size_per_gpu,
+                auxiliary_loss_mask_names=list(dict.fromkeys(names + [MASK])),
+            )
+        return batch
+
     def prepare(self, trainer, batch, metrics):
         import transfer_queue as tq
         from tensordict import TensorDict
