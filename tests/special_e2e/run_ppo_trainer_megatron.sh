@@ -165,8 +165,7 @@ PROFILE_ENABLE=${PROFILE_ENABLE:-False}
 #
 # Both sides must read PROFILE_ENABLE the same way: Hydra accepts True/true/TRUE (and 1) for a bool,
 # so matching on the literal string "True" alone would enable the workers while leaving the trigger
-# null -- the same silent no-op this branch exists to avoid. Compare case-insensitively, without
-# `${var,,}`: that is bash 4+, and this runs under bash 3.2 on macOS too.
+# null -- the same silent no-op this branch exists to avoid.
 PROFILE_ENABLE_LOWER=$(printf '%s' "$PROFILE_ENABLE" | tr '[:upper:]' '[:lower:]')
 case "$PROFILE_ENABLE_LOWER" in
     true|1) PROFILE_STEPS=${PROFILE_STEPS:-[1]} ;;
