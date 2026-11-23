@@ -312,3 +312,10 @@ steps require a finite actor/sd/jsd metric; absence raises instead of silently
 performing GRPO alone. The SD job uses collect_sd_telemetry.py: an NVML command
 timeout records an error sample and HTTP metric collection continues. Gaps in
 GPU samples remain visible and must be considered when estimating memory peaks.
+
+Custom SD input IDs, causal positions and query weights are explicitly staged
+on the actor device; TransferQueue's standard input migration does not guarantee
+that custom columns move. The acceptance launcher first runs verify_sd_gpu.py
+with eight tiny Qwen FSDP ranks and CPU auxiliary fields, checking actual SD
+backward and finite gradients before loading the large retrieval index. This
+preflight is a runtime integration check, not a trained-model quality result.

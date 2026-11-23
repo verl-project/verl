@@ -149,7 +149,8 @@ def test_auxiliary_backward_normalization_and_teacher_detach():
         return data
 
     full = make([0, 1], 2)
-    backward_sd(engine, full)
+    metrics = backward_sd(engine, full)
+    assert float(metrics["sd/jsd"].aggregate()) > 0
     grad = [p.grad.clone() for p in model.parameters()]
     model.zero_grad()
     backward_sd(engine, make([0], 2))
@@ -327,3 +328,32 @@ def test_gpu_sampling_timeout_does_not_disable_http_metrics(monkeypatch, tmp_pat
     collector.main()
     assert "TimeoutExpired" in json.loads((tmp_path / "gpu-memory.jsonl").read_text())["error"]
     assert json.loads((tmp_path / "vllm-metrics.jsonl").read_text())["endpoint"] == "127.0.0.1:1234"
+
+
+@pytest.mark.parametrize("device", ["cpu", "meta"])
+def test_cpu_auxiliary_fields_follow_model_device(device):
+    from tensordict import TensorDict
+    from torch import nn
+
+    from examples.search_r1.sd_search import query_logits, weighted_jsd
+
+    class Probe(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(1, device=device))
+
+        def forward(self, input_ids, attention_mask, position_ids, **kwargs):
+            assert input_ids.device.type == device
+            assert attention_mask.device.type == device
+            assert position_ids.device.type == device
+            return SimpleNamespace(logits=torch.ones((*input_ids.shape, 7), device=device) * self.weight)
+
+    fields = {}
+    for key, row in [("student_ids", [1, 2, 3]), ("student_positions", [2])]:
+        fields["sd_0_" + key] = torch.nested.as_nested_tensor([torch.tensor(row)], layout=torch.jagged)
+    logits = query_logits(Probe(), TensorDict(fields, batch_size=[1]), 0, "student", [0])
+    weights = torch.ones(1, requires_grad=True)  # CPU even when the model is meta.
+    result = weighted_jsd(logits, logits.detach(), weights, 3)
+    assert result.device.type == device
+    result.backward()
+    assert weights.grad is None

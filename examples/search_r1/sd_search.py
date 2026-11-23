@@ -207,8 +207,9 @@ class HindsightSupervisor:
 
 
 def query_logits(model, data, slot, role, indices):
-    ids = [data[f"sd_{slot}_{role}_ids"].unbind()[i] for i in indices]
-    positions = [data[f"sd_{slot}_{role}_positions"].unbind()[i] for i in indices]
+    device = next(model.parameters()).device
+    ids = [data[f"sd_{slot}_{role}_ids"].unbind()[i].to(device=device) for i in indices]
+    positions = [data[f"sd_{slot}_{role}_positions"].unbind()[i].to(device=device) for i in indices]
     lengths = torch.tensor([len(x) for x in ids], device=ids[0].device)
     padded = torch.nn.utils.rnn.pad_sequence(ids, batch_first=True, padding_value=0)
     mask = torch.arange(padded.shape[1], device=padded.device)[None, :] < lengths[:, None]
@@ -216,6 +217,13 @@ def query_logits(model, data, slot, role, indices):
         input_ids=padded, attention_mask=mask, position_ids=(mask.long().cumsum(-1) - 1).clamp_min(0), use_cache=False
     )
     return torch.cat([output.logits[j, p - 1] for j, p in enumerate(positions)])
+
+
+def weighted_jsd(student, teacher, weights, top_k):
+    # TransferQueue/engine staging moves standard model inputs, but custom
+    # auxiliary columns may remain on CPU. Never rely on implicit migration.
+    weights = weights.detach().to(device=student.device)
+    return (topk_union_jsd(student, teacher, top_k) * weights).sum()
 
 
 def backward_sd(engine, data):
@@ -251,7 +259,7 @@ def backward_sd(engine, data):
                     engine.module.train(training)
                     student = query_logits(engine.module, data, slot, "student", indices)
                     weights = torch.cat([data[f"sd_{slot}_weights"].unbind()[i] for i in indices])
-                    loss = (topk_union_jsd(student, teacher, tu.get(data, "sd_top_k")) * weights).sum() * scale
+                    loss = weighted_jsd(student, teacher, weights, tu.get(data, "sd_top_k")) * scale
                 weighted = alpha * loss
                 if getattr(engine, "scaler", None) is not None:
                     engine.scaler.scale(weighted).backward()

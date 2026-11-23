@@ -53,6 +53,14 @@ for kind, steps, freq in [("acceptance", 2, -1), ("formal", 200, 20)]:
     )
     if kind == "acceptance":
         script = script.rstrip() + " sd_search.warmup_steps=0\n"
+        probe = (
+            '"$TRAIN_PYTHON" -m torch.distributed.run --standalone --nproc_per_node=8 '
+            '"$PYTHONPATH/examples/search_r1/verify_sd_gpu.py" --output "$RUN_DIR/sd-gpu-preflight.json"'
+        )
+        script = script.replace(
+            '"$TRAIN_PYTHON" "$RUN_DIR/preflight.py"', '"$TRAIN_PYTHON" "$RUN_DIR/preflight.py"\n' + probe
+        )
+
     (run / "run.sh").write_text(script)
     collect = (run / "collect_metrics.py").read_text().replace("+'\\\\n'", "+'\\n'")
     (run / "collect_metrics.py").write_text(collect)
