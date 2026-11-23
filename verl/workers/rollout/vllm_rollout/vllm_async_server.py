@@ -353,12 +353,11 @@ class vLLMHttpServer:
 
             set_expandable_segments(True)
 
-        hf_overrides = self._apply_quantization()
-        hf_quantization_config = getattr(self.model_config.hf_config, "quantization_config", None)
-        # An explicit ``quantization_config: null`` override is a BF16 rollout of a quantized checkpoint.
-        effective_quantization_config = hf_overrides.get("quantization_config", hf_quantization_config)
+        from verl.utils.qat.compressed_tensors import _resolve_quantization_config
         from verl.utils.vllm.vllm_quant_utils import set_default_vllm_quantization_backends
 
+        hf_overrides = self._apply_quantization()
+        _, effective_quantization_config = _resolve_quantization_config(self.model_config.hf_config, hf_overrides)
         set_default_vllm_quantization_backends(
             effective_quantization_config, engine_kwargs, hf_config=self.model_config.hf_config
         )
