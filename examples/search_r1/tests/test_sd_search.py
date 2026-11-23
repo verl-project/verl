@@ -159,13 +159,25 @@ def test_auxiliary_backward_normalization_and_teacher_detach():
     assert sum(g.abs().sum() for g in grad) > 0
 
 
-def test_driver_grouping_after_balance_and_padding(monkeypatch, tmp_path):
+@pytest.mark.parametrize("container", [list, "linked_list", "numpy"])
+def test_driver_grouping_after_balance_and_padding(monkeypatch, tmp_path, container):
     import sys
 
-    class NonTensorStack:
-        @staticmethod
-        def _from_list(items):
-            return SimpleNamespace(tolist=lambda: items)
+    # The cluster returns a list subclass without tolist(); local older
+    # TensorDict lacks that class, so exercise its actual iterable contract.
+    class LinkedList(list):
+        pass
+
+    def wrap(items):
+        if container == "linked_list":
+            return LinkedList(items)
+        if container == "numpy":
+            import numpy as np
+
+            result = np.empty(len(items), dtype=object)
+            result[:] = items
+            return result
+        return list(items)
 
     from examples.search_r1.sd_search import MASK, HindsightSupervisor
 
@@ -178,8 +190,8 @@ def test_driver_grouping_after_balance_and_padding(monkeypatch, tmp_path):
         "response_mask": torch.nested.as_nested_tensor(
             [torch.ones(len(ids), dtype=torch.bool) for _ in keys], layout=torch.jagged
         ),
-        "reward_model": NonTensorStack._from_list([{"ground_truth": {"target": ["New York City"]}} for _ in keys]),
-        "extra_fields": NonTensorStack._from_list(
+        "reward_model": wrap([{"ground_truth": {"target": ["New York City"]}} for _ in keys]),
+        "extra_fields": wrap(
             [
                 {"search_r1_final_assistant": "<answer>New York</answer>", "search_r1_termination": "answer"}
                 for _ in keys

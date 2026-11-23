@@ -121,8 +121,8 @@ class HindsightSupervisor:
         for response, mask, rm, extra in zip(
             data["responses"].unbind(),
             data["response_mask"].unbind(),
-            data["reward_model"].tolist(),
-            data["extra_fields"].tolist(),
+            list(data["reward_model"]),
+            list(data["extra_fields"]),
             strict=True,
         ):
             spans.append(queries(self.codec, response.tolist(), mask.tolist()))
