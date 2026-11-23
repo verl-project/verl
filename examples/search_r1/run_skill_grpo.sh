@@ -6,5 +6,5 @@ export RUN_DIR=${RUN_DIR:-$RECIPE_DIR/../../../outputs/search-r1-skills-$(date +
 exec bash "$RECIPE_DIR/run_grpo.sh" \
     +skill_distillation=search_r1 \
     trainer.project_name=search-r1-skills \
-    trainer.experiment_name=search-r1-three-skill-teachers \
+    trainer.experiment_name=search-r1-four-skill-forward-kl \
     "$@"

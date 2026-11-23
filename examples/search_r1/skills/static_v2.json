@@ -1,0 +1,39 @@
+{
+  "version": "static-v2",
+  "provenance": "Hand-written generic rules; no task trajectories or answers used.",
+  "teachers": {
+    "entity": {
+      "rules": [
+        "Ground named entities and identity claims in the question or evidence already observed. A name suggested by memory may be searched as a hypothesis, but is not established evidence.",
+        "Resolve pronouns and aliases using explicit context. If identity is ambiguous, preserve the uncertainty and seek disambiguating evidence.",
+        "Do not conflate different people, places, works, or organizations that share a name. Keep entity references consistent between reasoning and the search query."
+      ]
+    },
+    "planning": {
+      "rules": [
+        "Identify the evidence gap that prevents answering the question and choose the next unresolved subgoal.",
+        "Respect dependencies: verify an intermediate entity before looking up an attribute that depends on its identity.",
+        "Use observed results to revise the plan. Avoid repeating a search that cannot resolve a remaining evidence gap."
+      ]
+    },
+    "query": {
+      "rules": [
+        "Express the current search subgoal with the intended entity and relation; preserve relation direction.",
+        "Preserve relevant time, location, and other constraints from the question and verified evidence.",
+        "Do not turn an unverified guess into a hard query restriction. When disambiguation is needed, search for evidence that can distinguish the alternatives."
+      ]
+    },
+    "answer": {
+      "rules": [
+        "Check whether observed evidence is sufficient to answer the original question. Previous assistant reasoning may contain errors; reconcile it with the actual evidence.",
+        "Identify the facts and relations necessary to answer, including intermediate links in multi-hop questions. Related names or partial facts alone are not sufficient.",
+        "Compare each claimed information gap with the evidence already observed. If a previously missing fact is now established, update the reasoning accordingly.",
+        "Distinguish absent information from information expressed in different wording. Do not claim a fact is missing immediately after identifying evidence that supplies it.",
+        "When the evidence resolves the question, answer now. Do not repeat a resolved lookup or search merely to obtain evidence already observed.",
+        "When a necessary fact is missing, ambiguous, or contradicted, identify the specific unresolved fact and search rather than guessing.",
+        "Base the next action on the evidence even if the preceding reasoning incorrectly claims information is missing.",
+        "Give a concise answer to the original question grounded in the observed evidence inside <answer>...</answer>. Continue reasoning inside <think>...</think> without a fixed template."
+      ]
+    }
+  }
+}

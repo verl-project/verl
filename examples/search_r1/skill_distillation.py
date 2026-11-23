@@ -1,6 +1,7 @@
-"""V1 driver and loss integration for static Search-R1 self-teachers."""
+"""Frozen skill self-teachers: overlap-gated forward KL with Reset Support."""
 
 import json
+import math
 import time
 from functools import partial
 from pathlib import Path
@@ -8,44 +9,34 @@ from uuid import uuid4
 
 import torch
 
-from .skill_teachers import (
-    TEACHERS,
-    SkillTokenCodec,
-    beta_at_step,
-    clipped_skill_loss,
-    load_bank,
-    teacher_masks,
-    validate_settings,
-)
+from .skill_distributions import overlap_prefix_gate
+from .skill_teachers import TEACHERS, SkillTokenCodec, beta_at_step, load_bank, teacher_masks, validate_settings
 
 
-def skill_ppo_loss(config, weights, model_output, data, dp_group=None):
-    """Retain the original GRPO/entropy/reference loss, add separate skill losses."""
+def skill_ppo_loss(config, weights, model_output, data, dp_group=None, answer_components=None):
+    """Add forward KL to the unchanged task PPO/reference loss."""
     from verl.utils import tensordict_utils as tu
     from verl.utils.metric import AggregationType, Metric
     from verl.workers.utils.losses import ppo_loss
     from verl.workers.utils.padding import no_padding_2_padding
 
     loss, metrics = ppo_loss(config, model_output, data, dp_group)
-    log_prob = no_padding_2_padding(model_output["log_probs"], data)
     beta = tu.get(data, "skill_beta")
     counts = tu.get(data, "auxiliary_loss_mask_counts")
-    old = data.select("old_log_probs").to_padded_tensor()["old_log_probs"]
-    clip_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
-    clip_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
     for name, weight in weights.items():
-        mask_key, advantage_key = f"skill_{name}_mask", f"skill_{name}_advantages"
-        padded = data.select(mask_key, advantage_key).to_padded_tensor()
-        auxiliary = clipped_skill_loss(
-            log_prob,
-            old,
-            padded[advantage_key],
-            padded[mask_key],
-            counts[mask_key],
-            data["dp_size"],
-            clip_low,
-            clip_high,
-        )
+        per_token = no_padding_2_padding(model_output[f"skill_{name}_forward_kl"], data)
+        components = answer_components if name == "answer" and answer_components else {None: 1.0}
+        auxiliary = per_token.sum() * 0
+        for component, component_weight in components.items():
+            key = f"skill_{name}_{component}_mask" if component else f"skill_{name}_mask"
+            mask = data.select(key).to_padded_tensor()[key].bool()
+            count = counts[key]
+            value = per_token[mask].sum() * data["dp_size"] / count if count > 0 else per_token.sum() * 0
+            auxiliary = auxiliary + component_weight * value
+            if component:
+                metrics[f"skill/{name}/{component}_loss"] = Metric(
+                    value=value.detach(), aggregation=AggregationType.SUM
+                )
         loss = loss + beta * weight * auxiliary
         metrics[f"skill/{name}/loss"] = Metric(value=auxiliary.detach(), aggregation=AggregationType.SUM)
     metrics["skill/beta"] = beta
@@ -53,10 +44,11 @@ def skill_ppo_loss(config, weights, model_output, data, dp_group=None):
 
 
 class SkillTeacherSupervisor:
-    """Scores all three contexts before the actor's first optimizer update.
+    """Score frozen distributions before any update; gates never reset at turns.
 
-    The unchanged actor is the old-policy snapshot; its eval-mode forwards are
-    no-grad. Teacher inputs live in a separate temporary TransferQueue partition.
+    All generated assistant tokens (except chat special tokens) are divergence
+    checkpoints, even outside a teacher's loss scope. Tool/padding cannot trip
+    a gate. Stop state is independent for every teacher and trajectory.
     """
 
     def __init__(self, config):
@@ -65,6 +57,7 @@ class SkillTeacherSupervisor:
         self.bank, self.contexts, self.bank_sha256 = load_bank(self.config.bank_path)
         self.names = ("combined",) if self.config.mode == "combined" else TEACHERS
         self.weights = {name: float(self.config.weights[name]) for name in self.names}
+        self.components = dict(self.config.answer_component_weights) if self.config.mode == "split" else None
         self.codec = None
 
     def initialize(self, trainer):
@@ -78,6 +71,13 @@ class SkillTeacherSupervisor:
             "weights": self.weights,
             "beta": self.config.beta,
             "warmup_steps": self.config.warmup_steps,
+            "objective": self.config.objective,
+            "top_k": self.config.top_k,
+            "min_topk_overlap": self.config.min_topk_overlap,
+            "prefix_fraction": self.config.prefix_fraction,
+            "gate_scope": "all_generated_assistant_tokens_excluding_specials",
+            "gate_action": "exclude_first_failure_and_all_subsequent_tokens_without_turn_reset",
+            "answer_component_weights": self.components,
         }
         path = Path(trainer.config.trainer.default_local_dir) / "skill-teachers.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,12 +85,18 @@ class SkillTeacherSupervisor:
             raise ValueError("Existing run has a different skill bank/objective; use a new output directory")
         path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
         actor_config = omega_conf_to_dataclass(trainer.config.actor_rollout_ref.actor)
-        trainer.actor_rollout_wg.set_loss_fn(partial(skill_ppo_loss, config=actor_config, weights=self.weights))
+        trainer.actor_rollout_wg.set_loss_fn(
+            partial(skill_ppo_loss, config=actor_config, weights=self.weights, answer_components=self.components)
+        )
 
     def update_metadata(self, batch, step):
+        names = [f"skill_{name}_mask" for name in self.names]
+        if self.components:
+            names.extend(f"skill_answer_{component}_mask" for component in self.components)
         batch.extra_info.update(
             skill_beta=beta_at_step(self.config.beta, self.config.warmup_steps, step),
-            auxiliary_loss_mask_names=[f"skill_{name}_mask" for name in self.names],
+            auxiliary_loss_mask_names=names,
+            skill_forward_kl_names=tuple(self.names),
         )
 
     def score(self, trainer, batch, metrics):
@@ -110,116 +116,138 @@ class SkillTeacherSupervisor:
 
         started = time.monotonic()
         data = tq.kv_batch_get(
-            keys=batch.keys,
-            partition_id=batch.partition_id,
-            select_fields=["prompts", "responses", "response_mask", "old_log_probs"],
+            keys=batch.keys, partition_id=batch.partition_id, select_fields=["prompts", "responses", "response_mask"]
         )
-        records, masks, stored = [], [], [{} for _ in batch.keys]
-        think_count = query_count = generated_count = 0
-        old_probs = data["old_log_probs"].unbind()
+        records, scopes, masks, watches = [], [], [], []
+        stored = [{} for _ in batch.keys]
         for i, (prompt, response, generated) in enumerate(
             zip(data["prompts"].unbind(), data["responses"].unbind(), data["response_mask"].unbind(), strict=True)
         ):
-            response_mask = generated.bool()
             is_padding = batch.tags[i].get("is_padding", False)
-            if is_padding:
-                response_mask = torch.zeros_like(response_mask)
-            think, query = self.codec.span_masks(response, response_mask)
-            think_count += int(think.sum())
-            query_count += int(query.sum())
-            generated_count += int(response_mask.sum())
-            masks.append(teacher_masks(think, query, response_mask, self.config.mode))
-            records.append((prompt.tolist(), response, response_mask, is_padding))
-
-        for name in self.names:
-            teacher_started = time.monotonic()
-            fields, tags = [], []
-            for prompt, response, response_mask, is_padding in records:
-                teacher_prompt = torch.tensor(
-                    prompt if is_padding else self.codec.teacher_prompt(prompt, self.contexts[name]), dtype=torch.long
+            generated = torch.zeros_like(generated).bool() if is_padding else generated.bool()
+            scope = self.codec.assistant_masks(response, generated)
+            scopes.append(scope)
+            masks.append(
+                teacher_masks(
+                    scope["think"], scope["query"], generated, self.config.mode, scope["answer"], scope["decision"]
                 )
-                input_ids = torch.cat((teacher_prompt, response))
-                if len(input_ids) > self.config.max_teacher_context_length:
-                    raise ValueError(
-                        f"{name} teacher input has {len(input_ids)} tokens, exceeding "
-                        f"max_teacher_context_length={self.config.max_teacher_context_length}; no truncation allowed"
-                    )
+            )
+            watches.append(generated & torch.tensor([int(t) not in self.codec.special_ids for t in response]))
+            records.append((prompt.tolist(), response, generated, is_padding))
+
+        def collect(name):
+            fields, tags = [], []
+            for prompt, response, generated, is_padding in records:
+                teacher_prompt = torch.tensor(
+                    prompt
+                    if name == "student" or is_padding
+                    else self.codec.teacher_prompt(prompt, self.contexts[name]),
+                    dtype=torch.long,
+                )
+                ids = torch.cat((teacher_prompt, response))
+                if len(ids) > self.config.max_teacher_context_length:
+                    raise ValueError(f"{name} input exceeds max_teacher_context_length; no truncation allowed")
                 fields.append(
                     {
                         "prompts": teacher_prompt,
                         "responses": response,
-                        "input_ids": input_ids,
-                        "position_ids": torch.arange(len(input_ids)),
-                        "response_mask": response_mask,
-                        "loss_mask": response_mask,
+                        "input_ids": ids,
+                        "position_ids": torch.arange(len(ids)),
+                        "response_mask": generated,
+                        "loss_mask": generated,
                     }
                 )
-                tags.append(
-                    {"seq_len": len(input_ids), "prompt_len": len(teacher_prompt), "response_len": len(response)}
-                )
-            partition = f"skill-teacher-{uuid4().hex}"
+                tags.append({"seq_len": len(ids), "prompt_len": len(teacher_prompt), "response_len": len(response)})
+            partition = f"skill-distribution-{uuid4().hex}"
             try:
-                teacher_batch = tq.kv_batch_put(
-                    keys=batch.keys,
-                    partition_id=partition,
-                    tags=tags,
-                    fields=nested_batch(fields),
+                temporary = tq.kv_batch_put(
+                    keys=batch.keys, partition_id=partition, tags=tags, fields=nested_batch(fields)
                 )
-                teacher_batch.extra_info.update(
+                temporary.extra_info.update(
                     calculate_entropy=False,
                     compute_loss=False,
                     temperature=1.0,
                     use_dynamic_bsz=False,
                     micro_batch_size_per_gpu=self.config.teacher_micro_batch_size_per_gpu,
+                    skill_collect_topk=self.config.top_k,
+                    skill_forward_kl_names=(),
                 )
-                output = trainer.actor_rollout_wg.compute_log_prob(teacher_batch)
+                output = trainer.actor_rollout_wg.compute_log_prob(temporary)
                 if len(output) != len(batch):
-                    raise RuntimeError("Teacher scoring changed the batch size")
+                    raise RuntimeError("Skill distribution scoring changed the batch size")
+                keys = ["skill_topk_ids", "skill_topk_logps", "skill_tail_logp"]
                 result = tq.kv_batch_get(
-                    keys=batch.keys,
-                    partition_id=partition,
-                    select_fields=["log_probs", "response_mask"],
+                    keys=batch.keys, partition_id=partition, select_fields=keys + ["response_mask"]
                 )
-                teacher_probs = response_from_nested(result["log_probs"], result["response_mask"]).unbind()
-                gaps = []
-                for i in range(len(batch)):
-                    mask = masks[i][name]
-                    advantage = (teacher_probs[i].float() - old_probs[i].float()).detach()
-                    if advantage.shape != mask.shape or not torch.isfinite(advantage[mask]).all():
-                        raise ValueError("Teacher scores are misaligned or nonfinite")
-                    stored[i][f"skill_{name}_mask"] = mask
-                    stored[i][f"skill_{name}_advantages"] = advantage.masked_fill(~mask, 0)
-                    gaps.append(advantage[mask])
-                values = torch.cat(gaps)
-                metrics[f"skill/{name}/tokens"] = values.numel()
-                metrics[f"skill/{name}/gap_mean"] = values.mean().item() if values.numel() else 0.0
-                metrics[f"skill/{name}/gap_abs_mean"] = values.abs().mean().item() if values.numel() else 0.0
-                metrics[f"skill/{name}/positive_fraction"] = (
-                    (values > 0).float().mean().item() if values.numel() else 0.0
-                )
-                metrics[f"skill/{name}/scoring_seconds"] = time.monotonic() - teacher_started
-                metrics[f"skill/{name}/scoring_tokens"] = sum(tag["seq_len"] for tag in tags)
+                rows = [response_from_nested(result[key], result["response_mask"]).unbind() for key in keys]
+                return list(zip(*rows, strict=True))
             finally:
                 tq.kv_clear(keys=batch.keys, partition_id=partition)
 
-        if self.config.mode != "combined":
-            for other in ("planning", "query"):
-                disagreements, overlaps = 0, 0
-                for record in stored:
-                    overlap = record["skill_entity_mask"] & record[f"skill_{other}_mask"]
-                    product = record["skill_entity_advantages"] * record[f"skill_{other}_advantages"]
-                    disagreements += int(((product < 0) & overlap).sum())
-                    overlaps += int(overlap.sum())
-                metrics[f"skill/entity_{other}_conflict_fraction"] = disagreements / max(1, overlaps)
+        student_started = time.monotonic()
+        student = collect("student")
+        metrics["skill/student/scoring_seconds"] = time.monotonic() - student_started
+        for name in self.names:
+            tick = time.monotonic()
+            teacher = collect(name)
+            overlaps, stops, before_count, after_count, prefix_drops = [], [], 0, 0, 0
+            for i, ((student_ids, _, _), (teacher_ids, logps, tail)) in enumerate(zip(student, teacher, strict=True)):
+                expected = (len(records[i][1]), self.config.top_k)
+                if student_ids.shape != expected or teacher_ids.shape != expected or logps.shape != expected:
+                    raise ValueError("Teacher/student top-k targets are misaligned")
+                if tail.shape != expected[:1] or not torch.isfinite(logps).all() or not torch.isfinite(tail).all():
+                    raise ValueError("Teacher probabilities are misaligned or nonfinite")
+                prefix, overlap, stop = overlap_prefix_gate(
+                    student_ids, teacher_ids, watches[i], self.config.min_topk_overlap
+                )
+                generated = records[i][2]
+                cutoff = math.ceil(int(generated.sum()) * self.config.prefix_fraction)
+                window = generated.long().cumsum(0) <= cutoff
+                base_mask = masks[i][name]
+                mask = base_mask & prefix & window
+                before_count += int(base_mask.sum())
+                after_count += int(mask.sum())
+                prefix_drops += int((base_mask & ~window).sum())
+                overlaps.append(overlap[watches[i]])
+                if watches[i].any():
+                    stops.append(stop)
+                stored[i].update(
+                    {
+                        f"skill_{name}_mask": mask,
+                        f"skill_{name}_ids": teacher_ids.detach(),
+                        f"skill_{name}_logps": logps.detach(),
+                        f"skill_{name}_tail": tail.detach(),
+                    }
+                )
+                if name == "answer" and self.components:
+                    for component, scope in {"think": "think", "decision": "decision", "content": "answer"}.items():
+                        stored[i][f"skill_answer_{component}_mask"] = mask & scopes[i][scope]
+            overlap = torch.cat(overlaps)
+            triggered = [position for position in stops if position >= 0]
+            metrics.update(
+                {
+                    f"skill/{name}/candidate_tokens": before_count,
+                    f"skill/{name}/tokens": after_count,
+                    f"skill/{name}/kept_fraction": after_count / max(1, before_count),
+                    f"skill/{name}/overlap_mean": overlap.mean().item() if overlap.numel() else 0.0,
+                    f"skill/{name}/stopped_trajectories": len(triggered),
+                    f"skill/{name}/stopped_fraction": len(triggered) / max(1, len(stops)),
+                    f"skill/{name}/first_stop_response_index_mean": sum(triggered) / len(triggered)
+                    if triggered
+                    else -1.0,
+                    f"skill/{name}/prefix_window_dropped_tokens": prefix_drops,
+                    f"skill/{name}/scoring_seconds": time.monotonic() - tick,
+                }
+            )
         tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=nested_batch(stored))
-        # Subsequent workers must receive auxiliary columns as well as existing RL data.
         batch.fields = None
         metrics.update(
             {
-                "skill/think_tokens": think_count,
-                "skill/query_tokens": query_count,
-                "skill/generated_tokens": generated_count,
                 "skill/scoring_seconds": time.monotonic() - started,
+                "skill/think_tokens": sum(int(s["think"].sum()) for s in scopes),
+                "skill/query_tokens": sum(int(s["query"].sum()) for s in scopes),
+                "skill/answer_tokens": sum(int(s["answer"].sum()) for s in scopes),
+                "skill/decision_tokens": sum(int(s["decision"].sum()) for s in scopes),
                 "skill/beta": beta_at_step(self.config.beta, self.config.warmup_steps, trainer.global_steps),
             }
         )

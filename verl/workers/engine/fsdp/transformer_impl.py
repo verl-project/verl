@@ -1343,6 +1343,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
         )
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(data=micro_batch, key="distillation_only", default=False)
+        skill_enabled = bool(tu.get(micro_batch, "skill_collect_topk", default=0)) or bool(
+            tu.get(micro_batch, "skill_forward_kl_names", default=[])
+        )
+        if skill_enabled and (use_fused_kernels or self.use_ulysses_sp):
+            raise ValueError("Skill distribution scoring requires unfused logits and Ulysses SP=1")
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1351,6 +1356,17 @@ class FSDPEngineWithLMHead(FSDPEngine):
             )
 
         model_output = {}
+
+        def add_skill_outputs(packed_logits):
+            if not skill_enabled:
+                return
+            from examples.search_r1.skill_distributions import skill_model_outputs
+
+            offsets = input_ids.offsets()
+            # Static packed padding is not a real sequence or response target.
+            outputs = skill_model_outputs(packed_logits[: int(offsets[-1])], micro_batch)
+            for name, values in outputs.items():
+                model_output[name] = torch.nested.nested_tensor_from_jagged(values, offsets)
 
         # Some internal callers construct output_args directly instead of going
         # through prepare_model_inputs. Without the optimization metadata, fall
@@ -1426,7 +1442,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                 if not distillation_only:
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
-                    inplace_backward = True
+                    inplace_backward = not skill_enabled
                     if calculate_entropy:
                         inplace_backward = False
                     log_probs = logprobs_from_logits(
@@ -1434,6 +1450,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         labels=input_ids_rmpad_rolled,
                         inplace_backward=inplace_backward,
                     )
+
+                add_skill_outputs(logits_rmpad)
 
             # gather across the ulysses sp group and drop the packed-sequence padding
             pad_size = output_args["pad_size"]
@@ -1503,8 +1521,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     cu_seqlens = input_ids.offsets()
                     seq_lengths = cu_seqlens.diff()
                     starts = torch.zeros_like(seq_lengths, dtype=torch.int64)
-                    logits = torch.nested.narrow(logits, 1, starts, seq_lengths, layout=torch.jagged)
-                    logits_rmpad = torch.cat([t for t in logits.unbind()])
+                    # Keep a regular differentiable indexing path: older Torch
+                    # cannot backpropagate through narrow(jagged).unbind().
+                    valid = torch.arange(logits.shape[1], device=logits.device)[None, :] < seq_lengths[:, None]
+                    logits_rmpad = logits[valid]
                     input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
 
                     # Mirror the use_remove_padding=True branch (see verl#6293).
@@ -1523,7 +1543,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                     log_probs = None
                     if not distillation_only:
-                        log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
+                        log_probs = logprobs_from_logits(
+                            logits=logits_rmpad,
+                            labels=input_ids_rmpad_rolled,
+                            inplace_backward=not skill_enabled,
+                        )
+                    add_skill_outputs(logits_rmpad)
 
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
                     if not distillation_only:

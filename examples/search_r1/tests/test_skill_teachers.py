@@ -26,7 +26,7 @@ from examples.search_r1.skill_teachers import (
 )
 
 ROOT = Path(__file__).resolve().parents[3]
-BANK = ROOT / "examples/search_r1/skills/static_v1.json"
+BANK = ROOT / "examples/search_r1/skills/static_v2.json"
 
 
 @pytest.fixture(scope="module")
@@ -100,6 +100,14 @@ def test_masks_exclude_answers_tools_and_boundaries(tokenizer):
     assert b"forged" not in selected_bytes(codec, ids, think | query)
     assert not ((think | query) & ~mask.bool()).any()
     assert b"<" not in selected_bytes(codec, ids, think | query)
+    full_scopes = codec.assistant_masks(ids, mask)
+    answer_bytes = selected_bytes(codec, ids, full_scopes["answer"])
+    decisions = selected_bytes(codec, ids, full_scopes["decision"])
+    assert b"France" in answer_bytes and b"forged" not in answer_bytes
+    assert b"search" in decisions and b"answer" in decisions and b"<" not in decisions
+    answer_mask = teacher_masks(think, query, mask, "split", full_scopes["answer"], full_scopes["decision"])["answer"]
+    assert torch.equal(answer_mask, think | full_scopes["answer"] | full_scopes["decision"])
+    assert not (answer_mask & ~mask.bool()).any()
     scopes = teacher_masks(think, query, mask, "split")
     assert torch.equal(scopes["entity"], think | query)
     assert torch.equal(scopes["planning"], think)
@@ -227,7 +235,7 @@ def test_composed_config_and_bank():
     config = settings()
     validate_settings(config)
     bank, contexts, digest = load_bank(BANK)
-    assert len(digest) == 64 and bank["version"] == "static-v1"
+    assert len(digest) == 64 and bank["version"] == "static-v2"
     assert set(contexts) == {*TEACHERS, "combined"}
     assert beta_at_step(0.01, 10, 1) == 0.001
     assert beta_at_step(0.01, 10, 100) == 0.01
@@ -273,6 +281,12 @@ def test_manifest_loss_installation_and_resume_schedule(tokenizer, tmp_path):
         ("skill_distillation.beta", -0.1),
         ("skill_distillation.beta", float("nan")),
         ("skill_distillation.mode", "bad"),
+        ("skill_distillation.top_k", 0),
+        ("skill_distillation.min_topk_overlap", 1.1),
+        ("skill_distillation.prefix_fraction", 0),
+        ("skill_distillation.answer_component_weights.think", -1),
+        ("sd_search.enabled", True),
+        ("turn_hidden_diversity.enabled", True),
     ],
 )
 def test_unsupported_config_rejected(path, value):
@@ -339,6 +353,8 @@ def scoring_fixture(tokenizer, monkeypatch, mode="split", fail=False):
     )
     # A synthetic padding row must not be parsed as ChatML or contribute a loss.
     prompts, responses, masks = [prompt, torch.tensor([0, 0])], [response, torch.tensor([0])], [mask, torch.tensor([0])]
+    config.skill_distillation.top_k = 4
+    config.skill_distillation.min_topk_overlap = 0.0
     old_probs = [causal_scores(torch.cat((p, r)))[len(p) - 1 : -1] for p, r in zip(prompts, responses, strict=True)]
     source = TensorDict(
         {
@@ -369,7 +385,15 @@ def scoring_fixture(tokenizer, monkeypatch, mode="split", fail=False):
         torch.testing.assert_close(causal_scores(full)[:-4], causal_scores(altered)[:-4])
         if fail:
             raise RuntimeError("injected scoring failure")
-        td["log_probs"] = nt([causal_scores(row) for row in td["input_ids"].unbind()])
+        from examples.search_r1.skill_distributions import topk_distribution
+
+        outputs = []
+        for row in td["input_ids"].unbind():
+            state = torch.sin((row % 11).float().cumsum(0) / 7)
+            logits = state[:, None] * torch.arange(11)[None, :].float() / 11
+            outputs.append(topk_distribution(logits, batch.extra_info["skill_collect_topk"]))
+        for j, key in enumerate(["skill_topk_ids", "skill_topk_logps", "skill_tail_logp"]):
+            td[key] = nt([row[j] for row in outputs])
         return batch
 
     trainer = SimpleNamespace(global_steps=3, actor_rollout_wg=SimpleNamespace(compute_log_prob=score))
@@ -377,29 +401,36 @@ def scoring_fixture(tokenizer, monkeypatch, mode="split", fail=False):
     return supervisor, trainer, batch, queue, calls, source
 
 
-@pytest.mark.parametrize("mode,teacher_count", [("split", 3), ("combined", 1), ("all", 3)])
+@pytest.mark.parametrize("mode,teacher_count", [("split", 4), ("combined", 1), ("all", 4)])
 def test_teacher_driver_alignment_masks_cleanup_and_frozen_targets(tokenizer, monkeypatch, mode, teacher_count):
     supervisor, trainer, batch, queue, calls, source = scoring_fixture(tokenizer, monkeypatch, mode)
     original = source.clone()
     metrics = {}
     assert supervisor.score(trainer, batch, metrics) is batch
-    assert len(calls) == len(queue.cleared) == teacher_count
+    assert len(calls) == len(queue.cleared) == teacher_count + 1
     assert set(queue.partitions) == {"train"}
     for key in ("prompts", "responses", "old_log_probs", "advantages"):
         for before, after in zip(original[key].unbind(), source[key].unbind(), strict=True):
             torch.testing.assert_close(before, after)
-    for name, scored in zip(supervisor.names, calls, strict=True):
+    for name, scored in zip(supervisor.names, calls[1:], strict=True):
         mask = source[f"skill_{name}_mask"].unbind()[0]
-        teacher = causal_scores(scored["input_ids"].unbind()[0])[len(scored["prompts"].unbind()[0]) - 1 : -1]
-        expected = teacher - original["old_log_probs"].unbind()[0]
-        gap = source[f"skill_{name}_advantages"].unbind()[0]
-        torch.testing.assert_close(gap[mask], expected[mask])
-        assert not gap.requires_grad and not gap[~mask].any()
+        actual = source[f"skill_{name}_logps"].unbind()[0]
+        ids = source[f"skill_{name}_ids"].unbind()[0]
+        from examples.search_r1.skill_distributions import topk_distribution
+
+        full = scored["input_ids"].unbind()[0]
+        state = torch.sin((full % 11).float().cumsum(0) / 7)
+        logits = state[:, None] * torch.arange(11)[None, :].float() / 11
+        expected_ids, expected, _ = topk_distribution(logits, 4)
+        plen = len(scored["prompts"].unbind()[0])
+        torch.testing.assert_close(actual, expected[plen - 1 : -1])
+        torch.testing.assert_close(ids, expected_ids[plen - 1 : -1])
+        assert not actual.requires_grad
         assert not source[f"skill_{name}_mask"].unbind()[1].any()
         assert metrics[f"skill/{name}/tokens"] == int(mask.sum())
     supervisor.update_metadata(batch, 3)
     assert batch.extra_info["skill_beta"] == pytest.approx(0.003)
-    assert len(batch.extra_info["auxiliary_loss_mask_names"]) == teacher_count
+    assert len(batch.extra_info["auxiliary_loss_mask_names"]) == teacher_count + (3 if mode == "split" else 0)
 
 
 def test_teacher_failure_cleanup_and_no_partial_student_write(tokenizer, monkeypatch):
@@ -407,7 +438,7 @@ def test_teacher_failure_cleanup_and_no_partial_student_write(tokenizer, monkeyp
     with pytest.raises(RuntimeError, match="injected"):
         supervisor.score(trainer, batch, {})
     assert len(queue.cleared) == 1 and set(queue.partitions) == {"train"}
-    assert "skill_entity_advantages" not in source
+    assert "skill_entity_logps" not in source
 
 
 def test_teacher_context_overflow_fails_without_truncation(tokenizer, monkeypatch):
@@ -416,6 +447,47 @@ def test_teacher_context_overflow_fails_without_truncation(tokenizer, monkeypatc
     with pytest.raises(ValueError, match="no truncation"):
         supervisor.score(trainer, batch, {})
     assert not calls and set(queue.partitions) == {"train"}
+
+
+def test_thinking_divergence_stops_entity_before_query_and_answer_independently(tokenizer, monkeypatch):
+    supervisor, trainer, batch, queue, calls, source = scoring_fixture(tokenizer, monkeypatch)
+    supervisor.config.min_topk_overlap = 0.5
+    original_score = trainer.actor_rollout_wg.compute_log_prob
+    frozen = []
+
+    def controlled_score(temporary):
+        result = original_score(temporary)
+        td = queue.partitions[temporary.partition_id]
+        plen = len(td["prompts"].unbind()[0])
+        rows = [row.clone() for row in td["skill_topk_ids"].unbind()]
+        rlen = len(td["responses"].unbind()[0])
+        if not frozen:
+            frozen.append(rows[0][plen - 1 : plen + rlen - 1].clone())
+        else:
+            # All teachers agree with the frozen student's support, except one
+            # entity token inside the first think. Later tokens agree again.
+            rows[0][plen - 1 : plen + rlen - 1] = frozen[0]
+            if len(calls) == 2:
+                scope = supervisor.codec.assistant_masks(td["responses"].unbind()[0], td["response_mask"].unbind()[0])
+                index = int(scope["think"].nonzero()[1])
+                excluded = set(frozen[0][index].tolist())
+                replacement = [i for i in range(11) if i not in excluded][:4]
+                rows[0][plen - 1 + index] = torch.tensor(replacement)
+        td["skill_topk_ids"] = nt(rows)
+        return result
+
+    trainer.actor_rollout_wg.compute_log_prob = controlled_score
+    metrics = {}
+    supervisor.score(trainer, batch, metrics)
+    scope = supervisor.codec.assistant_masks(source["responses"].unbind()[0], source["response_mask"].unbind()[0])
+    entity = source["skill_entity_mask"].unbind()[0]
+    assert entity.any() and not entity[scope["query"]].any()
+    stop = int(metrics["skill/entity/first_stop_response_index_mean"])
+    assert not entity[stop:].any()
+    assert source["skill_query_mask"].unbind()[0][scope["query"]].all()
+    assert source["skill_answer_mask"].unbind()[0][scope["answer"]].all()
+    assert metrics["skill/entity/stopped_trajectories"] == 1
+    assert metrics["skill/answer/stopped_trajectories"] == 0
 
 
 def test_actual_combined_loss_preserves_grpo_and_has_no_answer_tool_auxiliary_gradient():
@@ -436,7 +508,6 @@ def test_actual_combined_loss_preserves_grpo_and_has_no_answer_tool_auxiliary_gr
             "old_log_probs": torch.full((1, 5), -1.0),
             "advantages": torch.ones(1, 5),
             "skill_entity_mask": torch.tensor([[1, 1, 0, 0, 0]], dtype=torch.bool),
-            "skill_entity_advantages": torch.tensor([[2.0, -3.0, 0, 0, 0]]),
         },
         batch_size=[1],
     )
@@ -449,15 +520,57 @@ def test_actual_combined_loss_preserves_grpo_and_has_no_answer_tool_auxiliary_gr
         auxiliary_loss_mask_counts={"skill_entity_mask": 2},
     )
     logits = torch.full((7,), -1.0, requires_grad=True)
-    output = {"log_probs": nt([logits])}
+    kl_terms = torch.arange(7).float().requires_grad_()
+    output = {"log_probs": nt([logits]), "skill_entity_forward_kl": nt([kl_terms])}
     base, _ = ppo_loss(config, output, data)
     combined, metrics = skill_ppo_loss(config, {"entity": 1.0}, output, data)
     base_gradient = torch.autograd.grad(base, logits, retain_graph=True)[0]
     full_gradient = torch.autograd.grad(combined, logits, retain_graph=True)[0]
     delta = full_gradient - base_gradient
-    torch.testing.assert_close(delta, torch.tensor([0.0, -0.1, 0.15, 0, 0, 0, 0]))
+    torch.testing.assert_close(delta, torch.zeros(7))
+    torch.testing.assert_close(
+        torch.autograd.grad(combined, kl_terms, retain_graph=True)[0],
+        torch.tensor([0.0, 0.05, 0.05, 0.0, 0.0, 0.0, 0.0]),
+    )
     assert "skill/entity/loss" in metrics
     tu.assign_non_tensor(data, skill_beta=0.0)
     disabled, _ = skill_ppo_loss(config, {"entity": 1.0}, output, data)
     torch.testing.assert_close(disabled, base)
     torch.testing.assert_close(torch.autograd.grad(disabled, logits)[0], base_gradient)
+
+
+def test_answer_component_gradients_use_separate_global_mask_counts(monkeypatch):
+    import verl.workers.utils.losses as base
+    from verl.utils import tensordict_utils as tu
+
+    values = torch.ones(5, requires_grad=True)
+    monkeypatch.setattr(base, "ppo_loss", lambda *args: (values.sum() * 0, {}))
+    data = TensorDict(
+        {
+            "prompts": nt([torch.tensor([1])]),
+            "responses": nt([torch.arange(4)]),
+            "skill_answer_think_mask": torch.tensor([[1, 1, 0, 0]], dtype=torch.bool),
+            "skill_answer_decision_mask": torch.tensor([[0, 0, 1, 0]], dtype=torch.bool),
+            "skill_answer_content_mask": torch.tensor([[0, 0, 0, 1]], dtype=torch.bool),
+        },
+        batch_size=[1],
+    )
+    tu.assign_non_tensor(
+        data,
+        dp_size=2,
+        skill_beta=1.0,
+        auxiliary_loss_mask_counts={
+            "skill_answer_think_mask": 4,
+            "skill_answer_decision_mask": 2,
+            "skill_answer_content_mask": 2,
+        },
+    )
+    loss, _ = skill_ppo_loss(
+        None,
+        {"answer": 1.0},
+        {"skill_answer_forward_kl": nt([values])},
+        data,
+        answer_components={"think": 0.1, "decision": 1.0, "content": 1.0},
+    )
+    loss.backward()
+    torch.testing.assert_close(values.grad, torch.tensor([0.05, 0.05, 1.0, 1.0, 0.0]))

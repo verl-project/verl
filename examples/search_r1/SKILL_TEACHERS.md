@@ -1,174 +1,153 @@
-# Search-R1 with three static skill-conditioned self-teachers
+# Search-R1: four skill self-teachers with gated forward KL
 
-This experimental task retains the existing Search-R1 rollout, EM outcome
-reward, GRPO objective and reference-policy regularization. It adds sampled-token
-PPO-style auxiliary losses. No effectiveness or GPU throughput claim is implied
-by the CPU tests.
+This recipe keeps the Search-R1 multi-turn rollout, EM outcome reward, GRPO and
+reference-policy regularization. Teachers use the actor's unchanged pre-update
+weights with separate static system rules. It adds distributional forward KL,
+not the previous sampled-token log-prob-gap PPO auxiliary loss. No effectiveness
+or GPU throughput claim is implied by CPU verification.
 
 ## Run
 
-Use the same prepared data, retriever and GPU image as [the baseline](README.md).
-From the `verl` root:
+From the `verl` root, using the prepared model, data and retriever:
 
 ```bash
 bash examples/search_r1/run_skill_grpo.sh
-```
 
-A five-step check (this starts training when executed in the GPU runtime):
-
-```bash
-TOTAL_STEPS=5 bash examples/search_r1/run_skill_grpo.sh \
-  trainer.test_freq=-1 trainer.save_freq=5
-```
-
-Prepare a command without starting the retriever, Ray or GPU work:
-
-```bash
+# Prepare the command without starting retrieval, Ray or training.
 DRY_RUN=1 TRAIN_PYTHON=../.envs/search-r1-tests/bin/python \
   bash examples/search_r1/run_skill_grpo.sh
 ```
 
-`command.json` is saved to `RUN_DIR`. The script inherits all baseline environment
-overrides (including `MODEL_PATH`, `N_GPUS`, `DATA_DIR`, `PPO_MICRO_BATCH_SIZE`,
-`TOTAL_STEPS`, `START_RETRIEVER`). The default output prefix is `search-r1-skills`.
-The launcher does not submit cluster jobs.
+The launcher inherits baseline overrides such as `MODEL_PATH`, `N_GPUS`,
+`TOTAL_STEPS`, `DATA_DIR`, `RUN_DIR`, and `START_RETRIEVER`. It does not submit
+cluster jobs. Use the original Qwen2.5-3B-Instruct path when a fresh run is wanted;
+changing this objective does not itself change the model initialization.
 
-## Objective and teacher scopes
+## Teacher scopes
 
-| Teacher | Guidance | Auxiliary tokens in `split` mode |
+| Teacher | Guidance | Auxiliary loss tokens in split mode |
 | --- | --- | --- |
-| Entity | Grounding, identity, aliases, disambiguation | think + search |
-| Planning | Evidence gaps, subgoals, dependencies | think |
-| Query | Entities, relation direction, time and conditions | search |
+| Entity | Identity, aliases and grounding | think + search content |
+| Planning | Evidence gaps and dependencies | think content |
+| Query | Query entities, relations and constraints | search content |
+| Answer | Evidence sufficiency, stopping, grounded answers | think + action decision + answer content |
 
-`query` in the algorithm corresponds to `<search>...</search>` in this recipe.
-Each teacher receives a separate static rule package in the system message.
-All use the unchanged actor checkpoint before the first optimizer update of the
-current synchronous batch. For every sampled token,
+Answer's three components are separately normalized over their global optimizer
+mini-batch mask counts, with default weights `think=0.1`, `decision=1`, `content=1`.
+The decision mask includes the word tokens inside opening `<search>` and
+`<answer>` tags, including decisions on trajectories that only search. Closing
+tags, tool observations and chat-boundary tokens are not split-mode targets.
+All parsing uses original generated token IDs and byte offsets; ambiguous or
+malformed spans are excluded, without retokenizing the student trajectory.
+
+`combined` uses one teacher with all four rule packages and the union of the
+split scopes. `all` is an ablation that supervises all generated assistant tokens.
+Both still use the overlap gate. The three old rule packages in
+[`skills/static_v2.json`](skills/static_v2.json) are identical to `static_v1.json`;
+only the answer package is added. The old bank remains as historical evidence,
+but the four-teacher implementation requires the new schema and a new run folder.
+
+## Reliable-prefix gate
+
+Before any actor update, score the same sampled trajectory under the original
+student context and each teacher's context. At each generated assistant token,
+let `S` and `T` be student and teacher top-k vocabulary IDs. Overlap is
 
 ```
-A_k = stop_gradient(log p_old(token | actual_history, skill_k)
-                    - log p_old(token | actual_history))
-L_k = -sum(mask_k * min(ratio * A_k, clipped_ratio * A_k)) / N_k
-L = original_GRPO_loss + beta(step) * sum(weight_k * L_k)
+rho_t = |S_t intersection T_t| / k
 ```
 
-The student never sees skills. Teacher scoring runs in no-grad eval mode, one
-context at a time on the actor workers; three additional resident teacher models
-are unnecessary. All teacher advantages are materialized before optimization
-and stay fixed through PPO epochs. The next rollout uses the updated checkpoint.
-The frozen reference policy is still separate from these old-policy teachers.
+Defaults are `top_k=32`, `min_topk_overlap=0.5`. Equality is accepted: 16 shared
+IDs out of 32 continue; 15 stop. Once `rho_t < 0.5`, exclude that token and the
+entire remaining trajectory from that teacher's loss. Earlier eligible tokens
+remain supervised. The gate does not reset at tool calls, XML spans or assistant
+turns. It resets for each new trajectory and is independent for each teacher.
 
-`N_k` is each teacher's token count across the actual optimizer mini-batch and
-all data-parallel ranks, calculated before micro-batch splitting. The local loss
-is multiplied by DP size to compensate for averaged distributed gradients.
-This preserves separate normalization under gradient accumulation, variable
-sequence lengths and multiple optimizer mini-batches. Empty scopes have zero
-auxiliary loss. The existing GRPO reduction is unchanged.
+The gate watches *all generated assistant tokens except chat special tokens*,
+even when a teacher's loss scope is narrower. Thus thinking divergence can stop
+a query/answer teacher before its first query/answer target. Tool/context tokens
+and synthetic batch-padding rows never trigger the gate and never receive loss.
+A stopped teacher does not stop rollout generation, the task GRPO loss, or other
+teachers. Full teacher forwards are still performed to compute gate decisions;
+this gate skips supervision, not necessarily inference compute.
 
-These are clipped optimization surrogates, not exact full-trajectory KL losses.
-The sampled log-probability gap measures a skill-induced preference, not verified
-token correctness. Negative gaps are retained; final failure does not reverse
-the teacher signal. Ratios use the same numerical log-ratio bounds as vanilla
-PPO in this repository; no group normalization is applied to skill advantages.
+Optionally restrict supervision to the first fraction of generated tokens with
+`prefix_fraction`. Its denominator counts assistant-generated tokens, not tool
+observations. The default is `1.0`, so late-turn answer supervision remains
+possible until overlap diverges. Set `prefix_fraction=0.2` for a paper-inspired
+prefix ablation; this can exclude every final answer in a long search trajectory.
 
-## Alignment and information boundaries
+## Forward KL and O2PD provenance
 
-- Preserve original prompt and response token IDs. Insert static teacher rules
-  into the existing ChatML system message, or prepend one if absent. Never
-  decode/re-encode the student response for scoring.
-- Forward the whole trajectory through the ordinary causal LM. A query sees its
-  preceding student think, including mistakes. Future evidence/answers are not
-  copied into the teacher prompt or exposed through bidirectional attention.
-- Compute span masks only within sampled assistant runs, using byte offsets of
-  Qwen BPE pieces. Tool text, inserted chat boundaries, XML delimiter tokens and
-  tokens crossing a delimiter/content boundary have no auxiliary loss.
-- In `split` and `combined`, answer and untagged content retain only the baseline
-  objective. Truncated open think/search spans are supervised up to the end of
-  their assistant run. Nested or mismatched tags disable auxiliary supervision
-  for that run, while GRPO still trains it.
-- Synthetic padding rows have no auxiliary loss. Overlong teacher contexts fail
-  explicitly instead of dropping history. Teacher data use a temporary queue
-  partition that is cleared even when scoring fails.
+Source: [O2PD, arXiv:2611.07731v1](https://arxiv.org/html/2611.07731), section 4.2
+and appendix E. This implementation uses its overlap definition and Reset
+Support at the **forward-KL endpoint**. For teacher top-k support `T`, construct
+normalized distributions on `T` plus a single tail/reset atom:
 
-## Configuration and ablations
+```
+P(a) = teacher_probability(a),  Q(a) = student_probability(a)   for a in T
+P(r) = sum_{a outside T} P(a), Q(r) = sum_{a outside T} Q(a)
+L = sum_{a in T plus r} P(a) [log P(a) - log Q(a)]
+```
 
-The Hydra group is
-[`skill_distillation/search_r1.yaml`](../../verl/trainer/config/skill_distillation/search_r1.yaml).
-Defaults are beta `0.01`, linear warmup `10` steps, all teacher weights `1`, teacher
-scoring micro-batch `4` per GPU and teacher context cap `6144` tokens. These are
-starting values, not tuned hyperparameters. The teacher scoring micro-batch is
-independent of the baseline old-policy micro-batch.
+This is `KL(teacher || student)`. Student probabilities are normalized against
+the full vocabulary. Teacher top-k and tail targets are detached and frozen for
+the optimizer update. Tail log-probabilities are computed by a masked logsumexp,
+not by subtracting a rounded top-k mass from one. The result is a normalized
+categorical forward KL, not a renormalized-top-k or unnormalized truncated sum.
+It aggregates the vocabulary tail, so it is a coarsening/lower bound of full
+vocabulary forward KL rather than exact per-vocabulary KL.
+
+The total loss is the existing GRPO/reference/entropy objective plus
+`beta * sum_teacher(weight * forward_KL_teacher)`. There is no auxiliary PPO
+ratio, sampled-token advantage, adaptive alpha or reverse KL in this extension.
+The baseline reference regularizer retains its separately configured objective.
+DP/global token counts and gradient accumulation scaling are retained.
+
+Differences from full O2PD: the paper uses k=16, a 20% prefix and adaptive
+alpha/support switching. Here the requested defaults are k=32, a permanent
+low-overlap stop, and pure forward KL with Reset Support for every retained
+position. No percentile support switch or reverse-KL branch is implemented.
+Optimizer, GRPO groups, retrieval and dataset settings are not copied from its
+math-only training recipe.
+
+## Configuration and implementation limits
 
 ```bash
-# Three teachers with separate scopes (default).
-bash examples/search_r1/run_skill_grpo.sh skill_distillation.mode=split
-
-# One teacher containing all rules, supervising think + query.
-bash examples/search_r1/run_skill_grpo.sh skill_distillation.mode=combined
-
-# Ablation: all three teachers supervise ALL generated assistant tokens,
-# including answer and markup. Tool/context tokens still never receive loss.
-bash examples/search_r1/run_skill_grpo.sh skill_distillation.mode=all
-
-# Original baseline, without teacher scoring overhead.
-bash examples/search_r1/run_grpo.sh
-
-# Override overall strength, schedule, a teacher weight and scoring memory use.
 bash examples/search_r1/run_skill_grpo.sh \
-  skill_distillation.beta=0.02 skill_distillation.warmup_steps=20 \
-  skill_distillation.weights.planning=0.5 \
-  skill_distillation.teacher_micro_batch_size_per_gpu=2
+  skill_distillation.top_k=32 \
+  skill_distillation.min_topk_overlap=0.5 \
+  skill_distillation.prefix_fraction=1.0 \
+  skill_distillation.answer_component_weights.think=0.1
 ```
 
-`combined` has one scoring pass, the other modes have three. These are not
-compute-matched experiments by default: report scoring tokens, wall time and
-total training cost. `beta=0` still scores teachers (useful for overhead checks);
-`skill_distillation.enabled=False` disables the entire extension.
+The recipe requires synchronous V1, FSDP/FSDP2, parameter sync every update,
+Ulysses sequence-parallel size 1, unfused logits and temperature 1. Both
+remove-padding and padded-model paths use the same causally aligned distribution
+hook. Static packed padding is stripped. Logit processing is chunked and KL
+reductions are checkpointed so FP32 vocabulary buffers are not retained per
+teacher for backward. External OPD, SD hindsight and turn-hidden loss extensions
+are rejected if enabled simultaneously because they install another actor loss.
 
-The first implementation requires synchronous V1, FSDP/FSDP2, one parameter sync
-per rollout update, Search-R1 with a Qwen ChatML tokenizer, and untruncated
-sampling at temperature 1. It rejects simultaneous external-teacher OPD and
-old-policy log-probability bypass. Do not enable it with the legacy V0 entrypoint.
+Default split mode scores one student distribution and four teacher contexts
+before every update, in addition to the existing old-policy log-prob pass. The
+extra scoring and KL gradient cost must be measured before a long run.
 
-## Bank, checkpoints and diagnostics
+`checkpoints/skill-teachers.json` records the bank hash, objective, gate parameters,
+prefix fraction, scopes and component weights. Resuming a directory with a
+different objective or gate fails. A previous reverse-style skill run must use a
+new output directory for this objective; frozen output snapshots remain intact.
 
-[`skills/static_v1.json`](skills/static_v1.json) contains hand-written general
-rules. It contains no dataset trajectories or answers and does not retrieve or
-update skills online. Review/edit the rules before launching a new experiment.
-`skill_distillation.bank_path` can select another file with the same schema.
-Trajectory-derived replacements should use disjoint construction questions and
-exclude source questions and near-duplicates from direct reuse.
+## Metrics and verification
 
-On initialization, `checkpoints/skill-teachers.json` records the full bank,
-SHA-256, mode, weights and schedule. Reusing an output directory with a different
-bank/objective fails. Resume uses the restored trainer step for beta warmup and
-the restored actor for teachers; there is no separate teacher checkpoint.
+For each teacher, record candidate/retained token counts, retained fraction,
+mean top-k overlap, stopped trajectories/fraction, mean first stop response index,
+prefix-window dropped tokens, scoring time and actor forward-KL loss. Answer
+component losses are reported separately. These are distribution diagnostics,
+not evidence that the teacher's factual judgment is correct.
 
-Logged diagnostics include:
-
-- `skill/{teacher}/tokens`, `gap_mean`, `gap_abs_mean`, `positive_fraction`;
-- `skill/{teacher}/scoring_seconds`, `scoring_tokens` and total scoring time;
-- `skill/entity_planning_conflict_fraction` and `entity_query_conflict_fraction`;
-- `skill/think_tokens`, `query_tokens`, `generated_tokens`, `beta`;
-- actor-side `skill/{teacher}/loss` (the engine prefixes these with `actor/`).
-
-These diagnostics do not measure actual entity, plan or query errors. Those
-require an independently specified evaluator or annotation protocol, alongside
-final EM, search count and cost. The baseline retains final-answer EM evaluation.
-
-## CPU verification
-
-From the parent directory:
-
-```bash
-PYTHONPATH="$PWD/verl" .envs/search-r1-tests/bin/python -m pytest \
-  verl/examples/search_r1/tests -q -o addopts=''
-```
-
-Tests cover the real tokenizer, noncanonical BPE, Unicode, malformed/truncated
-spans, forged tags in tool results, original-token preservation, causal scoring
-alignment, teacher cleanup and padding, detached targets, clipping gradients,
-normalization under DP/micro-batch splits, baseline equivalence at beta zero and
-Hydra configuration. GPU memory, distributed FSDP and real reward improvements
-must be checked in the training image.
+CPU tests cover strict threshold equality, permanent stops across turns,
+independent teachers, tool/padding exclusion, answer/decision masks, true
+forward-KL values/gradients including the tail, saturated distributions, frozen
+targets, zero-mask gradients, mini-batch normalization, causal shifts and both
+FSDP output paths. GPU distributed training remains a separate validation step.
