@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from dataclasses import is_dataclass
 from typing import Any, Optional
 
@@ -115,6 +116,66 @@ def _validate_score_centering_config(config: DictConfig) -> None:
         raise ValueError("score centering requires stochastic training rollouts with temperature > 0.")
     if (config.get("distillation") or {}).get("enabled", False):
         raise ValueError("score centering cannot be combined with distillation.")
+
+
+# Role profiler blocks that a worker can read. `global_profiler` only says *when* and *with which
+# tool* to collect; each role's own `profiler.enable` is what decides *whether* it does. A run that
+# sets only one side starts, trains to completion, and produces no trace and no error.
+_PROFILER_ROLE_KEYS = (
+    "actor_rollout_ref.actor.profiler.enable",
+    "actor_rollout_ref.ref.profiler.enable",
+    "actor_rollout_ref.rollout.profiler.enable",
+    "critic.profiler.enable",
+)
+
+
+def _select_profiler_field(config: DictConfig, key: str, default: Any) -> Any:
+    """Read a profiler config value, tolerating schemas that do not define it at all."""
+    try:
+        return OmegaConf.select(config, key, default=default)
+    except Exception:  # unresolvable interpolation or missing parent node
+        return default
+
+
+def _validate_profiler_config(config: DictConfig) -> None:
+    """Warn about profiler configurations that silently collect nothing.
+
+    ``global_profiler.steps`` and the per-role ``profiler.enable`` are two halves of one switch that
+    neither validates against the other. ``steps`` only decides on *which* steps the trainer calls
+    ``start_profile``/``stop_profile``; every worker then gates that call on its own ``enable``. Arm
+    the trigger with no role enabled and the trainer spends the whole run driving calls that every
+    worker discards -- no trace, no error, no log line saying why.
+
+    The reverse direction (``enable`` with ``steps: null``) is deliberate and documented, so it is
+    not reported: that is how code-instrumented collection works, where the user calls the profiler
+    API from their own script and ``global_profiler.steps`` must stay null to avoid a second,
+    conflicting profiler.
+    """
+    steps = _select_profiler_field(config, "global_profiler.steps", None)
+    tool = _select_profiler_field(config, "global_profiler.tool", None)
+    # An empty step list schedules nothing, exactly like null.
+    has_steps = bool(steps)
+    enabled_roles = [key for key in _PROFILER_ROLE_KEYS if bool(_select_profiler_field(config, key, False))]
+
+    if not has_steps:
+        # Manual instrumentation, or not profiling at all. Both are valid.
+        return
+
+    if not enabled_roles:
+        warnings.warn(
+            f"global_profiler.steps={list(steps)} schedules profiling but no role enables it: "
+            f"{', '.join(_PROFILER_ROLE_KEYS)} are all False, so every worker skips the trainer's "
+            "start/stop_profile calls and no trace is written. Set "
+            "actor_rollout_ref.actor.profiler.enable=True (rollout and ref follow the actor) to collect.",
+            stacklevel=2,
+        )
+    elif tool is None:
+        warnings.warn(
+            "global_profiler.tool is null while profiling is enabled and steps are configured. "
+            "DistProfiler falls back to a no-op backend for an unknown tool, so those steps produce no "
+            "trace. Set global_profiler.tool to one of: nsys, npu, torch, torch_memory, precision_debugger.",
+            stacklevel=2,
+        )
 
 
 def validate_config(
@@ -246,5 +307,7 @@ def validate_config(
         from verl.workers.rollout.vllm_rollout.utils import get_vllm_max_lora_rank
 
         get_vllm_max_lora_rank(lora_rank)
+
+    _validate_profiler_config(config)
 
     print("[validate_config] All configuration checks passed successfully!")

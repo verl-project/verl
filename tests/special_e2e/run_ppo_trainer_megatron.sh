@@ -159,7 +159,14 @@ SKIP_TOKENIZER_INIT="True"
 OPTIM_MEMORY_EFFICIENT=${OPTIM_MEMORY_EFFICIENT:-False}
 
 PROFILE_ENABLE=${PROFILE_ENABLE:-False}
-PROFILE_STEPS=${PROFILE_STEPS:-[1]}
+# The trainer triggers profiling from global_profiler.steps, but each worker only records when its
+# own profiler.enable is set -- which PROFILE_ENABLE controls below. Arming the step list while
+# leaving every role disabled schedules a trigger nothing answers, so keep it empty in that case.
+if [ "$PROFILE_ENABLE" = "True" ]; then
+    PROFILE_STEPS=${PROFILE_STEPS:-[1]}
+else
+    PROFILE_STEPS=null
+fi
 PROFILE_RANKS_ALL=${PROFILE_RANKS_ALL:-True}
 PROFILE_RANKS=${PROFILE_RANKS:-[0,1,2,3]}
 DISCRETE=${DISCRETE:-True}  # or True
