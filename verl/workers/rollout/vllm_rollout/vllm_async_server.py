@@ -421,7 +421,12 @@ class vLLMHttpServer:
             dp_args = {
                 "data_parallel_size": self.config.data_parallel_size,
                 "data_parallel_size_local": data_parallel_size_local,
-                "data_parallel_start_rank": self.node_rank * data_parallel_size_local,
+                # Let vLLM infer DP rank from node_rank for multi-node internal LB.
+                # Supplying start_rank makes vLLM 0.30 infer hybrid/external LB,
+                # which is incompatible with the remote headless engines below.
+                "data_parallel_start_rank": (
+                    None if self.nnodes > 1 else self.node_rank * data_parallel_size_local
+                ),
                 "data_parallel_address": self._master_address,
                 "data_parallel_rpc_port": self._dp_rpc_port,
             }
@@ -906,7 +911,10 @@ class vLLMHttpServer:
             await self.engine.reset_prefix_cache(reset_connector=True)
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
-            await self.engine.wake_up(tags=self._get_wake_up_tags())
+            wake_tags = self._get_wake_up_tags()
+            if os.environ.get("VERL_VLLM_SLEEP_LEVEL") == "2":
+                wake_tags = tags or wake_tags
+            await self.engine.wake_up(tags=wake_tags)
             # reset_connector=True drops any attached external KV store
             # (e.g. MooncakeStoreConnector) whose entries were computed
             # against the previous weights. No-op success when no connector
@@ -922,7 +930,10 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            # Keep the historical default; explicit level 2 is restored by
+            # the colocated actor's full weight sync before KV graph recapture.
+            level = self._resolve_sleep_level() if os.environ.get("VERL_VLLM_SLEEP_LEVEL") else 1
+            await self.engine.sleep(level=level)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
@@ -969,11 +980,22 @@ class vLLMHttpServer:
     async def start_profile(self, **kwargs):
         if self.node_rank != 0:
             return
+        if os.environ.get("KIMI_PROFILE_PLAN_ROOT"):
+            step = int(kwargs.pop("profile_step"))
+            self._kimi_profile_selected = step == 13 or self.replica_rank in (0, 1)
+            if self._kimi_profile_selected:
+                await self.engine.start_profile(profile_prefix=f"k31step{step}_base{self.replica_rank * self.replica_world_size}")
+            return
+        kwargs.pop("profile_step", None)
         if self._should_profile():
             await self.engine.start_profile(**kwargs)
 
     async def stop_profile(self):
         if self.node_rank != 0:
+            return
+        if os.environ.get("KIMI_PROFILE_PLAN_ROOT"):
+            if getattr(self, "_kimi_profile_selected", False):
+                await self.engine.stop_profile()
             return
         if self._should_profile():
             await self.engine.stop_profile()
@@ -1325,6 +1347,15 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
+        # Explicit opt-in for Ascend level-2 validation; preserve the default.
+        requested_level = os.environ.get("VERL_VLLM_SLEEP_LEVEL")
+        if requested_level is not None:
+            if requested_level not in ("1", "2"):
+                raise ValueError("VERL_VLLM_SLEEP_LEVEL must be 1 or 2")
+            if requested_level == "2" and (mtp_rollout_enabled or self.lora_as_adapter):
+                raise ValueError("sleep level 2 cannot restore drafter-only or base LoRA weights")
+            logger.warning("Explicit vLLM sleep level: %s", requested_level)
+            return int(requested_level)
         if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
             return 1
         return 2
@@ -1398,6 +1429,30 @@ class vLLMReplica(RolloutReplica):
                 **{var: "1" for var in get_platform().ray_noset_envvars()},
                 **get_platform().rollout_env_vars(),
             }
+
+            if os.environ.get("KIMI_INFERENCE_REFERENCE_PROFILE") == "1":
+                # Only rollout EngineCore/TP workers inherit reference inference policy.
+                # Do not change the actor's HCCL or memory allocator settings.
+                env_vars.update({
+                    "HCCL_OP_EXPANSION_MODE": "AIV",
+                    "HCCL_BUFFSIZE": "256",
+                    "HCCL_CONNECT_TIMEOUT": "7200",
+                    "HCCL_EXEC_TIMEOUT": "7200",
+                    "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "10800",
+                    "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": "1",
+                    "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:False",
+                    "OMP_PROC_BIND": "false",
+                    "TOKENIZERS_PARALLELISM": "false",
+                })
+
+            # Explicit single-factor rollout environment experiments. No actor changes.
+            for env_key in (
+                "HCCL_OP_EXPANSION_MODE", "HCCL_BUFFSIZE", "KIMI_MOE_COMM_OVERRIDE",
+                "OMP_PROC_BIND", "TOKENIZERS_PARALLELISM",
+            ):
+                env_value = os.environ.get("KIMI_ROLLOUT_ENV_" + env_key)
+                if env_value is not None:
+                    env_vars[env_key] = env_value
 
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(

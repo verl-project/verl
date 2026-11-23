@@ -490,6 +490,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def __init__(
         self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
     ):
+        if get_device_name() == "npu" and role in {"actor", "ref", "actor_rollout", "actor_rollout_ref"}:
+            # The training SFA contract differs from vLLM's custom inference SFA.
+            # Keep this process on toolkit training kernels. A PID-scoped marker
+            # does not disable vendor setup in separately spawned rollout workers.
+            os.environ["VERL_NPU_TRAINING_PROCESS_PID"] = str(os.getpid())
+            for key in ("ASCEND_CUSTOM_OPP_PATH", "LD_LIBRARY_PATH"):
+                os.environ[key] = ":".join(
+                    item for item in os.environ.get(key, "").split(":")
+                    if item and "/vllm_ascend/_cann_ops_custom/" not in item
+                )
+            print(f"[KimiTrainingVendorIsolation] pid={os.getpid()} toolkit training kernels selected", flush=True)
         Worker.__init__(self)
         self.config = config
         self.distillation_config = distillation_config
@@ -721,8 +732,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             assert self.world_size % infer_world_size == 0, (
                 f"rollout world_size: {self.world_size} is not divisible by infer_world_size: {infer_world_size}"
             )
+            rollout_mesh_names = ["dp", "infer_tp", "infer_pp"]
+            rollout_mesh_kwargs = {}
+            if get_device_name() == "npu":
+                device_backend = torch.distributed.Backend.default_device_backend_map[get_device_name()]
+                rollout_mesh_kwargs["backend_override"] = dict.fromkeys(rollout_mesh_names, device_backend)
             rollout_device_mesh = init_device_mesh(
-                get_device_name(), mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
+                get_device_name(), mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=rollout_mesh_names,
+                **rollout_mesh_kwargs,
             )
 
             # 3.2 initialize rollout engine
@@ -769,7 +786,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if getattr(self.ref.engine, "_uses_fsdp2_cpu_offload_policy", False):
             self.ref.engine.to(device="cpu", model=True, optimizer=False, grad=False)
             _restore_module_buffers_to_device(self.ref.engine.module)
-            aggressive_empty_cache(force_sync=True)
+            if os.environ.get("VERL_REF_TO_ACTOR_EMPTY_CACHE", "0") == "1":
+                aggressive_empty_cache(force_sync=True)
+            else:
+                # Complete the asynchronous reference D2H copies without flushing cached buffers.
+                get_torch_device().synchronize()
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
@@ -851,6 +872,26 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         set_expandable_segments(False)
         aggressive_empty_cache(force_sync=True)
         log_gpu_memory_usage("Before resume weights", logger=logger)
+        logger.warning("KIMI_BEFORE_ROLLOUT_WAKE step=%s allocated_gib=%.3f reserved_gib=%.3f free_total=%s", global_steps, get_torch_device().memory_allocated() / 2**30, get_torch_device().memory_reserved() / 2**30, get_torch_device().mem_get_info())
+
+        # Finish export while rollout weights are still asleep. Owning CPU
+        # copies prevents producer all-gathers from overlapping rollout reload.
+        staged_export = None
+        if os.environ.get("VERL_ROLLOUT_EXPORT_CPU_STAGE", "0") == "1":
+            export_weights, export_peft = self.actor.engine.get_per_tensor_param(
+                layered_summon=self.layered_summon,
+                base_sync_done=True,
+                rollout_layout=rollout_layout,
+            )
+            cpu_weights = [(name, weight.detach().to(device="cpu", copy=True)) for name, weight in export_weights]
+            del export_weights
+            aggressive_empty_cache(force_sync=True)
+            staged_export = (iter(cpu_weights), export_peft)
+            logger.warning(
+                "CPU_WEIGHT_EXPORT_READY step=%s tensors=%s bytes=%s allocated=%s reserved=%s",
+                global_steps, len(cpu_weights), sum(weight.nbytes for _, weight in cpu_weights),
+                get_torch_device().memory_allocated(), get_torch_device().memory_reserved(),
+            )
 
         # 1. resume rollout memory (weights were released during sleep)
         # sleep_level=1 (adapter mode) in SGLang never released weights, so do not resume them.
@@ -866,11 +907,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After resume weights", logger=logger)
 
         # 2. determine if we need a base weight sync (adapter path only)
-        per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon,
-            base_sync_done=True,
-            rollout_layout=rollout_layout,
-        )
+        if staged_export is not None:
+            per_tensor_param, peft_config = staged_export
+        else:
+            per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
+                layered_summon=self.layered_summon,
+                base_sync_done=True,
+                rollout_layout=rollout_layout,
+            )
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:

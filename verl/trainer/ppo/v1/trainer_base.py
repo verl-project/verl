@@ -1690,7 +1690,13 @@ class PPOTrainer(ABC):
 
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
-        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        fields = ["uid", "response_mask", "rm_scores", "old_log_probs"]
+        if self.config.actor_rollout_ref.rollout.calculate_log_probs:
+            fields.append("rollout_log_probs")
+        if self.use_reference_policy:
+            fields.append("ref_log_prob")
+        if self.use_critic:
+            fields.append("values")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]
@@ -1820,13 +1826,15 @@ class PPOTrainer(ABC):
             "prompts",
             "responses",
             "response_mask",
-            "values",
             "advantages",
             "returns",
             "rm_scores",
-            "token_level_rewards",
             "num_turns",
         ]
+        if self.use_critic:
+            fields.append("values")
+        if self.config.algorithm.use_kl_in_reward:
+            fields.append("token_level_rewards")
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
         data = get_metric_data_with_optional_routed_experts(
             keys=batch.keys,

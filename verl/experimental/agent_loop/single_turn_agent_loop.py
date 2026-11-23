@@ -16,12 +16,15 @@ import os
 from typing import Any
 from uuid import uuid4
 
+import torch
+
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.workers.rollout.r3_utils import (
     KIMI_FULL_MODEL_ROUTE_SEMANTICS,
     is_kimi_full_r3_config,
+    validate_kimi_full_model_routes,
 )
 from verl.workers.rollout.replica import TokenOutput
 
@@ -94,6 +97,13 @@ class SingleTurnAgentLoop(AgentLoopBase):
         if self._kimi_full_r3 and output.routed_experts is not None:
             if output.routed_expert_weights is None:
                 raise RuntimeError("Kimi full R3 rollout returned expert IDs without executed router weights")
+            # The TransferQueue path consumes AgentLoopOutput directly and
+            # bypasses the legacy worker postprocessor's payload validation.
+            validate_kimi_full_model_routes(
+                torch.as_tensor(output.routed_experts),
+                torch.as_tensor(output.routed_expert_weights),
+                self.model_config.hf_config,
+            )
             if len(response_ids) > self.response_length:
                 raise ValueError(
                     "Kimi full-model routing replay cannot truncate generated "

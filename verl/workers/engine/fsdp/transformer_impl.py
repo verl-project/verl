@@ -195,10 +195,8 @@ def _load_hf_language_model(
     )
 
 
-def _select_raw_token_logits(logits: torch.Tensor, indices: torch.Tensor | None) -> torch.Tensor:
-    """Contract image-expanded logits back to the raw input-token sequence."""
-    if indices is None:
-        return logits
+def _validate_raw_token_logit_indices(logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    """Validate the raw-to-expanded prediction-position mapping."""
     if logits.ndim != 3 or indices.ndim != 2 or logits.shape[0] != indices.shape[0]:
         raise ValueError(
             f"Invalid multimodal logit alignment shapes: logits={tuple(logits.shape)}, indices={tuple(indices.shape)}"
@@ -210,8 +208,66 @@ def _select_raw_token_logits(logits: torch.Tensor, indices: torch.Tensor | None)
             "Multimodal logit length does not match the reconstructed expanded sequence: "
             f"logits={logits.shape[1]}, reconstructed={expanded_length}"
         )
+    return indices
+
+
+def _select_raw_token_logits(logits: torch.Tensor, indices: torch.Tensor | None) -> torch.Tensor:
+    """Retain full-logit alignment for callers that require vocabulary distributions."""
+    if indices is None:
+        return logits
+    indices = _validate_raw_token_logit_indices(logits, indices)
     batch_indices = torch.arange(logits.shape[0], device=logits.device)[:, None]
     return logits[batch_indices, indices]
+
+
+def _kimi_expanded_next_token_labels(
+    logits: torch.Tensor,
+    indices: torch.Tensor,
+    raw_shift_labels: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Place already-shifted raw targets at their expanded prediction positions.
+
+    Preserve the caller's label shift verbatim, including sequence boundaries.
+    Extra image positions receive a valid dummy target; their log-probabilities
+    are discarded before loss evaluation, so they receive no loss gradient.
+    """
+    indices = _validate_raw_token_logit_indices(logits, indices)
+    raw_width = indices.shape[1]
+    raw_labels = torch.nested.nested_tensor_from_jagged(raw_shift_labels, cu_seqlens)
+    raw_labels = torch.nested.to_padded_tensor(raw_labels, padding=0, output_size=tuple(indices.shape))
+    expanded_labels = raw_shift_labels.new_zeros(logits.shape[:2])
+    expanded_labels.scatter_(1, indices, raw_labels)
+    raw_mask = torch.arange(raw_width, device=indices.device)[None, :] < cu_seqlens.diff()[:, None]
+    return expanded_labels, indices, raw_mask
+
+
+def _kimi_expanded_packed_labels(
+    logits: torch.Tensor,
+    indices: torch.Tensor,
+    raw_shift_labels: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Scatter globally shifted packed labels, preserving document/pad boundaries."""
+    indices = _validate_raw_token_logit_indices(logits, indices)
+    if logits.shape[0] != 1 or raw_shift_labels.numel() != indices.numel():
+        raise ValueError(
+            "Packed Kimi labels must match the single packed raw prediction axis: "
+            f"labels={tuple(raw_shift_labels.shape)}, indices={tuple(indices.shape)}"
+        )
+    labels = raw_shift_labels.new_zeros(logits.shape[:2])
+    labels.scatter_(1, indices, raw_shift_labels.reshape_as(indices))
+    return labels, indices
+
+
+def _pack_kimi_raw_token_values(
+    expanded_values: torch.Tensor,
+    indices: torch.Tensor,
+    raw_mask: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+) -> torch.Tensor:
+    """Align scalar token results without selecting any vocabulary-sized rows."""
+    raw_values = torch.gather(expanded_values, dim=1, index=indices)
+    return torch.nested.nested_tensor_from_jagged(raw_values[raw_mask], cu_seqlens)
 
 
 def _move_multimodal_inputs_to_device(value, device):
@@ -992,7 +1048,9 @@ class FSDPEngine(BaseEngine):
             # Keep the policy for normal execution while honoring this manual
             # residency transition so colocated vLLM can reclaim the NPU.
             if device == "cpu" and model:
-                offload_fsdp_model_to_cpu(self.module)
+                offload_fsdp_model_to_cpu(
+                    self.module, empty_cache=os.environ.get("VERL_REF_TO_ACTOR_EMPTY_CACHE", "0") == "1"
+                )
             return
 
         device_name = get_device_name()
@@ -1125,7 +1183,7 @@ class FSDPEngine(BaseEngine):
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         kimi_rollout_layout = kwargs.pop("rollout_layout", None)
-        kimi_model = self.model_config.hf_config.model_type == "kimi_k3"
+        kimi_model = self.model_config.hf_config.model_type in {"kimi_k3", "kimi_k31"}
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
@@ -1603,7 +1661,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         attention_mask,
                     )
                     model_inputs["routed_experts"] = routed_experts_padded.to(torch.long)
-                    model_inputs["routed_expert_weights"] = routed_expert_weights_padded.to(torch.bfloat16)
+                    model_inputs["routed_expert_weights"] = routed_expert_weights_padded.to(torch.float32)
                     model_inputs["router_replay_mask"] = replay_mask
                     model_inputs["r3_full_model_rows"] = True
 
@@ -1692,56 +1750,98 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits, DTensor):
                     logits = logits.full_tensor()
-                logits = _select_raw_token_logits(logits, output_args.get("logits_to_input_indices"))
-                logits_rmpad = logits.squeeze(0)  # (total_nnz, vocab_size)
-                logits_rmpad = _scale_logits_by_temperature(
-                    logits_rmpad,
-                    temperature_rmpad.unsqueeze(-1),
-                    is_unit_temperature=temperature_is_one,
-                )
-
-                log_probs = None
-
-                if calculate_sum_pi_squared:
-                    sum_pi_squared_rmpad = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
-
-                if calculate_entropy:
-                    if not self.engine_config.entropy_checkpointing:
-                        if self.engine_config.entropy_from_logits_with_chunking:
-                            entropy_rmpad = self.compute_entropy_from_logits(
-                                logits_rmpad,
-                                chunk_size=self.engine_config.entropy_from_logits_chunk_size,
-                            )  # ((total_nnz / sp) + pad)
-                        else:
-                            entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
-                    else:
-                        entropy_rmpad = torch.utils.checkpoint.checkpoint(
-                            self.compute_entropy_from_logits, logits_rmpad
-                        )
-
-                # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
-                if distillation_use_topk:
-                    outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
-                    cu_seqlens = input_ids.offsets()
-                    for k, v in outputs.items():
-                        v = v.squeeze(0)
-                        assert v.shape == (logits_rmpad.shape[0],), (
-                            f"logits_rmpad len: {logits_rmpad.shape[0]}, {k} shape: {v.shape}"
-                        )
-                        v = self._gather_and_unpad_packed(v, output_args["pad_size"])
-                        model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
-
-                if not distillation_only:
-                    # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
-                    inplace_backward = True
-                    if calculate_entropy:
-                        inplace_backward = False
-                    log_probs = logprobs_from_logits(
-                        logits=logits_rmpad,
-                        labels=input_ids_rmpad_rolled,
-                        inplace_backward=inplace_backward,
-                        force_fp32=logits_processor_func is None,
+                raw_indices = output_args.get("logits_to_input_indices")
+                if raw_indices is not None and not distillation_use_topk:
+                    expanded_labels, raw_indices = _kimi_expanded_packed_labels(
+                        logits, raw_indices, input_ids_rmpad_rolled
                     )
+                    raw_positions = raw_indices.squeeze(0)
+                    logits_rmpad = logits.squeeze(0)
+                    if not temperature_is_one:
+                        # Different documents may use different temperatures. Expand
+                        # only this scalar field; dummy image positions are discarded.
+                        expanded_temperature = temperature_rmpad.new_ones(logits_rmpad.shape[0])
+                        expanded_temperature.scatter_(0, raw_positions, temperature_rmpad)
+                        logits_rmpad = _scale_logits_by_temperature(
+                            logits_rmpad, expanded_temperature.unsqueeze(-1),
+                            is_unit_temperature=False,
+                        )
+                    if calculate_sum_pi_squared:
+                        expanded_sum_pi_squared = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
+                        sum_pi_squared_rmpad = torch.gather(expanded_sum_pi_squared, 0, raw_positions)
+                    if calculate_entropy:
+                        if self.engine_config.entropy_checkpointing:
+                            expanded_entropy = torch.utils.checkpoint.checkpoint(
+                                self.compute_entropy_from_logits, logits_rmpad
+                            )
+                        elif self.engine_config.entropy_from_logits_with_chunking:
+                            expanded_entropy = self.compute_entropy_from_logits(
+                                logits_rmpad, chunk_size=self.engine_config.entropy_from_logits_chunk_size
+                            )
+                        else:
+                            expanded_entropy = self.compute_entropy_from_logits(logits_rmpad)
+                        entropy_rmpad = torch.gather(expanded_entropy, 0, raw_positions)
+                    log_probs = None
+                    if not distillation_only:
+                        expanded_log_probs = logprobs_from_logits(
+                            logits=logits_rmpad, labels=expanded_labels.squeeze(0),
+                            inplace_backward=not (calculate_entropy or calculate_sum_pi_squared),
+                            force_fp32=logits_processor_func is None,
+                        )
+                        log_probs = torch.gather(expanded_log_probs, 0, raw_positions)
+                    # The common packed tail removes static/SP padding and restores
+                    # the original jagged document boundaries for the PPO loss.
+                else:
+                    logits = _select_raw_token_logits(logits, output_args.get("logits_to_input_indices"))
+                    logits_rmpad = logits.squeeze(0)  # (total_nnz, vocab_size)
+                    logits_rmpad = _scale_logits_by_temperature(
+                        logits_rmpad,
+                        temperature_rmpad.unsqueeze(-1),
+                        is_unit_temperature=temperature_is_one,
+                    )
+
+                    log_probs = None
+
+                    if calculate_sum_pi_squared:
+                        sum_pi_squared_rmpad = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
+
+                    if calculate_entropy:
+                        if not self.engine_config.entropy_checkpointing:
+                            if self.engine_config.entropy_from_logits_with_chunking:
+                                entropy_rmpad = self.compute_entropy_from_logits(
+                                    logits_rmpad,
+                                    chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                                )  # ((total_nnz / sp) + pad)
+                            else:
+                                entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
+                        else:
+                            entropy_rmpad = torch.utils.checkpoint.checkpoint(
+                                self.compute_entropy_from_logits, logits_rmpad
+                            )
+
+                    # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
+                    if distillation_use_topk:
+                        outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
+                        cu_seqlens = input_ids.offsets()
+                        for k, v in outputs.items():
+                            v = v.squeeze(0)
+                            assert v.shape == (logits_rmpad.shape[0],), (
+                                f"logits_rmpad len: {logits_rmpad.shape[0]}, {k} shape: {v.shape}"
+                            )
+                            v = self._gather_and_unpad_packed(v, output_args["pad_size"])
+                            model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
+
+                    if not distillation_only:
+                        # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
+                        inplace_backward = True
+                        if calculate_entropy:
+                            inplace_backward = False
+                        log_probs = logprobs_from_logits(
+                            logits=logits_rmpad,
+                            labels=input_ids_rmpad_rolled,
+                            inplace_backward=inplace_backward,
+                            force_fp32=logits_processor_func is None,
+                        )
 
             # gather across the ulysses sp group and drop the packed-sequence padding
             pad_size = output_args["pad_size"]
@@ -1792,7 +1892,46 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits, DTensor):
                     logits = logits.full_tensor()
-                logits = _select_raw_token_logits(logits, output_args.get("logits_to_input_indices"))
+                raw_indices = output_args.get("logits_to_input_indices")
+                if raw_indices is not None and not distillation_use_topk:
+                    # Kimi expands image placeholders inside the model, while PPO
+                    # targets and masks retain the raw token axis. Expand the small
+                    # target tensor, evaluate log-probs on the model axis, then
+                    # align scalar outputs. Never index [B, expanded_T, vocab].
+                    cu_seqlens = input_ids.offsets()
+                    expanded_labels, raw_indices, raw_mask = _kimi_expanded_next_token_labels(
+                        logits, raw_indices, output_args["input_ids_rmpad_rolled"], cu_seqlens
+                    )
+                    logits = _scale_logits_by_temperature(
+                        logits, temperature, is_unit_temperature=temperature_is_one
+                    )
+                    if calculate_entropy:
+                        if self.engine_config.entropy_checkpointing:
+                            expanded_entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
+                        else:
+                            expanded_entropy = verl_F.entropy_from_logits(logits)
+                        model_output["entropy"] = _pack_kimi_raw_token_values(
+                            expanded_entropy, raw_indices, raw_mask, cu_seqlens
+                        )
+                    if calculate_sum_pi_squared:
+                        expanded_sum_pi_squared = verl_F.calculate_sum_pi_squared_from_logits(logits)
+                        model_output["sum_pi_squared"] = _pack_kimi_raw_token_values(
+                            expanded_sum_pi_squared, raw_indices, raw_mask, cu_seqlens
+                        )
+                    if not distillation_only:
+                        expanded_log_probs = logprobs_from_logits(
+                            logits=logits,
+                            labels=expanded_labels,
+                            inplace_backward=not (calculate_entropy or calculate_sum_pi_squared),
+                            force_fp32=logits_processor_func is None,
+                        )
+                        model_output["log_probs"] = _pack_kimi_raw_token_values(
+                            expanded_log_probs, raw_indices, raw_mask, cu_seqlens
+                        )
+                    return model_output
+
+                # Top-k distillation still consumes full vocabulary distributions.
+                logits = _select_raw_token_logits(logits, raw_indices)
                 logits = _scale_logits_by_temperature(
                     logits,
                     temperature,
