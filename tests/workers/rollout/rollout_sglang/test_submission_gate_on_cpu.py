@@ -148,6 +148,94 @@ def test_failed_deactivation_keeps_requests_rejected_until_explicit_resume(monke
     asyncio.run(run())
 
 
+def test_failed_plain_pause_rolls_back_native_pause_or_fails_closed(monkeypatch):
+    class _StatefulTokenizerManager(_TokenizerManager):
+        def __init__(self):
+            super().__init__()
+            self.is_pause = False
+            self.is_pause_cond = asyncio.Condition()
+
+        async def pause_generation(self, obj):
+            async with self.is_pause_cond:
+                self.is_pause = True
+            await super().pause_generation(obj)
+
+        async def continue_generation(self, obj):
+            await super().continue_generation(obj)
+            async with self.is_pause_cond:
+                self.is_pause = False
+                self.is_pause_cond.notify_all()
+
+        async def generate_request(self, obj, request):
+            async with self.is_pause_cond:
+                await self.is_pause_cond.wait_for(lambda: not self.is_pause)
+            async for chunk in super().generate_request(obj, request):
+                yield chunk
+
+    async def run():
+        server = _server(monkeypatch)
+        server.tokenizer_manager = _StatefulTokenizerManager()
+        server.tokenizer_manager.pause_error = RuntimeError("pause failed after setting is_pause")
+        with pytest.raises(RuntimeError, match="pause failed"):
+            await server.abort_all_requests()
+        assert server.tokenizer_manager.is_pause is False
+        assert (await asyncio.wait_for(_generate(server), 1)).token_ids == [7, 8]
+
+        server.tokenizer_manager.resume_error = RuntimeError("rollback failed")
+        with pytest.raises(RuntimeError, match="pause failed"):
+            await server.abort_all_requests()
+        assert (await asyncio.wait_for(_generate(server), 1)).stop_reason == "aborted"
+        server.tokenizer_manager.resume_error = None
+        await server.resume_generation()
+        assert (await asyncio.wait_for(_generate(server), 1)).token_ids == [7, 8]
+
+    asyncio.run(run())
+
+
+def test_pd_prefill_rejection_cancels_paired_decode_without_waiting(monkeypatch):
+    async def run():
+        server = _server(monkeypatch)
+        server._disaggregation_role = "prefill"
+        server._pd_bootstrap_host = "127.0.0.1"
+        server._disaggregation_bootstrap_port = 12345
+        aborted_rids = []
+        decode_entered = asyncio.Event()
+        decode_never_finishes = asyncio.Event()
+
+        def start_decode(*args, **kwargs):
+            async def _hang():
+                decode_entered.set()
+                await decode_never_finishes.wait()
+
+            return asyncio.create_task(_hang())
+
+        async def abort_decode(rid):
+            aborted_rids.append(rid)
+
+        peer = SimpleNamespace(
+            generate=SimpleNamespace(remote=start_decode),
+            abort_request=SimpleNamespace(remote=abort_decode),
+        )
+        server._pd_decode_peers = [peer]
+
+        orig_park = server._park_until_allowed
+        calls = 0
+
+        async def park_then_reject_recursive_prefill(req_id):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                server._rejecting = True
+            return await orig_park(req_id)
+
+        server._park_until_allowed = park_then_reject_recursive_prefill
+        output = await asyncio.wait_for(_generate(server), 1)
+        assert output.stop_reason == "aborted"
+        assert aborted_rids == ["late-request_D"]
+
+    asyncio.run(run())
+
+
 def test_failed_resume_does_not_reopen_admission(monkeypatch):
     async def run():
         server = _server(monkeypatch)

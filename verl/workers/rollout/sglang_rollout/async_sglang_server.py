@@ -576,28 +576,41 @@ class SGLangHttpServer:
         if self._disaggregation_role == "prefill" and self._pd_decode_peers and bootstrap_room is None:
             room = secrets.randbits(63)
             decode_peer = self._pd_decode_peers[secrets.randbelow(len(self._pd_decode_peers))]
-            prefill_coro = self.generate(
+            decode_rid = f"{request_id}_D"
+            prefill_task = asyncio.create_task(
+                self.generate(
+                    prompt_ids,
+                    dict(sampling_params),
+                    f"{request_id}_P",
+                    image_data=image_data,
+                    video_data=video_data,
+                    bootstrap_host=self._pd_bootstrap_host,
+                    bootstrap_port=self._disaggregation_bootstrap_port,
+                    bootstrap_room=room,
+                )
+            )
+            decode_ref = decode_peer.generate.remote(
                 prompt_ids,
                 dict(sampling_params),
-                f"{request_id}_P",
+                decode_rid,
                 image_data=image_data,
                 video_data=video_data,
                 bootstrap_host=self._pd_bootstrap_host,
                 bootstrap_port=self._disaggregation_bootstrap_port,
                 bootstrap_room=room,
             )
-            decode_coro = decode_peer.generate.remote(
-                prompt_ids,
-                dict(sampling_params),
-                f"{request_id}_D",
-                image_data=image_data,
-                video_data=video_data,
-                bootstrap_host=self._pd_bootstrap_host,
-                bootstrap_port=self._disaggregation_bootstrap_port,
-                bootstrap_room=room,
-            )
-            _, decode_output = await asyncio.gather(prefill_coro, decode_coro)
-            return decode_output
+            decode_task = asyncio.ensure_future(decode_ref)
+            prefill_output = await prefill_task
+            if prefill_output.stop_reason == "aborted":
+                if hasattr(decode_peer, "abort_request"):
+                    try:
+                        await decode_peer.abort_request.remote(decode_rid)
+                    except Exception:
+                        logger.debug("failed to abort paired PD decode request %s", decode_rid, exc_info=True)
+                decode_task.cancel()
+                await asyncio.gather(decode_task, return_exceptions=True)
+                return prefill_output
+            return await decode_task
 
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
         max_possible_tokens = self.config.max_model_len - len(prompt_ids) - 1
@@ -792,12 +805,26 @@ class SGLangHttpServer:
                 await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
             except Exception:
                 if was_allowed and not was_rejecting and not reject_request:
-                    # Not paused, so do not hold requests behind the gate.
-                    self._generation_allowed.set()
+                    # pause_generation may have set native is_pause=True before raising;
+                    # undo that side effect before reopening the gate.
+                    try:
+                        await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
+                    except Exception:
+                        self._rejecting = True
+                        self._generation_allowed.set()
+                    else:
+                        self._generation_allowed.set()
                 else:
                     self._rejecting = True
                     self._generation_allowed.set()
                 raise
+
+    async def abort_request(self, request_id: str) -> None:
+        if self.node_rank != 0:
+            return
+        abort_fn = getattr(self.tokenizer_manager, "abort_request", None)
+        if abort_fn is not None:
+            abort_fn(rid=request_id)
 
     async def resume_generation(self):
         if self.node_rank != 0:
