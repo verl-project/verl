@@ -97,13 +97,9 @@ jobs:
       ENGINE: sglang
       UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
       UV_INDEX_STRATEGY: unsafe-best-match
-      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
       UV_HTTP_TIMEOUT: 120
       UV_NO_CACHE: "1"
       UV_SYSTEM_PYTHON: "1"
-      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
-      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
-      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
@@ -177,13 +173,9 @@ jobs:
       ENGINE: sglang
       UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
       UV_INDEX_STRATEGY: unsafe-best-match
-      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
       UV_HTTP_TIMEOUT: 120
       UV_NO_CACHE: "1"
       UV_SYSTEM_PYTHON: "1"
-      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
-      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
-      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
