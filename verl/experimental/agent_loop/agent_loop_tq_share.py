@@ -23,11 +23,18 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any
 
+import hydra
 import torch
 import transfer_queue as tq
 from tensordict import TensorDict
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
+from verl.experimental.agent_loop.agent_loop import (
+    AgentLoopOutput,
+    DictConfigWrap,
+    ToolListWrap,
+    _agent_loop_registry,
+    _InternalAgentLoopOutput,
+)
 from verl.experimental.agent_loop.preprocess_cache import PromptPreprocessCache
 from verl.experimental.agent_loop.prompt_sharing import (
     PUBLIC_PARTITION,
@@ -37,6 +44,7 @@ from verl.experimental.agent_loop.prompt_sharing import (
     publish_public_prompts,
 )
 from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ
+from verl.utils.rollout_trace import rollout_trace_attr
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 
@@ -91,8 +99,49 @@ class AgentLoopWorkerTQShare(AgentLoopWorkerTQ):
             self.public_prompt_fields.pop(uid, None)
             self.public_multi_modal_inputs.pop(uid, None)
 
-    def _get_preprocess_cache(self, sample_kwargs: dict[str, Any]) -> PromptPreprocessCache | None:
-        return self.preprocess_caches.get(sample_kwargs.get("uid"))
+    async def _run_agent_loop(
+        self,
+        sampling_params: dict[str, Any],
+        trajectory: dict[str, Any],
+        *,
+        agent_name: str,
+        trace: bool = True,
+        **kwargs,
+    ) -> _InternalAgentLoopOutput:
+        """``AgentLoopWorker._run_agent_loop``, with this prompt's cache attached to the agent loop.
+
+        The cache has to be attached between building the agent loop and running it. Overriding the
+        whole method keeps that seam out of the shared rollout code, at the cost of repeating the
+        base method: keep the two in step.
+        """
+        with rollout_trace_attr(
+            step=trajectory["step"],
+            sample_index=trajectory["sample_index"],
+            rollout_n=trajectory["rollout_n"],
+            validate=trajectory["validate"],
+            name="agent_loop",
+            trace=trace,
+        ):
+            assert agent_name in _agent_loop_registry, (
+                f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
+            )
+
+            agent_loop = hydra.utils.instantiate(
+                config=_agent_loop_registry[agent_name],
+                trainer_config=DictConfigWrap(config=self.config),
+                server_manager=self.llm_client,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                hf_model_type=self.hf_model_type,
+                dataset_cls=self.dataset_cls,
+                data_config=DictConfigWrap(self.config.data),
+                tools=ToolListWrap(self.tools),
+            )
+            cache = self.preprocess_caches.get(kwargs.get("uid"))
+            if cache is not None:
+                cache.attach(agent_loop)
+            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     async def _get_multi_modal_inputs(self, uid: str, output: AgentLoopOutput, input_ids: torch.Tensor) -> dict:
         """``multi_modal_inputs`` of an output, computed once for the sessions of uid that saw the same media."""

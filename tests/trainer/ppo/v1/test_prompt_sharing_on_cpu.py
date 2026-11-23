@@ -13,14 +13,21 @@
 # limitations under the License.
 """A GRPO prompt is put once into TransferQueue's public partition and linked by its trajectories."""
 
+import inspect
 import uuid
 
+import hydra
 import pytest
 import torch
 import transfer_queue as tq
 from omegaconf import OmegaConf
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput
+from verl.experimental.agent_loop.agent_loop import (
+    AgentLoopMetrics,
+    AgentLoopOutput,
+    AgentLoopWorker,
+    _agent_loop_registry,
+)
 from verl.experimental.agent_loop.agent_loop_tq_share import AgentLoopWorkerTQShare, _PublicMultiModalInputs
 from verl.experimental.agent_loop.preprocess_cache import PromptPreprocessCache
 from verl.experimental.agent_loop.prompt_sharing import (
@@ -247,3 +254,80 @@ async def test_never_linked_public_prompt_is_freed_only_when_given_up(tq_init):
 
     release_public_prompts(uids[1:])
     assert _public_keys(uids) == set()
+
+
+class _StubAgentLoop:
+    """Enough of an agent loop for ``_run_agent_loop``: the cache wraps these two methods."""
+
+    def __init__(self):
+        self.ran_with = None
+
+    async def process_multi_modal_info(self, messages):
+        return {}
+
+    async def ct_build_initial_tokens(self, messages, *args, mm_inputs_out=None, **kwargs):
+        return [1]
+
+    async def run(self, sampling_params, **kwargs):
+        self.ran_with = kwargs
+        return "output"
+
+
+class _RunWorker(AgentLoopWorkerTQShare):
+    """A worker whose ``_run_agent_loop`` reaches the agent loop without a rollout backend."""
+
+    def __init__(self):
+        self.config = OmegaConf.create({"data": {}})
+        self.llm_client = self.tokenizer = self.processor = None
+        self.hf_model_type = self.dataset_cls = self.tools = None
+        self.preprocess_caches = {}
+        self.postprocessed = None
+
+    async def _agent_loop_postprocess(self, output, validate, **kwargs):
+        self.postprocessed = (output, validate)
+        return output
+
+
+async def _run_once(monkeypatch, worker_cls, worker, uid):
+    agent_loop, captured = _StubAgentLoop(), {}
+
+    def instantiate(**kwargs):
+        captured.update(kwargs)
+        return agent_loop
+
+    monkeypatch.setattr(hydra.utils, "instantiate", instantiate)
+    monkeypatch.setitem(_agent_loop_registry, "stub", {"_target_": "tests.stub"})
+    trajectory = {"step": 1, "sample_index": 0, "rollout_n": 0, "validate": False}
+    output = await worker_cls._run_agent_loop(worker, {}, trajectory, agent_name="stub", uid=uid)
+    return agent_loop, captured, output
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_attaches_the_cache_of_the_prompt(monkeypatch):
+    worker, uid = _RunWorker(), _uid()
+    cache = PromptPreprocessCache()
+    worker.preprocess_caches[uid] = cache
+    unattached = _StubAgentLoop().process_multi_modal_info
+
+    agent_loop, _, output = await _run_once(monkeypatch, AgentLoopWorkerTQShare, worker, uid)
+
+    assert agent_loop.process_multi_modal_info is not unattached
+    assert agent_loop.ran_with == {"uid": uid}
+    assert output == "output" and worker.postprocessed == ("output", False)
+
+    # A prompt with no cache, e.g. one whose sessions already finished, runs the plain methods.
+    other = _RunWorker()
+    agent_loop, _, _ = await _run_once(monkeypatch, AgentLoopWorkerTQShare, other, _uid())
+    assert agent_loop.process_multi_modal_info == _StubAgentLoop.process_multi_modal_info.__get__(agent_loop)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_builds_the_agent_loop_like_the_base_worker(monkeypatch):
+    """The override copies ``AgentLoopWorker._run_agent_loop``; this catches the base method drifting."""
+    _, base_kwargs, _ = await _run_once(monkeypatch, AgentLoopWorker, _RunWorker(), _uid())
+    _, share_kwargs, _ = await _run_once(monkeypatch, AgentLoopWorkerTQShare, _RunWorker(), _uid())
+
+    assert base_kwargs.keys() == share_kwargs.keys()
+    assert inspect.signature(AgentLoopWorkerTQShare._run_agent_loop) == inspect.signature(
+        AgentLoopWorker._run_agent_loop
+    )
