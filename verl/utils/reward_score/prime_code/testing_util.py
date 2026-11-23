@@ -15,38 +15,21 @@
 import ast
 import faulthandler
 import json
-import platform
 
 # to run the solution files we're using a timing based approach
 import signal
-import sys
 import traceback
+from contextlib import ExitStack
 
 # used for debugging to time steps
 from datetime import datetime
 from enum import Enum
 
 # for capturing the stdout
-from io import StringIO
-from types import ModuleType
-
 # used for testing the code that reads from input
-from unittest.mock import mock_open, patch
-
 import numpy as np
 
-
-def module_from_string(name: str, code: str) -> ModuleType:
-    """Compile ``code`` into a new in-memory module registered under ``name``.
-
-    Replaces ``pyext.RuntimeModule.from_string``, since ``pyext`` is unmaintained and cannot be
-    installed on Python 3.12+. The ``<string>`` filename is what :func:`clean_traceback` looks for
-    when trimming the traceback of a failing generated solution.
-    """
-    module = ModuleType(name)
-    exec(compile(code, "<string>", "exec"), module.__dict__)
-    sys.modules[name] = module
-    return module
+from .solution_worker import Capturing, SolutionWorker, call_method, module_from_string, reliability_guard  # noqa: F401
 
 
 def truncatefn(s, length=300):
@@ -60,23 +43,6 @@ def truncatefn(s, length=300):
 class CODE_TYPE(Enum):
     call_based = 0
     standard_input = 1
-
-
-# used to capture stdout as a list
-# from https://stackoverflow.com/a/16571630/6416660
-# alternative use redirect_stdout() from contextlib
-class Capturing(list):
-    def __enter__(self):
-        self._stdout = sys.stdout
-        sys.stdout = self._stringio = StringIO()
-        # Make closing the StringIO a no-op
-        self._stringio.close = lambda x: 1
-        return self
-
-    def __exit__(self, *args):
-        self.append(self._stringio.getvalue())
-        del self._stringio  # free up some memory
-        sys.stdout = self._stdout
 
 
 def only_int_check(val):
@@ -102,10 +68,15 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
     """
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
-    """
-    # Disable functionalities that can make destructive changes to the test.
-    reliability_guard()
 
+    The generated code runs in a separate :class:`SolutionWorker` process that only receives the
+    test inputs, so it cannot read ``in_outs["outputs"]`` from this process.
+    """
+    with ExitStack() as stack:
+        return _run_test(in_outs, test, debug, timeout, stack)
+
+
+def _run_test(in_outs, test, debug, timeout, stack):
     if debug:
         print(f"start = {datetime.now().time()}")
 
@@ -132,24 +103,6 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
             sol += test
             if debug:
                 print(f"sol = {sol}")
-            signal.alarm(timeout)
-            try:
-                tmp_sol = module_from_string("tmp_sol", sol)
-                tmp = tmp_sol if "class Solution" not in test else tmp_sol.Solution()
-                signal.alarm(0)
-            except Exception as e:
-                signal.alarm(0)
-                error_traceback = traceback.format_exc()
-                if debug:
-                    print(f"type 0 compilation error = {e}")
-                results.append(-2)
-                return results, {
-                    "error": repr(e),
-                    # "error_code": -1,
-                    # "error_message": "Compilation Error",
-                    "traceback": clean_traceback(error_traceback),
-                }
-            signal.alarm(0)
 
         elif which_type == CODE_TYPE.standard_input:
             # sol
@@ -192,40 +145,19 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
             if debug:
                 print(f"sol = {sol}")
             method_name = "code"
-            signal.alarm(timeout)
-            try:
-                tmp_sol = module_from_string("tmp_sol", sol)
-                tmp = tmp_sol
-                signal.alarm(0)
-            except Exception as e:
-                signal.alarm(0)
-                error_traceback = traceback.format_exc()
-                if debug:
-                    print(f"type 1 compilation error = {e}")
-                results.append(-2)
-                return results, {
-                    "error": repr(e),
-                    # "error_code": -1,
-                    # "error_message": "Compilation Error",
-                    "traceback": clean_traceback(error_traceback),
-                }
-            signal.alarm(0)
         if debug:
             print(f"get method = {datetime.now().time()}")
 
-        try:
-            method = getattr(tmp, method_name)  # get_attr second arg must be str
-        except Exception:
-            signal.alarm(0)
-            error_traceback = traceback.format_exc()
-            error_info = sys.exc_info()
-            print(f"unable to get function error = {error_info}")
+        worker = stack.enter_context(
+            SolutionWorker(sol, method_name, which_type == CODE_TYPE.call_based and "class Solution" in test, timeout)
+        )
+        if "error" in worker.setup:
+            if debug:
+                print(f"compilation error = {worker.setup['error']}")
             results.append(-2)
             return results, {
-                "error": repr(error_info),
-                # "error_code": -1,
-                # "error_message": "Unable to extract code",
-                "traceback": clean_traceback(error_traceback),
+                "error": worker.setup["error"],
+                "traceback": clean_traceback(worker.setup["traceback"]),
             }
 
         for index, inputs in enumerate(in_outs["inputs"]):
@@ -266,13 +198,15 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                     f"type = {which_type}"
                 )
             if which_type == CODE_TYPE.call_based:  # Call-based
-                signal.alarm(timeout)
-                faulthandler.enable()
                 try:
-                    output = method(*inputs)
+                    reply = worker.call(inputs)
+                    if "error" in reply:
+                        results.append(-1)
+                        return results, {"error": reply["error"], "traceback": clean_traceback(reply["traceback"])}
+                    output = ast.literal_eval(reply["ok"])
                     raw_true_output = output
 
-                    raw_true_output_copy = json.dumps(output)
+                    raw_true_output_copy = reply["json"]
                     raw_true_output_copy = truncatefn(raw_true_output_copy, 200)
 
                     # ground truth sequences are not tuples
@@ -303,7 +237,6 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 except Exception as e:
                     signal.alarm(0)
                     error_traceback = traceback.format_exc()
-                    faulthandler.disable()
                     if debug:
                         print(f"Standard input runtime error or time limit exceeded error = {e}")
                     results.append(-1)
@@ -327,24 +260,13 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 if isinstance(in_outs["outputs"][index], list):
                     in_outs["outputs"][index] = "\n".join(in_outs["outputs"][index])
 
-                signal.alarm(timeout)
-                with Capturing() as output:
-                    try:
-                        call_method(method, inputs)
-                        # reset the alarm
-                        signal.alarm(0)
-                        passed = True
-                    except Exception as e:
-                        # runtime error or took too long
-                        signal.alarm(0)
-                        error_traceback = traceback.format_exc()
-                        print(f"Call-based runtime error or time limit exceeded error = {repr(e)}{e}")
-                        results.append(-1)
-                        return results, {
-                            "error": repr(e),
-                            "traceback": clean_traceback(error_traceback),
-                        }
-                    signal.alarm(0)
+                reply = worker.run_stdin(inputs)
+                if "error" in reply:
+                    print(f"Call-based runtime error or time limit exceeded error = {reply['error']}")
+                    results.append(-1)
+                    return results, {"error": reply["error"], "traceback": clean_traceback(reply["traceback"])}
+                passed = True
+                output = [reply["ok"]]
                 raw_true_output = output[0]
                 raw_true_output_copy = truncatefn(raw_true_output, 200)
                 output = raw_true_output.splitlines()
@@ -585,112 +507,3 @@ def stripped_string_compare(s1, s2):
     s1 = s1.lstrip().rstrip()
     s2 = s2.lstrip().rstrip()
     return s1 == s2
-
-
-def call_method(method, inputs):
-    if isinstance(inputs, list):
-        inputs = "\n".join(inputs)
-
-    inputs_line_iterator = iter(inputs.split("\n"))
-
-    # sys.setrecursionlimit(10000)
-
-    # @patch('builtins.input', side_effect=inputs.split("\n"))
-    @patch("builtins.open", mock_open(read_data=inputs))
-    @patch("sys.stdin", StringIO(inputs))
-    @patch("sys.stdin.readline", lambda *args: next(inputs_line_iterator))
-    @patch("sys.stdin.readlines", lambda *args: inputs.split("\n"))
-    @patch("sys.stdin.read", lambda *args: inputs)
-    # @patch('sys.stdout.write', print)
-    def _inner_call_method(_method):
-        try:
-            return _method()
-        except SystemExit:
-            pass
-        finally:
-            pass
-
-    return _inner_call_method(method)
-
-
-def reliability_guard(maximum_memory_bytes=None):
-    """
-    This disables various destructive functions and prevents the generated code
-    from interfering with the test (e.g. fork bomb, killing other processes,
-    removing filesystem files, etc.)
-    WARNING
-    This function is NOT a security sandbox. Untrusted code, including, model-
-    generated code, should not be blindly executed outside of one. See the
-    Codex paper for more information about OpenAI's code sandbox, and proceed
-    with caution.
-    """
-
-    if maximum_memory_bytes is not None:
-        import resource
-
-        resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
-        resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
-        if platform.uname().system != "Darwin":
-            resource.setrlimit(resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes))
-
-    faulthandler.disable()
-
-    import builtins
-
-    builtins.exit = None
-    builtins.quit = None
-
-    import os
-
-    os.environ["OMP_NUM_THREADS"] = "1"
-
-    os.kill = None
-    os.system = None  # 防止干扰repl评测
-    os.putenv = None
-    os.remove = None
-    os.removedirs = None
-    os.rmdir = None
-    os.fchdir = None
-    os.setuid = None
-    os.fork = None
-    os.forkpty = None
-    os.killpg = None
-    os.rename = None
-    os.renames = None
-    os.truncate = None
-    os.replace = None
-    os.unlink = None
-    os.fchmod = None
-    os.fchown = None
-    os.chmod = None
-    os.chown = None
-    os.chroot = None
-    os.lchflags = None
-    os.lchmod = None
-    os.lchown = None
-    os.getcwd = None
-    os.chdir = None
-
-    import shutil
-
-    shutil.rmtree = None
-    shutil.move = None
-    shutil.chown = None
-
-    import subprocess
-
-    subprocess.Popen = None  # type: ignore
-
-    __builtins__["help"] = None
-
-    import sys
-
-    sys.modules["ipdb"] = None
-    sys.modules["joblib"] = None
-    sys.modules["resource"] = None
-    sys.modules["psutil"] = None
-    sys.modules["tkinter"] = None
-
-    # Disable some built-in functions that can be destructive
-    for mod in ["subprocess", "ctypes"]:
-        sys.modules[mod] = None
