@@ -55,7 +55,13 @@ from verl.utils.profiler import (
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, prefix_cache_salt
+from verl.workers.rollout.replica import (
+    RolloutMode,
+    RolloutReplica,
+    TokenOutput,
+    prefix_cache_salt,
+    wait_rollout_servers_scheduled,
+)
 from verl.workers.rollout.utils import (
     extract_response_topk_logprobs_with_coverage,
     extract_sampled_logprobs,
@@ -1652,6 +1658,7 @@ class vLLMReplica(RolloutReplica):
         # create server actor in each node with node affinity and cuda visible devices
         nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
         env_vars = self._get_server_env_vars(worker_node_ids[::gpus_per_replica_node])
+        server_node_ids = []
         for node_rank in range(nnodes):
             workers = self.workers[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             node_cuda_visible_devices = get_node_visible_devices(
@@ -1685,6 +1692,10 @@ class vLLMReplica(RolloutReplica):
                 cuda_visible_devices=node_cuda_visible_devices,
             )
             self.servers.append(server)
+            server_node_ids.append(node_id)
+
+        # Fail fast if a server actor cannot be placed, instead of blocking on the next .remote().
+        await wait_rollout_servers_scheduled(self.servers, server_node_ids)
 
         # launch http server in each node
         master_address, master_port, dp_rpc_port = await self.servers[0].get_master_address.remote()
