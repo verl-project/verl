@@ -100,6 +100,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
+    if "clip_cov_mask" in data:
+        fields.append("clip_cov_mask")
     data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
@@ -114,6 +116,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
     policy_loss_kwargs = {"sc_correction": sc_outputs["sc_correction"]} if sc_outputs else {}
+    if loss_mode == "clip_cov":
+        policy_loss_kwargs["clip_cov_mask"] = data.get("clip_cov_mask")
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
