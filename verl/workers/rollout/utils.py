@@ -69,6 +69,8 @@ class _UvicornServerAutoPort(uvicorn.Server):
     async def startup(self, sockets=None) -> None:
         try:
             await super().startup(sockets=sockets)
+            if not self.started:
+                return
             if self.servers and self.config.port == 0:
                 sock = self.servers[0].sockets[0]
                 self.actual_port = sock.getsockname()[1]
@@ -87,13 +89,14 @@ async def run_uvicorn(app: FastAPI, server_args, server_address) -> tuple[int, a
     config = uvicorn.Config(app, host=server_address, port=0, log_level="warning")
     server = _UvicornServerAutoPort(config)
     server_task = asyncio.create_task(server.serve())
+    server_task.add_done_callback(lambda _: server._startup_done.set())
     server_port = await server.get_port()
-    if server_port is None:
-        # server.startup() failed. await the task to re-raise exception from server.serve()
+    if server_port is None or server_task.done():
+        # Startup may fail before startup() is called, e.g. while loading the server config.
         await server_task
 
         # Fails on unexpected situation.
-        raise RuntimeError("Unexpected: HTTP server started without reporting listened port")
+        raise RuntimeError("HTTP server exited before it was ready")
     logger.info(f"HTTP server started on port {server_port}")
     return server_port, server_task
 
