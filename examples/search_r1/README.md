@@ -259,3 +259,49 @@ arithmetic constraint, whereas 128 does not. These are legal sizes, not verified
 GPU capacity limits. Both 32 and 80 completed five-step runs; 32 scored faster,
 while GPU E5 plus 80 reached about 139.95 GiB of device memory. The full-run
 recipe therefore defaults to GPU E5 plus teacher micro-batch 32.
+
+### SD-Search (arXiv:2605.18299v1)
+
+`bash examples/search_r1/run_sd_grpo.sh` enables on-policy hindsight JSD,
+independently of static skills and hidden-state repulsion. The reproduction
+retains the established multi-message ChatML rollout and EM task reward for
+controlled comparison. The paper's task reward is F1; this is an explicit
+experimental difference. Teacher outcome labels nevertheless use normalized
+answer F1 > 0 (rho=0), not EM, and never expose answer text to the teacher.
+
+Paper defaults: alpha=0.001, steps 1–50 warmup (no teacher forwards), top-k=50
+per distribution, renormalized on their unique union, hindsight budget 1024
+and teacher context limit 8192. On each search step, Appendix J hindsight is
+inserted immediately before the action opening tag; sibling search skeletons
+are deduplicated by (queries,outcome), with the focal current/future searches
+and own outcome appended. Only generated assistant queries enter skeletons;
+reasoning, retrieved observations and answers are excluded. Targets retain the
+original token IDs, with causal position shift; only query-content tokens
+strictly inside XML boundaries are supervised. The Qwen byte codec handles
+Unicode without re-tokenizing sampled actions. Overlong target contexts fail.
+The paper does not specify hindsight truncation direction; this reconstruction
+keeps the last 1024 tokens and reports the truncated token count.
+
+Hindsight groups are reconstructed by replay-buffer UID before rank sharding,
+with exact group-size checks. JSD is averaged over query tokens within each
+trajectory, then over the optimizer minibatch; empty-query trajectories contribute
+zero and remain in the denominator. Distributed padding contributes neither.
+Teacher parameters are the current actor at each optimizer update, with no-grad
+and eval mode; the student remains in training mode for gradient checkpointing.
+The teacher is detached in both terms of the JSD mixture.
+
+This implementation runs separate teacher/student forwards for each search after
+PPO backward, accumulating gradients before the optimizer step. This preserves
+the objective while reducing graph overlap, but costs extra student forwards
+compared with the paper's one-extra-forward description. Four slots preserve
+FSDP collective ordering including a last unexecuted search and empty queries.
+Auxiliary microbatch=4 is an engineering memory control, independent of actor
+microbatch=32. Fixed actor microbatching, padded unfused forwards and SP=1 are
+required. The auxiliaries are mutually exclusive with skill/hidden losses.
+
+Metrics: `sd/alpha`, `sd/query_tokens`, `sd/groups`,
+`sd/hindsight_truncated_tokens`, `timing_s/sd_prepare`, `actor/sd/jsd`,
+`actor/sd/weighted_loss`, `actor/sd/auxiliary_seconds`. Compare full actor wall
+latency as well as auxiliary timing; GPU memory and rollout telemetry use the
+same observers as the EM baseline. A two-step acceptance run with warmup=0
+checks the active algorithm before a separate fresh 200-step run with warmup=50.

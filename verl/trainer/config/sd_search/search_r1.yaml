@@ -1,0 +1,9 @@
+enabled: true
+alpha: 0.001
+warmup_steps: 50
+top_k: 50
+outcome_threshold: 0.0
+max_hindsight_tokens: 1024
+max_context_tokens: 8192
+slots: 4
+teacher_micro_batch_size_per_gpu: 4

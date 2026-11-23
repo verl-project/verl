@@ -138,6 +138,11 @@ class PPOTrainer(ABC):
             from examples.search_r1.skill_distillation import SkillTeacherSupervisor
 
             self.skill_teacher_supervisor = SkillTeacherSupervisor(config)
+        self.hindsight_supervisor = None
+        if config.get("sd_search", {}).get("enabled", False):
+            from examples.search_r1.sd_search import HindsightSupervisor
+
+            self.hindsight_supervisor = HindsightSupervisor(config)
         self.turn_hidden_supervisor = None
         if config.get("turn_hidden_diversity", {}).get("enabled", False):
             from examples.search_r1.turn_hidden_diversity import TurnHiddenSupervisor
@@ -249,6 +254,8 @@ class PPOTrainer(ABC):
             self.skill_teacher_supervisor.initialize(self)
         if self.turn_hidden_supervisor is not None:
             self.turn_hidden_supervisor.initialize(self)
+        if self.hindsight_supervisor is not None:
+            self.hindsight_supervisor.initialize(self)
         self.on_init_end()
 
     def _setup(self):
@@ -618,6 +625,10 @@ class PPOTrainer(ABC):
         if self.skill_teacher_supervisor is not None:
             with marked_timer("skill_teachers", timing_raw, color="blue"):
                 batch = self.skill_teacher_supervisor.score(self, batch, metrics)
+
+        if self.hindsight_supervisor is not None:
+            with marked_timer("sd_prepare", timing_raw, color="blue"):
+                batch = self.hindsight_supervisor.prepare(self, batch, metrics)
 
         if self.turn_hidden_supervisor is not None:
             with marked_timer("turn_hidden_prepare", timing_raw, color="blue"):

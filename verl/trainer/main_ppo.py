@@ -178,6 +178,11 @@ def main(config):
 
         validate_settings(config)
 
+    if config.get("sd_search", {}).get("enabled", False):
+        from examples.search_r1.sd_search import validate_settings as validate_sd
+
+        validate_sd(config)
+
     if config.get("turn_hidden_diversity", {}).get("enabled", False):
         from examples.search_r1.turn_hidden_diversity import validate_settings as validate_turn_hidden
 

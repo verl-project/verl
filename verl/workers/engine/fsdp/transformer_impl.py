@@ -770,6 +770,10 @@ class FSDPEngine(BaseEngine):
                         # full-length nested tensors across the mini-batch (∝ ppo_mini_batch * rollout_n) → OOM.
                         # Specialized callers such as Tinker may opt in when their response requires these outputs.
                         meta_info.pop("model_output", None)
+                    if tu.get(micro_batch, "sd_alpha", default=0.0) > 0:
+                        from examples.search_r1.sd_search import backward_sd
+
+                        meta_info["metrics"].update(backward_sd(self, micro_batch))
 
             output_lst.append(meta_info)
 
