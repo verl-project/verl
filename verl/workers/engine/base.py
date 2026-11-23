@@ -311,6 +311,22 @@ class BaseEngine:
         """
         return nullcontext()
 
+    def list_adapters(self) -> list[str]:
+        """Return registered resident adapter names on this engine."""
+        return []
+
+    def get_active_adapter(self) -> Optional[str]:
+        """Return the currently active adapter name, or None when no adapter is configured."""
+        return None
+
+    def set_adapter(self, adapter_name: str) -> None:
+        """Activate a registered resident adapter by name."""
+        raise NotImplementedError(f"{type(self).__name__} does not support switching LoRA adapters")
+
+    def adapter_context(self, adapter_name: str) -> ContextManager:
+        """Temporarily activate ``adapter_name`` and restore the previous adapter on exit."""
+        raise NotImplementedError(f"{type(self).__name__} does not support adapter_context")
+
 
 class BaseEngineCtx:
     def __init__(self, engine: BaseEngine, mode, **kwargs):

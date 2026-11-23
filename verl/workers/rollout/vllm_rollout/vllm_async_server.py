@@ -261,9 +261,9 @@ class vLLMHttpServer:
 
     @property
     def lora_as_adapter(self) -> bool:
-        return (
-            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
-        ) and not self.model_config.lora.get("merge", False)
+        from verl.utils.lora_utils import get_max_lora_rank
+
+        return get_max_lora_rank(self.model_config) > 0 and not self.model_config.lora.get("merge", False)
 
     async def collective_rpc(
         self,
@@ -453,11 +453,9 @@ class vLLMHttpServer:
             )
 
         # update lora-related args
-        lora_rank = self.model_config.lora.get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = (
-                self.model_config.lora_rank
-            )  # FIXME: fallback to lora_rank for now, we should unify lora settings.
+        from verl.utils.lora_utils import get_max_lora_rank, get_max_loras
+
+        lora_rank = get_max_lora_rank(self.model_config)
 
         if self.model_config.lora.get("merge", False):
             lora_rank = 0
@@ -465,7 +463,7 @@ class vLLMHttpServer:
         if lora_rank > 0:
             lora_args = {
                 "enable_lora": True,
-                "max_loras": 1,
+                "max_loras": get_max_loras(self.model_config),
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
             if self.model_config.lora.get("enable_tower_connector_lora", False):

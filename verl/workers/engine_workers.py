@@ -374,6 +374,50 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 output = None
         return output
 
+    @staticmethod
+    def _validate_single_adapter_request(data: TensorDict, lora_adapter_name) -> Optional[str]:
+        """Validate single-adapter routing for Phase 1 serialized per-adapter execution.
+
+        Rejects non-scalar ``lora_adapter_name`` or unsplit mixed-adapter ``adapter_name``
+        batches so callers must split mixed batches via ``split_batch_by_adapter`` first.
+        """
+        if lora_adapter_name is not None:
+            if not isinstance(lora_adapter_name, str) or not lora_adapter_name:
+                raise ValueError(
+                    "lora_adapter_name must be a non-empty string for single-adapter steps, "
+                    f"got {lora_adapter_name!r}. Split mixed-adapter batches with split_batch_by_adapter() "
+                    "before calling train_batch/infer_batch."
+                )
+
+        if "adapter_name" in data.keys():
+            raw = tu.get(data, key="adapter_name")
+            if hasattr(raw, "tolist") and not isinstance(raw, (str, bytes)):
+                raw = raw.tolist()
+            if isinstance(raw, (list, tuple)):
+                unique = {str(x) for x in raw}
+                if len(unique) > 1:
+                    raise ValueError(
+                        f"Mixed-adapter batch ({sorted(unique)}) passed directly to worker; "
+                        "split with split_batch_by_adapter() and run adapters in canonical order."
+                    )
+                if len(unique) == 1:
+                    only = next(iter(unique))
+                    if lora_adapter_name is not None and lora_adapter_name != only:
+                        raise ValueError(
+                            f"Conflicting adapter selection: lora_adapter_name={lora_adapter_name!r} "
+                            f"vs batch adapter_name={only!r}."
+                        )
+                    lora_adapter_name = only
+            elif isinstance(raw, str) and raw:
+                if lora_adapter_name is not None and lora_adapter_name != raw:
+                    raise ValueError(
+                        f"Conflicting adapter selection: lora_adapter_name={lora_adapter_name!r} "
+                        f"vs batch adapter_name={raw!r}."
+                    )
+                lora_adapter_name = raw
+
+        return lora_adapter_name
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     @DistProfiler.annotate(color="red", role="train_batch")
     def train_batch(self, data: TensorDict) -> TensorDict:
@@ -382,6 +426,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # global_token_num should be a list of number of tokens of each seq in this batch
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
+        lora_adapter_name = self._validate_single_adapter_request(
+            data, tu.pop(data, key="lora_adapter_name", default=None)
+        )
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
 
         # inject engineering parameters if not specified
@@ -401,7 +448,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None) as timer,
         ):
-            output = self.engine.train_batch(data, loss_function=self.loss_fn)
+            adapter_ctx = (
+                self.engine.adapter_context(lora_adapter_name) if lora_adapter_name is not None else nullcontext()
+            )
+            with adapter_ctx:
+                output = self.engine.train_batch(data, loss_function=self.loss_fn)
             # containing loss, model_output and metrics
             # for training, we only care about loss and metrics
         delta_time = timer.last
@@ -409,7 +460,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
         update_lr_scheduler = tu.get(data, key="update_lr_scheduler", default=False)
         # update lr scheduler
         if update_lr_scheduler:
-            lr = self.engine.lr_scheduler_step()
+            if lora_adapter_name is not None:
+                lr = self.engine.lr_scheduler_step(adapter_name=lora_adapter_name)
+            else:
+                lr = self.engine.lr_scheduler_step()
         else:
             lr = None
 
@@ -437,6 +491,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         compute_loss = tu.get(data, key="compute_loss", default=True)
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         no_lora_adapter = tu.pop(data, key="no_lora_adapter", default=False)
+        lora_adapter_name = self._validate_single_adapter_request(
+            data, tu.pop(data, key="lora_adapter_name", default=None)
+        )
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
 
         default_keys = dict(
@@ -458,7 +515,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.engine.eval_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="eval_batch", logger=None) as timer,
         ):
-            adapter_ctx = self.engine.disable_adapter() if no_lora_adapter else nullcontext()
+            if no_lora_adapter:
+                adapter_ctx = self.engine.disable_adapter()
+            elif lora_adapter_name is not None:
+                adapter_ctx = self.engine.adapter_context(lora_adapter_name)
+            else:
+                adapter_ctx = nullcontext()
             with adapter_ctx:
                 output = self.engine.infer_batch(data, loss_function=loss_function)
         delta_time = timer.last

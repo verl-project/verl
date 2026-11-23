@@ -192,25 +192,59 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             log_only_rank_0=True,
         )
 
-    def _get_lora_train_meta(self, unwrap_model):
-        peft_config = getattr(unwrap_model, "peft_config", None)
-        if not peft_config:
+    @staticmethod
+    def _extract_single_lora_meta(peft_cfg):
+        if peft_cfg is None:
             return None
-        if isinstance(peft_config, dict):
-            peft_config = peft_config.get("default") or next(iter(peft_config.values()), None)
-        if peft_config is None:
-            return None
-
-        lora_rank = int(getattr(peft_config, "r", 0) or 0)
+        lora_rank = int(getattr(peft_cfg, "r", 0) or 0)
         if lora_rank <= 0:
             return None
-
-        lora_alpha = int(getattr(peft_config, "lora_alpha", lora_rank) or 0)
-        task_type = getattr(peft_config, "task_type", None) or "CAUSAL_LM"
+        lora_alpha = int(getattr(peft_cfg, "lora_alpha", lora_rank) or 0)
+        task_type = getattr(peft_cfg, "task_type", None) or "CAUSAL_LM"
         if hasattr(task_type, "value"):
             task_type = task_type.value
+        meta = {"r": lora_rank, "lora_alpha": lora_alpha, "task_type": str(task_type)}
+        modules_to_save = getattr(peft_cfg, "modules_to_save", None)
+        if modules_to_save:
+            meta["modules_to_save"] = list(modules_to_save)
+        bias = getattr(peft_cfg, "bias", None)
+        if bias and bias != "none":
+            meta["bias"] = str(bias)
+        return meta
 
-        return {"r": lora_rank, "lora_alpha": lora_alpha, "task_type": str(task_type)}
+    def _get_lora_train_meta(self, unwrap_model):
+        from verl.utils.lora_utils import DEFAULT_ADAPTER_NAME, resolve_adapter_name, unwrap_peft_model
+
+        peft_model = unwrap_peft_model(unwrap_model)
+        peft_config = getattr(peft_model, "peft_config", None)
+        if not peft_config:
+            return None
+
+        if isinstance(peft_config, dict):
+            adapters_meta = {}
+            for adapter_name, adapter_cfg in peft_config.items():
+                meta = self._extract_single_lora_meta(adapter_cfg)
+                if meta is not None:
+                    adapters_meta[adapter_name] = meta
+            if not adapters_meta:
+                return None
+
+            try:
+                primary_name = resolve_adapter_name(peft_model)
+            except (KeyError, ValueError):
+                primary_name = None
+            if primary_name not in adapters_meta:
+                primary_name = (
+                    DEFAULT_ADAPTER_NAME if DEFAULT_ADAPTER_NAME in adapters_meta else next(iter(adapters_meta))
+                )
+
+            result = dict(adapters_meta[primary_name])
+            if len(adapters_meta) > 1 or primary_name != DEFAULT_ADAPTER_NAME:
+                result["active_adapter"] = primary_name
+                result["adapters"] = adapters_meta
+            return result
+
+        return self._extract_single_lora_meta(peft_config)
 
     def _save_lora_train_meta(self, local_path: str, unwrap_model):
         lora_train_meta = self._get_lora_train_meta(unwrap_model)
@@ -411,7 +445,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     if self.should_save_lora_only and self._has_lora():
                         n_total = len(model_state_dict)
                         model_state_dict = {
-                            k: v for k, v in model_state_dict.items() if "lora_" in k or ".adapter_" in k
+                            k: v
+                            for k, v in model_state_dict.items()
+                            if "lora_" in k or ".adapter_" in k or ".modules_to_save." in k
                         }
                         if not model_state_dict:
                             raise ValueError(

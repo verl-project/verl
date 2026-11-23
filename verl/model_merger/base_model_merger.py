@@ -281,6 +281,45 @@ class BaseModelMerger(ABC):
             if os.path.isfile(stale_config_path):
                 os.remove(stale_config_path)
 
+    @staticmethod
+    def _parse_single_lora_meta_entry(entry: dict, meta_path: str) -> dict[str, object]:
+        parsed: dict[str, object] = {}
+        if "r" in entry:
+            try:
+                parsed["r"] = int(entry["r"])
+            except (TypeError, ValueError):
+                warnings.warn(f"Invalid LoRA rank in {meta_path}: {entry['r']}", stacklevel=2)
+
+        if "lora_alpha" in entry:
+            try:
+                parsed["lora_alpha"] = int(entry["lora_alpha"])
+            except (TypeError, ValueError):
+                warnings.warn(f"Invalid lora_alpha in {meta_path}: {entry['lora_alpha']}", stacklevel=2)
+
+        if "task_type" in entry:
+            task_type = entry["task_type"]
+            if task_type is None:
+                pass
+            elif isinstance(task_type, str):
+                parsed["task_type"] = task_type
+            else:
+                warnings.warn(f"Invalid task_type in {meta_path}: {task_type}", stacklevel=2)
+
+        if "modules_to_save" in entry:
+            mts = entry["modules_to_save"]
+            if isinstance(mts, list) and all(isinstance(x, str) for x in mts):
+                parsed["modules_to_save"] = list(mts)
+            elif mts is not None:
+                warnings.warn(f"Invalid modules_to_save in {meta_path}: {mts}", stacklevel=2)
+
+        if "bias" in entry:
+            bias = entry["bias"]
+            if isinstance(bias, str):
+                parsed["bias"] = bias
+            elif bias is not None:
+                warnings.warn(f"Invalid bias in {meta_path}: {bias}", stacklevel=2)
+        return parsed
+
     def _load_lora_train_meta(self) -> Optional[dict[str, object]]:
         if not self.config.local_dir:
             return None
@@ -298,43 +337,48 @@ class BaseModelMerger(ABC):
             warnings.warn(f"Failed to read LoRA metadata from {meta_path}: {e}", stacklevel=2)
             return None
 
-        result = {}
-        if "r" in lora_meta:
-            try:
-                result["r"] = int(lora_meta["r"])
-            except (TypeError, ValueError):
-                warnings.warn(f"Invalid LoRA rank in {meta_path}: {lora_meta['r']}", stacklevel=2)
+        result = self._parse_single_lora_meta_entry(lora_meta, meta_path)
 
-        if "lora_alpha" in lora_meta:
-            try:
-                result["lora_alpha"] = int(lora_meta["lora_alpha"])
-            except (TypeError, ValueError):
-                warnings.warn(f"Invalid lora_alpha in {meta_path}: {lora_meta['lora_alpha']}", stacklevel=2)
-
-        if "task_type" in lora_meta:
-            task_type = lora_meta["task_type"]
-            if task_type is None:
-                pass
-            elif isinstance(task_type, str):
-                result["task_type"] = task_type
-            else:
-                warnings.warn(f"Invalid task_type in {meta_path}: {task_type}", stacklevel=2)
+        raw_adapters = lora_meta.get("adapters")
+        if isinstance(raw_adapters, dict):
+            parsed_adapters = {}
+            for adapter_name, entry in raw_adapters.items():
+                if isinstance(entry, dict):
+                    parsed_entry = self._parse_single_lora_meta_entry(entry, meta_path)
+                    if parsed_entry:
+                        parsed_adapters[str(adapter_name)] = parsed_entry
+            if parsed_adapters:
+                result["adapters"] = parsed_adapters
 
         return result if len(result) > 0 else None
 
+    @staticmethod
+    def _extract_target_module_name(stripped_lora_key: str) -> str:
+        parts = stripped_lora_key.split(".")
+        for idx, part in enumerate(parts):
+            if part.startswith("lora_") and idx > 0:
+                return parts[idx - 1]
+        return parts[-3] if len(parts) >= 3 else parts[0]
+
     def save_lora_adapter(self, state_dict: dict[str, torch.Tensor]):
         """
-        Save lora adapter to safetensors.
+        Save lora adapter(s) to safetensors.
+
+        For single-adapter checkpoints, writes to ``<target_dir>/lora_adapter``.
+        For multi-adapter checkpoints, writes each adapter to
+        ``<target_dir>/lora_adapters/<adapter_name>``.
 
         Returns:
-            lora_path: str, the path to the lora adapter. None if no lora adapter found.
+            lora_path: str, the path to the lora adapter directory (or parent
+                ``lora_adapters`` directory for multi-adapter checkpoints).
+                None if no lora adapter found.
 
         Note:
-            This function change the 'state_dict' in place.
+            This function mutates ``state_dict`` in place.
         """
-        lora_params_names = [name for name in state_dict.keys() if "lora_" in name]
+        adapter_param_names = [name for name in state_dict.keys() if "lora_" in name or ".modules_to_save." in name]
 
-        if len(lora_params_names) == 0:
+        if len(adapter_param_names) == 0:
             return None
 
         import json
@@ -343,83 +387,146 @@ class BaseModelMerger(ABC):
         import peft
         from safetensors.torch import save_file
 
-        lora_params = OrderedDict()
-        target_modules = set()
-        lora_key = None
+        from verl.utils.lora_utils import (
+            DEFAULT_ADAPTER_NAME,
+            extract_adapter_name_from_param_key,
+            strip_adapter_name_from_param_key,
+            validate_adapter_name,
+        )
 
-        for name in lora_params_names:
-            lora_key = name.replace(".default.weight", ".weight")
-            target_modules.add(lora_key.split(".")[-3])
-            lora_params[lora_key] = state_dict.pop(name)
-
-        inferred_lora_rank = min(lora_params[lora_key].shape[0], lora_params[lora_key].shape[1])
         lora_meta = self._load_lora_train_meta()
+        adapters_meta = lora_meta.get("adapters") if isinstance(lora_meta, dict) else None
+        known_adapters = set(adapters_meta.keys()) if isinstance(adapters_meta, dict) else None
 
-        lora_rank = inferred_lora_rank
-        lora_alpha = 0
-        task_type = None
-
-        if lora_meta is not None:
-            meta_rank = lora_meta.get("r")
-            if meta_rank is not None and meta_rank > 0:
-                if meta_rank != inferred_lora_rank:
-                    warnings.warn(
-                        f"LoRA rank mismatch between metadata ({meta_rank}) and adapter weights "
-                        f"({inferred_lora_rank}); using metadata rank.",
-                        stacklevel=2,
-                    )
-                lora_rank = meta_rank
-
-            meta_alpha = lora_meta.get("lora_alpha")
-            if meta_alpha is not None:
-                lora_alpha = meta_alpha
-
-            meta_task_type = lora_meta.get("task_type")
-            if meta_task_type is not None:
-                task_type = meta_task_type
-
-        if lora_alpha == 0:
-            warnings.warn(
-                "LoRA alpha metadata is missing or equals 0; falling back to lora_alpha=0. "
-                "Please verify checkpoint LoRA metadata (lora_train_meta.json).",
-                stacklevel=2,
+        grouped_names: OrderedDict[str, list[str]] = OrderedDict()
+        for name in adapter_param_names:
+            adapter_name = (
+                extract_adapter_name_from_param_key(name, known_adapters=known_adapters) or DEFAULT_ADAPTER_NAME
             )
+            grouped_names.setdefault(adapter_name, []).append(name)
 
-        peft_dict = {
-            "r": lora_rank,
-            "lora_alpha": lora_alpha,
-            "target_modules": list(target_modules),
-        }
-        if task_type is not None:
-            peft_dict["task_type"] = task_type
-        peft_config = peft.LoraConfig(**peft_dict).to_dict()
-        peft_config["task_type"] = (
-            peft_config["task_type"].value
-            if hasattr(peft_config["task_type"], "value")
-            else (peft_config["task_type"] or None)
-        )
-        peft_config["peft_type"] = (
-            peft_config["peft_type"].value
-            if hasattr(peft_config["peft_type"], "value")
-            else (peft_config["peft_type"] or None)
-        )
-        peft_config["target_modules"] = list(peft_config["target_modules"])
+        is_multi_adapter = len(grouped_names) > 1
+        out_root = os.path.join(self.config.target_dir, "lora_adapters") if is_multi_adapter else None
 
-        lora_path = os.path.join(self.config.target_dir, "lora_adapter")
-        os.makedirs(lora_path, exist_ok=True)
-        with open(os.path.join(lora_path, "adapter_config.json"), "w", encoding="utf-8") as f:
-            json.dump(peft_config, f, ensure_ascii=False, indent=4)
-        save_file(lora_params, os.path.join(lora_path, "adapter_model.safetensors"))
+        last_lora_path = None
+        for adapter_name, names in grouped_names.items():
+            validate_adapter_name(adapter_name)
+            lora_params: OrderedDict[str, torch.Tensor] = OrderedDict()
+            target_modules = set()
+            inferred_modules_to_save = set()
+            inferred_lora_rank = None
+
+            for name in names:
+                is_modules_to_save = ".modules_to_save." in name
+                lora_key = strip_adapter_name_from_param_key(name, adapter_name)
+                if is_modules_to_save:
+                    parts = name.split(".")
+                    mts_idx = parts.index("modules_to_save")
+                    if mts_idx > 0:
+                        inferred_modules_to_save.add(parts[mts_idx - 1])
+                else:
+                    target_modules.add(self._extract_target_module_name(lora_key))
+                tensor = state_dict.pop(name)
+                lora_params[lora_key] = tensor
+                if not is_modules_to_save and inferred_lora_rank is None and tensor.ndim >= 2:
+                    inferred_lora_rank = min(tensor.shape[0], tensor.shape[1])
+
+            if inferred_lora_rank is None:
+                first_tensor = next(iter(lora_params.values()))
+                inferred_lora_rank = int(first_tensor.shape[0]) if first_tensor.ndim > 0 else 0
+
+            adapter_meta = None
+            if isinstance(adapters_meta, dict) and adapter_name in adapters_meta:
+                adapter_meta = adapters_meta[adapter_name]
+            elif not is_multi_adapter and isinstance(lora_meta, dict):
+                adapter_meta = lora_meta
+
+            lora_rank = inferred_lora_rank
+            lora_alpha = 0
+            task_type = None
+            modules_to_save = sorted(inferred_modules_to_save) if inferred_modules_to_save else None
+            bias = None
+
+            if adapter_meta is not None:
+                meta_rank = adapter_meta.get("r")
+                if meta_rank is not None and meta_rank > 0:
+                    if meta_rank != inferred_lora_rank:
+                        warnings.warn(
+                            f"LoRA rank mismatch for adapter {adapter_name!r} between metadata ({meta_rank}) "
+                            f"and adapter weights ({inferred_lora_rank}); using metadata rank.",
+                            stacklevel=2,
+                        )
+                    lora_rank = meta_rank
+
+                meta_alpha = adapter_meta.get("lora_alpha")
+                if meta_alpha is not None:
+                    lora_alpha = meta_alpha
+
+                meta_task_type = adapter_meta.get("task_type")
+                if meta_task_type is not None:
+                    task_type = meta_task_type
+
+                meta_mts = adapter_meta.get("modules_to_save")
+                if meta_mts:
+                    modules_to_save = sorted(set(meta_mts) | inferred_modules_to_save)
+
+                meta_bias = adapter_meta.get("bias")
+                if meta_bias is not None:
+                    bias = meta_bias
+
+            if lora_alpha == 0:
+                warnings.warn(
+                    f"LoRA alpha metadata for adapter {adapter_name!r} is missing or equals 0; "
+                    f"falling back to lora_alpha=0. Please verify checkpoint LoRA metadata (lora_train_meta.json).",
+                    stacklevel=2,
+                )
+
+            peft_dict = {
+                "r": lora_rank,
+                "lora_alpha": lora_alpha,
+                "target_modules": sorted(target_modules),
+            }
+            if task_type is not None:
+                peft_dict["task_type"] = task_type
+            if modules_to_save:
+                peft_dict["modules_to_save"] = modules_to_save
+            if bias is not None:
+                peft_dict["bias"] = bias
+            peft_config = peft.LoraConfig(**peft_dict).to_dict()
+            peft_config["task_type"] = (
+                peft_config["task_type"].value
+                if hasattr(peft_config["task_type"], "value")
+                else (peft_config["task_type"] or None)
+            )
+            peft_config["peft_type"] = (
+                peft_config["peft_type"].value
+                if hasattr(peft_config["peft_type"], "value")
+                else (peft_config["peft_type"] or None)
+            )
+            peft_config["target_modules"] = list(peft_config["target_modules"])
+
+            lora_path = (
+                os.path.join(out_root, adapter_name)
+                if is_multi_adapter
+                else os.path.join(self.config.target_dir, "lora_adapter")
+            )
+            os.makedirs(lora_path, exist_ok=True)
+            with open(os.path.join(lora_path, "adapter_config.json"), "w", encoding="utf-8") as f:
+                json.dump(peft_config, f, ensure_ascii=False, indent=4)
+            save_file(lora_params, os.path.join(lora_path, "adapter_model.safetensors"))
+            last_lora_path = lora_path
 
         for name in list(state_dict.keys()):
             key = (
                 name.replace("base_model.model.", "")
                 .replace(".base_layer.weight", ".weight")
                 .replace(".base_layer.bias", ".bias")
+                .replace(".original_module.weight", ".weight")
+                .replace(".original_module.bias", ".bias")
             )
             state_dict[key] = state_dict.pop(name)
 
-        return lora_path
+        return out_root if is_multi_adapter else last_lora_path
 
     def save_hf_model_and_tokenizer(self, state_dict: dict[str, torch.Tensor]):
         auto_model_class = self.get_transformers_auto_model_class()
