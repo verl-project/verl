@@ -532,6 +532,9 @@ def offload_megatron_model_to_cpu(models):
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
+                # A CPU-to-CPU transfer would alias the live parameter and gradient storage.
+                if param.device.type == "cpu":
+                    continue
                 old_data = param.data
                 param.data = param.data.to("cpu")
                 if _can_safely_resize_storage(old_data):
