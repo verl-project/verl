@@ -30,8 +30,6 @@ from verl.checkpoint_engine.vllm_weight_transfer import (
     VLLM_NATIVE_BACKENDS,
     VerlEngineWeightSource,
     VerlRayVLLMWeightSyncClient,
-    VLLMNCCLCheckpointEngine,
-    VLLMSparseNCCLCheckpointEngine,
     resolve_vllm_weight_transfer_backend,
 )
 from verl.workers.config import CheckpointEngineConfig
@@ -265,7 +263,9 @@ def test_vllm_nccl_checkpoint_engine_reuse_and_reinit(monkeypatch):
     log: list = []
     s0 = _FakeServerHandle("r0", log)
     s1 = _FakeServerHandle("r1", log)
-    ce = VLLMNCCLCheckpointEngine(bucket_size=64 << 20, is_master=True, packed_num_buffers=3, use_load_plan=True)
+    ce = CheckpointEngineRegistry.new(
+        "vllm_nccl", bucket_size=64 << 20, is_master=True, packed_num_buffers=3, use_load_plan=True
+    )
 
     # First two syncs against the same target reuse trainer_init.
     ce.configure_targets([s0], [4])
@@ -323,7 +323,7 @@ def test_vllm_sparse_nccl_seed_steady_and_empty_delta(monkeypatch):
     log: list = []
     s0 = _FakeServerHandle("r0", log)
     actor_engine = _FakeDeltaActorEngine()
-    ce = VLLMSparseNCCLCheckpointEngine(bucket_size=64 << 20, is_master=True)
+    ce = CheckpointEngineRegistry.new("vllm_sparse_nccl", bucket_size=64 << 20, is_master=True)
     ce.configure_targets([s0], [2])
 
     # Step 0: dense seed via SparseWeightPatch + prime_delta_snapshots.
@@ -570,6 +570,10 @@ def test_vllm_server_preprocess_engine_kwargs_and_sleep_level(monkeypatch):
     assert _make_server("vllm_sparse_nccl")._resolve_sleep_level() == 1
     assert _make_server("vllm_nccl")._resolve_sleep_level() == 2
 
-    # delta_sharded on vLLM fails fast with a pointer to vllm_sparse_nccl.
+    # delta_sharded on standalone vLLM fails fast with a pointer to vllm_sparse_nccl,
+    # while HYBRID mode (which forces naive) stays unaffected.
     with pytest.raises(ValueError, match="vllm_sparse_nccl"):
         _make_server("delta_sharded")._preprocess_engine_kwargs({})
+    hybrid_server = _make_server("delta_sharded")
+    hybrid_server.rollout_mode = mod.RolloutMode.HYBRID
+    hybrid_server._preprocess_engine_kwargs({})

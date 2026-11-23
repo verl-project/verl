@@ -98,28 +98,9 @@ except ImportError as e:
     HCCLDeltaShardedCheckpointEngine = None
 
 try:
-    from .vllm_weight_transfer import (
-        VLLMIPCCheckpointEngine,
-        VLLMNCCLCheckpointEngine,
-        VLLMNCCLM2NCheckpointEngine,
-        VLLMShardedRDTCheckpointEngine,
-        VLLMSparseNCCLCheckpointEngine,
-        VLLMWeightTransferCheckpointEngine,
-    )
+    from .vllm_weight_transfer import VLLMWeightTransferCheckpointEngine
 
-    __all__ += [
-        "VLLMWeightTransferCheckpointEngine",
-        "VLLMIPCCheckpointEngine",
-        "VLLMNCCLCheckpointEngine",
-        "VLLMSparseNCCLCheckpointEngine",
-        "VLLMShardedRDTCheckpointEngine",
-        "VLLMNCCLM2NCheckpointEngine",
-    ]
+    __all__ += ["VLLMWeightTransferCheckpointEngine"]
 except ImportError as e:
     CheckpointEngineRegistry.record_import_error("vllm_weight_transfer", e)
     VLLMWeightTransferCheckpointEngine = None
-    VLLMIPCCheckpointEngine = None
-    VLLMNCCLCheckpointEngine = None
-    VLLMSparseNCCLCheckpointEngine = None
-    VLLMShardedRDTCheckpointEngine = None
-    VLLMNCCLM2NCheckpointEngine = None

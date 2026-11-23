@@ -1494,6 +1494,7 @@ class vLLMHttpServer:
         wt_backend = resolve_vllm_weight_transfer_backend(
             getattr(checkpoint_config, "backend", None),
             engine_kwargs,
+            allow_delta_sharded=getattr(self, "rollout_mode", None) == RolloutMode.HYBRID,
         )
         if wt_backend is not None:
             existing_wtc = dict(engine_kwargs.get("weight_transfer_config") or {})
