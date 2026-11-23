@@ -18,6 +18,7 @@ The CP rank/group sizes below describe only the packer's row ownership. Vocabula
 collectives use a real one-rank Gloo group; no KL computation is mocked.
 """
 
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -26,7 +27,7 @@ import torch.distributed as dist
 
 mpu = pytest.importorskip("megatron.core.parallel_state")
 
-from verl.models.mcore.util import preprocess_thd_engine  # noqa: E402
+from verl.models.mcore import util as mcore_util  # noqa: E402
 from verl.trainer.distillation.losses import distillation_ppo_loss  # noqa: E402
 
 
@@ -46,7 +47,16 @@ def parallel_state(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("cp_layout", ["contiguous", "zigzag"])
-def test_topk_teacher_matches_student_minimum_padding(parallel_state, cp_layout):
+def test_topk_teacher_matches_student_minimum_padding(parallel_state, monkeypatch, cp_layout):
+    if cp_layout == "contiguous" and not mcore_util._PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE:
+        # Supply metadata for the row packer on older Core releases. This test runs no attention kernels.
+        @dataclass
+        class PackedSeqParamsWithCPPartitionMode(mcore_util.PackedSeqParams):
+            cp_partition_mode: str = "zigzag"
+
+        monkeypatch.setattr(mcore_util, "PackedSeqParams", PackedSeqParamsWithCPPartitionMode)
+        monkeypatch.setattr(mcore_util, "_PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE", True)
+
     rows = 100
     generator = torch.Generator().manual_seed(1024)
     student = torch.randn(rows, 8, generator=generator)
@@ -59,12 +69,12 @@ def test_topk_teacher_matches_student_minimum_padding(parallel_state, cp_layout)
         "min_local_rows": 128,
         "cp_layout": cp_layout,
     }
-    packed_student = preprocess_thd_engine(nested(student), **packing)[0].detach().requires_grad_()
+    packed_student = mcore_util.preprocess_thd_engine(nested(student), **packing)[0].detach().requires_grad_()
     teacher_ids = nested(teacher.indices)
     teacher_logprobs = nested(teacher.values)
-    packed_ids = preprocess_thd_engine(teacher_ids, **packing)[0]
-    packed_logprobs = preprocess_thd_engine(teacher_logprobs, **packing)[0]
-    valid = preprocess_thd_engine(nested(torch.ones(rows, dtype=torch.bool)), **packing)[0]
+    packed_ids = mcore_util.preprocess_thd_engine(teacher_ids, **packing)[0]
+    packed_logprobs = mcore_util.preprocess_thd_engine(teacher_logprobs, **packing)[0]
+    valid = mcore_util.preprocess_thd_engine(nested(torch.ones(rows, dtype=torch.bool)), **packing)[0]
     assert valid.any()
 
     payload = {}
