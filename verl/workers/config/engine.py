@@ -346,6 +346,7 @@ class VeOmniEngineConfig(EngineConfig):
         moe_implementation (str): MoE implementation to use.
             1. `eager`
             2. `fused`
+            3. `qat` — fake-quantized expert GEMM operands for quantization-aware training
             default "fused"
             Note: In case VeOmni add more moe_implementation, please check https://github.com/ByteDance-Seed/VeOmni/
         cross_entropy_loss_implementation (str): Cross-entropy kernel selected via VeOmni's
@@ -355,8 +356,19 @@ class VeOmniEngineConfig(EngineConfig):
             ``"triton"`` (batch-invariant Triton kernel — required to keep vexact's rollout
             and the FSDP actor bitwise-aligned on DeepSeek-V3 / Moonlight), ``"liger_kernel"``,
             ``"npu"``.
-        swiglu_mlp_implementation (str): SwiGLU MLP kernel. ``"eager"`` (default) or
-            ``"liger_kernel"``.
+        swiglu_mlp_implementation (str): SwiGLU MLP kernel. ``"eager"`` (default),
+            ``"liger_kernel"``, or ``"qat"`` (FP8 fake quantization of the fused SwiGLU
+            projections, SM90+).
+        linear_implementation (str): Dense projection kernel. ``"eager"`` (default) or
+            ``"qat"`` (FP8 fake quantization of both GEMM operands, SM90+). VeOmni selects
+            QAT per family: this field rounds the attention/indexer projections,
+            ``swiglu_mlp_implementation`` the shared expert, ``moe_implementation`` the
+            routed experts, and ``kv_round_implementation`` the stored KV/indexer
+            activations.
+        kv_round_implementation (str): Storage rounding for KV-cache and indexer
+            activations, so training sees the values an FP8/FP4 deployment stores.
+            ``"none"`` (default) leaves stored tensors in the model dtype; ``"eager"`` and
+            ``"triton"`` round them, with ``"triton"`` requiring SM89+.
         rotary_pos_emb_implementation (str): RoPE kernel. ``"eager"`` (default), ``"triton"``
             (deterministic Triton bmm — required for bitwise-aligned RoPE on DeepSeek-V3 /
             Moonlight), ``"liger_kernel"``, ``"npu"``.
@@ -461,7 +473,12 @@ class VeOmniEngineConfig(EngineConfig):
     dsa_indexer_implementation: str = "eager"
     dsa_attention_implementation: str = "eager"
     mhc_implementation: str = "eager"
-    qat_implementation: str = "none"
+    # QAT is selected per family (VeOmni's `qat` rows) instead of one global recipe:
+    # `linear_implementation` rounds the projections, `swiglu_mlp_implementation` the
+    # shared expert, `moe_implementation` the routed experts, and
+    # `kv_round_implementation` the stored KV/indexer activations.
+    linear_implementation: str = "eager"
+    kv_round_implementation: str = "none"
     force_use_huggingface: bool = False
     enable_async_activation_offload: bool = False
     activation_offload_modules: list[str] = field(default_factory=list)
