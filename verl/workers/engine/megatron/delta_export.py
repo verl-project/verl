@@ -222,6 +222,9 @@ def build_export_index(bridge, megatron_model, slot_cache: dict | None = None) -
     tp_group = mpu.get_tensor_model_parallel_group()
     tp_world = torch.distributed.get_world_size(group=tp_group)
     ep_size = mpu.get_expert_model_parallel_world_size()
+    etp_size = (
+        mpu.get_expert_tensor_parallel_world_size() if hasattr(mpu, "get_expert_tensor_parallel_world_size") else 1
+    )
     world = torch.distributed.group.WORLD
 
     tasks = bridge.get_conversion_tasks(megatron_model)
@@ -249,7 +252,7 @@ def build_export_index(bridge, megatron_model, slot_cache: dict | None = None) -
         module = task.megatron_module
         local_shape = tuple(int(x) for x in param.shape)
 
-        is_expert = mapping.is_expert and (ep_size > 1 or tp_world > 1)
+        is_expert = mapping.is_expert and (ep_size > 1 or tp_world > 1 or etp_size > 1)
         is_tp_sharded = getattr(param, "tensor_model_parallel", False) and tp_world > 1
 
         if pp_world > 1:
