@@ -56,21 +56,17 @@ def resolve_vllm_weight_transfer_backend(
             "checkpoint_engine.backend='delta_sharded' is no longer used with vLLM; "
             "use checkpoint_engine.backend='vllm_sparse_nccl' instead."
         )
-
     wtc = (engine_kwargs or {}).get("weight_transfer_config")
     if wtc is not None and not isinstance(wtc, Mapping):
         raise TypeError("rollout.engine_kwargs.vllm.weight_transfer_config must be a mapping")
     configured = wtc.get("backend") if wtc is not None else None
-
     expected = VLLM_NATIVE_BACKENDS.get(checkpoint_backend or "")
-    if expected is not None:
-        if configured is not None and configured != expected:
-            raise ValueError(
-                f"checkpoint_engine.backend={checkpoint_backend!r} requires vLLM weight_transfer_config "
-                f"backend={expected!r}, got {configured!r}"
-            )
-        return expected
-    return configured
+    if expected is not None and configured not in (None, expected):
+        raise ValueError(
+            f"checkpoint_engine.backend={checkpoint_backend!r} requires vLLM weight_transfer_config "
+            f"backend={expected!r}, got {configured!r}"
+        )
+    return expected or configured
 
 
 class VerlRayVLLMWeightSyncClient:
@@ -104,8 +100,7 @@ class VerlRayVLLMWeightSyncClient:
             n = len(self.server_handles)
             payloads = [{**init_info, "replica_rank": i, "num_replicas": n} for i in range(n)]
         else:
-            self._fanout("init_weight_transfer_engine", init_info)
-            return
+            return self._fanout("init_weight_transfer_engine", init_info)
         ray.get([h.init_weight_transfer_engine.remote(p) for h, p in zip(self.server_handles, payloads, strict=True)])
 
     def shutdown_weight_transfer_engine(self) -> None:
@@ -139,12 +134,7 @@ class VerlEngineWeightSource(_WeightSourceBase):
     """WeightSource adapter over a verl training engine's HF parameter export."""
 
     def __init__(
-        self,
-        engine: Any,
-        *,
-        layered_summon: bool = False,
-        use_local_shards: bool = False,
-        trainer_world_size: int = 1,
+        self, engine: Any, *, layered_summon: bool = False, use_local_shards: bool = False, trainer_world_size: int = 1
     ) -> None:
         self._engine = engine
         self._layered_summon = layered_summon
@@ -160,39 +150,25 @@ class VerlEngineWeightSource(_WeightSourceBase):
                 ParamMeta(name, t.dtype, tuple(t.shape))
                 for name, t in _iter_engine_params(self._engine, layered_summon=self._layered_summon)
             ]
-
         all_ranks = tuple(range(self._trainer_world_size))
         metas = []
-        for name, param in _iter_engine_params(self._engine, shards=True):
-            layout = _vllm_dtensor_layout(param) if _vllm_dtensor_layout is not None else None
-            if layout is None:
-                metas.append(ParamMeta(name, param.dtype, tuple(param.shape), owners=all_ranks))
-            else:
-                owners, mesh_shape, placements = layout
-                metas.append(
-                    ParamMeta(
-                        name,
-                        param.dtype,
-                        tuple(param.shape),
-                        owners=owners,
-                        mesh_shape=mesh_shape,
-                        placements=placements,
-                    )
-                )
+        for name, p in _iter_engine_params(self._engine, shards=True):
+            layout = _vllm_dtensor_layout(p) if _vllm_dtensor_layout is not None else None
+            extra = (
+                {"owners": all_ranks}
+                if layout is None
+                else {"owners": layout[0], "mesh_shape": layout[1], "placements": layout[2]}
+            )
+            metas.append(ParamMeta(name, p.dtype, tuple(p.shape), **extra))
         return metas
 
     def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
         return _iter_engine_params(self._engine, layered_summon=self._layered_summon)
 
     def iter_local(self) -> Iterator[tuple[str, torch.Tensor]]:
-        for name, param in _iter_engine_params(self._engine, shards=True):
-            layout = _vllm_dtensor_layout(param) if _vllm_dtensor_layout is not None else None
-            if layout is None:
-                yield name, param
-            elif layout[2] is None:
-                yield name, param.full_tensor()
-            else:
-                yield name, param.to_local()
+        for name, p in _iter_engine_params(self._engine, shards=True):
+            layout = _vllm_dtensor_layout(p) if _vllm_dtensor_layout is not None else None
+            yield name, p if layout is None else (p.full_tensor() if layout[2] is None else p.to_local())
 
 
 def _dist_rank_world() -> tuple[int, int]:
@@ -205,8 +181,7 @@ def _broadcast_rendezvous_endpoint(rank: int) -> tuple[str, int]:
     endpoint: list[Any] = [None]
     if rank == 0:
         ip = ray.util.get_node_ip_address().strip("[]")
-        port, _ = get_free_port(ip)
-        endpoint[0] = (ip, int(port))
+        endpoint[0] = (ip, int(get_free_port(ip)[0]))
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.broadcast_object_list(endpoint, src=0)
     return endpoint[0]
@@ -221,27 +196,18 @@ def _build_trainer_init_info(
     bucket_size: int,
     trainer_kwargs: dict[str, Any],
 ) -> Any:
+    kw = dict(trainer_kwargs)
     if backend == "ipc":
         from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
-        return IPCTrainerInitInfo(
-            rank=rank,
-            packed=bool(trainer_kwargs.get("packed", True)),
-            packed_buffer_size_bytes=int(trainer_kwargs.get("packed_buffer_size_bytes", bucket_size)),
-        )
+        return IPCTrainerInitInfo(rank=rank, **{"packed": True, "packed_buffer_size_bytes": bucket_size, **kw})
     if backend == "nccl":
         from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
 
         addr, port = _broadcast_rendezvous_endpoint(rank)
+        defaults = {"packed": True, "packed_buffer_size_bytes": bucket_size, "packed_num_buffers": 2}
         return NCCLTrainerInitInfo(
-            master_address=addr,
-            master_port=port,
-            world_size=1 + client.total_workers,
-            rank=rank,
-            packed=bool(trainer_kwargs.get("packed", True)),
-            packed_buffer_size_bytes=int(trainer_kwargs.get("packed_buffer_size_bytes", bucket_size)),
-            packed_num_buffers=int(trainer_kwargs.get("packed_num_buffers", 2)),
-            use_load_plan=bool(trainer_kwargs.get("use_load_plan", False)),
+            master_address=addr, master_port=port, world_size=1 + client.total_workers, rank=rank, **{**defaults, **kw}
         )
     if backend == "sparse_nccl":
         from vllm.distributed.weight_transfer.sparse_nccl_engine import SparseNCCLTrainerInitInfo
@@ -253,89 +219,26 @@ def _build_trainer_init_info(
     if backend == "sharded_rdt":
         from vllm.distributed.weight_transfer.sharded_rdt_trainer import ShardedRDTTrainerInitInfo
 
-        wpr = client.replica_world_sizes[0] if len(set(client.replica_world_sizes)) == 1 else 0
-        ns = trainer_kwargs.get("trainer_actor_namespace")
-        if ns is None and ray.is_initialized():
-            ns = ray.get_runtime_context().namespace
-        extra = {k: v for k, v in trainer_kwargs.items() if k not in {"trainer_actor_namespace", "workers_per_replica"}}
-        return ShardedRDTTrainerInitInfo(
-            rank=rank,
-            num_consumers=client.total_workers,
-            workers_per_replica=int(trainer_kwargs.get("workers_per_replica", wpr)),
-            trainer_actor_namespace=ns,
-            **extra,
-        )
+        defaults = {
+            "workers_per_replica": client.replica_world_sizes[0] if len(set(client.replica_world_sizes)) == 1 else 0,
+            "trainer_actor_namespace": ray.get_runtime_context().namespace if ray.is_initialized() else None,
+        }
+        return ShardedRDTTrainerInitInfo(rank=rank, num_consumers=client.total_workers, **{**defaults, **kw})
     if backend == "nccl_m2n":
         from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
 
         addr, port = _broadcast_rendezvous_endpoint(rank)
-        extra = dict(trainer_kwargs)
-        if extra.get("dst_mesh_dims") is not None:
-            extra["dst_mesh_dims"] = tuple(extra["dst_mesh_dims"])
+        if kw.get("dst_mesh_dims") is not None:
+            kw["dst_mesh_dims"] = tuple(kw["dst_mesh_dims"])
         return M2NTrainerInitInfo(
             master_address=addr,
             master_port=port,
             world_size=trainer_world_size + client.total_workers,
             num_trainer_ranks=trainer_world_size,
             rank=rank,
-            **extra,
+            **kw,
         )
     raise ValueError(f"Unsupported vLLM native weight transfer backend: {backend!r}")
-
-
-class _SparsePatchStreamer:
-    """Bucket and stream SparseWeightPatch chunks inside one start/finish bracket."""
-
-    def __init__(self, trainer_engine: Any, client: VerlRayVLLMWeightSyncClient, bucket_size: int) -> None:
-        self._engine = trainer_engine
-        self._client = client
-        self._bucket_size = bucket_size
-        self._pending: list[Any] = []
-        self._pending_bytes = 0
-        self._started = False
-        self.flushes = 0
-        self.changed_elems = 0
-        self.wire_bytes = 0
-
-    def push(self, name: str, shape: tuple[int, ...], indices: torch.Tensor, values: torch.Tensor) -> None:
-        from vllm.distributed.weight_transfer.sparse_nccl_engine import SparseWeightPatch
-
-        numel = int(indices.numel())
-        if numel == 0:
-            return
-        self.changed_elems += numel
-        elem_bytes = torch.int32.itemsize + values.element_size()
-        self.wire_bytes += numel * elem_bytes
-        for s in range(0, numel, _SPARSE_MAX_ENTRY_ELEMS):
-            e = min(s + _SPARSE_MAX_ENTRY_ELEMS, numel)
-            patch = SparseWeightPatch(name=name, indices=indices[s:e], values=values[s:e], full_shape=shape)
-            pbytes = (e - s) * elem_bytes
-            if not self._started:
-                self._client.start_weight_update()
-                self._started = True
-            if self._pending and self._pending_bytes + pbytes > self._bucket_size:
-                self._engine.send_weight_chunk(self._pending)
-                self._pending.clear()
-                self._pending_bytes = 0
-                self.flushes += 1
-            self._pending.append(patch)
-            self._pending_bytes += pbytes
-
-    def finish(self, total_elems: int) -> dict[str, float] | None:
-        if self._pending:
-            self._engine.send_weight_chunk(self._pending)
-            self._pending.clear()
-            self.flushes += 1
-        if self._started:
-            self._client.finish_weight_update()
-        if not total_elems:
-            return None
-        return {
-            "checkpoint_engine/changed_ratio": self.changed_elems / total_elems,
-            "checkpoint_engine/changed_elems": float(self.changed_elems),
-            "checkpoint_engine/payload_mbytes": self.wire_bytes / (1 << 20),
-            "checkpoint_engine/flushes": float(self.flushes),
-        }
 
 
 class VLLMWeightTransferCheckpointEngine(CheckpointEngine):
@@ -365,7 +268,6 @@ class VLLMWeightTransferCheckpointEngine(CheckpointEngine):
         self.batch_gather = int(batch_gather)
         self.skip_seed = bool(skip_seed)
         self.trainer_kwargs = dict(trainer_kwargs)
-
         self._client: VerlRayVLLMWeightSyncClient | None = None
         self._target_sig: tuple[tuple[Any, int], ...] | None = None
         self._trainer_engine: Any = None
@@ -428,7 +330,6 @@ class VLLMWeightTransferCheckpointEngine(CheckpointEngine):
                     trainer_world_size=world_size,
                 )
             source = self._weight_source
-
         init_info = _build_trainer_init_info(
             self.vllm_backend,
             rank=rank,
@@ -443,13 +344,37 @@ class VLLMWeightTransferCheckpointEngine(CheckpointEngine):
         return self._trainer_engine
 
     def _send_sparse_weights(self, engine: Any, trainer_engine: Any) -> dict[str, float] | None:
+        from vllm.distributed.weight_transfer.sparse_nccl_engine import SparseWeightPatch
+
         from verl.checkpoint_engine.delta_checkpoint_engine import _GatherQueue
 
         assert self._client is not None
-        rank, _ = _dist_rank_world()
-        is_sender = rank == 0
-        streamer = _SparsePatchStreamer(trainer_engine, self._client, self.bucket_size)
-        total_elems = 0
+        is_sender = _dist_rank_world()[0] == 0
+        pending: list[Any] = []
+        pending_bytes = flushes = changed_elems = total_elems = wire_bytes = 0
+        started = False
+
+        def _push(name: str, shape: tuple[int, ...], indices: torch.Tensor, values: torch.Tensor) -> None:
+            nonlocal pending_bytes, flushes, changed_elems, wire_bytes, started
+            n = int(indices.numel())
+            if n == 0:
+                return
+            changed_elems += n
+            eb = torch.int32.itemsize + values.element_size()
+            wire_bytes += n * eb
+            for s in range(0, n, _SPARSE_MAX_ENTRY_ELEMS):
+                e = min(s + _SPARSE_MAX_ENTRY_ELEMS, n)
+                pb = (e - s) * eb
+                if not started:
+                    self._client.start_weight_update()
+                    started = True
+                if pending and pending_bytes + pb > self.bucket_size:
+                    trainer_engine.send_weight_chunk(pending)
+                    pending.clear()
+                    pending_bytes = 0
+                    flushes += 1
+                pending.append(SparseWeightPatch(name=name, indices=indices[s:e], values=values[s:e], full_shape=shape))
+                pending_bytes += pb
 
         if not self._shard_seeded:
             if not self.skip_seed:
@@ -467,24 +392,38 @@ class VLLMWeightTransferCheckpointEngine(CheckpointEngine):
                     total_elems += numel
                     for s in range(0, numel, _SPARSE_MAX_ENTRY_ELEMS):
                         e = min(s + _SPARSE_MAX_ENTRY_ELEMS, numel)
-                        streamer.push(name, shape, torch.arange(s, e, dtype=torch.int32, device=flat.device), flat[s:e])
+                        _push(name, shape, torch.arange(s, e, dtype=torch.int32, device=flat.device), flat[s:e])
             engine.prime_delta_snapshots()
             self._shard_seeded = True
-            return streamer.finish(total_elems) if is_sender else None
+        else:
+            weights, _ = engine.get_per_tensor_param_delta_shard()
 
-        weights, _ = engine.get_per_tensor_param_delta_shard()
+            def _consume(name, _dtype_str, full_shape, full_numel, aidx, aval):
+                nonlocal total_elems
+                total_elems += int(full_numel)
+                if aidx is not None and aval is not None and aidx.numel() > 0:
+                    _push(name, tuple(full_shape), aidx.contiguous().to(dtype=torch.int32), aval.contiguous())
 
-        def _consume(name, _dtype_str, full_shape, full_numel, aidx, aval):
-            nonlocal total_elems
-            total_elems += int(full_numel)
-            if aidx is not None and aval is not None and aidx.numel() > 0:
-                streamer.push(name, tuple(full_shape), aidx.contiguous().to(dtype=torch.int32), aval.contiguous())
+            gq = _GatherQueue(self.batch_gather, self.bucket_size, is_sender, _consume)
+            for slots, dtype_str, counts, hf_idx, hf_val, pg in weights:
+                gq.put(pg, slots, dtype_str, counts, hf_idx, hf_val)
+            gq.flush_all()
 
-        gq = _GatherQueue(self.batch_gather, self.bucket_size, is_sender, _consume)
-        for slots, dtype_str, counts, hf_idx, hf_val, pg in weights:
-            gq.put(pg, slots, dtype_str, counts, hf_idx, hf_val)
-        gq.flush_all()
-        return streamer.finish(total_elems) if is_sender else None
+        if not is_sender:
+            return None
+        if pending:
+            trainer_engine.send_weight_chunk(pending)
+            flushes += 1
+        if started:
+            self._client.finish_weight_update()
+        if not total_elems:
+            return None
+        return {
+            "checkpoint_engine/changed_ratio": changed_elems / total_elems,
+            "checkpoint_engine/changed_elems": float(changed_elems),
+            "checkpoint_engine/payload_mbytes": wire_bytes / (1 << 20),
+            "checkpoint_engine/flushes": float(flushes),
+        }
 
     async def send_weights(self, engine: Any, global_steps: int | None = None) -> dict[str, float] | None:
         t0 = time.perf_counter()
