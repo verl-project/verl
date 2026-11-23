@@ -707,17 +707,29 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
     """
     collect lora params or full params if base model is not ready in vllm
     work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
+
+    For an FSDP2 base export the values stay sharded ``DTensor``s: the caller gathers them one at a
+    time while streaming, so no rank ever holds a full copy of the model.
     """
     from peft.utils.save_and_load import get_peft_model_state_dict
 
     lora_params = OrderedDict()
     peft_model = getattr(module, "_fsdp_wrapped_module", module)
+    if fsdp_version(module) == 2 and not layered_summon and not base_sync_done:
+        # Gathering every tensor here would keep a full copy of the model in host memory on each
+        # rank, on every sync when model.lora.resync_base=True.
+        for name, param in peft_model.base_model.model.state_dict().items():
+            if "lora_" in name:
+                continue
+            lora_params[name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")] = param
+        return lora_params
     if fsdp_version(module) > 0:
         if layered_summon:
             if not base_sync_done:
                 raise ValueError(
-                    "To use layered_summon, you must make sure base-model is preloaded in vllm, e.g. let "
-                    "rollout.load_format=safetensors"
+                    "rollout.layered_summon=True cannot export the LoRA base weights. Preload the base model "
+                    "in the rollout (e.g. rollout.load_format=safetensors) and keep "
+                    "model.lora.resync_base=False, or set rollout.layered_summon=False."
                 )
             lora_params = layered_summon_lora_params(module)
             if not lora_params:
