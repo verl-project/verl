@@ -1604,6 +1604,20 @@ class PPOTrainer(ABC):
                 "temperature": self.config.actor_rollout_ref.rollout.temperature,
             }
         )
+        # Preserve the rollout trajectory even if the independent actor forward fails.
+        if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
+            import time
+            from pathlib import Path
+            from alignment_audit import freeze_inputs
+            rollout_snapshot = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id)
+            snapshot_dir = Path(os.environ["KIMI_ALIGNMENT_AUDIT_DIR"]) / "rollout_before_recompute"
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {"batch": {str(k): freeze_inputs(v) for k, v in rollout_snapshot.items()},
+                 "keys": [str(k) for k in batch.keys], "partition_id": str(batch.partition_id)},
+                snapshot_dir / (str(time.time_ns()) + ".pt"),
+            )
+            print("KIMI_ALIGNMENT_ROLLOUT_SNAPSHOT saved before independent recomputation", flush=True)
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
         assert len(output) == len(batch)
 

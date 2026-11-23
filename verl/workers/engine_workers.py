@@ -495,6 +495,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # Keep this process on toolkit training kernels. A PID-scoped marker
             # does not disable vendor setup in separately spawned rollout workers.
             os.environ["VERL_NPU_TRAINING_PROCESS_PID"] = str(os.getpid())
+            if os.environ.get("KIMI_ALIGNMENT_WORKSPACE"):
+                # Training and rollout use different vendor link flags.
+                os.environ["TORCH_EXTENSIONS_DIR"] = os.path.join(
+                    os.environ["KIMI_ALIGNMENT_WORKSPACE"], "cache/local/torch_extensions_training"
+                )
             for key in ("ASCEND_CUSTOM_OPP_PATH", "LD_LIBRARY_PATH"):
                 os.environ[key] = ":".join(
                     item for item in os.environ.get(key, "").split(":")

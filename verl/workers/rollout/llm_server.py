@@ -139,8 +139,20 @@ class LLMServerClient:
             priority_kwargs = (
                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
             )
+            backend_request_id = self._vllm_request_id(request_id)
+            if request_id.startswith("alignment-probe-") and __import__("os").environ.get("KIMI_ALIGNMENT_SERVING_PROBE") == "1":
+                backend_request_id = request_id
+
+            import os as alignment_os
+            if alignment_os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
+                import json as alignment_json
+                from pathlib import Path as AlignmentPath
+                alignment_root = AlignmentPath(alignment_os.environ["KIMI_ALIGNMENT_AUDIT_DIR"]) / "request_id_map"
+                alignment_root.mkdir(parents=True, exist_ok=True)
+                (alignment_root / (backend_request_id + ".json")).write_text(alignment_json.dumps(
+                    {"request_id": request_id, "backend_request_id": backend_request_id}) + "\n")
             output: TokenOutput = await server.generate.remote(
-                request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
+                request_id=backend_request_id,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,

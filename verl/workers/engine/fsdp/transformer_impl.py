@@ -336,6 +336,11 @@ class FSDPEngine(BaseEngine):
         if self.engine_config.full_determinism:
             enable_full_determinism(seed=self.engine_config.seed)
 
+        if os.environ.get("KIMI_ALIGNMENT_DETERMINISTIC_LEVEL") == "3":
+            import torch_npu
+            torch_npu.npu.set_deterministic_level(3)
+            print(f"KIMI_ALIGNMENT_DETERMINISTIC rank={self.rank} role=actor_or_ref level=3 grad_enabled={torch.is_grad_enabled()}", flush=True)
+
         # set FSDP offload params
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
@@ -1697,6 +1702,22 @@ class FSDPEngineWithLMHead(FSDPEngine):
         return model_inputs, output_args
 
     def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
+        from verl.utils.kimi_logprob import is_kimi_model, mask_kimi_generation_logits
+
+        import os
+        score_logprobs = logprobs_from_logits
+        compute_entropy = self.compute_entropy_from_logits
+        direct_entropy = verl_F.entropy_from_logits
+        if is_kimi_model(self.model_config.hf_config):
+            from kimi_scoring import masked_entropy, kimi_v2_logprobs
+            compute_entropy = direct_entropy = masked_entropy
+            if os.environ.get("KIMI_ALIGNMENT_V2_SCORING") == "1":
+                score_logprobs = kimi_v2_logprobs
+
+        force_fp32 = logits_processor_func is None or is_kimi_model(self.model_config.hf_config)
+        if getattr(output, "logits", None) is not None:
+            output.logits = mask_kimi_generation_logits(output.logits, self.model_config.hf_config)
+
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
@@ -1772,21 +1793,21 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     if calculate_entropy:
                         if self.engine_config.entropy_checkpointing:
                             expanded_entropy = torch.utils.checkpoint.checkpoint(
-                                self.compute_entropy_from_logits, logits_rmpad
+                                compute_entropy, logits_rmpad
                             )
                         elif self.engine_config.entropy_from_logits_with_chunking:
-                            expanded_entropy = self.compute_entropy_from_logits(
+                            expanded_entropy = compute_entropy(
                                 logits_rmpad, chunk_size=self.engine_config.entropy_from_logits_chunk_size
                             )
                         else:
-                            expanded_entropy = self.compute_entropy_from_logits(logits_rmpad)
+                            expanded_entropy = compute_entropy(logits_rmpad)
                         entropy_rmpad = torch.gather(expanded_entropy, 0, raw_positions)
                     log_probs = None
                     if not distillation_only:
-                        expanded_log_probs = logprobs_from_logits(
+                        expanded_log_probs = score_logprobs(
                             logits=logits_rmpad, labels=expanded_labels.squeeze(0),
                             inplace_backward=not (calculate_entropy or calculate_sum_pi_squared),
-                            force_fp32=logits_processor_func is None,
+                            force_fp32=force_fp32,
                         )
                         log_probs = torch.gather(expanded_log_probs, 0, raw_positions)
                     # The common packed tail removes static/SP padding and restores
@@ -1808,15 +1829,15 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     if calculate_entropy:
                         if not self.engine_config.entropy_checkpointing:
                             if self.engine_config.entropy_from_logits_with_chunking:
-                                entropy_rmpad = self.compute_entropy_from_logits(
+                                entropy_rmpad = compute_entropy(
                                     logits_rmpad,
                                     chunk_size=self.engine_config.entropy_from_logits_chunk_size,
                                 )  # ((total_nnz / sp) + pad)
                             else:
-                                entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
+                                entropy_rmpad = compute_entropy(logits_rmpad)
                         else:
                             entropy_rmpad = torch.utils.checkpoint.checkpoint(
-                                self.compute_entropy_from_logits, logits_rmpad
+                                compute_entropy, logits_rmpad
                             )
 
                     # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
@@ -1836,11 +1857,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         inplace_backward = True
                         if calculate_entropy:
                             inplace_backward = False
-                        log_probs = logprobs_from_logits(
+                        log_probs = score_logprobs(
                             logits=logits_rmpad,
                             labels=input_ids_rmpad_rolled,
                             inplace_backward=inplace_backward,
-                            force_fp32=logits_processor_func is None,
+                            force_fp32=force_fp32,
                         )
 
             # gather across the ulysses sp group and drop the packed-sequence padding
@@ -1907,9 +1928,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     )
                     if calculate_entropy:
                         if self.engine_config.entropy_checkpointing:
-                            expanded_entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
+                            expanded_entropy = torch.utils.checkpoint.checkpoint(direct_entropy, logits)
                         else:
-                            expanded_entropy = verl_F.entropy_from_logits(logits)
+                            expanded_entropy = direct_entropy(logits)
                         model_output["entropy"] = _pack_kimi_raw_token_values(
                             expanded_entropy, raw_indices, raw_mask, cu_seqlens
                         )
@@ -1919,11 +1940,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             expanded_sum_pi_squared, raw_indices, raw_mask, cu_seqlens
                         )
                     if not distillation_only:
-                        expanded_log_probs = logprobs_from_logits(
+                        expanded_log_probs = score_logprobs(
                             logits=logits,
                             labels=expanded_labels,
                             inplace_backward=not (calculate_entropy or calculate_sum_pi_squared),
-                            force_fp32=logits_processor_func is None,
+                            force_fp32=force_fp32,
                         )
                         model_output["log_probs"] = _pack_kimi_raw_token_values(
                             expanded_log_probs, raw_indices, raw_mask, cu_seqlens
@@ -1940,9 +1961,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
-                        entropy = verl_F.entropy_from_logits(logits)
+                        entropy = direct_entropy(logits)
                     else:
-                        entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
+                        entropy = torch.utils.checkpoint.checkpoint(direct_entropy, logits)
 
                 if calculate_sum_pi_squared:
                     sum_pi_squared = verl_F.calculate_sum_pi_squared_from_logits(logits)
@@ -1971,10 +1992,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                     log_probs = None
                     if not distillation_only:
-                        log_probs = logprobs_from_logits(
+                        log_probs = score_logprobs(
                             logits=logits_rmpad,
                             labels=input_ids_rmpad_rolled,
-                            force_fp32=logits_processor_func is None,
+                            force_fp32=force_fp32,
                         )
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
                     if not distillation_only:
@@ -2001,6 +2022,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         return model_output
 
+
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
         device_name = get_device_name()
         # actually, we should avoid assigning like this...
@@ -2018,14 +2040,29 @@ class FSDPEngineWithLMHead(FSDPEngine):
             else torch.autocast(device_type=device_name, dtype=autocast_dtype)
         )
         with autocast_ctx:
-            raw_output = self.module(
-                **model_inputs,
-                use_cache=False,
-            )  # prevent model thinks we are generating
+            alignment_context = nullcontext()
+            if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
+                from alignment_audit import trace_actual_forward
+                alignment_context = trace_actual_forward(self, model_inputs, micro_batch, forward_only)
+            with alignment_context:
+                raw_output = self.module(
+                    **model_inputs,
+                    use_cache=False,
+                )  # prevent model thinks we are generating
+
+            if forward_only and os.environ.get("KIMI_ALIGNMENT_PREFIX_PROBE") == "1":
+                from alignment_audit import probe_prefix
+                probe_prefix(self, model_inputs, raw_output, micro_batch)
+                from alignment_audit import replay_fixed_failure
+                replay_fixed_failure(self, model_inputs)
 
             model_output = self.prepare_model_outputs(
                 output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
             )
+
+            if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
+                from alignment_audit import capture_forward
+                capture_forward(self, micro_batch, model_inputs, model_output, forward_only)
 
             if loss_function is not None:
                 loss, metrics = loss_function(

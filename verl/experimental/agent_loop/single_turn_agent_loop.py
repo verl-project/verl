@@ -79,6 +79,11 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 mm_processor_kwargs=mm_processor_kwargs,
                 priority=priority,
             )
+        if os.environ.get("KIMI_ALIGNMENT_SERVING_PROBE") == "1":
+            from serving_invariance_probe import replay_prefix
+            await replay_prefix(self, request_id, prompt_ids, output.token_ids, dict(
+                image_data=images, audio_data=audios, video_data=videos,
+                mm_processor_kwargs=mm_processor_kwargs, priority=priority))
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
 
@@ -110,6 +115,18 @@ class SingleTurnAgentLoop(AgentLoopBase):
                     "tokens after route capture: "
                     f"generated={len(response_ids)}, configured={self.response_length}"
                 )
+
+        if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
+            import json as alignment_json
+            from pathlib import Path as AlignmentPath
+            alignment_root = AlignmentPath(os.environ["KIMI_ALIGNMENT_AUDIT_DIR"]) / "requests"
+            alignment_root.mkdir(parents=True, exist_ok=True)
+            alignment_record = {"request_id": request_id, "priority": priority,
+                                "prompt_ids": list(prompt_ids), "response_ids": list(response_ids),
+                                "response_logprobs": response_logprobs,
+                                "response_mask": list(response_mask)}
+            (alignment_root / (request_id + ".json")).write_text(alignment_json.dumps(alignment_record) + "\n")
+            print("KIMI_ALIGNMENT_REQUEST_MAP " + request_id, flush=True)
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
