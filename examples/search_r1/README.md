@@ -132,7 +132,11 @@ GPUs selected by `RETRIEVAL_GPU_INDICES` (default `0,1,2,3`), shared with traini
 The launcher resolves these indices to GPU UUIDs and scopes CUDA visibility to
 the retrieval subprocess; training and telemetry retain the full allocation.
 Retrieval uses the existing
-sd-search Python/CUDA environment and E5 runs on CPU. Its FAISS overlay is
+sd-search Python/CUDA environment. The recipe's `retrieval_service` reuses its
+corpus reader and four-GPU index, with explicit FP32 E5 parameters, no autocast,
+and TF32 disabled. E5 defaults to `RETRIEVAL_ENCODER_DEVICE=cuda:0`, the first
+GPU in the retrieval subprocess's UUID mask. Set `RETRIEVAL_ENCODER_DEVICE=cpu`
+for the CPU control. Its FAISS overlay is
 scoped to the retrieval subprocess. Training uses the image's Python and this
 checkout on PYTHONPATH. The worker performs no downloads or package installs.
 
@@ -154,7 +158,7 @@ that subprocess on exit. Set `START_RETRIEVER=0` only to use an already verified
 service in the same network namespace. `RUN_DIR`, `SD_ROOT`, `MODEL_PATH`,
 `DATA_DIR`, `VAL_FILE`, `TRAIN_PYTHON`, `RETRIEVER_PYTHON`, `TRAIN_BATCH_SIZE`,
 `PPO_MINI_BATCH_SIZE`, `ROLLOUT_N`, `TOTAL_STEPS`, `N_GPUS`,
-`RETRIEVAL_GPU_INDICES` and `ROLLOUT_GPU_MEMORY` are
+`RETRIEVAL_GPU_INDICES`, `RETRIEVAL_ENCODER_DEVICE` and `ROLLOUT_GPU_MEMORY` are
 explicit overrides. `DRY_RUN=1` saves command.json without starting GPU work.
 `ROLLOUT_ENFORCE_EAGER=False` enables the engine's CUDA graph path, while
 `ROLLOUT_MAX_BATCHED_TOKENS=16384` increases the scheduler's token budget.

@@ -10,7 +10,9 @@ DATA_DIR=${DATA_DIR:-$VERL_ROOT/../data/search_r1_sd_search}
 VAL_FILE=${VAL_FILE:-$DATA_DIR/monitor.parquet}
 RUN_DIR=${RUN_DIR:-$VERL_ROOT/../outputs/search-r1-$(date +%Y%m%d-%H%M%S)}
 TRAIN_PYTHON=${TRAIN_PYTHON:-/usr/bin/python3}
+TRAIN_ENTRYPOINT=${TRAIN_ENTRYPOINT:-verl.trainer.main_ppo}
 RETRIEVER_PYTHON=${RETRIEVER_PYTHON:-$SD_ROOT/.envs/sd-search/bin/python}
+RETRIEVAL_ENCODER_DEVICE=${RETRIEVAL_ENCODER_DEVICE:-cuda:0}
 START_RETRIEVER=${START_RETRIEVER:-1}
 DRY_RUN=${DRY_RUN:-0}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-256}
@@ -85,14 +87,14 @@ with socket.socket() as connection:
 PY
     read -r retrieval_cuda_mask < "$RUN_DIR/retrieval/cuda-visible-devices.txt"
     env CUDA_VISIBLE_DEVICES="$retrieval_cuda_mask" \
-        PYTHONPATH="$SD_ROOT/.envs/faiss-gpu-cu12-1.8.0.2:$SD_ROOT/src" \
+        PYTHONPATH="$SD_ROOT/.envs/faiss-gpu-cu12-1.8.0.2:$VERL_ROOT:$SD_ROOT/src" \
         NVIDIA_TF32_OVERRIDE=0 OPENBLAS_NUM_THREADS=20 OMP_NUM_THREADS=20 \
-        "$RETRIEVER_PYTHON" -u -m sd_search.retrieval \
+        "$RETRIEVER_PYTHON" -u -m examples.search_r1.retrieval_service \
         --index "$SD_ROOT/data/retrieval/e5_Flat.index" \
         --corpus "$SD_ROOT/data/retrieval/wiki-18.jsonl" \
         --offsets "$SD_ROOT/data/retrieval/wiki-18.offsets.u64" \
         --model "$SD_ROOT/models/e5-base-v2" \
-        --device cpu --threads 20 --search-backend gpu --gpu-scratch-mib 1536 --port 8000 \
+        --device "$RETRIEVAL_ENCODER_DEVICE" --threads 20 --search-backend gpu --gpu-scratch-mib 1536 --port 8000 \
         --timing-log "$RUN_DIR/retrieval/timing.jsonl" \
         --startup-report "$RUN_DIR/retrieval/startup.json" \
         > "$RUN_DIR/retrieval/service.log" 2>&1 &
@@ -122,7 +124,7 @@ if [[ "$DRY_RUN" != 1 && -n "${ROLLOUT_DIAGNOSTIC_SCRIPT:-}" ]]; then
     "$TRAIN_PYTHON" "$ROLLOUT_DIAGNOSTIC_SCRIPT" before
 fi
 
-COMMAND=("$TRAIN_PYTHON" -u -m verl.trainer.main_ppo \
+COMMAND=("$TRAIN_PYTHON" -u -m "$TRAIN_ENTRYPOINT" \
     algorithm.adv_estimator=grpo algorithm.use_kl_in_reward=False \
     data.train_files="$DATA_DIR/train.parquet" data.val_files="$VAL_FILE" \
     data.train_batch_size="$TRAIN_BATCH_SIZE" data.val_batch_size=128 \
