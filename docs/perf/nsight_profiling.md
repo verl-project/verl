@@ -43,6 +43,15 @@ Reward-loop workers and rollout servers are created as independent Ray actors. T
 
 The vLLM rollout server and engine Nsight support uses the standard PPO trainers' existing rollout start/stop calls. Reward-loop workers now have profiler initialization and manager start/stop methods, and generative reward-model servers receive launch configuration. Completing the reward profiling lifecycle in the standard PPO trainers is follow-up work. The reward settings below currently require an integration that drives that lifecycle to produce captures.
 
+For the standard V1 PPO trainer, enabled rollout Nsight capture using
+`capture-range: cudaProfilerApi` currently requires
+`global_profiler.profile_continuous_steps=False`. In `sync` and `colocate_async`
+modes, it also requires `parameter_sync_step=1`; `separate_async` retains its
+per-step rollout stop with multiple local updates. Unsupported combinations are
+rejected before worker setup, pending follow-up lifecycle support. These checks
+do not restrict training-worker-only profiling, other profiler backends, or
+rollout capture that does not use `cudaProfilerApi`.
+
 Reward-loop workers use `reward.profiler`; generative reward-model servers use `reward.reward_model.rollout.profiler`. These control separate processes. For an integration that drives the reward profiling lifecycle, with global Nsight profiling and a nonempty `global_profiler.steps`, select reward-loop worker 0 with:
 
 ```yaml
