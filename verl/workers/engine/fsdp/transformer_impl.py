@@ -1286,6 +1286,24 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         return model_inputs, output_args
 
+    def _compute_entropy(self, logits: torch.Tensor) -> torch.Tensor:
+        """Honor entropy chunking and recomputation for both packed and dense logits."""
+        kwargs = {}
+        if self.engine_config.entropy_from_logits_with_chunking:
+            # The chunked kernel consumes [tokens, vocab]. Process dense sequences
+            # individually so even non-contiguous [batch, tokens, vocab] views do
+            # not require a full-vocabulary reshape copy. Chunking the batch axis
+            # would not bound temporary memory for a single long sequence.
+            if logits.ndim == 3:
+                return torch.stack([self._compute_entropy(sequence) for sequence in logits.unbind(0)])
+            kwargs["chunk_size"] = self.engine_config.entropy_from_logits_chunk_size
+
+        if self.engine_config.entropy_checkpointing:
+            return torch.utils.checkpoint.checkpoint(
+                self.compute_entropy_from_logits, logits, use_reentrant=False, **kwargs
+            )
+        return self.compute_entropy_from_logits(logits, **kwargs)
+
     def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
@@ -1360,18 +1378,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     sum_pi_squared_rmpad = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
 
                 if calculate_entropy:
-                    if not self.engine_config.entropy_checkpointing:
-                        if self.engine_config.entropy_from_logits_with_chunking:
-                            entropy_rmpad = self.compute_entropy_from_logits(
-                                logits_rmpad,
-                                chunk_size=self.engine_config.entropy_from_logits_chunk_size,
-                            )  # ((total_nnz / sp) + pad)
-                        else:
-                            entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
-                    else:
-                        entropy_rmpad = torch.utils.checkpoint.checkpoint(
-                            self.compute_entropy_from_logits, logits_rmpad
-                        )
+                    entropy_rmpad = self._compute_entropy(logits_rmpad)
 
                 # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
                 if distillation_use_topk or score_centering:
@@ -1470,10 +1477,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 )
 
                 if calculate_entropy:
-                    if not self.engine_config.entropy_checkpointing:
-                        entropy = verl_F.entropy_from_logits(logits)
-                    else:
-                        entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
+                    entropy = self._compute_entropy(logits)
 
                 if calculate_sum_pi_squared:
                     sum_pi_squared = verl_F.calculate_sum_pi_squared_from_logits(logits)

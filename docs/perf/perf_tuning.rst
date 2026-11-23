@@ -1,7 +1,7 @@
 Performance Tuning Guide
 ==============================
 
-Last updated: 10/22/2026.
+Last updated: 11/23/2026.
 
 Author: `Guangming Sheng <https://github.com/PeterSH6>`_, `Jiali Zheng <https://github.com/CurryRice233>`_
 
@@ -363,6 +363,16 @@ The ``logits`` tensor (typically of shape ``[bsz*seq_len, voc]``) can consume si
 To reduce this memory peak, enable chunked computation by setting:
 ``actor_rollout_ref.ref.entropy_from_logits_with_chunking = True``
 This processes the tensor in chunks of shape ``[chunk_size, voc]`` (e.g., 2048) rather than the full sequence length, exclusively during the model's forward pass.
+
+For FSDP actor log-probability recomputation, use
+``actor_rollout_ref.actor.entropy_from_logits_with_chunking=True`` and set
+``actor_rollout_ref.actor.entropy_from_logits_chunk_size`` to the desired number
+of token positions per chunk. This works with both values of
+``actor_rollout_ref.model.use_remove_padding``. Dense ``[batch, sequence, vocab]``
+logits are chunked along token positions, not just along the batch dimension.
+The configured chunk size is also honored when entropy checkpointing is enabled.
+Chunking bounds forward temporary buffers; it does not eliminate the full model
+logits or, by itself, bound all tensors saved for backward.
 
 Additionally, during training, standard gradient checkpointing (``enable_gradient_checkpointing=True``) does not apply to entropy calculations. To reduce memory peaks in this context, set:
 ``actor_rollout_ref.actor.entropy_checkpointing = True``
