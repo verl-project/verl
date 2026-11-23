@@ -616,7 +616,7 @@ class CheckpointEngineManager:
             await asyncio.gather(*self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
 
-        if getattr(self.backend_cls, "is_vllm_native", False):
+        if getattr(getattr(self, "backend_cls", None), "is_vllm_native", False):
             return await self._update_weights_vllm_native(global_steps=global_steps)
 
         # Wait previous update to be committed
