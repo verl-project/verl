@@ -214,7 +214,10 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             return super()._compute_old_log_prob(batch, metrics)
 
         if self.local_trigger_step == 0:
-            self.actor_rollout_wg.save_model_to_cpu(0)
+            # With parameter_sync_step == 1, local_trigger_step never reaches >= 1, so the
+            # π_old snapshot is never restored; skip the redundant full-model D2H copy.
+            if self.parameter_sync_step > 1:
+                self.actor_rollout_wg.save_model_to_cpu(0)
             return super()._compute_old_log_prob(batch, metrics)
         else:
             self.actor_rollout_wg.save_model_to_cpu(self.local_trigger_step)
