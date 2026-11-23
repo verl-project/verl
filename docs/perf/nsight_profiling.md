@@ -142,7 +142,7 @@ To enable profiling for specific components and steps, modify your ppo_trainer.y
 ### Disable profiler
 
 ```yaml
-    profiler:
+    global_profiler:
         steps: null # disable profile
 ```
 
@@ -150,8 +150,11 @@ To enable profiling for specific components and steps, modify your ppo_trainer.y
 
 ```yaml
     global_profiler:
+        tool: nsys
         steps: [1, 2, 5]
-        discrete: False
+        global_tool_config:
+            nsys:
+                discrete: False
     actor_rollout_ref:
         actor:
             profiler:
@@ -171,9 +174,12 @@ To enable profiling for specific components and steps, modify your ppo_trainer.y
 ### Enable profiler and multiple databases for one training step
 
 ```yaml
-    profiler:
+    global_profiler:
+        tool: nsys
         steps: [1, 2, 5]
-        discrete: True
+        global_tool_config:
+            nsys:
+                discrete: True
 ```
 
 ## Profiling Output
