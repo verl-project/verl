@@ -236,6 +236,23 @@ class PPOTrainer(ABC):
         4. RewardLoopManager: reward workers for rule-based reward, optional LLM server for model-based reward.
         5. [Optional] MultiTeacherModelManager: LLM teacher servers for on-policy distillation.
         """
+        rollout_profiler = OmegaConf.select(self.config, "actor_rollout_ref.rollout.profiler")
+        if (
+            rollout_profiler is not None
+            and rollout_profiler.get("tool") == "nsys"
+            and rollout_profiler.get("enable", False)
+            and OmegaConf.select(self.config, "global_profiler.steps")
+        ):
+            nsight_options = rollout_profiler.get("ray_actor_nsight_options")
+            if nsight_options is None:
+                nsight_options = OmegaConf.select(
+                    self.config, "global_profiler.global_tool_config.nsys.worker_nsight_options"
+                )
+            if nsight_options and nsight_options.get("capture-range") == "cudaProfilerApi":
+                if self.config.global_profiler.profile_continuous_steps:
+                    raise ValueError("V1 rollout Nsight API capture requires profile_continuous_steps=False")
+                if self.trainer_mode in ("sync", "colocate_async") and self.parameter_sync_step > 1:
+                    raise ValueError("V1 sync/colocate_async rollout Nsight API capture requires parameter_sync_step=1")
         initialized = False
         try:
             self._setup()
