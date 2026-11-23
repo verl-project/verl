@@ -202,3 +202,60 @@ Tests use the real Qwen tokenizer and Continuous Token builder with fake
 inference and local HTTP retrieval. They cover history boundaries, masks,
 logprobs, budgets, reward provenance, deferred F1 routing, prompt preservation
 and data order. CPU checks do not validate GPU memory or throughput.
+
+### Adjacent search-decision hidden-state loss
+
+Opt in independently of static skill teachers (disabled unless explicitly enabled):
+
+```bash
+bash examples/search_r1/run_skill_grpo.sh \
+  +turn_hidden_diversity=search_r1 \
+  turn_hidden_diversity.enabled=true \
+  turn_hidden_diversity.margin=0.1 \
+  turn_hidden_diversity.coefficient=0.001
+```
+
+The same options work with `run_grpo.sh` without skill teachers. During actor
+updates, the final normalized hidden vector entering the LM head is selected at
+`</think>` in each adjacent pair of valid search turns. Endpoints are located in
+the actual sampled token IDs; no response is retokenized. Only endpoints ending
+before the action tag are accepted, including a whitespace suffix on the closing
+tag token. Answer/malformed/truncated turns break adjacency. Tools and padding
+are excluded. Current-turn states are compared with detached previous-turn
+states, using `relu(margin - (1 - cosine_similarity))` in FP32. The pair mean,
+weighted by `coefficient`, is added to the existing PPO and optional skill losses.
+Counts are taken across the optimizer mini-batch and DP group before splitting
+micro-batches. A micro-batch with no pairs contributes a differentiable zero.
+
+This first implementation supports the synchronous V1 FSDP/FSDP2 recipe, with
+`use_remove_padding=False`, unfused kernels and sequence parallel size 1.
+It captures only selected vectors during the existing actor forward; rollout,
+old-policy/reference/teacher scoring do not capture hidden states. It does not
+request all layers' hidden states. The previous endpoint is detached only in the
+distance branch; current states can still backpropagate through causal attention.
+
+Logged under `actor/turn_hidden/`: `loss` (unweighted pair mean), `weighted_loss`,
+`cosine_mean`, `distance_mean`, `active_fraction`, `pairs`, `margin`, and
+`coefficient`. `turn_hidden/prepared_pairs` counts usable pairs in the sampled
+batch; `timing_s/turn_hidden_prepare` measures mask preparation. Actor metrics
+aggregate over gradient accumulation and DP; repeated PPO epochs/mini-batches
+follow the trainer's normal aggregation, so pair counts there describe optimizer
+visits. Zero pairs yield zero means; consult pair counts when interpreting them.
+
+Representation distance does not establish semantic progress or evidence gain.
+A repeated query may already have a different state, and exact identical vectors
+are a stationary point of cosine similarity. Monitor repeated queries, EM, the
+active fraction, stage timings and memory in addition to this auxiliary loss.
+
+The turn-hidden launcher now defaults to FP32 E5 on `cuda:0` (the first
+retrieval-visible GPU), and teacher micro-batch 32 per GPU. Set
+`RETRIEVAL_ENCODER_DEVICE=cpu` for a CPU control or
+`TEACHER_MICRO_BATCH_SIZE=64` to test a larger teacher batch. Final Hydra CLI
+overrides take precedence. FAISS remains sharded over four GPUs. GPU encoder
+memory remains resident while teacher/actor run, so capacity checks must include
+it. With 256 prompts, five rollouts and DP=4, the current fixed batch splitter
+requires the teacher micro-batch to divide 320; 64, 80, 160 and 320 pass that
+arithmetic constraint, whereas 128 does not. These are legal sizes, not verified
+GPU capacity limits. Both 32 and 80 completed five-step runs; 32 scored faster,
+while GPU E5 plus 80 reached about 139.95 GiB of device memory. The full-run
+recipe therefore defaults to GPU E5 plus teacher micro-batch 32.

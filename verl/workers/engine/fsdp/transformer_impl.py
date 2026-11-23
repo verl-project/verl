@@ -1562,7 +1562,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
             if autocast_dtype == torch.float32
             else torch.autocast(device_type=device_name, dtype=autocast_dtype)
         )
-        with autocast_ctx:
+        capture_context = nullcontext(None)
+        if not forward_only and tu.get(micro_batch, "turn_hidden_enabled", default=False):
+            from examples.search_r1.turn_hidden_diversity import capture_decisions
+
+            capture_context = capture_decisions(self.module, micro_batch)
+        with autocast_ctx, capture_context as turn_hidden_output:
             raw_output = self.module(
                 **model_inputs,
                 use_cache=False,
@@ -1571,6 +1576,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
             model_output = self.prepare_model_outputs(
                 output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
             )
+
+            if turn_hidden_output is not None:
+                model_output["turn_hidden_diversity"] = turn_hidden_output
 
             if loss_function is not None:
                 loss, metrics = loss_function(

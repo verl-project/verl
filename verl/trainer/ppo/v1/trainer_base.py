@@ -138,6 +138,11 @@ class PPOTrainer(ABC):
             from examples.search_r1.skill_distillation import SkillTeacherSupervisor
 
             self.skill_teacher_supervisor = SkillTeacherSupervisor(config)
+        self.turn_hidden_supervisor = None
+        if config.get("turn_hidden_diversity", {}).get("enabled", False):
+            from examples.search_r1.turn_hidden_diversity import TurnHiddenSupervisor
+
+            self.turn_hidden_supervisor = TurnHiddenSupervisor(config)
         self.checkpoint_callback = build_checkpoint_callback(config)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
@@ -242,6 +247,8 @@ class PPOTrainer(ABC):
         self._setup()
         if self.skill_teacher_supervisor is not None:
             self.skill_teacher_supervisor.initialize(self)
+        if self.turn_hidden_supervisor is not None:
+            self.turn_hidden_supervisor.initialize(self)
         self.on_init_end()
 
     def _setup(self):
@@ -611,6 +618,10 @@ class PPOTrainer(ABC):
         if self.skill_teacher_supervisor is not None:
             with marked_timer("skill_teachers", timing_raw, color="blue"):
                 batch = self.skill_teacher_supervisor.score(self, batch, metrics)
+
+        if self.turn_hidden_supervisor is not None:
+            with marked_timer("turn_hidden_prepare", timing_raw, color="blue"):
+                batch = self.turn_hidden_supervisor.prepare(batch, metrics)
 
         # 5. [OPTIONAL] compute ref_log_prob
         if self.use_reference_policy:
@@ -1894,6 +1905,9 @@ class PPOTrainer(ABC):
         if self.skill_teacher_supervisor is not None:
             batch.fields = None
             self.skill_teacher_supervisor.update_metadata(batch, self.global_steps)
+
+        if self.turn_hidden_supervisor is not None:
+            self.turn_hidden_supervisor.update_metadata(batch)
 
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
         output = rename_dict(output["metrics"], "actor/")

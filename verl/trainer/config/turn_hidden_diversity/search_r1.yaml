@@ -1,0 +1,8 @@
+# Opt-in auxiliary loss; loading this config alone leaves the objective disabled.
+enabled: false
+
+# Minimum cosine distance between adjacent search decision states.
+margin: 0.1
+
+# Weight added to the existing PPO and optional skill losses.
+coefficient: 0.001
