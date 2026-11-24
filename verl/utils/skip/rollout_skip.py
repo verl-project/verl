@@ -12,12 +12,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 from pathlib import Path
 
 import torch
 from omegaconf import OmegaConf
+from tensordict import TensorDict
 
 from verl.utils.skip.base_skip import BaseSkip, SkipAction, register_skip
+
+logger = logging.getLogger(__name__)
+
+
+class _CacheLayoutMismatch(ValueError):
+    """The selected dump cannot satisfy the current rollout request."""
+
+
+def _config_replay_keys(old_keys: list[str], data: TensorDict, new_prompt_uids: list[str], n: int) -> list[str]:
+    """Validate the full batch before mapping its saved rows onto fresh prompts."""
+    sessions_by_uid: dict[str, set[str]] = {}
+    expected_sessions = {str(i) for i in range(n)}
+    saved_uids = data.get("uid").tolist() if "uid" in data.keys() else None
+    saved_sessions = data.get("session_id").tolist() if "session_id" in data.keys() else None
+
+    parsed = []
+    for row, key in enumerate(old_keys):
+        parts = key.rsplit("_", 2) if isinstance(key, str) else []
+        if len(parts) != 3:
+            raise _CacheLayoutMismatch(f"invalid trajectory key {key!r}")
+        uid, session, index = parts
+        if not uid or session not in expected_sessions or not index.isascii() or not index.isdecimal():
+            raise _CacheLayoutMismatch(f"invalid trajectory key {key!r} for rollout.n={n}")
+        if saved_uids is not None and saved_uids[row] != uid:
+            raise _CacheLayoutMismatch(f"row uid disagrees with trajectory key {key!r}")
+        if saved_sessions is not None and saved_sessions[row] != int(session):
+            raise _CacheLayoutMismatch(f"row session_id disagrees with trajectory key {key!r}")
+        sessions_by_uid.setdefault(uid, set()).add(session)
+        parsed.append((uid, session, index))
+
+    if len(sessions_by_uid) != len(new_prompt_uids):
+        raise _CacheLayoutMismatch(f"expected {len(new_prompt_uids)} prompt groups, found {len(sessions_by_uid)}")
+    if len(set(old_keys)) != len(old_keys):
+        raise _CacheLayoutMismatch("duplicate trajectory keys")
+    for uid, sessions in sessions_by_uid.items():
+        if sessions != expected_sessions:
+            raise _CacheLayoutMismatch(f"expected {n} sessions for prompt {uid!r}, found {len(sessions)}")
+
+    uid_map = dict(zip(sessions_by_uid, new_prompt_uids, strict=True))
+    return [f"{uid_map[uid]}_{session}_{index}" for uid, session, index in parsed]
 
 
 @register_skip("rollout_tq")
@@ -44,6 +86,7 @@ class RolloutTqSkip(BaseSkip):
 
     def __init__(self, local_config, global_config):
         super().__init__(local_config, global_config)
+        self.load_mode = getattr(local_config, "load_mode", "dump")
         # prepare experiment info
         self.exp_name = global_config.trainer.get("experiment_name", "default_experiment_name")
         self.project_name = global_config.trainer.get("project_name", "default_project_name")
@@ -171,13 +214,17 @@ class RolloutTqSkip(BaseSkip):
                 flush=True,
             )
             return False
-        self.load_dump_data(
-            step=step,
-            new_prompt_uids=new_prompt_uids,
-            n=self.n,
-            global_steps=step,
-            partition_id=partition_id,
-        )
+        try:
+            self.load_dump_data(
+                step=step,
+                new_prompt_uids=new_prompt_uids,
+                n=self.n,
+                global_steps=step,
+                partition_id=partition_id,
+            )
+        except _CacheLayoutMismatch as exc:
+            logger.warning("Incompatible rollout cache at step %d: %s. Collecting fresh rollouts.", step, exc)
+            return False
         return True
 
     def prepare_data(self, step: int, batch, global_steps: int) -> None:
@@ -230,14 +277,12 @@ class RolloutTqSkip(BaseSkip):
     ) -> None:
         """Phase two: load cached data from disk and inject into TransferQueue.
 
-        Maps saved trajectories to new prompt uids in order, preserving the
-        original key structure (``{uid}_{session_id}_{index}``) and GRPO group
-        composition (each prompt gets *n* trajectories from the same original group).
+        Maps saved groups to new prompt UIDs using the configured replay policy.
 
         Args:
             step: Current training step.
             new_prompt_uids: Freshly generated uids for the current batch.
-            n: Number of trajectories per prompt (``rollout.n``).
+            n: Number of rollout sessions per prompt (``rollout.n``).
             global_steps: Current ``global_steps``, used to override staleness tags.
             partition_id: TQ partition (``"train"`` or ``"val"``).
         """
@@ -256,6 +301,10 @@ class RolloutTqSkip(BaseSkip):
         for inner_idx in range(self.parameter_sync_step):
             inner_dir = self._get_v1_inner_dir(load_step, inner_idx)
             payload = torch.load(inner_dir / self.tq_batch_name, weights_only=False)
+            if self.load_mode == "config" and not (
+                len(payload["tensordict"]) == len(payload["keys"]) == len(payload["tags"])
+            ):
+                raise _CacheLayoutMismatch(f"field, key and tag counts disagree in {inner_dir}")
             data_list.append(payload["tensordict"])
             old_keys.extend(payload["keys"])
             old_tags.extend(payload["tags"])
@@ -267,6 +316,40 @@ class RolloutTqSkip(BaseSkip):
         else:
             data = data_list[0]
 
+        if self.load_mode == "config":
+            from verl.utils.tensordict_utils import assign_non_tensor_stack
+
+            new_keys = _config_replay_keys(old_keys, data, new_prompt_uids, n)
+            assign_non_tensor_stack(data, "uid", [key.rsplit("_", 2)[0] for key in new_keys])
+        else:
+            new_keys, traj_indices = self._dump_replay_rows(old_keys, new_prompt_uids, n, load_step)
+            # NestedTensor (jagged prompts/responses) cannot be indexed directly on dim=0.
+            from verl.utils.tensordict_utils import index_select_tensor_dict
+
+            data = index_select_tensor_dict(data, traj_indices)
+            old_tags = [old_tags[i] for i in traj_indices]
+
+        new_tags = []
+        for old_tag in old_tags:
+            tag = dict(old_tag)
+            tag.update(global_steps=global_steps, min_global_steps=global_steps, max_global_steps=global_steps)
+            tag.pop("is_prompt", None)
+            new_tags.append(tag)
+
+        tq.kv_batch_put(keys=new_keys, fields=data, tags=new_tags, partition_id=partition_id)
+        prompt_tags = [{"is_prompt": True, "status": "finished", "global_steps": global_steps}] * len(new_prompt_uids)
+        tq.kv_batch_put(keys=new_prompt_uids, partition_id=partition_id, tags=prompt_tags)
+
+        print(
+            f"{self.print_mark}\033[33mInjected {len(new_keys)} cached trajectories "
+            f"from step {load_step} ({len(new_prompt_uids)} prompts x {n} sessions) "
+            f"into TQ partition '{partition_id}' at current step {step}\033[0m",
+            flush=True,
+        )
+
+    def _dump_replay_rows(
+        self, old_keys: list[str], new_prompt_uids: list[str], n: int, load_step: int
+    ) -> tuple[list[str], list[int]]:
         # Group saved trajectories by parent uid.
         # Key format: {uid}_{session_id}_{index}, uid is UUID4 (no underscores).
         # ReplayBuffer.sample() does NOT guarantee keys are sorted by uid prefix,
@@ -302,7 +385,6 @@ class RolloutTqSkip(BaseSkip):
         # cycle within the group to fill *n* trajectories.
         # If cached groups < new prompts, cycle through groups (modulo).
         new_keys = []
-        new_tags = []
         traj_indices: list[int] = []
         for prompt_idx, new_uid in enumerate(new_prompt_uids):
             group = groups[prompt_idx % num_cached_groups]
@@ -310,38 +392,4 @@ class RolloutTqSkip(BaseSkip):
                 traj_idx = group[session_id % len(group)]
                 traj_indices.append(traj_idx)
                 new_keys.append(f"{new_uid}_{session_id}_0")
-                tag = dict(old_tags[traj_idx])
-                tag["global_steps"] = global_steps
-                tag["min_global_steps"] = global_steps
-                tag["max_global_steps"] = global_steps
-                tag.pop("is_prompt", None)
-                new_tags.append(tag)
-
-        # NestedTensor (jagged prompts/responses) does not support indexing or slicing
-        # on dim=0.  Use index_select_tensor_dict which unbinds, selects, and rebuilds.
-        from verl.utils.tensordict_utils import index_select_tensor_dict
-
-        new_fields = index_select_tensor_dict(data, traj_indices)
-
-        # Write trajectory data to TQ
-        tq.kv_batch_put(
-            keys=new_keys,
-            fields=new_fields,
-            tags=new_tags,
-            partition_id=partition_id,
-        )
-
-        # Mark prompt-level keys as finished so ReplayBuffer can pick them up immediately
-        prompt_tags = [{"is_prompt": True, "status": "finished", "global_steps": global_steps}] * len(new_prompt_uids)
-        tq.kv_batch_put(
-            keys=new_prompt_uids,
-            partition_id=partition_id,
-            tags=prompt_tags,
-        )
-
-        print(
-            f"{self.print_mark}\033[33mInjected {len(new_keys)} cached trajectories "
-            f"from step {load_step} ({len(new_prompt_uids)} prompts x {n}) "
-            f"into TQ partition '{partition_id}' at current step {step}\033[0m",
-            flush=True,
-        )
+        return new_keys, traj_indices

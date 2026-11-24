@@ -85,7 +85,7 @@ def test_only_tq_role_registered(config):
     assert SkipManager.skip_instances["rollout_tq"].gbs == 2
 
 
-@pytest.mark.parametrize("kwargs", [{"action": "random"}, {"steps": ["bad"]}, {"enable": 1}])
+@pytest.mark.parametrize("kwargs", [{"action": "random"}, {"steps": ["bad"]}, {"enable": 1}, {"load_mode": "unknown"}])
 def test_invalid_config(kwargs):
     with pytest.raises(AssertionError):
         RolloutTqSkipConfig(**kwargs)
@@ -183,3 +183,130 @@ def test_decorator_before_initialization():
             return "normal"
 
     assert Trainer().submit() == "normal"
+
+
+@pytest.fixture
+def config_cache(config):
+    config.skip.rollout_tq.load_mode = "config"
+    config.trainer.v1.separate_async.parameter_sync_step = 1
+    SkipManager.init(config)
+    SkipManager.set_step(1)
+    return SkipManager.skip_instances["rollout_tq"]
+
+
+def save_keys(cache, tq, keys):
+    from verl.utils.tensordict_utils import assign_non_tensor_stack
+
+    data = TensorDict({"value": torch.arange(len(keys))}, batch_size=[len(keys)])
+    if keys:
+        assign_non_tensor_stack(data, "uid", [key.rsplit("_", 2)[0] for key in keys])
+        assign_non_tensor_stack(data, "session_id", [int(key.rsplit("_", 2)[1]) for key in keys])
+    tq.kv_batch_get.return_value = data
+    tags = [{"source_row": i} for i in range(len(keys))]
+    cache.prepare_data(1, SimpleNamespace(keys=keys, tags=tags, partition_id="train"), global_steps=1)
+
+
+@pytest.mark.parametrize(
+    "keys, requested_n",
+    [
+        ([], None),  # No prompt groups.
+        (["a_0_0", "a_1_0"], None),  # Too few prompt groups.
+        (["a_0_0", "a_1_0", "b_0_0", "b_1_0", "c_0_0", "c_1_0"], None),  # Too many.
+        (["a_0_0", "a_0_1", "b_0_0", "b_1_0"], None),  # Right number of rows, missing session.
+        (["a_0_0", "a_2_0", "b_0_0", "b_1_0"], None),  # Session IDs disagree with rollout.n.
+        (["a_0_0", "a_1_0", "a_1_0", "b_0_0", "b_1_0"], None),  # Duplicate trajectory key.
+        (["a_0_0", "a_1_0", "b_0_0", "b_1_0"], [1, 2]),  # A prompt overrides rollout.n.
+        (["a_0_0", "a_1_0", "b_0_0", "b_1_0"], 1),  # An override broadcast to every prompt.
+    ],
+)
+def test_config_mismatch_submits_the_original_batch(config_cache, tq, keys, requested_n, caplog):
+    save_keys(config_cache, tq, keys)
+    batch = {"uid": ["new-a", "new-b"]}
+    if requested_n is not None:
+        batch["__rollout_n__"] = requested_n
+
+    class Trainer:
+        _next_train_batch = Mock(return_value=batch)
+        _submit_batch_to_rollout = Mock()
+
+        @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
+        def submit(self):
+            raise AssertionError("enabled SkipManager should handle submission")
+
+    trainer = Trainer()
+    trainer.submit()
+    trainer._next_train_batch.assert_called_once_with()
+    trainer._submit_batch_to_rollout.assert_called_once_with(batch)
+    tq.kv_batch_put.assert_not_called()
+    assert "fresh rollout" in caplog.text
+
+
+def test_config_replays_all_outputs_of_the_configured_sessions(config_cache, tq):
+    keys = ["old-b_1_1", "old-a_0_0", "old-b_1_0", "old-a_1_0", "old-b_0_0"]
+    save_keys(config_cache, tq, keys)
+    assert config_cache.maybe_load_and_inject(1, ["new-b", "new-a"])
+    trajectories, prompts = (call.kwargs for call in tq.kv_batch_put.call_args_list)
+    assert prompts["keys"] == ["new-b", "new-a"]
+    assert all(tag["status"] == "finished" for tag in prompts["tags"])
+    expected = [key.replace("old-", "new-") for key in keys]
+    rows = trajectories["fields"]["value"].tolist()
+    assert sorted(rows) == list(range(len(keys)))
+    assert trajectories["keys"] == [expected[i] for i in rows]
+    assert list(trajectories["fields"]["uid"]) == [key.rsplit("_", 2)[0] for key in trajectories["keys"]]
+    assert list(trajectories["fields"]["session_id"]) == [int(key.rsplit("_", 2)[1]) for key in trajectories["keys"]]
+    assert [tag["source_row"] for tag in trajectories["tags"]] == rows
+
+
+@pytest.mark.parametrize("bad_field", ["uid", "session_id", "keys", "tags"])
+def test_config_validates_every_inner_batch_before_writing(config_cache, tq, bad_field):
+    from verl.utils.tensordict_utils import assign_non_tensor_stack
+
+    config_cache.parameter_sync_step = 2
+    save_keys(config_cache, tq, ["a_0_0", "a_1_0"])
+    save_keys(config_cache, tq, ["b_0_0", "b_1_0"])
+    path = config_cache._get_v1_inner_dir(1, 1) / config_cache.tq_batch_name
+    payload = torch.load(path, weights_only=False)
+    if bad_field in ("keys", "tags"):
+        payload[bad_field].pop()
+    else:
+        values = ["a", "b"] if bad_field == "uid" else [1, 1]
+        assign_non_tensor_stack(payload["tensordict"], bad_field, values)
+    torch.save(payload, path)
+    assert not config_cache.maybe_load_and_inject(1, ["new-a", "new-b"])
+    tq.kv_batch_put.assert_not_called()
+
+
+def test_config_repeat_checks_each_request_against_the_selected_dump(config_cache, tq):
+    from verl.utils.skip.base_skip import SkipAction
+
+    config_cache.action = SkipAction.REPEAT
+    save_batch(config_cache, tq, 1, "old")
+    assert not config_cache.maybe_load_and_inject(2, ["a", "b"])
+    tq.kv_batch_put.assert_not_called()
+    assert config_cache.maybe_load_and_inject(2, ["new"])
+    trajectories = tq.kv_batch_put.call_args_list[0].kwargs
+    assert trajectories["keys"] == ["new_0_0", "new_1_0"]
+    assert list(trajectories["fields"]["uid"]) == ["new", "new"]
+    assert all(tag["global_steps"] == 2 for tag in trajectories["tags"])
+
+
+def test_config_propagates_queue_write_errors(config_cache, tq):
+    save_keys(config_cache, tq, ["a_0_0", "a_1_0"])
+    tq.kv_batch_put.side_effect = [None, RuntimeError("completion write failed")]
+    with pytest.raises(RuntimeError, match="completion write failed"):
+        config_cache.maybe_load_and_inject(1, ["new"])
+
+
+def test_config_replays_broadcast_row_metadata(config_cache, tq):
+    from tensordict.tensorclass import NonTensorData
+
+    config_cache.n = 1
+    tq.kv_batch_get.return_value = TensorDict(
+        {"uid": NonTensorData("old"), "session_id": NonTensorData(0), "value": torch.arange(2)}, batch_size=[2]
+    )
+    batch = SimpleNamespace(keys=["old_0_0", "old_0_1"], tags=[{}, {}], partition_id="train")
+    config_cache.prepare_data(1, batch, global_steps=1)
+    assert config_cache.maybe_load_and_inject(1, ["new"])
+    trajectories = tq.kv_batch_put.call_args_list[0].kwargs
+    assert trajectories["keys"] == ["new_0_0", "new_0_1"]
+    assert list(trajectories["fields"]["uid"]) == ["new", "new"]

@@ -13,11 +13,16 @@
 # limitations under the License.
 
 import functools
+import logging
 from typing import Callable
+
+import torch
 
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.skip.base_skip import SKIP_REGISTRY
 from verl.utils.skip.config import SkipManagerConfig
+
+logger = logging.getLogger(__name__)
 
 
 class SkipManager:
@@ -85,7 +90,13 @@ class SkipManager:
                 if phase == "submit":
                     # Always prepare batch (keeps dataloader aligned on cache-hit steps)
                     batch = self._next_train_batch()
-                    if skip_instance.maybe_load_and_inject(step, list(batch["uid"])):
+                    if (
+                        getattr(skip_instance, "load_mode", None) == "config"
+                        and "__rollout_n__" in batch.keys()
+                        and not torch.as_tensor(batch["__rollout_n__"]).eq(skip_instance.n).all().item()
+                    ):
+                        logger.warning("Per-prompt session counts differ from rollout.n. Collecting fresh rollouts.")
+                    elif skip_instance.maybe_load_and_inject(step, list(batch["uid"])):
                         return
                     self._submit_batch_to_rollout(batch)
                     return

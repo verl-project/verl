@@ -25,6 +25,7 @@ class RolloutTqSkipConfig(BaseConfig):
     dump_dir: str = "~/.verl/rollout_dump"
     steps: list[int] = field(default_factory=list)
     action: str = "cache"  # cache | repeat, refer to SkipAction in base_skip.py
+    load_mode: str = "dump"
 
     def __post_init__(self) -> None:
         assert isinstance(self.enable, bool), f"`enable` must be bool, got {type(self.enable)}"
@@ -32,6 +33,7 @@ class RolloutTqSkipConfig(BaseConfig):
         assert isinstance(self.steps, list), f"`steps` must be list[int], got {type(self.steps)}"
         assert all(isinstance(step, int) for step in self.steps), "`steps` must contain int only"
         assert self.action in {"cache", "repeat"}, f"`action` must be one of cache/repeat, got {self.action}"
+        assert self.load_mode in {"dump", "config"}, f"`load_mode` must be one of dump/config, got {self.load_mode}"
 
 
 @dataclass
