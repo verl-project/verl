@@ -10,11 +10,11 @@ ARG TPU_SYNC_VERSION=0.0.1.dev20261103081657
 #   (google-pytorch/torchtitan#142).
 # - Qwen3.5 with both EP > 1 and context parallelism (CP > 1, e.g. 64k Qwen3.5-397B-A17B):
 #   --build-arg TORCHTITAN_COMMIT=6037e897f83153eaf9024707aeda5c8e9c3cb379 (google-pytorch/torchtitan#201 + #210).
-ARG TORCHTITAN_COMMIT=d0f0316e9ecbe1c78a24b0a5824fdf72e666ec01
+ARG TORCHTITAN_COMMIT=6037e897f83153eaf9024707aeda5c8e9c3cb379
 
 # 11/22/2026 HEAD of vllm-torchtpu (includes on-load MoE FP8 quantization via QUANTIZE_ON_LOAD_PREFIXES=experts
 # and configurable TPU_MOE_REQUANT_CHUNK_BYTES; built against vLLM v0.33.0).
-ARG VLLM_TORCHTPU_COMMIT=b6afeff56d0bc1991b4d61ff8a15a121056e66c3
+ARG VLLM_TORCHTPU_COMMIT=c241a7d3c94dfb3cb65c6bbf7eee49f6a5b49c13
 ARG VLLM_VERSION=0.33.0
 # GKE Agent Sandbox & SWE-Bench extras for verl-recipe/deepswe_tpu (pass --build-arg INSTALL_GKE_SANDBOX=false to skip).
 ARG INSTALL_GKE_SANDBOX=true
