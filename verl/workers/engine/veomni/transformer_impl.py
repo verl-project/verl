@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import inspect
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass, field, fields
@@ -26,7 +27,7 @@ from veomni.arguments import AcceleratorConfig, FSDPConfig, MixedPrecisionConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
-from veomni.models.checkpoint import get_checkpoint_tensor_converter
+from veomni.models.checkpoint import export_weights, get_checkpoint_tensor_converter
 from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
@@ -52,7 +53,6 @@ from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead, FSDPEngine
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
     VL_TYPE2INDEX,
-    get_moe_param_handler,
     load_safetensors_index,
     load_veomni_model_to_gpu,
     load_veomni_optimizer,
@@ -401,16 +401,16 @@ class VeOmniEngine(FSDPEngine):
         )
         log_gpu_memory_usage("After load base model", logger=logger)
 
-        if self.engine_config.freeze_ple_embeddings:
-            try:
-                from veomni.models.frozen_ple import prepare_ple_storage
-            except ImportError:
-                if self.engine_config.frozen_ple_dtype is not None:
-                    raise
-            else:
-                prepare_ple_storage(module, self.engine_config.frozen_ple_dtype)
-
         self._maybe_apply_async_activation_offload(module)
+
+        ple_parallelize_kwargs: dict[str, Any] = {}
+        if "freeze_ple_embeddings" in inspect.signature(build_parallelize_model).parameters:
+            ple_parallelize_kwargs["freeze_ple_embeddings"] = self.engine_config.freeze_ple_embeddings
+            ple_parallelize_kwargs["frozen_ple_dtype"] = self.engine_config.frozen_ple_dtype
+        elif self.engine_config.freeze_ple_embeddings:
+            raise ValueError(
+                "The installed VeOmni's build_parallelize_model does not support freeze_ple_embeddings; upgrade VeOmni."
+            )
 
         # Applies parallel strategies to the model.
         log_gpu_memory_usage("Before parallelize model", logger=logger)
@@ -431,25 +431,9 @@ class VeOmniEngine(FSDPEngine):
             broadcast_model_weights_from_rank0=self.engine_config.broadcast_model_weights_from_rank0,
             ep_sharded_stream_load=self.engine_config.ep_sharded_stream_load,
             fqn_to_index_mapping=load_safetensors_index(self.model_config.local_path),
+            **ple_parallelize_kwargs,
         )
         log_gpu_memory_usage("After parallelize model", logger=logger)
-
-        if self.engine_config.freeze_ple_embeddings:
-            from verl.utils.engram import is_engram_table_param
-
-            frozen_count = 0
-            for name, param in module.named_parameters():
-                if is_engram_table_param(name):
-                    param.requires_grad_(False)
-                    param.grad = None
-                    frozen_count += 1
-            if frozen_count == 0 and self.engine_config.frozen_ple_dtype is not None:
-                raise ValueError(
-                    f"frozen_ple_dtype={self.engine_config.frozen_ple_dtype!r} matched no PLE/Engram parameters on "
-                    f"{type(module).__name__}."
-                )
-            if frozen_count > 0 and self.rank == 0:
-                logger.info("VeOmniEngine: froze %d PLE/Engram parameter tensors.", frozen_count)
 
         if not self.engine_config.forward_only:
             # Initialize optimizer with model parameters and config settings
@@ -706,91 +690,40 @@ class VeOmniEngine(FSDPEngine):
     # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
-        per_tensor_param, peft_config = self._get_hf_export_per_tensor_param(skip_frozen_engram=True)
+        per_tensor_param, peft_config = self._get_hf_export_per_tensor_param()
         return self._quantize_for_rollout(per_tensor_param), peft_config
 
-    def _get_hf_export_per_tensor_param(self, skip_frozen_engram: bool = False):
+    def _get_hf_export_per_tensor_param(self):
         """Full HF-format weights without the rollout weight quantizer: the checkpoint 'hf_model' export."""
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
-        # here leaves the module half-moved and crashes state_dict() below (#5995). Likewise,
-        # when manual param_offload is active, staging each parameter individually in
-        # param_generator() avoids moving the entire model onto the accelerator at once.
-        if not self._is_offload_param and not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
+        # here leaves the module half-moved and crashes state_dict() below (#5995). The
+        # per-DTensor .to(device).full_tensor() in export_weights() stages each shard
+        # instead, so the manual whole-model move is unnecessary under CPU offload.
+        manual_offload = not getattr(self, "_uses_fsdp2_cpu_offload_policy", False)
+        if manual_offload:
             load_veomni_model_to_gpu(self.module)
 
-        # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
         converter = get_checkpoint_tensor_converter(self.module)
         if converter is not None and hasattr(converter, "export_weights"):
-            import inspect
-
-            from verl.utils.engram import is_engram_table_param
-
-            sig = inspect.signature(converter.export_weights)
-            accepts_skip = "skip_frozen_engram" in sig.parameters or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-            )
-            if accepts_skip:
-                return converter.export_weights(self.module, skip_frozen_engram=skip_frozen_engram), None
             exported = converter.export_weights(self.module)
-            if skip_frozen_engram:
-                engram_params = [p for n, p in self.module.named_parameters() if is_engram_table_param(n)]
-                if engram_params and all(not p.requires_grad for p in engram_params):
-                    exported = ((n, t) for n, t in exported if not is_engram_table_param(n))
-            return exported, None
-
-        wrapped_module = getattr(self.module, "_fsdp_wrapped_module", self.module)
-        params = self.module.state_dict()
-        params = convert_weight_keys(params, wrapped_module)
-
-        frozen_engram_keys: set[str] = set()
-        if skip_frozen_engram:
-            from verl.utils.engram import collect_frozen_engram_keys
-
-            frozen_engram_keys = collect_frozen_engram_keys(
-                self.module,
-                params.keys(),
-                key_converter=lambda d: convert_weight_keys(d, wrapped_module),
+        else:
+            wrapped_module = getattr(self.module, "_fsdp_wrapped_module", self.module)
+            exported = (
+                (next(iter(convert_weight_keys({name: tensor}, wrapped_module))), tensor)
+                if hasattr(wrapped_module, "_checkpoint_conversion_mapping")
+                else (name, tensor)
+                for name, tensor in export_weights(self.module)
             )
 
-        crop_fn = getattr(converter, "crop_hf_export_tensor", None) if converter is not None else None
-
-        ps = parallel_state.get_parallel_state()
-        model_type = getattr(self.module.config, "model_type", "default")
-        process_func = get_moe_param_handler(model_type, ps.ep_enabled)
-
-        device = get_device_id()  # used when fsdp2 set cpu_offload_policy or param_offload
-
-        def param_generator():
-            for name, param in params.items():
-                if name in frozen_engram_keys:
-                    continue
-                unsharded_tensor = (
-                    param.to(device, non_blocking=True).full_tensor()
-                    if isinstance(param, DTensor)
-                    else param.to(device, non_blocking=True)
-                )
-
-                is_expert_layer = "mlp.experts." in name
-                is_proj = any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
-
-                if is_expert_layer and is_proj and ps.ep_enabled:
-                    ep_rank, ep_size = ps.ep_rank, ps.ep_size
-                    buffer = torch.empty_like(unsharded_tensor)  # [num_experts/ep_size, H, I]
-                    for src_ep_rank in range(ep_size):
-                        tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
-                        torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ps.ep_group)
-                        yield from process_func(name, tensor, expert_id_base=src_ep_rank * tensor.size(0))
-
-                else:
-                    if is_expert_layer:
-                        yield from process_func(name, unsharded_tensor, expert_id_base=0)
-                    else:
-                        if callable(crop_fn):
-                            unsharded_tensor = crop_fn(name, unsharded_tensor)
-                        yield name, unsharded_tensor
+        def _with_offload_back():
+            try:
+                yield from exported
+            finally:
+                if manual_offload and self._is_offload_param:
+                    offload_veomni_model_to_cpu(self.module)
 
         # TODO: support VeOmni LoRA
-        return param_generator(), None
+        return _with_offload_back(), None
 
     def set_rollout_weight_quantizer(self, quantizer) -> None:
         self._rollout_weight_quantizer = quantizer

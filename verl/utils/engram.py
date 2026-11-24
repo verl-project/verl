@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Helpers for frozen Engram / PLE n-gram embedding weight export and rollout safetensors loading."""
+"""Helpers for Engram / PLE n-gram embedding parameter detection and rollout safetensors loading."""
 
 from __future__ import annotations
 
@@ -19,8 +19,7 @@ import fnmatch
 import json
 import os
 import re
-from collections.abc import Callable, Iterable, Iterator
-from typing import Any
+from collections.abc import Iterable, Iterator
 
 import torch
 
@@ -74,18 +73,6 @@ def _engram_table_scope(name: str) -> str | None:
     return None
 
 
-def _canonical_engram_scope(name: str) -> str | None:
-    """Return a normalized Engram / PLE table scope across runtime and HF checkpoint key layouts."""
-    scope = _engram_table_scope(name)
-    if scope is None:
-        return None
-    scope = scope.replace(".engram.embed_tokens", ".engram.embed")
-    scope = scope.replace("language_model.model.", "model.language_model.")
-    if scope.startswith("model."):
-        scope = scope.removeprefix("model.")
-    return scope
-
-
 def is_engram_table_param(name: str) -> bool:
     """Return whether ``name`` identifies an Engram or PLE n-gram lookup table weight/scale."""
     return _engram_table_scope(name) is not None
@@ -97,73 +84,6 @@ def is_engram_safetensors_key(name: str) -> bool:
         return True
     clean_name = _strip_wrapper_prefixes(name)
     return _PLE_HASH_BUFFER_PATTERN.search(clean_name) is not None
-
-
-def collect_frozen_engram_keys(
-    module: torch.nn.Module,
-    state_dict_keys: Iterable[str] | None = None,
-    *,
-    key_converter: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-) -> set[str]:
-    """Collect ``state_dict`` keys belonging to frozen Engram / PLE lookup tables.
-
-    ``module.state_dict()`` detaches tensors, which clears ``requires_grad`` on
-    every returned tensor. Inspect ``module.named_parameters()`` up front so
-    callers can skip frozen Engram/PLE ``DTensor`` shards *before* triggering
-    ``full_tensor()`` all-gather collectives. Companion scale buffers under the
-    same frozen table scope are included as well.
-    """
-    raw_params = dict(module.named_parameters())
-    converted_names: dict[str, str]
-    if key_converter is not None and raw_params:
-        placeholders = {name: None for name in raw_params}
-        converted_map = key_converter(placeholders)
-        if len(converted_map) == len(raw_params):
-            converted_names = dict(zip(raw_params.keys(), converted_map.keys(), strict=True))
-        else:
-            converted_names = {}
-            for name in raw_params:
-                converted = key_converter({name: None})
-                if converted:
-                    converted_names[name] = next(iter(converted))
-    else:
-        converted_names = {name: name for name in raw_params}
-
-    frozen_keys: set[str] = set()
-    frozen_scopes: set[str] = set()
-    trainable_scopes: set[str] = set()
-
-    for raw_name, param in raw_params.items():
-        mapped_name = converted_names.get(raw_name, raw_name)
-        for candidate in (raw_name, mapped_name, _strip_wrapper_prefixes(mapped_name)):
-            scope = _canonical_engram_scope(candidate)
-            if scope is not None:
-                break
-        else:
-            continue
-
-        if param.requires_grad:
-            trainable_scopes.add(scope)
-        else:
-            frozen_keys.add(raw_name)
-            frozen_keys.add(mapped_name)
-            frozen_keys.add(_strip_wrapper_prefixes(raw_name))
-            frozen_keys.add(_strip_wrapper_prefixes(mapped_name))
-            frozen_scopes.add(scope)
-
-    pure_frozen_scopes = frozen_scopes - trainable_scopes
-    if state_dict_keys is not None and pure_frozen_scopes:
-        for key in state_dict_keys:
-            clean_key = _strip_wrapper_prefixes(key)
-            if key in frozen_keys or clean_key in frozen_keys:
-                frozen_keys.add(key)
-                continue
-            scope = _canonical_engram_scope(clean_key)
-            if scope is not None and scope in pure_frozen_scopes:
-                frozen_keys.add(key)
-                frozen_keys.add(clean_key)
-
-    return frozen_keys
 
 
 def find_model_engram_parameters(

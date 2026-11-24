@@ -496,10 +496,9 @@ class VeOmniEngineConfig(EngineConfig):
         if self.frozen_ple_dtype is not None:
             if not self.freeze_ple_embeddings:
                 raise ValueError("frozen_ple_dtype requires freeze_ple_embeddings=True.")
-            if self.frozen_ple_dtype not in {"bfloat16", "float16", "float32"}:
+            if self.frozen_ple_dtype not in {"bfloat16", "float32"}:
                 raise ValueError(
-                    "frozen_ple_dtype must be one of None, 'bfloat16', 'float16', 'float32'; "
-                    f"got {self.frozen_ple_dtype!r}."
+                    f"frozen_ple_dtype must be one of None, 'bfloat16', 'float32'; got {self.frozen_ple_dtype!r}."
                 )
 
         if not math.isfinite(self.activation_offload_host_cache_limit_gb) or (

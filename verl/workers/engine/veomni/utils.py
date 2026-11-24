@@ -325,17 +325,17 @@ def veomni_shard_export(module):
     import torch.distributed as dist
     from veomni.distributed import parallel_state
 
-    from verl.utils.engram import collect_frozen_engram_keys
     from verl.utils.model import convert_weight_keys
 
-    wrapped_module = getattr(module, "_fsdp_wrapped_module", module)
+    try:
+        from veomni.models.frozen_ple import has_frozen_ple_embeddings, is_ple_table
+    except ImportError:
+        skip_frozen_ple = False
+    else:
+        skip_frozen_ple = has_frozen_ple_embeddings(module)
+
     params = module.state_dict()
-    params = convert_weight_keys(params, wrapped_module)
-    frozen_engram_keys = collect_frozen_engram_keys(
-        module,
-        params.keys(),
-        key_converter=lambda d: convert_weight_keys(d, wrapped_module),
-    )
+    params = convert_weight_keys(params, getattr(module, "_fsdp_wrapped_module", module))
 
     ps = parallel_state.get_parallel_state()
     model_type = getattr(module.config, "model_type", "default")
@@ -375,7 +375,7 @@ def veomni_shard_export(module):
 
     def _gen():
         for name, param in params.items():
-            if name in frozen_engram_keys:
+            if skip_frozen_ple and is_ple_table(name):
                 continue
             # NOT gated on ep_enabled: the fused expert stack exists (and needs
             # the per-expert HF renaming, like the seed path does) even with

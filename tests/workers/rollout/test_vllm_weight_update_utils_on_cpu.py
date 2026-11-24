@@ -337,10 +337,10 @@ def _install_fake_reload(monkeypatch, events):
     monkeypatch.setitem(sys.modules, reload.__name__, reload)
 
 
-def test_engram_key_matching_and_frozen_key_collection():
-    from verl.utils.engram import collect_frozen_engram_keys, is_engram_safetensors_key, is_engram_table_param
+def test_engram_key_matching():
+    from verl.utils.engram import is_engram_safetensors_key, is_engram_table_param
 
-    # Qwen3.8-Flash-Next PLE n-gram shards & buffers
+    # Qwen4-Exp PLE n-gram shards & buffers
     assert is_engram_table_param("model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight")
     assert is_engram_table_param("language_model.model.layers.1.ple.ple_embedding.ngram_embedding.weight")
     assert is_engram_table_param("language_model.model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale")
@@ -348,7 +348,7 @@ def test_engram_key_matching_and_frozen_key_collection():
     assert is_engram_safetensors_key("model.language_model.layers.1.ple.ple_embedding.ngram_heads_offsets")
     assert is_engram_safetensors_key("model.language_model.layers.1.ple.ple_embedding.ngram_heads_vocab_sizes")
 
-    # DeepSeek-V4.1-Flash Engram lookup table & companion scale
+    # DeepSeek-V4.1 Engram lookup table & companion scale
     assert is_engram_table_param("layers.1.engram.embed.weight")
     assert is_engram_table_param("layers.1.engram.embed.scale")
     assert is_engram_table_param("language_model.model.layers.14.engram.embed_tokens.weight")
@@ -370,19 +370,6 @@ def test_engram_key_matching_and_frozen_key_collection():
     ):
         assert not is_engram_table_param(non_table_key), non_table_key
         assert not is_engram_safetensors_key(non_table_key), non_table_key
-
-    # Companion scale buffer under a frozen Engram scope is collected, while trainable sibling stays excluded.
-    toy = torch.nn.Module()
-    toy.engram = torch.nn.Module()
-    toy.engram.embed = torch.nn.Module()
-    toy.engram.embed.weight = torch.nn.Parameter(torch.ones(4, 4), requires_grad=False)
-    toy.engram.embed.register_buffer("scale", torch.ones(4, 1, dtype=torch.uint8))
-    toy.engram.q_weight = torch.nn.Parameter(torch.ones(4, 4), requires_grad=True)
-
-    frozen = collect_frozen_engram_keys(toy, toy.state_dict().keys())
-    assert "engram.embed.weight" in frozen
-    assert "engram.embed.scale" in frozen
-    assert "engram.q_weight" not in frozen
 
 
 def _write_sharded_engram_checkpoint(ckpt_dir: Path) -> tuple[Path, Path]:
@@ -473,13 +460,17 @@ class _FakeEngramRolloutModel(torch.nn.Module):
                 self.layers["2"].ple.ple_embedding.layer_multipliers.copy_(tensor)
 
 
-def _make_engram_worker(model: torch.nn.Module, ckpt_dir: Path, *, load_format: str = "dummy"):
+def _make_engram_worker(
+    model: torch.nn.Module,
+    ckpt_dir: Path,
+    *,
+    load_format: str = "dummy",
+    architecture: str = "Qwen4ExpForConditionalGeneration",
+):
     class _BaseWorker:
-        def __init__(self):
-            self.sleep_levels: list[int] = []
-
         def sleep(self, level: int = 1):
             self.sleep_levels.append(level)
+            return level
 
     class _ComposedWorker(_BaseWorker, vLLMColocateWorkerExtension):
         pass
@@ -488,6 +479,8 @@ def _make_engram_worker(model: torch.nn.Module, ckpt_dir: Path, *, load_format: 
         model=str(ckpt_dir),
         model_weights=None,
         revision=None,
+        architectures=(architecture,),
+        enable_sleep_mode=True,
         sleep_preserve_parameter_names=(),
     )
     load_cfg = types.SimpleNamespace(load_format=load_format, download_dir=None)
@@ -498,7 +491,8 @@ def _make_engram_worker(model: torch.nn.Module, ckpt_dir: Path, *, load_format: 
         weight_transfer_config=None,
     )
     worker = _ComposedWorker.__new__(_ComposedWorker, vllm_config=vllm_cfg)
-    _BaseWorker.__init__(worker)
+    assert getattr(_ComposedWorker.sleep, "_verl_engram_sleep_hooked", False)
+    worker.sleep_levels = []
     worker.device = torch.device("cpu")
     worker.local_rank = 0
     worker.model_runner = types.SimpleNamespace(model=model, vllm_config=vllm_cfg)
@@ -506,12 +500,50 @@ def _make_engram_worker(model: torch.nn.Module, ckpt_dir: Path, *, load_format: 
     return worker
 
 
+@pytest.mark.parametrize(
+    "architecture",
+    ["DeepseekV41ForCausalLM", "Qwen4ExpForConditionalGeneration"],
+)
+def test_engram_model_architectures_enable_weight_tracking(tmp_path, architecture):
+    worker = _make_engram_worker(
+        _FakeEngramRolloutModel(),
+        tmp_path,
+        architecture=architecture,
+    )
+    assert worker._is_engram_model is True
+
+
+def test_non_engram_model_skips_name_matching_and_parameter_scan(monkeypatch, tmp_path):
+    _install_fake_reload(monkeypatch, [])
+
+    class _Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([], True)
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", _Receiver)
+    worker = _make_engram_worker(
+        _FakeEngramRolloutModel(),
+        tmp_path,
+        architecture="LlamaForCausalLM",
+    )
+    assert worker._is_engram_model is False
+
+    def _unexpected(*args, **kwargs):
+        raise AssertionError("non-Engram models must not enter Engram matching")
+
+    monkeypatch.setattr(_vllm_rollout_utils, "is_engram_table_param", _unexpected)
+    monkeypatch.setattr(_vllm_rollout_utils, "find_model_engram_parameters", _unexpected)
+    worker.sleep(level=2)
+    worker.update_weights_from_ipc()
+
+
 def test_rollout_streams_engram_once_for_cpu_offload_and_skips_non_engram_shards(monkeypatch, tmp_path):
     _write_sharded_engram_checkpoint(tmp_path)
-    loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
-    post_events: list[str] = []
-    loader_utils.process_weights_after_loading = lambda *args: post_events.append("post")
-    monkeypatch.setitem(sys.modules, loader_utils.__name__, loader_utils)
+    reload_events: list[str] = []
+    _install_fake_reload(monkeypatch, reload_events)
 
     ipc_payload: list[tuple[str, torch.Tensor]] = [
         ("layers.1.engram.q_weight", torch.full((4, 8), 5.0, dtype=torch.bfloat16))
@@ -529,7 +561,6 @@ def test_rollout_streams_engram_once_for_cpu_offload_and_skips_non_engram_shards
     model = _FakeEngramRolloutModel()
     worker = _make_engram_worker(model, tmp_path, load_format="dummy")
     assert worker._engram_weights_loaded is False
-    assert not hasattr(worker, "_engram_discarded_by_sleep")
 
     # Initial sync under dummy format loads IPC trainable weights + streams Engram/PLE from safetensors.
     worker.update_weights_from_ipc()
@@ -545,23 +576,20 @@ def test_rollout_streams_engram_once_for_cpu_offload_and_skips_non_engram_shards
     assert torch.all(model.layers["1"].engram.embed_tokens.weight_scale_inv == 127)
     assert torch.all(model.layers["2"].ple.ple_embedding.ngram_embedding.weight == 3.0)
     assert model.layers["2"].ple.ple_embedding.layer_multipliers.tolist() == [3, 5, 7, 11]
-    assert post_events == ["post"]
+    assert reload_events == ["start_reload", "finish_reload"]
 
-    # CPU-offloaded Engram/PLE (param.is_cpu == True) survives both sleep(level=1) and sleep(level=2):
+    # CPU-offloaded Engram/PLE (param.is_cpu == True) is not cleared by sleep(level=2):
     # subsequent weight syncs must NOT re-read safetensors.
     model.loaded_batches.clear()
-    worker.sleep(level=1)
     worker.sleep(level=2)
     assert worker._engram_weights_loaded is True
     worker.update_weights_from_ipc()
     assert [name for batch in model.loaded_batches for name, _ in batch] == ["layers.1.engram.q_weight"]
 
 
-def test_rollout_reloads_device_resident_engram_only_after_level2_sleep(monkeypatch, tmp_path):
+def test_rollout_reloads_device_resident_engram_only_when_level2_sleep_clears(monkeypatch, tmp_path):
     _write_sharded_engram_checkpoint(tmp_path)
-    loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
-    loader_utils.process_weights_after_loading = lambda *args: None
-    monkeypatch.setitem(sys.modules, loader_utils.__name__, loader_utils)
+    _install_fake_reload(monkeypatch, [])
 
     class _Receiver:
         def __init__(self, **kwargs):
@@ -583,38 +611,55 @@ def test_rollout_reloads_device_resident_engram_only_after_level2_sleep(monkeypa
         torch.zeros((4, 8), dtype=torch.bfloat16), requires_grad=False
     )
 
-    # With load_format="safetensors", initial _engram_weights_loaded=True skips safetensors reload.
+    # With load_format="safetensors", no sleep and level-1 sleep preserve device weights.
     worker = _make_engram_worker(model, tmp_path, load_format="safetensors")
     assert worker._engram_weights_loaded is True
+    # Even if vLLM later mutates load_config.load_format at runtime, initial load_format stays "safetensors".
+    worker.model_runner.vllm_config.load_config.load_format = "dummy"
     worker.update_weights_from_ipc()
     assert model.loaded_batches == []
 
-    # Level-1 sleep preserves device weights -> _engram_weights_loaded stays True.
     worker.sleep(level=1)
     assert worker._engram_weights_loaded is True
     worker.update_weights_from_ipc()
     assert model.loaded_batches == []
 
-    # Level-2 sleep discards unpreserved device weights -> _engram_weights_loaded flips to False -> reloads layer 2!
+    # Level-2 sleep clears unpreserved device weights -> the next sync reloads local layer 2.
     # (Also verifies PP layer filtering: shard 1 for missing layer 1 is NOT opened.)
     (tmp_path / "model-00001-of-00002.safetensors").unlink()
     worker.sleep(level=2)
     assert worker._engram_weights_loaded is False
     worker.update_weights_from_ipc()
-    assert worker._engram_weights_loaded is True
-    loaded_names = [name for batch in model.loaded_batches for name, _ in batch]
-    assert loaded_names == [
+    expected_layer2 = [
         "model.language_model.layers.2.ple.ple_embedding.ngram_embedding.shard_0.weight",
         "model.language_model.layers.2.ple.ple_embedding.layer_multipliers",
     ]
+    assert [name for batch in model.loaded_batches for name, _ in batch] == expected_layer2
+    assert worker._engram_weights_loaded is True
+
+    model.loaded_batches.clear()
+    worker.sleep(level=2)
+    worker.update_weights_from_ipc()
+    assert [name for batch in model.loaded_batches for name, _ in batch] == expected_layer2
 
     # When sleep_preserve_parameter_names preserves the Engram/PLE parameter across level-2 sleep,
-    # _engram_weights_loaded stays True and no safetensors reload occurs.
+    # the loaded state remains true and no safetensors reload occurs.
     model.loaded_batches.clear()
     worker.model_runner.vllm_config.model_config.sleep_preserve_parameter_names = ("*ngram_embedding.weight",)
     worker.sleep(level=2)
     assert worker._engram_weights_loaded is True
     worker.update_weights_from_ipc()
+    assert model.loaded_batches == []
+
+    # Under load_format="dummy" with sleep_preserve_parameter_names set, safetensors loads once on initial sync
+    # and skips subsequent syncs.
+    dummy_worker = _make_engram_worker(model, tmp_path, load_format="dummy")
+    dummy_worker.model_runner.vllm_config.model_config.sleep_preserve_parameter_names = ("*ngram_embedding.weight",)
+    dummy_worker.update_weights_from_ipc()
+    assert [name for batch in model.loaded_batches for name, _ in batch] == expected_layer2
+    model.loaded_batches.clear()
+    dummy_worker.sleep(level=2)
+    dummy_worker.update_weights_from_ipc()
     assert model.loaded_batches == []
 
 
@@ -623,9 +668,7 @@ def test_rollout_does_not_overwrite_trainable_engram_sent_over_ipc(monkeypatch, 
     # Remove checkpoint shards to prove safetensors is never opened when received_engram_from_ipc is True.
     shard1.unlink()
     shard2.unlink()
-    loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
-    loader_utils.process_weights_after_loading = lambda *args: None
-    monkeypatch.setitem(sys.modules, loader_utils.__name__, loader_utils)
+    _install_fake_reload(monkeypatch, [])
 
     trained_ple = torch.full((4, 8), 42.0, dtype=torch.bfloat16)
 
@@ -641,7 +684,15 @@ def test_rollout_does_not_overwrite_trainable_engram_sent_over_ipc(monkeypatch, 
 
     monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", _Receiver)
 
+    class _DeviceResidentFakeParam(torch.nn.Parameter):
+        @property
+        def is_cpu(self):
+            return False
+
     model = _FakeEngramRolloutModel(include_layer1=False, include_layer2=True)
+    model.layers["2"].ple.ple_embedding.ngram_embedding.weight = _DeviceResidentFakeParam(
+        torch.zeros((4, 8), dtype=torch.bfloat16), requires_grad=False
+    )
     worker = _make_engram_worker(model, tmp_path, load_format="dummy")
     assert worker._engram_weights_loaded is False
     worker.update_weights_from_ipc()
@@ -668,56 +719,66 @@ def test_engram_safetensors_requires_local_index_json(tmp_path):
         list(iter_engram_safetensors_batches(str(tmp_path)))
 
 
-def test_collect_frozen_engram_keys_handles_key_converter_dropping_lora_keys():
-    from verl.utils.engram import collect_frozen_engram_keys
-
-    model = torch.nn.Module()
-    model.layers = torch.nn.ModuleList([torch.nn.Module()])
-    model.layers[0].engram = torch.nn.Module()
-    model.layers[0].engram.embed_tokens = torch.nn.Module()
-    model.layers[0].engram.embed_tokens.weight = torch.nn.Parameter(torch.ones(4, 2), requires_grad=False)
-    model.layers[0].engram.embed_tokens.register_buffer("scale", torch.ones(4, 1, dtype=torch.uint8))
-    model.layers[0].q_proj = torch.nn.Module()
-    model.layers[0].q_proj.base_layer = torch.nn.Linear(2, 2, bias=False)
-    model.layers[0].q_proj.lora_A = torch.nn.Parameter(torch.ones(1, 2), requires_grad=True)
-    model.layers[0].q_proj.lora_B = torch.nn.Parameter(torch.ones(2, 1), requires_grad=True)
-
-    def _peft_like_key_converter(mapping):
-        out = {}
-        for k, v in mapping.items():
-            if "lora_A" in k or "lora_B" in k:
-                continue
-            out[k.replace(".base_layer.", ".").replace(".engram.embed_tokens.", ".engram.embed.")] = v
-        return out
-
-    converted_state_keys = list(_peft_like_key_converter(dict.fromkeys(model.state_dict().keys())).keys())
-    frozen = collect_frozen_engram_keys(model, converted_state_keys, key_converter=_peft_like_key_converter)
-    assert "layers.0.engram.embed.weight" in frozen
-    assert "layers.0.engram.embed.scale" in frozen
-    assert "layers.0.q_proj.weight" not in frozen
-
-
-def test_veomni_engine_and_shard_export_skip_frozen_engram(monkeypatch, tmp_path):
+def test_veomni_engine_delegates_ple_freeze_and_passes_through_export(monkeypatch, tmp_path):
     import torch.distributed as dist
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.tensor import Shard, distribute_tensor
 
     fake_ps = types.SimpleNamespace(ep_enabled=False, ep_size=1, ep_rank=0)
+    captured_parallelize_kwargs: dict[str, object] = {}
+
+    def _fake_build_parallelize_model(
+        model,
+        *,
+        freeze_ple_embeddings: bool = False,
+        frozen_ple_dtype: str | None = None,
+        **kwargs,
+    ):
+        captured_parallelize_kwargs["freeze_ple_embeddings"] = freeze_ple_embeddings
+        captured_parallelize_kwargs["frozen_ple_dtype"] = frozen_ple_dtype
+        if freeze_ple_embeddings:
+            model._veomni_freeze_ple_embeddings = True
+        return model
+
+    def _fake_is_ple_table(name: str) -> bool:
+        return name.endswith(".ple.ple_embedding.ngram_embedding.shard_0.weight") or (
+            name == "ple.ple_embedding.ngram_embedding.shard_0.weight"
+        )
+
+    def _fake_has_frozen_ple_embeddings(model: torch.nn.Module) -> bool:
+        return bool(getattr(model, "_veomni_freeze_ple_embeddings", False))
+
+    def _fake_export_weights(model: torch.nn.Module):
+        skip_frozen = _fake_has_frozen_ple_embeddings(model)
+        converter = getattr(model, "_converter", None)
+        crop_fn = getattr(converter, "crop_hf_export_tensor", None)
+        for name, param in model.state_dict().items():
+            if skip_frozen and _fake_is_ple_table(name):
+                continue
+            tensor = param.full_tensor() if hasattr(param, "full_tensor") else param
+            if callable(crop_fn):
+                tensor = crop_fn(name, tensor)
+            yield name, tensor
+
     fake_veomni = types.ModuleType("veomni")
     fake_veomni_args = types.ModuleType("veomni.arguments")
     for cls_name in ("AcceleratorConfig", "FSDPConfig", "MixedPrecisionConfig", "OpsImplementationConfig"):
-        setattr(fake_veomni_args, cls_name, type(cls_name, (), {}))
+        setattr(fake_veomni_args, cls_name, lambda **kw: types.SimpleNamespace(**kw))
     fake_veomni_dist = types.ModuleType("veomni.distributed")
     fake_veomni_ps = types.ModuleType("veomni.distributed.parallel_state")
     fake_veomni_ps.get_parallel_state = lambda: fake_ps
     fake_veomni_dist.parallel_state = fake_veomni_ps
     fake_veomni_tp = types.ModuleType("veomni.distributed.torch_parallelize")
-    fake_veomni_tp.build_parallelize_model = lambda *a, **kw: None
+    fake_veomni_tp.build_parallelize_model = _fake_build_parallelize_model
     fake_veomni_models = types.ModuleType("veomni.models")
     fake_veomni_auto = types.ModuleType("veomni.models.auto")
-    fake_veomni_auto.build_foundation_model = lambda *a, **kw: None
+    fake_veomni_auto.build_foundation_model = lambda **kw: kw["_test_module"]
     fake_veomni_ckpt = types.ModuleType("veomni.models.checkpoint")
+    fake_veomni_ckpt.export_weights = _fake_export_weights
     fake_veomni_ckpt.get_checkpoint_tensor_converter = lambda m: getattr(m, "_converter", None)
+    fake_veomni_frozen_ple = types.ModuleType("veomni.models.frozen_ple")
+    fake_veomni_frozen_ple.has_frozen_ple_embeddings = _fake_has_frozen_ple_embeddings
+    fake_veomni_frozen_ple.is_ple_table = _fake_is_ple_table
     fake_veomni_optim = types.ModuleType("veomni.optim")
     fake_veomni_optim.build_lr_scheduler = lambda *a, **kw: None
     fake_veomni_optim.build_optimizer = lambda *a, **kw: None
@@ -734,16 +795,24 @@ def test_veomni_engine_and_shard_export_skip_frozen_engram(monkeypatch, tmp_path
         "veomni.models": fake_veomni_models,
         "veomni.models.auto": fake_veomni_auto,
         "veomni.models.checkpoint": fake_veomni_ckpt,
+        "veomni.models.frozen_ple": fake_veomni_frozen_ple,
         "veomni.optim": fake_veomni_optim,
         "veomni.utils": fake_veomni_utils,
         "veomni.utils.seqlen_pos_transform_utils": fake_veomni_seqlen,
     }.items():
         monkeypatch.setitem(sys.modules, mod_name, mod_obj)
 
+    from verl.workers.config.engine import VeOmniEngineConfig
+    from verl.workers.engine.veomni import transformer_impl as veomni_impl
     from verl.workers.engine.veomni.transformer_impl import VeOmniEngine
     from verl.workers.engine.veomni.utils import veomni_shard_export
 
-    monkeypatch.setattr("verl.workers.engine.veomni.transformer_impl.get_device_id", lambda: "cpu")
+    monkeypatch.setattr(veomni_impl, "MixedPrecisionConfig", fake_veomni_args.MixedPrecisionConfig)
+    monkeypatch.setattr(veomni_impl, "build_parallelize_model", _fake_build_parallelize_model)
+    monkeypatch.setattr(veomni_impl, "export_weights", _fake_export_weights)
+    monkeypatch.setattr(
+        veomni_impl, "get_checkpoint_tensor_converter", fake_veomni_ckpt.get_checkpoint_tensor_converter
+    )
 
     dist.init_process_group("gloo", init_method=f"file://{tmp_path / 'veomni_rendezvous'}", rank=0, world_size=1)
     try:
@@ -755,7 +824,7 @@ def test_veomni_engine_and_shard_export_skip_frozen_engram(monkeypatch, tmp_path
         module.ple.ple_embedding.ngram_embedding = torch.nn.ModuleDict()
         shard0 = torch.nn.Module()
         raw = torch.arange(24, dtype=torch.bfloat16).reshape(6, 4)
-        shard0.weight = torch.nn.Parameter(distribute_tensor(raw, mesh, [Shard(0)]), requires_grad=False)
+        shard0.weight = torch.nn.Parameter(distribute_tensor(raw, mesh, [Shard(0)]), requires_grad=True)
         module.ple.ple_embedding.ngram_embedding["shard_0"] = shard0
         module.ple.key_proj = torch.nn.Linear(4, 4, bias=False)
         trainable_shard = torch.nn.Module()
@@ -777,6 +846,37 @@ def test_veomni_engine_and_shard_export_skip_frozen_engram(monkeypatch, tmp_path
         )
         module._create_checkpoint_tensor_converter = lambda m: m._converter
 
+        monkeypatch.setattr(veomni_impl, "_build_ops_implementation_config", lambda cfg: None)
+        monkeypatch.setattr(veomni_impl, "build_foundation_model", lambda **kw: module)
+        monkeypatch.setattr(veomni_impl, "patch_veomni_forward_with_backends", lambda **kw: None)
+        monkeypatch.setattr(veomni_impl, "load_safetensors_index", lambda *a, **kw: None)
+
+        engine = object.__new__(VeOmniEngine)
+        engine.engine_config = VeOmniEngineConfig(
+            freeze_ple_embeddings=True,
+            frozen_ple_dtype="bfloat16",
+            forward_only=True,
+        )
+        engine.model_config = types.SimpleNamespace(
+            local_path=str(tmp_path),
+            fused_kernel_options=None,
+            use_fused_kernels=False,
+            enable_gradient_checkpointing=False,
+        )
+        engine._get_model_config_path = lambda: str(tmp_path)
+        engine._maybe_apply_async_activation_offload = lambda m: None
+        engine._uses_fsdp2_cpu_offload_policy = True
+        engine._is_offload_param = False
+        engine._rollout_weight_quantizer = None
+
+        # 1. _build_model_optimizer forwards freeze_ple_embeddings + frozen_ple_dtype to VeOmni.
+        engine._build_model_optimizer()
+        assert captured_parallelize_kwargs == {
+            "freeze_ple_embeddings": True,
+            "frozen_ple_dtype": "bfloat16",
+        }
+        assert shard0.weight.requires_grad is True  # VeOmniEngine itself did not mutate requires_grad
+
         orig_full_tensor = torch.distributed.tensor.DTensor.full_tensor
         ple_full_tensor_calls = 0
 
@@ -788,38 +888,37 @@ def test_veomni_engine_and_shard_export_skip_frozen_engram(monkeypatch, tmp_path
 
         monkeypatch.setattr(torch.distributed.tensor.DTensor, "full_tensor", _guarded_full_tensor)
 
-        engine = object.__new__(VeOmniEngine)
-        engine.module = module
-        engine._uses_fsdp2_cpu_offload_policy = True
-        engine._is_offload_param = False
-        engine._rollout_weight_quantizer = None
-
-        # 1. Rollout weight sync (get_per_tensor_param) skips frozen PLE without calling full_tensor().
+        # 2. VeOmniEngine passes through VeOmni's export_weights (frozen PLE skipped before full_tensor()).
         rollout_weights, _ = engine.get_per_tensor_param()
         rollout_dict = dict(rollout_weights)
         assert ple_full_tensor_calls == 0
         assert "ple.ple_embedding.ngram_embedding.shard_0.weight" not in rollout_dict
         assert "ple.key_proj.weight" in rollout_dict
 
-        # 2. Checkpoint hf_model export (_get_hf_export_per_tensor_param) keeps and crops PLE.
-        ckpt_weights, _ = engine._get_hf_export_per_tensor_param()
-        ckpt_dict = dict(ckpt_weights)
-        assert ple_full_tensor_calls == 1
-        assert ckpt_dict["ple.ple_embedding.ngram_embedding.shard_0.weight"].shape == (5, 4)
-
-        # 3. Delta shard export skips frozen PLE and treats para_name='ple' Shard(0) as dense (not MoE expert stack).
+        # 3. Delta shard export respects VeOmni's frozen PLE marker and treats para_name='ple' as non-expert.
         shard_gen, _ = veomni_shard_export(module)
         shard_items = {name: (flat, spec) for name, flat, spec in shard_gen}
         assert "ple.ple_embedding.ngram_embedding.shard_0.weight" not in shard_items
         assert "ple_trainable.weight" in shard_items
         assert shard_items["ple_trainable.weight"][1].to_hf_chunk is None
 
-        # 4. Default weight-loading flags and PLE validation.
-        from verl.workers.config.engine import VeOmniEngineConfig
+        # 4. When freeze_ple_embeddings is not set on the model, VeOmni exports cropped PLE weights.
+        module._veomni_freeze_ple_embeddings = False
+        trainable_weights, _ = engine.get_per_tensor_param()
+        trainable_dict = dict(trainable_weights)
+        assert ple_full_tensor_calls == 1
+        assert trainable_dict["ple.ple_embedding.ngram_embedding.shard_0.weight"].shape == (5, 4)
 
+        # 5. Default config flags and PLE validation.
         default_cfg = VeOmniEngineConfig()
+        assert default_cfg.freeze_ple_embeddings is True
+        assert default_cfg.frozen_ple_dtype is None
         assert default_cfg.broadcast_model_weights_from_rank0 is False
         assert default_cfg.ep_sharded_stream_load is True
+        with pytest.raises(ValueError, match="requires freeze_ple_embeddings=True"):
+            VeOmniEngineConfig(freeze_ple_embeddings=False, frozen_ple_dtype="bfloat16")
+        with pytest.raises(ValueError, match="frozen_ple_dtype must be one of"):
+            VeOmniEngineConfig(freeze_ple_embeddings=True, frozen_ple_dtype="float16")
         with pytest.raises(ValueError, match="ple_parallel_size > 1 requires"):
             VeOmniEngineConfig(ple_parallel_size=2, broadcast_model_weights_from_rank0=True)
         with pytest.raises(ValueError, match="ple_parallel_size > 1 requires"):
