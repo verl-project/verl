@@ -198,6 +198,27 @@ fi
 if [[ -n "${STATIC_MAX_RESPONSE_LEN:-}" ]]; then
     EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_max_response_len=${STATIC_MAX_RESPONSE_LEN}")
 fi
+# TRAINER_MODE=graph_trainer: the actor update runs as one compiled graph (TorchTitan TpuGraphTrainer). Needs
+# USE_KL_LOSS=False, EXPERT_PARALLEL_SIZE=1, USE_DYNAMIC_BSZ=True with one micro-batch per rank (STATIC_MICRO_BATCH_LEN).
+if [[ -n "${TRAINER_MODE:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.trainer_mode=${TRAINER_MODE}")
+fi
+if [[ "${TRAINER_MODE:-}" == "graph_trainer" ]]; then
+    # GRAPH_TRAINER_* go to the plugin's engine_kwargs.tpu.graph_trainer (TorchTitan TpuGraphTrainerCompileConfig).
+    # MODEL_KERNELS defaults to moe,lce: verl-hardware-plugin main rejects the Tokamax KDA kernels (kda) in graph mode
+    # until it pins their document budget for the run.
+    # GRAPH_TRAINER_SPLIT_LAYERS=N compiles N layers per forward / backward executable (graph split with the
+    # fsdp_pipeline backward, as torchtitan's qwen35_moe_35b_split_tokamax_benchmark) instead of one step graph.
+    if [[ -n "${GRAPH_TRAINER_SPLIT_LAYERS:-}" ]]; then
+        GRAPH_TRAINER_EXTRA="enable_remat_barriers:false,fsdp_barrier_policy:none,graph_split:{enabled:true,forward_layers_per_executable:${GRAPH_TRAINER_SPLIT_LAYERS},forward_isolate_prefix:true,backward_partition_mode:fsdp_pipeline,backward_layers_per_executable:${GRAPH_TRAINER_SPLIT_LAYERS}}"
+    else
+        GRAPH_TRAINER_EXTRA="fsdp_barrier_policy:${GRAPH_TRAINER_FSDP_BARRIER_POLICY:-interleave}"
+    fi
+    EXTRA_TPU_OVERRIDES+=(
+        "+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.model_kernels='${MODEL_KERNELS:-moe,lce}'"
+        "+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer={memory_policy:${GRAPH_TRAINER_MEMORY_POLICY:-tpu_selective},save_regions:'${GRAPH_TRAINER_SAVE_REGIONS:-moe.routing,attention.inner_attention}',${GRAPH_TRAINER_EXTRA}}"
+    )
+fi
 
 python3 -m verl.trainer.main_ppo \
     trainer.v1.trainer_mode=separate_async \

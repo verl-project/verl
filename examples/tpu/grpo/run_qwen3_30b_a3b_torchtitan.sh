@@ -136,6 +136,31 @@ SPLASH_MAX_BLOCK_SIZE="${SPLASH_MAX_BLOCK_SIZE:-1024}"
 # checkpoint load and the tpu-sync expert install are unchanged.
 MOE_PAIRED_GROUPED_MM="${MOE_PAIRED_GROUPED_MM:-True}"
 MOE_NATIVE_WEIGHT_LAYOUT="${MOE_NATIVE_WEIGHT_LAYOUT:-True}"
+# Reduce-scatter dtype for SimpleFSDP gradients on actor: bfloat16 cuts update_actor latency by ~9-18% vs float32
+# with matching 30-step GSM8K reward/KL; set MIXED_PRECISION_REDUCE=float32 to revert.
+MIXED_PRECISION_REDUCE="${MIXED_PRECISION_REDUCE:-bfloat16}"
+# Optional eager selective AC matching graph_trainer's tpu_selective policy (keeps Splash attention & MoE routing outputs).
+AC_SAVE_SPLASH_AND_ROUTING="${AC_SAVE_SPLASH_AND_ROUTING:-}"
+# Optional, actor only: TRAINER_MODE=graph_trainer runs the actor update through TorchTitan's TpuGraphTrainer: the
+# whole micro-batch step (forward, fused log-prob, PPO loss, backward) is traced once and compiled as one program,
+# instead of per-block torch.compile (eager_blocks, the default). It needs bypass mode with the KL loss off (as here),
+# one micro-batch per mini-batch per rank (MAX_TOKEN_LEN_PER_GPU must hold a rank's mini-batch) and one static
+# length, so STATIC_MICRO_BATCH_LEN defaults to MAX_TOKEN_LEN_PER_GPU. Configure engine_kwargs.tpu.graph_trainer via
+# GRAPH_TRAINER_MEMORY_POLICY (unsplit default: tpu_selective; split default: default), GRAPH_TRAINER_SAVE_REGIONS
+# (only applied for tpu_selective*, default moe.routing,attention.inner_attention), GRAPH_TRAINER_FSDP_BARRIER_POLICY
+# (unsplit default: prefetch on v5p*, interleave on other chips; split default: none), and optional
+# GRAPH_TRAINER_SPLIT_LAYERS (e.g. 1 with GRAPH_TRAINER_BACKWARD_MODE=fsdp_pipeline for fast compile, lower HBM, and
+# large-batch MFU scaling).
+TRAINER_MODE="${TRAINER_MODE:-}"
+GRAPH_TRAINER_MEMORY_POLICY="${GRAPH_TRAINER_MEMORY_POLICY:-}"
+GRAPH_TRAINER_SAVE_REGIONS="${GRAPH_TRAINER_SAVE_REGIONS:-}"
+GRAPH_TRAINER_FSDP_BARRIER_POLICY="${GRAPH_TRAINER_FSDP_BARRIER_POLICY:-}"
+GRAPH_TRAINER_SPLIT_LAYERS="${GRAPH_TRAINER_SPLIT_LAYERS:-}"
+GRAPH_TRAINER_BACKWARD_MODE="${GRAPH_TRAINER_BACKWARD_MODE:-fsdp_pipeline}"
+GRAPH_TRAINER_BACKWARD_LAYERS="${GRAPH_TRAINER_BACKWARD_LAYERS:-${GRAPH_TRAINER_SPLIT_LAYERS}}"
+if [[ "${TRAINER_MODE}" == "graph_trainer" && -z "${STATIC_MICRO_BATCH_LEN}" ]]; then
+    STATIC_MICRO_BATCH_LEN="${MAX_TOKEN_LEN_PER_GPU}"
+fi
 TPU_PERF_OPTIONS=(
     "+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.splash_max_block_size=${SPLASH_MAX_BLOCK_SIZE}"
     "+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.moe_paired_grouped_mm=${MOE_PAIRED_GROUPED_MM}"
@@ -149,6 +174,47 @@ if [[ -n "${STATIC_MICRO_BATCH_LEN}" ]]; then
         "+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_micro_batch_len=${STATIC_MICRO_BATCH_LEN}"
         "+actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.static_micro_batch_len=${STATIC_MICRO_BATCH_LEN}"
     )
+fi
+tpu_opts="actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu"
+if [[ -n "${MIXED_PRECISION_REDUCE}" ]]; then
+    TPU_PERF_OPTIONS+=("+${tpu_opts}.mixed_precision_reduce=${MIXED_PRECISION_REDUCE}")
+fi
+if [[ -n "${AC_SAVE_SPLASH_AND_ROUTING}" ]]; then
+    TPU_PERF_OPTIONS+=("+${tpu_opts}.ac_save_splash_and_routing=${AC_SAVE_SPLASH_AND_ROUTING}")
+fi
+if [[ -n "${TRAINER_MODE}" ]]; then
+    TPU_PERF_OPTIONS+=("+${tpu_opts}.trainer_mode=${TRAINER_MODE}")
+fi
+if [[ "${TRAINER_MODE}" == "graph_trainer" ]]; then
+    gt_entries=()
+    if [[ -n "${GRAPH_TRAINER_SPLIT_LAYERS}" ]]; then
+        gt_mem="${GRAPH_TRAINER_MEMORY_POLICY:-default}"
+        gt_bar="${GRAPH_TRAINER_FSDP_BARRIER_POLICY:-none}"
+        gt_entries+=("memory_policy:${gt_mem}")
+        gt_entries+=("fsdp_barrier_policy:${gt_bar}")
+        gt_entries+=("enable_remat_barriers:false")
+        gt_entries+=(
+            "graph_split:{enabled:true,forward_layers_per_executable:${GRAPH_TRAINER_SPLIT_LAYERS},backward_partition_mode:${GRAPH_TRAINER_BACKWARD_MODE},backward_layers_per_executable:${GRAPH_TRAINER_BACKWARD_LAYERS}}"
+        )
+    else
+        gt_mem="${GRAPH_TRAINER_MEMORY_POLICY:-tpu_selective}"
+        if [[ -n "${GRAPH_TRAINER_FSDP_BARRIER_POLICY}" ]]; then
+            gt_bar="${GRAPH_TRAINER_FSDP_BARRIER_POLICY}"
+        elif [[ "${TPU_ACCELERATOR_TYPE:-}" == v5p* ]]; then
+            gt_bar="prefetch"
+        else
+            gt_bar="interleave"
+        fi
+        gt_entries+=("memory_policy:${gt_mem}")
+        gt_entries+=("fsdp_barrier_policy:${gt_bar}")
+    fi
+    if [[ "${gt_mem}" == tpu_selective || "${gt_mem}" == tpu_selective_and_offload ]]; then
+        gt_regions="${GRAPH_TRAINER_SAVE_REGIONS:-moe.routing,attention.inner_attention}"
+        # Single-quoted for Hydra: save_regions is comma-separated.
+        gt_entries+=("save_regions:'${gt_regions}'")
+    fi
+    gt_dict=$(IFS=,; echo "${gt_entries[*]}")
+    TPU_PERF_OPTIONS+=("+${tpu_opts}.graph_trainer={${gt_dict}}")
 fi
 # KL-to-reference loss, off by default: it adds a reference model (bf16 weights) on every trainer chip and a reference
 # log-prob pass per step.
