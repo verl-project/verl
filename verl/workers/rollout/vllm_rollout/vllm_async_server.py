@@ -1507,6 +1507,9 @@ class vLLMHttpServer:
             existing_wtc = dict(engine_kwargs.get("weight_transfer_config") or {})
             existing_wtc["backend"] = wt_backend
             engine_kwargs["weight_transfer_config"] = existing_wtc
+            if wt_backend == "ipc":
+                # CUDA IPC handles (reduce_tensor tuples) require pickle fallback on vLLM's ZMQ RPC.
+                os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
             if wt_backend == "sharded_rdt":
                 exec_backend = engine_kwargs.get("distributed_executor_backend")
                 if exec_backend not in {None, "ray"}:
@@ -1680,6 +1683,9 @@ class vLLMReplica(RolloutReplica):
         vllm_ek = (self.config.get("engine_kwargs", {}) or {}).get("vllm", {}) or {}
         checkpoint_backend = getattr(getattr(self.config, "checkpoint_engine", None), "backend", None)
         wtc_backend = (vllm_ek.get("weight_transfer_config") or {}).get("backend")
+        if checkpoint_backend == "vllm_ipc" or wtc_backend == "ipc":
+            # CUDA IPC handles (reduce_tensor tuples) require pickle fallback on vLLM's ZMQ RPC.
+            env_vars = {**env_vars, "VLLM_ALLOW_INSECURE_SERIALIZATION": "1"}
         if checkpoint_backend == "vllm_nccl_m2n" or wtc_backend == "nccl_m2n":
             # ncclDevCommCreate (NCCL Device API used by nccl_m2n) requires cuMem enabled.
             env_vars = {**env_vars, "NCCL_CUMEM_ENABLE": "1"}

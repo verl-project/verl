@@ -573,8 +573,18 @@ def test_vllm_server_preprocess_engine_kwargs_and_sleep_level(monkeypatch):
         server.model_config = SimpleNamespace(lora_rank=0, lora={})
         return server
 
-    # Ensure monkeypatch always restores VLLM_RELOAD_MODE after this test.
+    # Ensure monkeypatch always restores VLLM_RELOAD_MODE and VLLM_ALLOW_INSECURE_SERIALIZATION after this test.
     monkeypatch.setenv("VLLM_RELOAD_MODE", "")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "")
+
+    # vllm_ipc enables VLLM_ALLOW_INSECURE_SERIALIZATION for CUDA IPC handle RPCs.
+    monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
+    monkeypatch.delenv("VLLM_ALLOW_INSECURE_SERIALIZATION", raising=False)
+    ek = {}
+    _make_server("vllm_ipc")._preprocess_engine_kwargs(ek)
+    assert ek["weight_transfer_config"] == {"backend": "ipc"}
+    assert os.environ.get("VLLM_ALLOW_INSECURE_SERIALIZATION") == "1"
+    assert os.environ.get("VLLM_RELOAD_MODE") == "direct"
 
     # vllm_nccl wires weight_transfer_config + VLLM_RELOAD_MODE=direct.
     monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
