@@ -85,7 +85,7 @@ def test_create_empty_actor_rpc_surface():
 
 
 def test_load_balancer_plane_is_embedded_in_the_manager():
-    """The merged balancing plane: add/acquire/release go through the
+    """The merged balancing plane: add/acquire/release/CAS go through the
     manager actor's RPC surface and hit the same embedded balancer state."""
     ray.init(ignore_reinit_error=True)
     manager_cls = _make_manager_cls()
@@ -104,6 +104,9 @@ def test_load_balancer_plane_is_embedded_in_the_manager():
     ray.get(manager.release_server.remote(server_id=server_id, request_id="req-1"))
     assert ray.get(manager.get_total_inflight.remote()) == 0
     assert ray.get(manager.get_all_servers.remote()) == ["addr-0"]
+    # CAS removal needs a real handle: None cannot prove actor identity.
+    assert ray.get(manager.remove_server_if_current.remote("addr-0", server_actor)) is True
+    assert ray.get(manager.get_all_servers.remote()) == []
     ray.kill(manager)
 
 
