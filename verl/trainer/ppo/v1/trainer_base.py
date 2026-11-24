@@ -39,6 +39,11 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
+from verl.experimental.teacher_loop.hidden_state_store import (
+    distillation_target_mask,
+    hidden_state_enabled,
+    step_hidden_handles,
+)
 from verl.protocol import DataProto, DataProtoFuture
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
@@ -1980,14 +1985,13 @@ class PPOTrainer(ABC):
         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
             self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
         )
-        distillation_use_topk = (
-            self.distillation_config.distillation_loss.loss_settings.use_topk
-            if is_distillation_enabled(self.config.get("distillation"))
-            else False
-        )
-        distillation_only = False  # distillation_only flag means we can skip policy loss and reduce mem footprint
+        distillation_use_topk = False
+        distillation_only = False
         if is_distillation_enabled(self.config.get("distillation")):
             distillation_loss_cfg = self.distillation_config.distillation_loss
+            settings = distillation_loss_cfg.loss_settings
+            # Both objectives consume the student vocabulary logits directly.
+            distillation_use_topk = settings.use_topk or settings.use_hidden_states
             distillation_only = (
                 distillation_use_topk
                 and not distillation_loss_cfg.use_task_rewards
@@ -2010,7 +2014,37 @@ class PPOTrainer(ABC):
         }
         batch.extra_info.update(extra_info)
 
-        output: TensorDict = self.actor_rollout_wg.update_actor(batch)
+        if hidden_state_enabled(self.config.get("distillation")):
+            routing = self.distillation_config.teacher_key
+            fields = ["uid", "input_ids", "response_mask", "loss_mask"]
+            if len(self.distillation_config.teacher_models) > 1 and routing not in fields:
+                fields.append(routing)
+            teacher_fields = fields
+            if self.distillation_config.teacher_execution.mode == "dedicated_hidden_state":
+                teacher_fields = [*fields, "teacher_prefill"]
+            rows = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=teacher_fields)
+            with step_hidden_handles(self.teacher_model_manager, rows, routing) as handles:
+                tq.kv_batch_put(
+                    keys=batch.keys,
+                    partition_id=batch.partition_id,
+                    # The engine counts loss_mask across DP ranks before its first actor microbatch.
+                    fields=tu.list_of_dict_to_tensordict(
+                        [
+                            {
+                                "teacher_hidden_handle": handle,
+                                "loss_mask": distillation_target_mask(row["response_mask"], row["loss_mask"]).to(
+                                    row["loss_mask"].dtype
+                                ),
+                            }
+                            for row, handle in zip(rows, handles, strict=True)
+                        ]
+                    ),
+                )
+                if batch.fields is not None:
+                    batch.fields = list(dict.fromkeys([*batch.fields, *fields, "teacher_hidden_handle"]))
+                output = self.actor_rollout_wg.update_actor(batch)
+        else:
+            output = self.actor_rollout_wg.update_actor(batch)
         output = rename_dict(output["metrics"], "actor/")
         output["perf/mfu/actor"] = output.pop("actor/mfu")
         actor_metrics = reduce_metrics(output)

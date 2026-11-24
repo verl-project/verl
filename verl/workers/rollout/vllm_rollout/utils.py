@@ -309,6 +309,17 @@ class vLLMColocateWorkerExtension:
             attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
             clear_kv_cache(model)
 
+    def install_hidden_state_pooler(self):
+        from verl.experimental.teacher_loop.vllm_hidden_pooler import install_hidden_pooler
+
+        install_hidden_pooler(self)
+
+    def reload_hidden_teacher_weights(self, model_path: str, use_shm: bool):
+        from verl.utils.fs import copy_to_local
+
+        # Each node has its own checkpoint cache. The filesystem helper locks copies across TP ranks.
+        self.reload_weights(weights_path=copy_to_local(model_path, use_shm=use_shm))
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
         if self.device is None:

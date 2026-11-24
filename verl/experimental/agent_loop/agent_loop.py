@@ -94,6 +94,8 @@ class AgentLoopOutput(BaseModel):
     """Response token ids including LLM generated token, tool response token."""
     response_mask: list[int]
     """Response mask, 1 for LLM generated token, 0 for tool response token."""
+    loss_mask: Optional[list[bool]] = None
+    """Optional per-response-token eligibility for hidden-state distillation, intersected with response_mask."""
     response_logprobs: Optional[list[float]] = None
     """Log probabilities for the response tokens."""
     routed_experts: Optional[Any] = None
@@ -121,6 +123,13 @@ class AgentLoopOutput(BaseModel):
         output["prompts"] = torch.tensor(output.pop("prompt_ids"), dtype=torch.int64)
         output["responses"] = torch.tensor(output.pop("response_ids"), dtype=torch.int64)
         output["response_mask"] = torch.tensor(output.pop("response_mask"), dtype=torch.int64)
+
+        loss_mask = output.pop("loss_mask", None)
+        if loss_mask is not None:
+            mask = torch.as_tensor(loss_mask, dtype=torch.bool)
+            if mask.shape != output["responses"].shape or mask.shape != output["response_mask"].shape:
+                raise ValueError("loss_mask must have one entry per response token and match response_mask")
+            output["loss_mask"] = mask
 
         response_logprobs = output.pop("response_logprobs", None)
         if response_logprobs is not None:
@@ -599,7 +608,9 @@ class AgentLoopWorker:
 
         # Online policy distillation
         self.distillation_enabled = is_distillation_enabled(config.distillation)
-        if self.distillation_enabled:
+        execution = (config.distillation or {}).get("teacher_execution", {})
+        self.teacher_execution_mode = execution.get("mode", "dedicated")
+        if self.distillation_enabled and self.teacher_execution_mode == "dedicated":
             from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
             self.teacher_key: str = config.distillation.teacher_key
@@ -941,13 +952,15 @@ class AgentLoopWorker:
             ),
         )
         await self._compute_score([output], kwargs=kwargs)
-        await self._compute_teacher_logprobs(
+        teacher_prefill = await self._compute_teacher_logprobs(
             output,
             prompt_ids=output.prompt_ids,
             response_ids=output.response_ids,
             validate=validate,
             sample_kwargs=kwargs,
         )
+        if teacher_prefill is not None:
+            output.extra_fields["teacher_prefill"] = teacher_prefill
         teacher_ids, teacher_logprobs = (
             output.extra_fields.pop("teacher_ids", None),
             output.extra_fields.pop("teacher_logprobs", None),
@@ -1149,6 +1162,18 @@ class AgentLoopWorker:
                 final_output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
             final_output.metrics.compute_score = timing["compute_score"]
 
+    def _teacher_prefill_payload(self, output: AgentLoopOutput) -> dict:
+        """Keep rollout media and its processing settings together for the dedicated teacher."""
+        media = output.multi_modal_data or {}
+        if not media:
+            return {}
+        if any(values for modality, values in media.items() if modality != "images"):
+            raise ValueError("Dedicated hidden-state teacher prefill supports images and text.")
+        kwargs = (
+            output.mm_processor_kwargs if output.mm_processor_kwargs is not None else self._get_mm_processor_kwargs()
+        )
+        return {"multi_modal_data": media, "mm_processor_kwargs": kwargs}
+
     async def _compute_teacher_logprobs(
         self,
         output: AgentLoopOutput,
@@ -1156,9 +1181,16 @@ class AgentLoopWorker:
         response_ids: list[int],
         validate: bool,
         sample_kwargs: Optional[dict[str, Any]] = None,
-    ) -> None:
-        """Compute teacher logprobs for single sample."""
+    ) -> dict | None:
+        """Score a sample now, or return the media needed by a dedicated hidden-state teacher at update."""
         if self.distillation_enabled and not validate:
+            if self.teacher_execution_mode == "dedicated_hidden_state":
+                return self._teacher_prefill_payload(output)
+            if self.teacher_execution_mode == "weight_swapped_hidden_state":
+                if any(values for values in (output.multi_modal_data or {}).values()):
+                    raise ValueError("Weight-swapped hidden-state teacher prefill supports text trajectories only.")
+                return
+
             routing_key = None
             if sample_kwargs is not None:
                 routing_value = sample_kwargs.get(self.teacher_key)

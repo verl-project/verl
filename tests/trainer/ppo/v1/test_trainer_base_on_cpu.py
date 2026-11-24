@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from omegaconf import OmegaConf
 
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
@@ -253,8 +254,7 @@ def test_builtin_filter_groups_warns_when_total_generation_limit_is_configured()
     )
 
 
-@pytest.mark.parametrize("score_centering", [True, False])
-def test_update_actor_passes_score_centering_flag(score_centering):
+def _trainer_for_actor_update(score_centering=False):
     trainer = _StubTrainer.__new__(_StubTrainer)
     trainer.config = OmegaConf.create(
         {
@@ -274,8 +274,79 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     )
     trainer.actor_rollout_wg = MagicMock()
     trainer.actor_rollout_wg.update_actor.return_value = {"metrics": {"mfu": 0.0}}
-    batch = SimpleNamespace(extra_info={})
+    return trainer
 
+
+@pytest.mark.parametrize("score_centering", [True, False])
+def test_update_actor_passes_score_centering_flag(score_centering):
+    trainer = _trainer_for_actor_update(score_centering=score_centering)
+    batch = SimpleNamespace(extra_info={})
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+
+
+def test_hidden_actor_token_count_matches_requested_teacher_rows(monkeypatch):
+    from verl.experimental.teacher_loop.hidden_state_store import put_hidden_record
+    from verl.trainer.ppo.v1 import trainer_base
+    from verl.utils.tensordict_utils import list_of_dict_to_tensordict
+    from verl.workers.config import DistillationLossConfig
+
+    trainer = _trainer_for_actor_update()
+    trainer.config.distillation = {"enabled": True, "teacher_execution": {"mode": "weight_swapped_hidden_state"}}
+    trainer.distillation_config = SimpleNamespace(
+        distillation_loss=DistillationLossConfig(loss_mode="forward_kl_hidden_state", use_task_rewards=False),
+        teacher_execution=trainer.config.distillation.teacher_execution,
+        teacher_models={"teacher": {}},
+        teacher_key="route",
+    )
+    # First rollout has an independently masked assistant token and an environment
+    # token. The second rollout was rejected after its original loss mask was set.
+    rows = list_of_dict_to_tensordict([
+        {
+            "uid": "selected",
+            "input_ids": torch.arange(6),
+            "response_mask": torch.tensor([1, 1, 0, 1]),
+            "loss_mask": torch.tensor([1, 0, 1, 1]),
+        },
+        {
+            "uid": "rejected",
+            "input_ids": torch.arange(5),
+            "response_mask": torch.tensor([0, 0, 0]),
+            "loss_mask": torch.tensor([1, 1, 0]),
+        },
+    ])
+    batch = SimpleNamespace(keys=["a", "b"], partition_id="train", extra_info={}, fields=list(rows.keys()))
+
+    def read_batch(*, keys, partition_id, select_fields):
+        return rows.select(*select_fields)
+
+    def write_batch(*, keys, partition_id, fields):
+        rows.update(fields)
+
+    def teacher(requests):
+        assert [r["positions"] for r in requests] == [[1, 4], []]
+        return [
+            put_hidden_record(
+                dict(r, teacher_key="teacher", teacher_index=0, teacher_weight_version=1),
+                torch.zeros(len(r["positions"]), 3),
+            )
+            for r in requests
+        ]
+
+    def update_actor(actor_batch):
+        assert {"response_mask", "loss_mask", "teacher_hidden_handle"} <= set(actor_batch.fields)
+        assert [mask.tolist() for mask in rows["response_mask"].unbind()] == [[1, 1, 0, 1], [0, 0, 0]]
+        masks = rows["loss_mask"].unbind()
+        assert [mask.tolist() for mask in masks] == [[1, 0, 0, 1], [0, 0, 0]]
+        assert sum(mask.sum().item() for mask in masks) == 2
+        return {"metrics": {"mfu": 0.0}}
+
+    trainer.teacher_model_manager = SimpleNamespace(compute_hidden_states=teacher)
+    trainer.actor_rollout_wg.update_actor.side_effect = update_actor
+    monkeypatch.setattr(trainer_base.tq, "kv_batch_get", read_batch)
+    monkeypatch.setattr(trainer_base.tq, "kv_batch_put", write_batch)
+    monkeypatch.setattr(trainer_base.tq, "kv_put", MagicMock())
+    monkeypatch.setattr(trainer_base.tq, "kv_clear", MagicMock())
+    trainer._update_actor(batch, {})
+    trainer.actor_rollout_wg.update_actor.assert_called_once_with(batch)

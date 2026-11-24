@@ -13,6 +13,21 @@ defaults:
 # Whether to enable distillation.
 enabled: false
 
+# weight_swapped_hidden_state reuses a compatible teacher pool. dedicated_hidden_state
+# allocates independent pools for teachers with different architectures or hidden widths.
+teacher_execution:
+  _target_: verl.workers.config.TeacherExecutionConfig
+  mode: dedicated
+  transfer_signal: hidden_states
+  # In multi-turn tool_agent rollouts, exclude generated tool-call spans from OPD targets.
+  # Tool replies are already masked. The full token sequence remains available as context.
+  skip_tool_call_tokens: false
+  weight_cache:
+    max_resident_teachers: 1
+  hidden_state_transport:
+    backend: transfer_queue
+    storage_backend: simple
+
 # distillation loss config
 distillation_loss:
 
@@ -25,6 +40,9 @@ distillation_loss:
 
   # If distillation loss requires top-k logits, this is the value of k
   topk: 32
+
+  # Active prediction positions per full-vocabulary KL projection.
+  hidden_state_chunk_size: 32
 
   # Whether to include task rewards alongside distillation loss.
   use_task_rewards: true

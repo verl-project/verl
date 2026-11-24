@@ -19,6 +19,7 @@ import logging
 import os
 import warnings
 from contextlib import contextmanager, nullcontext
+from functools import partial
 from inspect import signature
 from typing import Callable, ContextManager, Optional
 
@@ -1087,7 +1088,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
     def prepare_model_inputs(self, micro_batch: TensorDict):
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
         score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
-        if self.pad_to_length and (distillation_use_topk or score_centering):
+        hidden_distillation = distillation_use_topk and "teacher_hidden_handle" in micro_batch
+        if self.pad_to_length and ((distillation_use_topk and not hidden_distillation) or score_centering):
             # Every top-K path re-derives the teacher/rollout tensors' layout from the *unpadded*
             # packed length and slices them with the Ulysses rule only, which does not know about
             # the static pad, so the token streams would silently misalign.
@@ -1103,6 +1105,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
         use_fused_topk = use_fused_kernels and (distillation_use_topk or score_centering)
         topk_labels = None
         if use_fused_topk:
+            if hidden_distillation:
+                raise ValueError("Hidden-state distillation requires full student logits. Disable fused kernels.")
             topk_key = "teacher_ids" if distillation_use_topk else "rollout_topk_ids"
             topk_labels = micro_batch[topk_key]
             if not topk_labels.is_nested:
@@ -1318,6 +1322,18 @@ class FSDPEngineWithLMHead(FSDPEngine):
         batch_invariant = self.engine_config.batch_invariant
 
         input_ids = micro_batch["input_ids"]
+        if distillation_use_topk and "teacher_hidden_handle" in micro_batch:
+            # Pack predictor ordinals in the same layout as student logits. Static
+            # bucket padding and Ulysses alignment are both global suffixes.
+            ordinals = torch.arange(1, input_ids.values().numel() + 1).unsqueeze(0)
+            pad_size = output_args.get("pad_size", 0)
+            if pad_size:
+                ordinals = torch.nn.functional.pad(ordinals, (0, pad_size))
+            if use_remove_padding and self.use_ulysses_sp:
+                ordinals = slice_input_tensor(ordinals, dim=1, padding=False)
+            logits_processor_func = partial(
+                logits_processor_func, token_indices=ordinals, fsdp_group=self.device_mesh["fsdp"].get_group()
+            )
 
         if use_remove_padding:
             input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]

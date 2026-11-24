@@ -305,6 +305,12 @@ class vLLMHttpServer:
         # 1. setup vllm serve cli args
         engine_kwargs = self.config.get("engine_kwargs", {}).get(self._get_engine_kwargs_key(), {}) or {}
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        self._hidden_state_opd = engine_kwargs.pop("hidden_state_opd", False)
+        if self._hidden_state_opd:
+            if self.config.data_parallel_size != 1:
+                raise ValueError("Use separate teacher replicas for data parallel hidden-state OPD.")
+            engine_kwargs.update(runner="pooling", convert="embed", enable_prefix_caching=False)
+            engine_kwargs["pooler_config"] = {"tok_pooling_type": "ALL"}
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
 
@@ -537,13 +543,16 @@ class vLLMHttpServer:
         await engine_client.reset_mm_cache()
         # A sampled <|image_pad|>/<|video_pad|> has no image behind it, and every consumer of the
         # sequence assumes it does. Mask them out with the OOV tail, so the policy cannot pick one.
-        await engine_client.collective_rpc(
-            method="monkey_patch_model",
-            kwargs={
-                "vocab_size": len(self.model_config.tokenizer),
-                "banned_token_ids": get_vision_placeholder_token_ids(self.model_config.processor),
-            },
-        )
+        if self._hidden_state_opd:
+            await engine_client.collective_rpc(method="install_hidden_state_pooler")
+        else:
+            await engine_client.collective_rpc(
+                method="monkey_patch_model",
+                kwargs={
+                    "vocab_size": len(self.model_config.tokenizer),
+                    "banned_token_ids": get_vision_placeholder_token_ids(self.model_config.processor),
+                },
+            )
 
         build_app_sig = inspect.signature(build_app)
         supported_tasks: tuple[Any, ...] = ()
@@ -571,6 +580,69 @@ class vLLMHttpServer:
 
         self.engine = engine_client
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
+
+    async def compute_teacher_hidden_states(
+        self,
+        request_id: str,
+        prompt_ids: list[int],
+        *,
+        queue_request: dict,
+        multi_modal_data: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> dict:
+        """Run a prefill and return the handle committed by its producing TP rank."""
+        from vllm.pooling_params import PoolingParams
+
+        if not self._hidden_state_opd:
+            raise ValueError("Teacher server requires hidden_state_opd for hidden-state export.")
+        if prompt_ids != queue_request["sequence_ids"]:
+            raise ValueError("Teacher token IDs differ from the hidden-state record.")
+        positions = queue_request["positions"]
+        if positions and (positions != sorted(set(positions)) or positions[0] < 0 or positions[-1] >= len(prompt_ids)):
+            raise ValueError("Teacher prediction positions must be sorted, distinct and within the token sequence.")
+        prompt = TokensPrompt(prompt_token_ids=prompt_ids)
+        media = multi_modal_data or {}
+        if any(len(items) for key, items in media.items() if key != "images" and items is not None):
+            raise ValueError("Hidden-state teacher prefill supports text and images.")
+        if media.get("images"):
+            prompt["prompt_token_ids"] = dedup_image_tokens(prompt_ids, self.model_config.processor)
+            prompt["multi_modal_data"] = {"image": media["images"]}
+            if mm_processor_kwargs:
+                prompt["mm_processor_kwargs"] = mm_processor_kwargs
+            # The stored positions refer to the student's fully expanded trajectory. Render once
+            # with the teacher's processor and submit that exact model input for prefill.
+            (prompt,) = await self.engine.renderer.render_cmpl_async([prompt])
+            if prompt["prompt_token_ids"] != prompt_ids:
+                raise ValueError(f"Teacher image-token expansion differs from the student trajectory for {request_id}.")
+        elif set(get_vision_placeholder_token_ids(self.model_config.processor)).intersection(prompt_ids):
+            raise ValueError(f"Teacher trajectory {request_id} has vision placeholder tokens without matching media.")
+        logger.info(
+            "Hidden-state teacher prefill teacher=%s uid=%s images=%d expanded_tokens=%d",
+            queue_request["teacher_key"],
+            queue_request["uid"],
+            len(media.get("images") or []),
+            len(prompt_ids),
+        )
+        params = PoolingParams(
+            task="token_embed",
+            use_activation=False,
+            skip_reading_prefix_cache=True,
+            extra_kwargs={"opd_record": queue_request},
+        )
+        async for output in self.engine.encode(prompt, params, request_id):
+            if output.finished:
+                return json.loads(bytes(output.outputs.data.tolist()))
+        raise RuntimeError(f"Teacher prefill {request_id} ended without a hidden-state handle.")
+
+    async def switch_teacher_weights(self, model_path: str):
+        """Reload every TP shard after the manager has drained the preceding teacher group."""
+        if not self._hidden_state_opd:
+            raise ValueError("Teacher server requires hidden_state_opd for weight swapping.")
+        await self.engine.collective_rpc(
+            method="reload_hidden_teacher_weights",
+            kwargs={"model_path": model_path, "use_shm": self.model_config.use_shm},
+        )
+        await self.clear_kv_cache()
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""

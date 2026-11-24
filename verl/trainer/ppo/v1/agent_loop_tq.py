@@ -165,15 +165,6 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         await self._compute_score(outputs, kwargs=kwargs)
 
         final_output = outputs[-1]
-        # TODO: Support output:list[AgentLoopOutput]
-        await self._compute_teacher_logprobs(
-            final_output,
-            prompt_ids=final_output.prompt_ids,
-            response_ids=final_output.response_ids,
-            validate=validate,
-            sample_kwargs=kwargs,
-        )
-
         if final_output.reward_score is not None:
             for output in outputs[:-1]:
                 output.reward_score = final_output.reward_score
@@ -184,6 +175,10 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # - uid: raw prompt uid from dataset
         # - session_id: session id for rollout.n sampling
         # - index: index of agent loop output
+        hidden_state_opd = self.distillation_enabled and self.teacher_execution_mode in (
+            "dedicated_hidden_state",
+            "weight_swapped_hidden_state",
+        )
         keys, fields, tags = [], [], []
         for i, output in enumerate(outputs):
             prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
@@ -196,12 +191,26 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             ).squeeze(0)
 
             keys.append(f"{uid}_{session_id}_{i}")
+            # Each trajectory needs its own media when its hidden-state teacher runs at actor update.
+            teacher_prefill = None
+            if output is final_output or hidden_state_opd:
+                teacher_prefill = await self._compute_teacher_logprobs(
+                    output,
+                    prompt_ids=output.prompt_ids,
+                    response_ids=output.response_ids,
+                    validate=validate,
+                    sample_kwargs=kwargs,
+                )
             field = output.as_dict()
+            agent_loss_mask = field.get("loss_mask")
             field.update(kwargs)
             # do not store raw image/video
             field.pop("multi_modal_data", None)
-            # TODO: uniform response_mask and loss_mask
+            if teacher_prefill is not None:
+                field["teacher_prefill"] = teacher_prefill
             field["loss_mask"] = field["response_mask"]
+            if hidden_state_opd and agent_loss_mask is not None:
+                field["loss_mask"] = field["response_mask"] & agent_loss_mask
             field["input_ids"] = input_ids
             field["position_ids"] = position_ids
             field["multi_modal_inputs"] = multi_modal_inputs

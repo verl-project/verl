@@ -883,10 +883,21 @@ algorithm:
 distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
+  teacher_execution:
+    _target_: verl.workers.config.TeacherExecutionConfig
+    mode: dedicated
+    transfer_signal: hidden_states
+    skip_tool_call_tokens: false
+    weight_cache:
+      max_resident_teachers: 1
+    hidden_state_transport:
+      backend: transfer_queue
+      storage_backend: simple
   distillation_loss:
     _target_: verl.workers.config.DistillationLossConfig
     loss_mode: k3
     topk: 32
+    hidden_state_chunk_size: 32
     use_task_rewards: true
     distillation_loss_coef: 1.0
     loss_max_clamp: null
