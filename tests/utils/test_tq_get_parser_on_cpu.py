@@ -13,8 +13,11 @@
 # limitations under the License.
 """Each rank reads only the routes it replays from TransferQueue, through a get parser."""
 
+import asyncio
+import sys
 import uuid
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -90,6 +93,42 @@ def test_cp_rows_need_the_aligned_length():
         slice_for_rank({"routed_experts": [routes]}, None, cp_rows=(0, 4, 8))
     with pytest.raises(ValueError, match="route rows"):
         slice_for_rank({"routed_experts": [routes], "input_ids": [torch.zeros(9)]}, None, cp_rows=(0, 4, 8))
+
+
+def test_a_parsed_get_that_keeps_timing_out_reads_whole_samples(monkeypatch):
+    """A plain get retries every storage-unit request on its own budget, so a parsed one must not fail first."""
+    from verl.utils import transferqueue_utils as tqu
+
+    class _StorageUnitTimeout(Exception):
+        pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transfer_queue.storage.managers.simple_storage_manager",
+        SimpleNamespace(StorageUnitTimeout=_StorageUnitTimeout),
+    )
+    monkeypatch.setenv("TQ_SIMPLE_STORAGE_MAX_ATTEMPTS", "2")
+    gets = []
+
+    class _Client:
+        async def async_get_data(self, meta, data_parser=None):
+            gets.append(data_parser)
+            if data_parser is not None:
+                raise _StorageUnitTimeout("storage unit did not reply")
+            return TensorDict({"routed_experts": torch.zeros(1, 4, 2)}, batch_size=(1,))
+
+    monkeypatch.setattr(tqu.tq, "get_client", lambda: _Client())
+    spec = tqu.TQGetSpec(
+        data_parser=partial(slice_for_rank, route_layers=[0, 2]),
+        non_tensor={"routed_experts_layers": [0, 2]},
+    )
+
+    meta = SimpleNamespace(extra_info={}, size=1)
+    data = asyncio.run(tqu._async_meta_to_realdata(meta, spec))
+
+    assert [parser is not None for parser in gets] == [True, True, False]
+    assert data["routed_experts"].shape == (1, 4, 2)  # Every layer, because no parser selected any.
+    assert tu.get_non_tensor_data(data, "routed_experts_layers", None) is None
 
 
 @pytest.fixture(scope="module")

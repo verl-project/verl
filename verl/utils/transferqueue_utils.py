@@ -105,25 +105,27 @@ def tq_get_parser_supported() -> bool:
     return _GET_PARSER_SUPPORTED
 
 
-async def _get_data_with_parser(tq_client, meta: BatchMeta, data_parser: Callable) -> TensorDict:
-    """``async_get_data`` with a parser, retrying a timed-out storage unit itself.
+async def _get_data_with_parser(tq_client, meta: BatchMeta, data_parser: Callable) -> tuple[TensorDict, bool]:
+    """``async_get_data`` with a parser, retrying a timed-out storage unit itself, and whether it ran.
 
     TransferQueue never replays a parser-backed request, because it cannot know the parser has no
-    side effects; the ones here only select stored rows, so a read is safe to repeat.
+    side effects; the ones here only select stored rows, so a read is safe to repeat. A retry repeats
+    the whole batch, which recovers from fewer timeouts than a plain get, where every storage-unit
+    request has its own budget. So a read that keeps timing out ends in a plain get: it returns whole
+    samples, which every caller can still use, rather than failing a read a plain one would survive.
     """
     try:
         from transfer_queue.storage.managers.simple_storage_manager import StorageUnitTimeout
     except ImportError:
-        return await tq_client.async_get_data(meta, data_parser=data_parser)
+        return await tq_client.async_get_data(meta, data_parser=data_parser), True
 
     attempts = max(1, int(os.environ.get("TQ_SIMPLE_STORAGE_MAX_ATTEMPTS", 3)))
     for attempt in range(1, attempts + 1):
         try:
-            return await tq_client.async_get_data(meta, data_parser=data_parser)
+            return await tq_client.async_get_data(meta, data_parser=data_parser), True
         except StorageUnitTimeout as e:
-            if attempt == attempts:
-                raise
-            logger.warning(f"parsed get retry {attempt + 1}/{attempts} for {meta.size} samples: {e}")
+            logger.warning(f"parsed get attempt {attempt}/{attempts} timed out for {meta.size} samples: {e}")
+    return await tq_client.async_get_data(meta), False
 
 
 def _get_tq_get_spec(args, func_name: str) -> TQGetSpec | None:
@@ -231,11 +233,13 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta, spec: TQGetSpec
         return empty_td
 
     tq_client = tq.get_client()
+    parsed = False
     if spec is not None and spec.data_parser is not None:
-        tensordict = await _get_data_with_parser(tq_client, meta, spec.data_parser)
+        tensordict, parsed = await _get_data_with_parser(tq_client, meta, spec.data_parser)
     else:
         tensordict = await tq_client.async_get_data(meta)
-    for key, val in spec.non_tensor.items() if spec is not None else ():
+    # This data describes what the parser kept, so a get that fell back to whole samples must not carry it.
+    for key, val in spec.non_tensor.items() if parsed else ():
         tu.assign_non_tensor_data(tensor_dict=tensordict, key=key, val=val)
 
     for key, val in meta_info.items():
