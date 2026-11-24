@@ -305,7 +305,12 @@ class NIXLCheckpointEngine(CheckpointEngine):
         return actor_wg_kwargs, rollout_kwargs
 
     def init_process_group(
-        self, rank: int, world_size: int, prev_agent_metadata: NixlAgentMetadata, next_agent_metadata: NixlAgentMetadata
+        self,
+        rank: int,
+        world_size: int,
+        prev_agent_metadata: NixlAgentMetadata,
+        next_agent_metadata: NixlAgentMetadata,
+        group_generation: int | None = None,
     ):
         """Setup the communication with the previous and next agent.
 
@@ -314,6 +319,8 @@ class NIXLCheckpointEngine(CheckpointEngine):
             world_size (int): The total number of processes.
             prev_agent_metadata (NixlAgentMetadata): The metadata of the previous nixl agent.
             next_agent_metadata (NixlAgentMetadata): The metadata of the next nixl agent.
+            group_generation: rollout-restart fencing generation — informational
+                here: the remote agents are re-established fresh every round.
         """
         if rank < 0:
             assert not prev_agent_metadata and not next_agent_metadata, (
@@ -332,6 +339,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
 
         self.rank = rank
         self.world_size = world_size
+        self.group_generation = group_generation
         self.prev_agent = None
         self.next_agent = None
 

@@ -13,7 +13,9 @@
 # limitations under the License.
 import asyncio
 import concurrent.futures
+import logging
 import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Generator
@@ -30,6 +32,36 @@ from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
 from verl.workers.rollout.utils import ensure_async_iterator
+
+logger = logging.getLogger(__name__)
+
+# Fault-tolerant weight-sync tunables (see enable_fault_tolerance): bounded
+# commit wait, post-failure detection grace, max attempts, finalize bound.
+_BOUNDED_ABORT_S = 120.0
+_PROBE_GRACE_S = 30.0
+_MAX_SYNC_ATTEMPTS = 3
+_FINALIZE_TIMEOUT_S = 30.0
+
+# Zero-syncable-members wait (single-replica / all-restarting deployments):
+# poll cadence and overall bound while the restart pipeline runs. These waits
+# are not sync attempts — there is nothing to transfer to while nobody is
+# syncable, so they must not consume the attempt budget.
+_EMPTY_MEMBERSHIP_POLL_S = 10.0
+_RECOVERY_WAIT_TIMEOUT_S = 1800.0
+
+# Preparation-phase bound (fault tolerance only): a sync worker whose
+# collective is blocked on a dead peer never returns the ray calls the
+# quiesce / group-build steps submit, so an unbounded retry would hang on
+# it forever. Overtime fails closed instead — the manager cannot un-wedge
+# a worker; only a checkpoint restart recovers the job.
+_SYNC_PREPARE_TIMEOUT_S = 120.0
+
+
+class WeightSyncWedgedError(RuntimeError):
+    """A sync worker is wedged inside a previous failed transfer (its
+    collective is blocked on a dead peer). Raised when the preparation
+    phase overruns ``_SYNC_PREPARE_TIMEOUT_S``: the retry loop fails
+    closed instead of retrying — the manager cannot un-wedge a worker."""
 
 
 @dataclass
@@ -460,6 +492,15 @@ class CheckpointEngineManager:
         self.replicas = replicas
 
         self._update_ticket = None
+        # Fault-tolerance state, inert until enable_fault_tolerance() (the
+        # rollout-restart wiring): fail-fast sync, no fencing. Membership is
+        # written only via sync_membership().
+        self._fault_tolerant = False
+        self._pre_sync_hook = None
+        self._sync_succeeded_callback = None
+        self._group_generation = 0
+        self._retry_epoch = 0
+        self._fatal_error: str | None = None
         self._background_loop = asyncio.new_event_loop()
         self._background_loop_ready = threading.Event()
         self._background_loop_thread = threading.Thread(
@@ -471,6 +512,37 @@ class CheckpointEngineManager:
         if not self._background_loop_ready.wait(timeout=5):
             self.close()
             raise RuntimeError("Failed to start CheckpointEngineManager background event loop.")
+
+    def enable_fault_tolerance(
+        self,
+        pre_sync_hook=None,
+        sync_succeeded_callback=None,
+    ) -> None:
+        """Activate wait-and-retry weight sync (idempotent; called once by the
+        rollout-restart wiring).
+
+        ``pre_sync_hook``: async, reconciles membership before every attempt
+        (a fresh detection round on the manager, then
+        manager snapshot -> :meth:`sync_membership`).
+        ``sync_succeeded_callback``: fired after a successful sync so the
+        manager promotes rebuilt replicas; a lost notification is retried by
+        the next sync.
+        """
+        self._fault_tolerant = True
+        self._pre_sync_hook = pre_sync_hook
+        self._sync_succeeded_callback = sync_succeeded_callback
+
+    @staticmethod
+    def _replica_key(replica: RolloutReplica) -> str:
+        return f"{replica.replica_rank}{getattr(replica, 'name_suffix', '') or ''}"
+
+    def sync_membership(self, snapshot) -> None:
+        """Adopt the manager-authoritative membership snapshot (replicas,
+        fencing generation, fatal flag) — the only write boundary for this
+        state."""
+        self.replicas = list(snapshot.replicas)
+        self._group_generation = snapshot.group_generation
+        self._fatal_error = snapshot.fatal_error
 
     def _run_background_loop(self):
         asyncio.set_event_loop(self._background_loop)
@@ -511,6 +583,15 @@ class CheckpointEngineManager:
 
         actor_wg_kwargs["method"] = ["init_process_group"] * actor_wg.world_size
         rollout_kwargs["method"] = ["init_process_group"] * rollout.world_size
+
+        # Membership fencing: generation = manager conviction count + retry
+        # epoch, so a membership change or a failed attempt builds under a
+        # never-used name (each worker destroys its previous group on the
+        # rename). Zero (or fault tolerance disabled) sends no extra kwargs.
+        fence = self._group_generation + self._retry_epoch
+        if self._fault_tolerant and fence > 0:
+            actor_wg_kwargs["group_generation"] = [fence] * actor_wg.world_size
+            rollout_kwargs["group_generation"] = [fence] * rollout.world_size
 
         # 3. init process group between all workers
         ray.get(
@@ -603,7 +684,92 @@ class CheckpointEngineManager:
 
         Args:
             global_steps: The global steps of the actor worker group.
+
+        With fault tolerance (see :meth:`enable_fault_tolerance`) this is
+        the wait-and-retry loop over member failures; otherwise the
+        fail-fast pipeline.
         """
+        if not self._fault_tolerant:
+            return await self._update_weights_pipeline(global_steps)
+        return await self._update_weights_with_retry(global_steps)
+
+    async def _update_weights_with_retry(self, global_steps: int = None):
+        """Fatal gate + membership reconcile, then bounded attempts; an empty
+        syncable set waits for recovery (nobody to sync to — the loop must
+        not burn the attempt budget on doomed empty-group builds); after a
+        failure, hold for the detection grace window only and re-attempt with
+        the surviving group (the entry reconcile re-probes membership; a
+        fenced-out replica rejoins at the following sync)."""
+        attempts = 0
+        while True:
+            self._gate_on_fatal()
+            await self._pull_membership()
+            await self._wait_for_syncable_replicas()
+            try:
+                return await self._update_weights_pipeline(global_steps)
+            except WeightSyncWedgedError:
+                raise
+            except Exception as exc:
+                # Drop the abandoned ticket (it never resolves) and rename
+                # the next attempt's group: a failed attempt must not be
+                # retried on its own communicator.
+                self._update_ticket = None
+                self._retry_epoch += 1
+                attempts += 1
+                if attempts >= _MAX_SYNC_ATTEMPTS:
+                    raise RuntimeError(f"weight sync failed after {attempts} attempts (last: {exc})") from exc
+                logger.warning(
+                    "weight sync attempt %d/%d failed (%s: %s) — retrying after the detection grace window",
+                    attempts,
+                    _MAX_SYNC_ATTEMPTS,
+                    type(exc).__name__,
+                    exc,
+                )
+                await self._wait_for_detection()
+
+    def _gate_on_fatal(self) -> None:
+        if self._fatal_error is not None:
+            raise RuntimeError(f"rollout restart is in a fatal state: {self._fatal_error}")
+
+    async def _pull_membership(self) -> None:
+        """Best-effort membership pull; a broken pull leaves membership at
+        the last snapshot."""
+        if self._pre_sync_hook is None:
+            return
+        try:
+            await self._pre_sync_hook()
+        except Exception:
+            logger.warning("membership reconcile failed (non-fatal)", exc_info=True)
+
+    async def _wait_for_detection(self) -> None:
+        """Hold off the retry only for the fault-detection grace window: the
+        next attempt's entry reconcile runs a fresh detection round, so the
+        surviving group syncs without waiting for any rebuild to settle — a
+        fenced-out replica rejoins at the following sync. Fails closed on
+        the fatal flag."""
+        await asyncio.sleep(_PROBE_GRACE_S)
+        await self._pull_membership()
+        self._gate_on_fatal()
+
+    async def _wait_for_syncable_replicas(self) -> None:
+        """Hold while the syncable member set is empty (every replica
+        mid-recovery or fenced out): with nobody to sync to, a fast retry
+        would only burn the attempt budget on doomed empty-group builds and
+        fail the step before recovery lands. Terminal states: the fatal flag
+        (all replicas DEAD) and the overall recovery-wait bound. Waits here
+        are not sync attempts."""
+        if self.replicas:
+            return
+        logger.warning("no syncable rollout replicas at the weight-sync entry — waiting for recovery")
+        deadline = time.monotonic() + _RECOVERY_WAIT_TIMEOUT_S
+        while not self.replicas:
+            self._gate_on_fatal()
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"no syncable rollout replicas recovered within {_RECOVERY_WAIT_TIMEOUT_S:.0f}s")
+            await asyncio.sleep(_EMPTY_MEMBERSHIP_POLL_S)
+            await self._pull_membership()
+
+    async def _update_weights_pipeline(self, global_steps: int = None):
         # 0. update weights for sync training with colocated actor and rollout
         # No global_steps check here: the only caller without one wakes replicas back up on unchanged
         # weights, so the current salt still matches what the external KV store holds.
@@ -623,6 +789,10 @@ class CheckpointEngineManager:
             return await self._update_ticket.wait_committed()
 
     async def submit_update(self, global_steps: int | None, rollout_quiesced: bool = False) -> WeightUpdateTicket:
+        # An empty member set must fail here with a clear error — an empty
+        # worker list would surface as an opaque single-controller TypeError.
+        if not self.replicas:
+            raise RuntimeError("no rollout replicas available for the weight sync (empty syncable member set)")
         # Salted external KV caches tell weights apart only by global_steps, and the shared KV store
         # is no longer wiped, so a weight change without a new version would serve stale KV.
         if global_steps is None and any(r.config.external_kv_cache_invalidation == "salt" for r in self.replicas):
@@ -634,15 +804,17 @@ class CheckpointEngineManager:
             workers.extend(replica.workers)
         rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
 
-        if not self.backend_cls.support_publish_weights:
-            # Coupled transports allocate receive buffers and start collectives in
-            # build_process_group(), so preserve the original ordering: quiesce
-            # rollout and release its KV cache before either of those operations.
-            await self.abort_replicas()
-            await self.release_kv_cache_replicas()
-
-        # 2. build process group
-        self.build_process_group(rollout)
+        # 2. prepare for the transfer (quiesce + process-group build), bounded
+        # under fault tolerance (see _prepare_sync_bounded).
+        if self._fault_tolerant:
+            await self._prepare_sync_bounded(rollout)
+        else:
+            if not self.backend_cls.support_publish_weights:
+                # Coupled transports allocate receive buffers and start collectives in
+                # build_process_group(), so preserve the original ordering: quiesce
+                # rollout and release its KV cache before either of those operations.
+                await self._quiesce_replicas()
+            self.build_process_group(rollout)
 
         # 3. trainer publish weights
         trainer_published = self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
@@ -662,6 +834,69 @@ class CheckpointEngineManager:
             rollout_committed=rollout_committed,
         )
 
+    async def _quiesce_replicas(self) -> None:
+        """Abort + release KV cache: strict (default) or best-effort per
+        replica (fault tolerance)."""
+        if not self._fault_tolerant:
+            await self.abort_replicas()
+            await self.release_kv_cache_replicas()
+            return
+        await asyncio.gather(*(self._best_effort_abort(r) for r in list(self.replicas)))
+        await asyncio.gather(*(self._best_effort_release(r) for r in list(self.replicas)))
+
+    async def _best_effort_abort(self, replica: RolloutReplica) -> None:
+        try:
+            await replica.abort_all_requests()
+        except Exception:
+            logger.warning("abort_all_requests failed for replica %s (non-fatal)", self._replica_key(replica))
+
+    async def _best_effort_release(self, replica: RolloutReplica) -> None:
+        try:
+            await replica.release_kv_cache()
+        except Exception:
+            logger.warning("release_kv_cache failed for replica %s (non-fatal)", self._replica_key(replica))
+
+    @staticmethod
+    def _wedged_sync_error(phase: str) -> WeightSyncWedgedError:
+        """Log and build the fail-closed error for a preparation-phase
+        overrun (see :meth:`_prepare_sync_bounded`)."""
+        logger.error(
+            "%s stalled for over %.0fs — a sync worker is wedged inside a previous failed transfer; "
+            "failing closed (restart the job from a checkpoint)",
+            phase,
+            _SYNC_PREPARE_TIMEOUT_S,
+        )
+        return WeightSyncWedgedError(
+            f"{phase} stalled for over {_SYNC_PREPARE_TIMEOUT_S:.0f}s: a sync worker is wedged "
+            "inside a previous failed transfer (its collective is blocked on a dead peer); "
+            "failing closed — restart the job from a checkpoint"
+        )
+
+    async def _quiesce_replicas_bounded(self) -> None:
+        """Fault tolerance only: quiesce under the preparation bound."""
+        try:
+            await asyncio.wait_for(self._quiesce_replicas(), timeout=_SYNC_PREPARE_TIMEOUT_S)
+        except asyncio.TimeoutError as exc:
+            raise self._wedged_sync_error("weight-sync replica quiesce") from exc
+
+    async def _prepare_sync_bounded(self, rollout: RayWorkerGroup) -> None:
+        """Fault tolerance only: quiesce plus group build, each under the
+        preparation bound.
+
+        A worker whose collective is blocked on a dead peer (an in-flight
+        death in a previous attempt) never returns the ray tasks these steps
+        submit — without the bound the retry loop hangs on it silently.
+        Overtime raises :class:`WeightSyncWedgedError`, which the retry loop
+        does not retry: the manager cannot un-wedge a worker."""
+        if not self.backend_cls.support_publish_weights:
+            await self._quiesce_replicas_bounded()
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self.build_process_group, rollout), timeout=_SYNC_PREPARE_TIMEOUT_S
+            )
+        except asyncio.TimeoutError as exc:
+            raise self._wedged_sync_error("weight-sync group build") from exc
+
     async def _commit_update(
         self,
         rollout: RayWorkerGroup,
@@ -670,10 +905,22 @@ class CheckpointEngineManager:
     ):
         """Install a published weight version on rollout workers."""
         if self.backend_cls.support_publish_weights:
-            await self.abort_replicas()
-            await self.release_kv_cache_replicas()
+            if self._fault_tolerant:
+                await self._quiesce_replicas_bounded()
+            else:
+                await self._quiesce_replicas()
 
         rollout_committed = rollout.update_weights(global_steps=global_steps)
+        if not self._fault_tolerant:
+            return await self._commit_strict(rollout, trainer_published, rollout_committed)
+        return await self._commit_all_or_nothing(rollout, trainer_published, rollout_committed)
+
+    async def _commit_strict(
+        self,
+        rollout: RayWorkerGroup,
+        trainer_published: list[ray.ObjectRef],
+        rollout_committed: list,
+    ):
         results = await asyncio.gather(*trainer_published, *rollout_committed)
 
         await asyncio.gather(
@@ -684,6 +931,63 @@ class CheckpointEngineManager:
         await self.resume_kv_cache_replicas()
         await self.resume_generation_replicas()
         return self._merge_sync_metrics(results[: self.actor_wg.world_size])
+
+    async def _commit_all_or_nothing(
+        self,
+        rollout: RayWorkerGroup,
+        trainer_published: list[ray.ObjectRef],
+        rollout_committed: list,
+    ):
+        """All-or-nothing commit: the transfer completes within the bounded
+        abort or the attempt fails and the wait-retry loop owns the follow-up
+        under a fresh fenced name. The version stamp moves only on a complete
+        transfer, so a failed attempt leaves every replica serving its last
+        installed version."""
+        futures = [asyncio.ensure_future(ref) for ref in (*trainer_published, *rollout_committed)]
+        try:
+            results = await asyncio.wait_for(asyncio.gather(*futures), timeout=_BOUNDED_ABORT_S)
+        except Exception as exc:
+            # A worker raised or stalled (a dead peer's collective holds the
+            # survivors): fail the attempt — the retry renames the group and
+            # each worker destroys its previous group on the rename.
+            raise RuntimeError(
+                f"weight sync commit failed or stalled within {_BOUNDED_ABORT_S}s ({type(exc).__name__}: {exc})"
+            ) from exc
+
+        finalize_refs = self.actor_wg.execute_checkpoint_engine(
+            ["finalize"] * self.actor_wg.world_size
+        ) + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
+        try:
+            await asyncio.wait_for(asyncio.gather(*finalize_refs, return_exceptions=True), timeout=_FINALIZE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            # A stuck worker's finalize queues behind its blocked collective;
+            # the straggler is the manager's polling business.
+            logger.warning("engine finalize did not finish within 30s (stuck worker assumed); continuing")
+
+        await self._guarded_resume(list(self.replicas))
+        self._notify_sync_succeeded()
+        return self._merge_sync_metrics(results[: len(trainer_published)])
+
+    async def _guarded_resume(self, replicas: list[RolloutReplica]) -> None:
+        """Resume KV cache and generation per replica, swallowing per-replica
+        failures (a dead replica must not block the others)."""
+        for replica in replicas:
+            key = self._replica_key(replica)
+            try:
+                await replica.resume_kv_cache()
+                await replica.resume_generation()
+            except Exception:
+                logger.warning("resume failed for replica %s (non-fatal)", key)
+
+    def _notify_sync_succeeded(self) -> None:
+        """Fire-and-forget: let the manager promote rebuilt replicas; a lost
+        notification is retried by the next sync."""
+        if self._sync_succeeded_callback is None:
+            return
+        try:
+            self._sync_succeeded_callback()
+        except Exception:
+            logger.warning("sync-succeeded notification failed (non-fatal)", exc_info=True)
 
 
 async def split_weight_chunks(
