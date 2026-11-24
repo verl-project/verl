@@ -528,9 +528,12 @@ def test_rollout_streams_engram_once_for_cpu_offload_and_skips_non_engram_shards
 
     model = _FakeEngramRolloutModel()
     worker = _make_engram_worker(model, tmp_path, load_format="dummy")
+    assert worker._engram_weights_loaded is False
+    assert not hasattr(worker, "_engram_discarded_by_sleep")
 
     # Initial sync under dummy format loads IPC trainable weights + streams Engram/PLE from safetensors.
     worker.update_weights_from_ipc()
+    assert worker._engram_weights_loaded is True
     loaded_names = [name for batch in model.loaded_batches for name, _ in batch]
     assert loaded_names == [
         "layers.1.engram.q_weight",
@@ -549,6 +552,7 @@ def test_rollout_streams_engram_once_for_cpu_offload_and_skips_non_engram_shards
     model.loaded_batches.clear()
     worker.sleep(level=1)
     worker.sleep(level=2)
+    assert worker._engram_weights_loaded is True
     worker.update_weights_from_ipc()
     assert [name for batch in model.loaded_batches for name, _ in batch] == ["layers.1.engram.q_weight"]
 
@@ -579,30 +583,46 @@ def test_rollout_reloads_device_resident_engram_only_after_level2_sleep(monkeypa
         torch.zeros((4, 8), dtype=torch.bfloat16), requires_grad=False
     )
 
-    # With load_format="safetensors", initial sync skips safetensors reload when no level-2 sleep occurred.
+    # With load_format="safetensors", initial _engram_weights_loaded=True skips safetensors reload.
     worker = _make_engram_worker(model, tmp_path, load_format="safetensors")
+    assert worker._engram_weights_loaded is True
     worker.update_weights_from_ipc()
     assert model.loaded_batches == []
 
-    # Level-1 sleep preserves device weights -> still no safetensors reload.
+    # Level-1 sleep preserves device weights -> _engram_weights_loaded stays True.
     worker.sleep(level=1)
+    assert worker._engram_weights_loaded is True
     worker.update_weights_from_ipc()
     assert model.loaded_batches == []
 
-    # Level-2 sleep discards unpreserved device weights -> next sync reloads ONLY layer 2's shard!
+    # Level-2 sleep discards unpreserved device weights -> _engram_weights_loaded flips to False -> reloads layer 2!
     # (Also verifies PP layer filtering: shard 1 for missing layer 1 is NOT opened.)
     (tmp_path / "model-00001-of-00002.safetensors").unlink()
     worker.sleep(level=2)
+    assert worker._engram_weights_loaded is False
     worker.update_weights_from_ipc()
+    assert worker._engram_weights_loaded is True
     loaded_names = [name for batch in model.loaded_batches for name, _ in batch]
     assert loaded_names == [
         "model.language_model.layers.2.ple.ple_embedding.ngram_embedding.shard_0.weight",
         "model.language_model.layers.2.ple.ple_embedding.layer_multipliers",
     ]
 
+    # When sleep_preserve_parameter_names preserves the Engram/PLE parameter across level-2 sleep,
+    # _engram_weights_loaded stays True and no safetensors reload occurs.
+    model.loaded_batches.clear()
+    worker.model_runner.vllm_config.model_config.sleep_preserve_parameter_names = ("*ngram_embedding.weight",)
+    worker.sleep(level=2)
+    assert worker._engram_weights_loaded is True
+    worker.update_weights_from_ipc()
+    assert model.loaded_batches == []
+
 
 def test_rollout_does_not_overwrite_trainable_engram_sent_over_ipc(monkeypatch, tmp_path):
-    _write_sharded_engram_checkpoint(tmp_path)
+    shard1, shard2 = _write_sharded_engram_checkpoint(tmp_path)
+    # Remove checkpoint shards to prove safetensors is never opened when received_engram_from_ipc is True.
+    shard1.unlink()
+    shard2.unlink()
     loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
     loader_utils.process_weights_after_loading = lambda *args: None
     monkeypatch.setitem(sys.modules, loader_utils.__name__, loader_utils)
@@ -623,41 +643,29 @@ def test_rollout_does_not_overwrite_trainable_engram_sent_over_ipc(monkeypatch, 
 
     model = _FakeEngramRolloutModel(include_layer1=False, include_layer2=True)
     worker = _make_engram_worker(model, tmp_path, load_format="dummy")
+    assert worker._engram_weights_loaded is False
     worker.update_weights_from_ipc()
 
-    # Checkpoint has 3.0; trainer IPC sent 42.0 -> must stay 42.0 (not overwritten by safetensors).
+    assert worker._engram_weights_loaded is True
     assert torch.all(model.layers["2"].ple.ple_embedding.ngram_embedding.weight == 42.0)
 
 
-def test_rollout_restores_omitted_frozen_engram_when_ipc_sends_partial_trainable_tables(monkeypatch, tmp_path):
-    _write_sharded_engram_checkpoint(tmp_path)
-    loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
-    loader_utils.process_weights_after_loading = lambda *args: None
-    monkeypatch.setitem(sys.modules, loader_utils.__name__, loader_utils)
+def test_engram_safetensors_requires_local_index_json(tmp_path):
+    from safetensors.torch import save_file
 
-    trained_ple = torch.full((4, 8), 42.0, dtype=torch.bfloat16)
+    from verl.utils.engram import iter_engram_safetensors_batches
 
-    class _Receiver:
-        def __init__(self, **kwargs):
-            pass
+    # Remote repo ID or missing local directory must fail explicitly without downloading from HuggingFace Hub.
+    with pytest.raises(FileNotFoundError, match="local checkpoint directory"):
+        list(iter_engram_safetensors_batches("org/nonexistent-engram-repo"))
 
-        def receive_weights(self, on_bucket_received):
-            # Layer 2 PLE is trainable (sent over IPC), while Layer 1 Engram is frozen (omitted from IPC).
-            on_bucket_received(
-                [("model.language_model.layers.2.ple.ple_embedding.ngram_embedding.shard_0.weight", trained_ple)],
-                True,
-            )
-
-    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", _Receiver)
-
-    model = _FakeEngramRolloutModel(include_layer1=True, include_layer2=True)
-    worker = _make_engram_worker(model, tmp_path, load_format="dummy")
-    worker.update_weights_from_ipc()
-
-    # Omitted frozen Layer 1 Engram weight + scale are restored from safetensors, while Layer 2 keeps 42.0 from IPC.
-    assert torch.all(model.layers["1"].engram.embed_tokens.weight.float() == 2.0)
-    assert torch.all(model.layers["1"].engram.embed_tokens.weight_scale_inv == 127)
-    assert torch.all(model.layers["2"].ple.ple_embedding.ngram_embedding.weight == 42.0)
+    # Local directory with .safetensors shard(s) but missing model.safetensors.index.json must fail explicitly.
+    save_file(
+        {"layers.1.engram.embed.weight": torch.ones((4, 8), dtype=torch.bfloat16)},
+        str(tmp_path / "model.safetensors"),
+    )
+    with pytest.raises(FileNotFoundError, match="model.safetensors.index.json"):
+        list(iter_engram_safetensors_batches(str(tmp_path)))
 
 
 def test_collect_frozen_engram_keys_handles_key_converter_dropping_lora_keys():
