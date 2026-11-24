@@ -52,9 +52,3 @@ Last updated: 06/05/2026.
 
    faq/faq
    contribution_guide/ascend_ci_guide
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Alignment Diagnostics
-
-   ../kimi_bf16_alignment

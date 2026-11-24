@@ -1,0 +1,358 @@
+--- a/verl/experimental/agent_loop/single_turn_agent_loop.py
++++ b/verl/experimental/agent_loop/single_turn_agent_loop.py
+@@ -79,6 +79,11 @@
+                 mm_processor_kwargs=mm_processor_kwargs,
+                 priority=priority,
+             )
++        if os.environ.get("KIMI_ALIGNMENT_SERVING_PROBE") == "1":
++            from serving_invariance_probe import replay_prefix
++            await replay_prefix(self, request_id, prompt_ids, output.token_ids, dict(
++                image_data=images, audio_data=audios, video_data=videos,
++                mm_processor_kwargs=mm_processor_kwargs, priority=priority))
+         if metrics.get("num_preempted") is None:
+             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
+ 
+@@ -111,6 +116,18 @@
+                     f"generated={len(response_ids)}, configured={self.response_length}"
+                 )
+ 
++        if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
++            import json as alignment_json
++            from pathlib import Path as AlignmentPath
++            alignment_root = AlignmentPath(os.environ["KIMI_ALIGNMENT_AUDIT_DIR"]) / "requests"
++            alignment_root.mkdir(parents=True, exist_ok=True)
++            alignment_record = {"request_id": request_id, "priority": priority,
++                                "prompt_ids": list(prompt_ids), "response_ids": list(response_ids),
++                                "response_logprobs": response_logprobs,
++                                "response_mask": list(response_mask)}
++            (alignment_root / (request_id + ".json")).write_text(alignment_json.dumps(alignment_record) + "\n")
++            print("KIMI_ALIGNMENT_REQUEST_MAP " + request_id, flush=True)
++
+         output: AgentLoopOutput = AgentLoopOutput(
+             prompt_ids=prompt_ids,
+             response_ids=response_ids[: self.response_length],
+--- a/verl/trainer/main_ppo.py
++++ b/verl/trainer/main_ppo.py
+@@ -149,6 +149,14 @@
+         tq.init(config.transfer_queue)
+         succeeded = False
+         try:
++            # Task-local occupancy recheck before workers acquire any NPU.
++            import os
++            if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
++                import subprocess
++                subprocess.run(
++                    ["/usr/bin/python3", "/mnt/share/y00938198/kimi-k31/test_wxx_skill/scripts/check_idle.py"],
++                    check=True,
++                )
+             self.trainer = trainer_cls(config=config)
+             self.trainer.init()
+             self.init_agent_loop_manager()
+--- a/verl/trainer/ppo/v1/trainer_base.py
++++ b/verl/trainer/ppo/v1/trainer_base.py
+@@ -1604,6 +1604,20 @@
+                 "temperature": self.config.actor_rollout_ref.rollout.temperature,
+             }
+         )
++        # Preserve the rollout trajectory even if the independent actor forward fails.
++        if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
++            import time
++            from pathlib import Path
++            from alignment_audit import freeze_inputs
++            rollout_snapshot = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id)
++            snapshot_dir = Path(os.environ["KIMI_ALIGNMENT_AUDIT_DIR"]) / "rollout_before_recompute"
++            snapshot_dir.mkdir(parents=True, exist_ok=True)
++            torch.save(
++                {"batch": {str(k): freeze_inputs(v) for k, v in rollout_snapshot.items()},
++                 "keys": [str(k) for k in batch.keys], "partition_id": str(batch.partition_id)},
++                snapshot_dir / (str(time.time_ns()) + ".pt"),
++            )
++            print("KIMI_ALIGNMENT_ROLLOUT_SNAPSHOT saved before independent recomputation", flush=True)
+         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
+         assert len(output) == len(batch)
+ 
+--- a/verl/utils/debug/metrics.py
++++ b/verl/utils/debug/metrics.py
+@@ -114,6 +114,38 @@
+     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
+     rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
+     log_prob_abs_diff = calculate_log_prob_diff(rollout_old_log_probs, actor_old_log_probs, response_mask_bool)
++    import os
++    audit_root = os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR")
++    if audit_root:
++        from pathlib import Path
++        import json, time
++        root = Path(audit_root)
++        root.mkdir(parents=True, exist_ok=True)
++        stamp = str(time.time_ns())
++        left = actor_old_log_probs.detach().cpu().contiguous()
++        right = rollout_old_log_probs.detach().cpu().contiguous()
++        mask = response_mask_bool.detach().cpu()
++        finite = torch.isfinite(left) & torch.isfinite(right)
++        delta = (left.double() - right.double()).abs()[mask]
++        different = (left != right) & mask
++        where = different.nonzero()
++        summary = {
++            "comparison": "independent_actor_old_logprob_vs_rollout",
++            "valid_tokens": int(mask.sum()), "nonfinite_tokens": int((~finite & mask).sum()),
++            "different_tokens": int(different.sum()),
++            "mean_abs_diff": float(delta.mean()), "max_abs_diff": float(delta.max()),
++            "first_difference": where[0].tolist() if len(where) else None,
++            "actor_dtype": str(left.dtype), "rollout_dtype": str(right.dtype),
++            "passed": bool(mask.any() and finite[mask].all() and not different.any()),
++        }
++        artifact = {"actor_logprobs": left, "rollout_logprobs": right, "mask": mask,
++                    "responses": responses.detach().cpu()}
++        for key in ("input_ids", "attention_mask", "position_ids"):
++            if key in data.batch:
++                artifact[key] = data.batch[key].detach().cpu()
++        torch.save(artifact, root / (stamp + ".pt"))
++        (root / (stamp + ".json")).write_text(json.dumps(summary, indent=2) + "\n")
++        print("KIMI_ALIGNMENT_AUDIT " + json.dumps(summary), flush=True)
+     return {
+         "training/rollout_probs_diff_valid": 1,
+         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
+--- a/verl/workers/engine/fsdp/transformer_impl.py
++++ b/verl/workers/engine/fsdp/transformer_impl.py
+@@ -335,6 +335,11 @@
+ 
+         if self.engine_config.full_determinism:
+             enable_full_determinism(seed=self.engine_config.seed)
++
++        if os.environ.get("KIMI_ALIGNMENT_DETERMINISTIC_LEVEL") == "3":
++            import torch_npu
++            torch_npu.npu.set_deterministic_level(3)
++            print(f"KIMI_ALIGNMENT_DETERMINISTIC rank={self.rank} role=actor_or_ref level=3 grad_enabled={torch.is_grad_enabled()}", flush=True)
+ 
+         # set FSDP offload params
+         self._is_offload_param = self.engine_config.param_offload
+@@ -1697,6 +1702,22 @@
+         return model_inputs, output_args
+ 
+     def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
++        from verl.utils.kimi_logprob import is_kimi_model, mask_kimi_generation_logits
++
++        import os
++        score_logprobs = logprobs_from_logits
++        compute_entropy = self.compute_entropy_from_logits
++        direct_entropy = verl_F.entropy_from_logits
++        if is_kimi_model(self.model_config.hf_config):
++            from kimi_scoring import masked_entropy, kimi_v2_logprobs
++            compute_entropy = direct_entropy = masked_entropy
++            if os.environ.get("KIMI_ALIGNMENT_V2_SCORING") == "1":
++                score_logprobs = kimi_v2_logprobs
++
++        force_fp32 = logits_processor_func is None or is_kimi_model(self.model_config.hf_config)
++        if getattr(output, "logits", None) is not None:
++            output.logits = mask_kimi_generation_logits(output.logits, self.model_config.hf_config)
++
+         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
+         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
+         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+@@ -1772,21 +1793,21 @@
+                     if calculate_entropy:
+                         if self.engine_config.entropy_checkpointing:
+                             expanded_entropy = torch.utils.checkpoint.checkpoint(
+-                                self.compute_entropy_from_logits, logits_rmpad
++                                compute_entropy, logits_rmpad
+                             )
+                         elif self.engine_config.entropy_from_logits_with_chunking:
+-                            expanded_entropy = self.compute_entropy_from_logits(
++                            expanded_entropy = compute_entropy(
+                                 logits_rmpad, chunk_size=self.engine_config.entropy_from_logits_chunk_size
+                             )
+                         else:
+-                            expanded_entropy = self.compute_entropy_from_logits(logits_rmpad)
++                            expanded_entropy = compute_entropy(logits_rmpad)
+                         entropy_rmpad = torch.gather(expanded_entropy, 0, raw_positions)
+                     log_probs = None
+                     if not distillation_only:
+-                        expanded_log_probs = logprobs_from_logits(
++                        expanded_log_probs = score_logprobs(
+                             logits=logits_rmpad, labels=expanded_labels.squeeze(0),
+                             inplace_backward=not (calculate_entropy or calculate_sum_pi_squared),
+-                            force_fp32=logits_processor_func is None,
++                            force_fp32=force_fp32,
+                         )
+                         log_probs = torch.gather(expanded_log_probs, 0, raw_positions)
+                     # The common packed tail removes static/SP padding and restores
+@@ -1808,15 +1829,15 @@
+                     if calculate_entropy:
+                         if not self.engine_config.entropy_checkpointing:
+                             if self.engine_config.entropy_from_logits_with_chunking:
+-                                entropy_rmpad = self.compute_entropy_from_logits(
++                                entropy_rmpad = compute_entropy(
+                                     logits_rmpad,
+                                     chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                                 )  # ((total_nnz / sp) + pad)
+                             else:
+-                                entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
++                                entropy_rmpad = compute_entropy(logits_rmpad)
+                         else:
+                             entropy_rmpad = torch.utils.checkpoint.checkpoint(
+-                                self.compute_entropy_from_logits, logits_rmpad
++                                compute_entropy, logits_rmpad
+                             )
+ 
+                     # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
+@@ -1836,11 +1857,11 @@
+                         inplace_backward = True
+                         if calculate_entropy:
+                             inplace_backward = False
+-                        log_probs = logprobs_from_logits(
++                        log_probs = score_logprobs(
+                             logits=logits_rmpad,
+                             labels=input_ids_rmpad_rolled,
+                             inplace_backward=inplace_backward,
+-                            force_fp32=logits_processor_func is None,
++                            force_fp32=force_fp32,
+                         )
+ 
+             # gather across the ulysses sp group and drop the packed-sequence padding
+@@ -1907,9 +1928,9 @@
+                     )
+                     if calculate_entropy:
+                         if self.engine_config.entropy_checkpointing:
+-                            expanded_entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
++                            expanded_entropy = torch.utils.checkpoint.checkpoint(direct_entropy, logits)
+                         else:
+-                            expanded_entropy = verl_F.entropy_from_logits(logits)
++                            expanded_entropy = direct_entropy(logits)
+                         model_output["entropy"] = _pack_kimi_raw_token_values(
+                             expanded_entropy, raw_indices, raw_mask, cu_seqlens
+                         )
+@@ -1919,11 +1940,11 @@
+                             expanded_sum_pi_squared, raw_indices, raw_mask, cu_seqlens
+                         )
+                     if not distillation_only:
+-                        expanded_log_probs = logprobs_from_logits(
++                        expanded_log_probs = score_logprobs(
+                             logits=logits,
+                             labels=expanded_labels,
+                             inplace_backward=not (calculate_entropy or calculate_sum_pi_squared),
+-                            force_fp32=logits_processor_func is None,
++                            force_fp32=force_fp32,
+                         )
+                         model_output["log_probs"] = _pack_kimi_raw_token_values(
+                             expanded_log_probs, raw_indices, raw_mask, cu_seqlens
+@@ -1940,9 +1961,9 @@
+ 
+                 if calculate_entropy:
+                     if not self.engine_config.entropy_checkpointing:
+-                        entropy = verl_F.entropy_from_logits(logits)
++                        entropy = direct_entropy(logits)
+                     else:
+-                        entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
++                        entropy = torch.utils.checkpoint.checkpoint(direct_entropy, logits)
+ 
+                 if calculate_sum_pi_squared:
+                     sum_pi_squared = verl_F.calculate_sum_pi_squared_from_logits(logits)
+@@ -1971,10 +1992,10 @@
+ 
+                     log_probs = None
+                     if not distillation_only:
+-                        log_probs = logprobs_from_logits(
++                        log_probs = score_logprobs(
+                             logits=logits_rmpad,
+                             labels=input_ids_rmpad_rolled,
+-                            force_fp32=logits_processor_func is None,
++                            force_fp32=force_fp32,
+                         )
+                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
+                     if not distillation_only:
+@@ -2001,6 +2022,7 @@
+ 
+         return model_output
+ 
++
+     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
+         device_name = get_device_name()
+         # actually, we should avoid assigning like this...
+@@ -2018,14 +2040,29 @@
+             else torch.autocast(device_type=device_name, dtype=autocast_dtype)
+         )
+         with autocast_ctx:
+-            raw_output = self.module(
+-                **model_inputs,
+-                use_cache=False,
+-            )  # prevent model thinks we are generating
++            alignment_context = nullcontext()
++            if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
++                from alignment_audit import trace_actual_forward
++                alignment_context = trace_actual_forward(self, model_inputs, micro_batch, forward_only)
++            with alignment_context:
++                raw_output = self.module(
++                    **model_inputs,
++                    use_cache=False,
++                )  # prevent model thinks we are generating
++
++            if forward_only and os.environ.get("KIMI_ALIGNMENT_PREFIX_PROBE") == "1":
++                from alignment_audit import probe_prefix
++                probe_prefix(self, model_inputs, raw_output, micro_batch)
++                from alignment_audit import replay_fixed_failure
++                replay_fixed_failure(self, model_inputs)
+ 
+             model_output = self.prepare_model_outputs(
+                 output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
+             )
++
++            if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
++                from alignment_audit import capture_forward
++                capture_forward(self, micro_batch, model_inputs, model_output, forward_only)
+ 
+             if loss_function is not None:
+                 loss, metrics = loss_function(
+--- a/verl/workers/engine_workers.py
++++ b/verl/workers/engine_workers.py
+@@ -495,6 +495,11 @@
+             # Keep this process on toolkit training kernels. A PID-scoped marker
+             # does not disable vendor setup in separately spawned rollout workers.
+             os.environ["VERL_NPU_TRAINING_PROCESS_PID"] = str(os.getpid())
++            if os.environ.get("KIMI_ALIGNMENT_WORKSPACE"):
++                # Training and rollout use different vendor link flags.
++                os.environ["TORCH_EXTENSIONS_DIR"] = os.path.join(
++                    os.environ["KIMI_ALIGNMENT_WORKSPACE"], "cache/local/torch_extensions_training"
++                )
+             for key in ("ASCEND_CUSTOM_OPP_PATH", "LD_LIBRARY_PATH"):
+                 os.environ[key] = ":".join(
+                     item for item in os.environ.get(key, "").split(":")
+--- a/verl/workers/rollout/llm_server.py
++++ b/verl/workers/rollout/llm_server.py
+@@ -139,8 +139,20 @@
+             priority_kwargs = (
+                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
+             )
++            backend_request_id = self._vllm_request_id(request_id)
++            if request_id.startswith("alignment-probe-") and __import__("os").environ.get("KIMI_ALIGNMENT_SERVING_PROBE") == "1":
++                backend_request_id = request_id
++
++            import os as alignment_os
++            if alignment_os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
++                import json as alignment_json
++                from pathlib import Path as AlignmentPath
++                alignment_root = AlignmentPath(alignment_os.environ["KIMI_ALIGNMENT_AUDIT_DIR"]) / "request_id_map"
++                alignment_root.mkdir(parents=True, exist_ok=True)
++                (alignment_root / (backend_request_id + ".json")).write_text(alignment_json.dumps(
++                    {"request_id": request_id, "backend_request_id": backend_request_id}) + "\n")
+             output: TokenOutput = await server.generate.remote(
+-                request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
++                request_id=backend_request_id,  # use new request_id for each turn
+                 prompt_ids=prompt_ids,
+                 sampling_params=sampling_params,
+                 image_data=image_data,
+--- a/verl/workers/rollout/vllm_rollout/vllm_async_server.py
++++ b/verl/workers/rollout/vllm_rollout/vllm_async_server.py
+@@ -700,6 +700,13 @@
+         except TypeError:
+             prompt = prompt_kwargs
+ 
++        if request_id == "alignment-probe-control" and os.environ.get("KIMI_ALIGNMENT_SERVING_PROBE") == "1":
++            from serving_invariance_probe import run_matrix
++            await run_matrix(self, prompt)
++            return TokenOutput(token_ids=[], log_probs=None, routed_experts=None,
++                               routed_expert_weights=None, stop_reason="completed",
++                               extra_fields={"global_steps": self.global_steps})
++
+         # Add lora request
+         lora_request = None
+         if self.lora_as_adapter:

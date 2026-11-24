@@ -503,6 +503,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
         self.role = role
+        if get_device_name() == "npu" and role in {"actor", "ref", "actor_rollout", "actor_rollout_ref"}:
+            if os.environ.get("KIMI_ALIGNMENT_WORKSPACE"):
+                # Training and rollout use different vendor link flags.
+                os.environ["TORCH_EXTENSIONS_DIR"] = os.path.join(
+                    os.environ["KIMI_ALIGNMENT_WORKSPACE"], "cache/local/torch_extensions_training"
+                )
         self.actor: TrainingWorker | None = None
         self.ref: TrainingWorker | None = None
         self.rollout: BaseRollout = None

@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
-from functools import partial
-
 import torch
-from omegaconf import OmegaConf
 
 from verl.utils.fsdp_utils import fsdp2_load_full_state_dict
 
@@ -36,24 +32,7 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
         from fsdp_turbo.utils.device import set_accelerator_compatible
 
         set_accelerator_compatible()
-        raw_config = self.engine_config.turbo_config
-        raw_config = (
-            OmegaConf.to_container(raw_config, resolve=True)
-            if OmegaConf.is_config(raw_config)
-            else copy.deepcopy(raw_config)
-        )
-        ep_plan = raw_config.get("distributed", {}).get("ep_plan", {})
-        if (
-            self.model_config.hf_config.model_type == "kimi_k31"
-            and ep_plan.get("dispatcher") == "custom_ep_forward_mc2"
-        ):
-            from fsdp_turbo.training.kimi_mc2 import kimi_mc2_dispatcher
-
-            fixed_router = ep_plan.get("fixed_router", False)
-            if type(fixed_router) is not bool:
-                raise ValueError("Kimi MC2 fixed_router must be a boolean")
-            ep_plan["dispatcher"] = partial(kimi_mc2_dispatcher, fixed_router=fixed_router)
-        self.fsdp_turbo_config = _dict_to_dataclass(FSDPTurboConfig, raw_config)
+        self.fsdp_turbo_config = _dict_to_dataclass(FSDPTurboConfig, self.engine_config.turbo_config)
         self.fsdp_turbo_config.distributed.fsdp_plan.cpu_offload = (
             self.engine_config.offload_policy or self.engine_config.forward_only
         )
