@@ -145,6 +145,12 @@ class FSDPEngine(BaseEngine):
 
         self.rank = torch.distributed.get_rank()
 
+        if device_name == "npu" and os.environ.get("KIMI_ALIGNMENT_DETERMINISTIC_LEVEL") == "3":
+            import torch_npu
+
+            torch_npu.npu.set_deterministic_level(3)
+            logger.info("Enabled NPU deterministic level 3 for rank %s", self.rank)
+
         # Apply NPU patches for FSDP backend
         skip_npu_patches = getattr(self.engine_config, "strategy", None) == "fsdp_turbo"
         if not skip_npu_patches:
@@ -1292,9 +1298,25 @@ class FSDPEngineWithLMHead(FSDPEngine):
         return model_inputs, output_args
 
     def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
+        from verl.utils.kimi_logprob import is_kimi_model, mask_kimi_generation_logits
+
+        score_logprobs = logprobs_from_logits
+        compute_entropy = self.compute_entropy_from_logits
+        direct_entropy = verl_F.entropy_from_logits
+        if is_kimi_model(self.model_config.hf_config):
+            from verl.utils.kimi_alignment.kimi_scoring import kimi_v2_logprobs, masked_entropy
+
+            compute_entropy = direct_entropy = masked_entropy
+            if os.environ.get("KIMI_ALIGNMENT_V2_SCORING") == "1":
+                score_logprobs = kimi_v2_logprobs
+            if getattr(output, "logits", None) is not None:
+                output.logits = mask_kimi_generation_logits(output.logits, self.model_config.hf_config)
+
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+        if use_fused_kernels and is_kimi_model(self.model_config.hf_config):
+            raise ValueError("Kimi generation-logprob alignment requires use_fused_kernels=False")
         calculate_entropy = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy", default=False)
         calculate_sum_pi_squared = tu.get_non_tensor_data(
             data=micro_batch, key="calculate_sum_pi_squared", default=False
@@ -1367,16 +1389,14 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
                         if self.engine_config.entropy_from_logits_with_chunking:
-                            entropy_rmpad = self.compute_entropy_from_logits(
+                            entropy_rmpad = compute_entropy(
                                 logits_rmpad,
                                 chunk_size=self.engine_config.entropy_from_logits_chunk_size,
                             )  # ((total_nnz / sp) + pad)
                         else:
-                            entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
+                            entropy_rmpad = compute_entropy(logits_rmpad)
                     else:
-                        entropy_rmpad = torch.utils.checkpoint.checkpoint(
-                            self.compute_entropy_from_logits, logits_rmpad
-                        )
+                        entropy_rmpad = torch.utils.checkpoint.checkpoint(compute_entropy, logits_rmpad)
 
                 # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
                 if distillation_use_topk or score_centering:
@@ -1394,7 +1414,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                     # entropy and the score centering hook reuse the logits in their backward
                     inplace_backward = not (calculate_entropy or score_centering)
-                    log_probs = logprobs_from_logits(
+                    log_probs = score_logprobs(
                         logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
                         labels=input_ids_rmpad_rolled,
                         inplace_backward=inplace_backward,
@@ -1476,9 +1496,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
-                        entropy = verl_F.entropy_from_logits(logits)
+                        entropy = direct_entropy(logits)
                     else:
-                        entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
+                        entropy = torch.utils.checkpoint.checkpoint(direct_entropy, logits)
 
                 if calculate_sum_pi_squared:
                     sum_pi_squared = verl_F.calculate_sum_pi_squared_from_logits(logits)
@@ -1515,7 +1535,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                     log_probs = None
                     if not distillation_only:
-                        log_probs = logprobs_from_logits(
+                        log_probs = score_logprobs(
                             logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
                             labels=input_ids_rmpad_rolled,
                             inplace_backward=not score_centering,
