@@ -239,6 +239,15 @@ def load_fsdp2_model_to_gpu(model):
 
 @torch.no_grad()
 def offload_fsdp_optimizer(optimizer):
+    # AdamWSwap owns host buffers and zero-storage device state aliases.
+    # Generic Tensor.to would copy invalid aliases and break its state maps.
+    if any(
+        cls.__name__ == "AdamWSwap"
+        and cls.__module__ == "fsdp_turbo.memory.swap_optimizer.swap_optimizer"
+        for cls in type(optimizer).__mro__
+    ):
+        return
+
     if not optimizer.state:
         return
     for param_group in optimizer.param_groups:
@@ -251,6 +260,15 @@ def offload_fsdp_optimizer(optimizer):
 
 @torch.no_grad()
 def load_fsdp_optimizer(optimizer, device_id):
+    # AdamWSwap owns host buffers and zero-storage device state aliases.
+    # Generic Tensor.to would copy invalid aliases and break its state maps.
+    if any(
+        cls.__name__ == "AdamWSwap"
+        and cls.__module__ == "fsdp_turbo.memory.swap_optimizer.swap_optimizer"
+        for cls in type(optimizer).__mro__
+    ):
+        return
+
     if not optimizer.state:
         return
     for param_group in optimizer.param_groups:

@@ -496,7 +496,27 @@ def allgather_dict_into_dict(data: dict, group=None) -> dict:
 
     final_metrics = {}
     all_metrics_lst = [None for _ in range(group_size)]
-    torch.distributed.all_gather_object(all_metrics_lst, data, group=group)
+    if os.environ.get("VERL_METRICS_GATHER_ON_NPU", "0") == "1" and get_device_name() == "npu":
+        # Preserve the object payload and rank order while avoiding the CPU
+        # Gloo path that can stall on multi-node NPU process groups.
+        import pickle
+
+        device = torch.device("npu", torch.npu.current_device())
+        payload = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
+        size = torch.tensor([len(payload)], dtype=torch.int64, device=device)
+        sizes = [torch.empty_like(size) for _ in range(group_size)]
+        torch.distributed.all_gather(sizes, size, group=group)
+        lengths = [int(item.item()) for item in sizes]
+        buffer = torch.zeros(max(lengths), dtype=torch.uint8, device=device)
+        buffer[:len(payload)] = torch.tensor(list(payload), dtype=torch.uint8, device=device)
+        buffers = [torch.empty_like(buffer) for _ in range(group_size)]
+        torch.distributed.all_gather(buffers, buffer, group=group)
+        all_metrics_lst = [
+            pickle.loads(bytes(item[:length].cpu().tolist()))
+            for item, length in zip(buffers, lengths, strict=True)
+        ]
+    else:
+        torch.distributed.all_gather_object(all_metrics_lst, data, group=group)
 
     for all_metrics in all_metrics_lst:
         for key, val in all_metrics.items():

@@ -11,18 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Strict Kimi full-R3 rollout payload helpers.
+"""Exact Kimi full-R3 rollout payload helpers.
 
-vLLM's routed-experts API has one integer tensor slot.  The Ascend worker
-uses that slot to carry, for every top-k entry, the expert id followed by the
-low and high bytes of the *executed BF16 router weight*.  Keeping the wire
-payload integer-valued lets the existing vLLM slot manager retain its compact
-uint8/uint16 storage without changing the EngineCore protocol.
-
-The payload layout is ``[..., ids[K], weight_low_bytes[K],
-weight_high_bytes[K]]``.  It is decoded at the verl boundary and never exposed
-to the trainer as an overloaded tensor: downstream code receives explicit
-``routed_experts`` and ``routed_expert_weights`` fields.
+Current Ascend execution supplies FP32 routing weights. The integer transport
+contains IDs[K] followed by four raw byte lanes[K] per FP32 weight. Scheduler
+uint8/uint16 storage therefore preserves every executed bit. Legacy two-lane
+BF16 payloads remain readable; FSDP receives explicit IDs and FP32 weights.
 """
 
 from __future__ import annotations
@@ -32,13 +26,14 @@ from typing import Any
 import numpy as np
 import torch
 
-KIMI_FULL_R3_PACK_FACTOR = 3
+KIMI_FULL_R3_PACK_FACTOR = 3  # legacy BF16 transport
+KIMI_FULL_R3_FP32_PACK_FACTOR = 5
 KIMI_FULL_MODEL_ROUTE_SEMANTICS = "kimi_natural_rollout_full_model_rows_v1"
 
 
 def is_kimi_full_r3_config(hf_config: Any) -> bool:
     """Whether the model uses Kimi K3's IDs+executed-weights R3 schema."""
-    return getattr(hf_config, "model_type", None) == "kimi_k3"
+    return getattr(hf_config, "model_type", None) in {"kimi_k3", "kimi_k31"}
 
 
 def get_kimi_full_r3_topk(hf_config: Any) -> int:
@@ -160,43 +155,28 @@ def decode_kimi_full_r3_payload(
     *,
     expected_topk: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Decode vLLM's integer Kimi full-R3 payload without losing BF16 bits.
-
-    Returns expert IDs and FP32 values.  Every BF16 value is exactly
-    representable in FP32, so converting back to BF16 in the trainer is
-    bit-exact.
-    """
+    """Decode exact FP32 (five-lane) or legacy BF16 (three-lane) weights."""
     payload = np.asarray(packed)
     if payload.ndim != 3:
-        raise ValueError(f"Kimi full R3 packed payload must be [model_rows, layers, 3*topk], got {payload.shape!r}")
+        raise ValueError(f"Kimi full R3 packed payload must be [model_rows, layers, 5*topk] (legacy BF16: 3*topk), got {payload.shape!r}")
     if expected_topk <= 0:
         raise ValueError(f"expected_topk must be positive, got {expected_topk}")
-    expected_width = expected_topk * KIMI_FULL_R3_PACK_FACTOR
-    if payload.shape[-1] != expected_width:
-        raise ValueError(
-            "Kimi full R3 payload width proves that rollout weight capture is "
-            "not active or is incompatible: "
-            f"got={payload.shape[-1]}, expected={expected_width} "
-            f"(topk={expected_topk})"
-        )
+    width = payload.shape[-1]
+    if width not in (3 * expected_topk, 5 * expected_topk):
+        raise ValueError(f"Kimi full R3 payload width proves that rollout weight capture is not active or is incompatible: got={width}, expected={5 * expected_topk} (legacy BF16={3 * expected_topk})")
     if not np.issubdtype(payload.dtype, np.integer):
-        raise TypeError(f"Kimi full R3 packed payload must use an integer transport dtype, got {payload.dtype}")
-
+        raise TypeError(f"Kimi full R3 payload must be integer, got {payload.dtype}")
     expert_ids = np.array(payload[..., :expected_topk], dtype=np.int32, copy=True)
-    low = payload[..., expected_topk : 2 * expected_topk]
-    high = payload[..., 2 * expected_topk :]
-    if low.size:
-        low_min, low_max = int(low.min()), int(low.max())
-        high_min, high_max = int(high.min()), int(high.max())
-        if low_min < 0 or low_max > 255 or high_min < 0 or high_max > 255:
-            raise ValueError(
-                "Kimi full R3 BF16 byte lanes are out of range: "
-                f"low=[{low_min}, {low_max}], high=[{high_min}, {high_max}]"
-            )
-
-    bf16_bits = low.astype(np.uint16) | (high.astype(np.uint16) << 8)
-    fp32_bits = bf16_bits.astype(np.uint32) << 16
-    weights = np.array(fp32_bits.view(np.float32), copy=True)
+    lanes = payload[..., expected_topk:]
+    if lanes.size and (int(lanes.min()) < 0 or int(lanes.max()) > 255):
+        raise ValueError("Kimi full R3 weight byte lanes are out of range")
+    bits = np.zeros(payload.shape[:-1] + (expected_topk,), dtype=np.uint32)
+    count = width // expected_topk - 1
+    for i in range(count):
+        bits |= lanes[..., i * expected_topk:(i + 1) * expected_topk].astype(np.uint32) << (8 * i)
+    if count == 2:
+        bits <<= 16
+    weights = np.array(bits.view(np.float32), copy=True)
     if not np.isfinite(weights).all():
         raise ValueError("Kimi full R3 decoded router weights contain NaN or Inf")
     if (weights < 0).any():

@@ -15,6 +15,7 @@
 import copy
 import logging
 import math
+import os
 from contextlib import contextmanager
 
 import torch
@@ -40,10 +41,14 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
 
         turbo_config = copy.deepcopy(self.engine_config.turbo_config)
         fsdp_plan = turbo_config.setdefault("distributed", {}).setdefault("fsdp_plan", {})
-        cpu_offload = bool(self.engine_config.offload_policy or self.engine_config.forward_only)
+        # Preserve the historical forward-only default unless the launcher explicitly
+        # selects a CPU offload policy for this engine.
+        cpu_offload = bool(
+            fsdp_plan.get("cpu_offload", self.engine_config.offload_policy or self.engine_config.forward_only)
+        )
         fsdp_plan["cpu_offload"] = cpu_offload
         if cpu_offload and get_device_name() == "npu":
-            fsdp_plan["pin_memory"] = False
+            fsdp_plan.setdefault("pin_memory", False)
         reshard_after_forward = self.engine_config.reshard_after_forward
         fsdp_plan["reshard_after_forward"] = True if reshard_after_forward is None else reshard_after_forward
         self.fsdp_turbo_config = _dict_to_dataclass(FSDPTurboConfig, turbo_config)
@@ -57,7 +62,7 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
         vision_config = getattr(self.model_config.hf_config, "vision_config", None)
         if vision_config is not None:
             vision_config._attn_implementation = (
-                "flash_attention_2" if self.model_config.hf_config.model_type == "kimi_k3" else attn_implementation
+                "flash_attention_2" if self.model_config.hf_config.model_type in {"kimi_k3", "kimi_k31"} else attn_implementation
             )
         init_parallel_state(self.fsdp_turbo_config)
         self._parallel_state = get_parallel_state()
@@ -70,7 +75,7 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
         cp_size = self.ulysses_sequence_parallel_size
         self.ulysses_sequence_parallel_size = 1
         try:
-            if self.model_config.hf_config.model_type == "kimi_k3":
+            if self.model_config.hf_config.model_type in {"kimi_k3", "kimi_k31"}:
                 load_pretrained = False
                 force_meta = True
             return super()._build_module(load_pretrained=load_pretrained, force_meta=force_meta)
@@ -80,10 +85,10 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
     def _build_fsdp_module(self, module):
         from fsdp_turbo.fsdp_turbo import FSDPTurbo
 
-        if self.model_config.hf_config.model_type == "kimi_k3":
+        if self.model_config.hf_config.model_type in {"kimi_k3", "kimi_k31"}:
             # Wrap the meta model first, then materialize only final local shards.
             module = FSDPTurbo(self.fsdp_turbo_config, module).model
-            if self.engine_config.offload_policy or self.engine_config.forward_only:
+            if self.fsdp_turbo_config.distributed.fsdp_plan.cpu_offload:
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
                 self._uses_fsdp2_cpu_offload_policy = True
@@ -91,11 +96,14 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
             from .streaming_loader import load_kimi_k3_checkpoint_to_local_shards
 
             materialize_device = (
-                "cpu" if self.engine_config.offload_policy or self.engine_config.forward_only else get_device_id()
+                "cpu" if self.fsdp_turbo_config.distributed.fsdp_plan.cpu_offload else get_device_id()
             )
+            zero_init = os.environ.get("VERL_KIMI_ZERO_INIT") == "1"
+            if zero_init and torch.distributed.get_rank() == 0:
+                logger.warning("KIMI_ZERO_INIT: materializing zero local parameter shards without reading model weights")
             load_kimi_k3_checkpoint_to_local_shards(
                 module,
-                self.model_config.local_path,
+                None if zero_init else self.model_config.local_path,
                 materialize_device=materialize_device,
             )
             if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -105,7 +113,7 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
         full_state = module.state_dict()
         module = FSDPTurbo(self.fsdp_turbo_config, module).model
         offload_policy = None
-        if self.engine_config.offload_policy or self.engine_config.forward_only:
+        if self.fsdp_turbo_config.distributed.fsdp_plan.cpu_offload:
             self._is_offload_param = False
             self._is_offload_optimizer = False
             offload_policy = True

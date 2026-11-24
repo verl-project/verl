@@ -199,6 +199,13 @@ class DistProfiler:
         Args:
             **kwargs: Runtime arguments forwarded to backend `start`.
         """
+        if self._tool == "npu" and self.check_enable() and os.environ.get("KIMI_PROFILE_PLAN_ROOT"):
+            from .kimi_step_plan import profile_spec
+            spec = profile_spec(kwargs["profile_step"], self.rank, "training")
+            self._this_rank = spec["enabled"]
+            self._impl.profile_level = spec["level"]
+            self._impl.profile_contents = ["npu", "cpu"] + (["stack"] if spec["with_stack"] else [])
+            self._impl.profile_save_path = spec["save_path"]
         if self.check_enable() and self.check_this_rank():
             self._this_step = True
             return getattr(self._impl, "start", lambda **_: None)(**kwargs)

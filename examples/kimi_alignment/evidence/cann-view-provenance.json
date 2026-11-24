@@ -1,0 +1,8 @@
+{
+  "source": "/mnt/share/l00804615/cann/9.2.0/cann-9.2.0",
+  "view": "/mnt/share/y00938198/kimi-k31/test_wxx_skill/environment/cann-9.2.0-view",
+  "version_file_source": "/mnt/share/l00804615/cann/9.2.0/cann-9.2.0/aarch64-linux/ascend_toolkit_install.info",
+  "version_sha256": "8080e70928e9ad6a2e20fe76b1a0c2fa380a4d5dee9b0f1a67cc3c92c69d2210",
+  "method": "Top-level links retain the original installation; real copied toolkit version file avoids recursive enumeration by torch_npu get_cann_version. No package checks bypassed.",
+  "time": "2026-11-23T15:13:55.819060+08:00"
+}

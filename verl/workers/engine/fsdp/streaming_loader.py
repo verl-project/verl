@@ -212,14 +212,15 @@ def _copy_task(task: _LoadTask, accessor) -> None:
 @torch.no_grad()
 def load_kimi_k3_checkpoint_to_local_shards(
     model: torch.nn.Module,
-    checkpoint_path: str,
+    checkpoint_path: str | None,
     *,
     materialize_device,
 ) -> None:
     """Load raw Kimi checkpoint weights directly into local DTensor shards.
 
     ``model`` must already have the final FSDP-Turbo/TP/EP wrappers applied.
-    Missing parameters and mismatched checkpoint shapes are errors.
+    When checkpoint_path is None, zero the local parameter shards for a smoke test.
+    Missing parameters and mismatched checkpoint shapes are errors when loading weights.
     """
 
     # Materialize meta tensors without discarding initialized rotary/cache buffers.
@@ -228,6 +229,12 @@ def load_kimi_k3_checkpoint_to_local_shards(
         if tensor.is_meta
         else tensor.to(device=materialize_device)
     )
+
+    if checkpoint_path is None:
+        for param in model.parameters():
+            local_param = param.to_local() if isinstance(param, DTensor) else param
+            local_param.zero_()
+        return
 
     weight_map = _read_index(checkpoint_path)
     tasks_by_file: dict[str, list[_LoadTask]] = defaultdict(list)

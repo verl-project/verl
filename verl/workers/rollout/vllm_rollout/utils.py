@@ -398,8 +398,14 @@ class vLLMColocateWorkerExtension:
         elif layerwise_reload:
             # Layerwise loaders may retain inputs until a later bucket completes
             # the layer. Own each tensor before the IPC receiver reuses its storage.
+            # Full models may defer many layers until the final bucket. Keep
+            # their owned IPC copies on CPU when device staging would exceed HBM.
+            buffer_on_cpu = os.environ.get("VERL_VLLM_LAYERWISE_RELOAD_CPU", "0") == "1"
             for model in self._iter_all_models():
-                model.load_weights((name, tensor.clone()) for name, tensor in weights)
+                model.load_weights(
+                    (name, tensor.to(device="cpu", copy=True) if buffer_on_cpu else tensor.clone())
+                    for name, tensor in weights
+                )
         else:
             param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
             # Add the FP8 related logic here as sharding manager has been deprecated.

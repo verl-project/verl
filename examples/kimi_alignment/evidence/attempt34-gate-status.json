@@ -667,12 +667,19 @@
         "maximum": 0.0
       }
     },
-    "passed": true,
     "actual_target_row": {
       "mixed": 0,
       "reordered": 0
     },
-    "request_order_changed": false
+    "request_order_changed": false,
+    "numerical_checks_passed": true,
+    "coverage": {
+      "generated_positions": 8,
+      "batch16": false,
+      "request_order_changed": false,
+      "chunked_prefill": false
+    },
+    "complete_matrix_passed": false
   },
   "request_order": "Submitted reversed, but actual scheduler target index unchanged. Retest with shorter peer in attempt35.",
   "effective_update": "not verified; original recipe retained at user request"

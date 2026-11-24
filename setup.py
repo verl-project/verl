@@ -29,7 +29,7 @@ install_requires = [
     "datasets",
     "dill",
     "hydra-core",
-    "numpy>=2.0.0",
+    "numpy>=1.26.4",
     "pandas",
     "peft",
     "pyarrow>=19.0.0",
@@ -40,7 +40,7 @@ install_requires = [
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     # 5.6.0 ships a broken flash-attention path (crashes on s_aux=None for
     # sink-less models); fixed in 5.6.1. See huggingface/transformers#45588.
-    "transformers>=5.5.3,!=5.6.0,<5.11",
+    "transformers>=5.5.3,!=5.6.0,<5.15",
     "wandb",
     "packaging>=20.0",
     "tensorboard",

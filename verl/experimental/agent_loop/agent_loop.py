@@ -53,6 +53,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.import_utils import resolve_config_path
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.model_adapters import ProcessorAdapter
 from verl.utils.profiler import simple_timer
 from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
@@ -1008,7 +1009,10 @@ class AgentLoopWorker:
                 continue
             collapsed_ids.append(token_id)
             prev_id = token_id
-        current_text = self.tokenizer.decode(collapsed_ids, skip_special_tokens=True)
+        if isinstance(self.processor, ProcessorAdapter):
+            current_text = self.processor.decode_for_processor(self.tokenizer, collapsed_ids)
+        else:
+            current_text = self.tokenizer.decode(collapsed_ids, skip_special_tokens=True)
 
         multi_modal_inputs = build_multimodal_processor_inputs(
             self.processor,

@@ -1509,7 +1509,7 @@ class RayPPOTrainer:
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
-                            self.llm_server_manager.start_profile()
+                            self.llm_server_manager.start_profile(profile_step=self.global_steps)
                         combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
                         self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:

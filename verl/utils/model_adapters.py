@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import re
 
 import torch
@@ -20,6 +21,10 @@ import torch
 class ProcessorAdapter:
     def __init__(self, processor):
         self._processor = processor
+
+    def decode_for_processor(self, tokenizer, token_ids: list[int]) -> str:
+        """Decode model inputs for another multimodal processor pass."""
+        return tokenizer.decode(token_ids, skip_special_tokens=True)
 
     def __getattr__(self, name):
         try:
@@ -41,6 +46,11 @@ class KimiK3Adapter(ProcessorAdapter):
     )
     _VLLM_MEDIA_PROMPT = "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
 
+    def decode_for_processor(self, tokenizer, token_ids: list[int]) -> str:
+        """Restore raw image placeholders without dropping Kimi media tokens."""
+        text = tokenizer.decode(token_ids, skip_special_tokens=False)
+        return self._MEDIA_PROMPT_PATTERN.sub("<|kimi_image_placeholder|>", text)
+
     @staticmethod
     def _validate_media(video_data, audio_data):
         if video_data is not None or audio_data is not None:
@@ -58,7 +68,10 @@ class KimiK3Adapter(ProcessorAdapter):
                 image if isinstance(image, dict) and image.get("type") == "image" else {"type": "image", "image": image}
                 for image in images
             ]
-            return self._processor(medias=medias, text=text, **kwargs)
+            # Native checkpoints expose either scalar or batched text APIs.
+            text_annotation = inspect.signature(self._processor.__call__).parameters["text"].annotation
+            native_text = text if text_annotation in (str, "str") else [text]
+            return self._processor(medias=medias, text=native_text, **kwargs)
 
         return self._processor.tokenizer(text=text, **kwargs)
 
@@ -88,6 +101,28 @@ class KimiK3Adapter(ProcessorAdapter):
         }
 
 
+
+class KimiK31Adapter(KimiK3Adapter):
+    """Use the standard image contract of the vLLM 0.30 Kimi backend."""
+
+    _MEDIA_PROMPT_PATTERN = re.compile(
+        r"<\|media_begin\|>image \d+x\d+<\|media_content\|>(?:<\|media_pad\|>)+<\|media_end\|>"
+    )
+    _VLLM_MEDIA_PROMPT = "<|kimi_image_placeholder|>"
+
+    @classmethod
+    def build_vllm_multimodal_data(cls, image_data=None, video_data=None, audio_data=None) -> dict:
+        cls._validate_media(video_data, audio_data)
+        if image_data is None:
+            return {}
+        return {
+            "image": [
+                image["image"] if isinstance(image, dict) and image.get("type") == "image" else image
+                for image in image_data
+            ]
+        }
+
+
 def kimi_k3_logits_to_input_indices(
     input_ids: torch.Tensor,
     multi_modal_inputs: dict,
@@ -106,7 +141,7 @@ def kimi_k3_logits_to_input_indices(
     causal logit is consequently the one that predicts the first text token
     after the image, matching the original-token label shift used by verl.
     """
-    if getattr(config, "model_type", None) != "kimi_k3":
+    if getattr(config, "model_type", None) not in {"kimi_k3", "kimi_k31"}:
         return None
     if input_ids.ndim != 2:
         raise ValueError(f"Kimi K3 logit alignment expects 2-D input_ids, got {tuple(input_ids.shape)}")
@@ -186,6 +221,7 @@ _PROCESSOR_ADAPTERS = {
 }
 _VLLM_ADAPTERS = {
     "kimi_k3": KimiK3Adapter,
+    "kimi_k31": KimiK31Adapter,
 }
 
 
@@ -207,7 +243,7 @@ def add_kimi_k3_stop_conditions(
     end_of_msg_token_id: int | None,
 ) -> None:
     """Stop Kimi-K3 after its first complete assistant response."""
-    if model_type != "kimi_k3" or sampling_params.get("ignore_eos", False):
+    if model_type not in {"kimi_k3", "kimi_k31"} or sampling_params.get("ignore_eos", False):
         return
     if end_of_msg_token_id is None:
         raise ValueError("Kimi K3 config must define eos_token_id")

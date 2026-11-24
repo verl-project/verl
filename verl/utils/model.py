@@ -80,7 +80,10 @@ def update_model_config(module_config, override_config_kwargs):
     """
     for key, val in override_config_kwargs.items():
         if isinstance(val, dict):
-            update_model_config(getattr(module_config, key), val)
+            child = module_config[key] if isinstance(module_config, dict) else getattr(module_config, key)
+            update_model_config(child, val)
+        elif isinstance(module_config, dict):
+            module_config[key] = val
         else:
             setattr(module_config, key, val)
 

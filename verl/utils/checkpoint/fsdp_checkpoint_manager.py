@@ -41,6 +41,80 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
+def _recoverable_packed_model_state_dict(model):
+    """Keep physical Kimi expert DTensor shards for same-topology resume.
+
+    Per-expert export is for inference/HF interchange and may redistribute CPU
+    offloaded DTensors. Training checkpoints preserve the packed parameter ABI
+    accepted by KimiMoeExperts._load_from_state_dict, without collectives.
+    """
+    saved = []
+    try:
+        for module in model.modules():
+            if (module.__class__.__name__ == "KimiMoeExperts"
+                    and hasattr(module, "_export_external_state_dict")):
+                saved.append((module, module._export_external_state_dict))
+                module._export_external_state_dict = False
+        return model.state_dict()
+    finally:
+        for module, external_export in saved:
+            module._export_external_state_dict = external_export
+
+
+def _recoverable_optimizer_state_dict(optimizer):
+    """Serialize AdamWSwap's authoritative host buffers, not freed NPU storage."""
+    host_map = getattr(optimizer, "param_to_cpu_states_map", None)
+    if host_map is None:
+        return optimizer.state_dict()
+    for name in ("swap_to_host_stream", "swap_to_device_stream"):
+        stream = getattr(optimizer, name, None)
+        if stream is not None:
+            stream.synchronize()
+    result = optimizer.state_dict()
+    states = {}
+    for group, saved_group in zip(optimizer.param_groups, result["param_groups"], strict=True):
+        for param, index in zip(group["params"], saved_group["params"], strict=True):
+            if param not in host_map:
+                raise RuntimeError("AdamWSwap parameter has no authoritative host state")
+            states[index] = dict(host_map[param])
+        if isinstance(saved_group.get("step"), torch.Tensor):
+            saved_group["step"] = saved_group["step"].detach().cpu()
+    result["state"] = states
+    result["kimi_swap_host_state_format"] = 1
+    return result
+
+
+def _load_recoverable_optimizer_state_dict(optimizer, saved):
+    if saved.get("kimi_swap_host_state_format") != 1:
+        optimizer.load_state_dict(saved)
+        return
+    host_map = getattr(optimizer, "param_to_cpu_states_map", None)
+    if host_map is None:
+        raise RuntimeError("AdamWSwap host checkpoint requires AdamWSwap optimizer")
+    if len(optimizer.param_groups) != len(saved["param_groups"]):
+        raise ValueError("AdamWSwap parameter group count changed")
+    pairs = []
+    for group, loaded_group in zip(optimizer.param_groups, saved["param_groups"], strict=True):
+        if len(group["params"]) != len(loaded_group["params"]):
+            raise ValueError("AdamWSwap parameter count changed")
+        for param, index in zip(group["params"], loaded_group["params"], strict=True):
+            source, target = saved["state"][index], host_map[param]
+            if set(source) != set(target):
+                raise ValueError("AdamWSwap state keys changed")
+            for key, tensor in source.items():
+                if tensor is None:
+                    if target[key] is not None:
+                        raise ValueError("AdamWSwap optional state changed")
+                elif target[key] is None or tensor.shape != target[key].shape or tensor.dtype != target[key].dtype:
+                    raise ValueError("AdamWSwap state shape or dtype changed")
+                else:
+                    pairs.append((target[key], tensor))
+    for target, tensor in pairs:
+        target.copy_(tensor)
+    for group, loaded_group in zip(optimizer.param_groups, saved["param_groups"], strict=True):
+        group.update({key: value for key, value in loaded_group.items() if key != "params"})
+
+
 @dataclass
 class FSDPConfig:
     """Configuration for FSDP checkpointing.
@@ -234,7 +308,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 local_optim_path = copy_to_local(remote_optim_path)
                 optimizer_state_dict = torch.load(local_optim_path, weights_only=False)
                 optimizer_state_dict = self._backfill_optimizer_state(optimizer_state_dict)
-                self.optimizer.load_state_dict(optimizer_state_dict)
+                _load_recoverable_optimizer_state_dict(self.optimizer, optimizer_state_dict)
                 log_with_rank(f"Loaded optimizer from {remote_optim_path}", rank=self.rank, logger=logger)
 
         if self.should_load_extra:
@@ -318,7 +392,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 extra_path = os.path.join(local_path, f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt")
 
                 if self.should_save_model:
-                    model_state_dict = self.model.state_dict()
+                    model_state_dict = _recoverable_packed_model_state_dict(self.model)
                     if self.should_save_lora_only and self._has_lora():
                         n_total = len(model_state_dict)
                         model_state_dict = {
@@ -348,7 +422,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     log_with_rank(f"Saved model to {os.path.abspath(model_path)}", rank=self.rank, logger=logger)
 
                 if self.should_save_optimizer:
-                    optimizer_state_dict = self.optimizer.state_dict()
+                    optimizer_state_dict = _recoverable_optimizer_state_dict(self.optimizer)
                     torch.save(optimizer_state_dict, optim_path)
                     log_with_rank(f"Saved optim to {os.path.abspath(optim_path)}", rank=self.rank, logger=logger)
 

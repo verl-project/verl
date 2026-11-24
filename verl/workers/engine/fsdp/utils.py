@@ -110,12 +110,27 @@ def unfuse_moe_params(weights, model_type: str | None = None):
             if tensor.dim() != 3:
                 raise ValueError(f"Kimi packed-local parameter must be 3-D: {name}, shape={tuple(tensor.shape)}")
 
-            if model_type != "kimi_k3":
+            if model_type not in {"kimi_k3", "kimi_k31"}:
                 raise ValueError(
                     "Kimi packed-local transport is valid only for the Kimi K3 "
                     f"rollout loader, got model_type={model_type!r}"
                 )
-            yield name, tensor
+            if model_type == "kimi_k31":
+                base, _, offset_text = name.rpartition(KIMI_PACKED_LOCAL_MARKER)
+                expert_start = int(offset_text)
+                prefix, projection = base.rsplit(".", 1)
+                for index, expert in enumerate(tensor):
+                    expert_id = expert_start + index
+                    if projection == "gate_up_proj":
+                        gate, up = expert.chunk(2, dim=-1)
+                        yield f"{prefix}.{expert_id}.w1.weight", gate.t().contiguous()
+                        yield f"{prefix}.{expert_id}.w3.weight", up.t().contiguous()
+                    elif projection == "down_proj":
+                        yield f"{prefix}.{expert_id}.w2.weight", expert.t().contiguous()
+                    else:
+                        raise ValueError(f"Unsupported Kimi expert projection: {projection}")
+            else:
+                yield name, tensor
             continue
 
         # GPT-OSS checkpoint weights use packed 3D expert tensors directly.
