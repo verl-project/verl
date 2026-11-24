@@ -391,6 +391,8 @@ class TestSpeculativeConfigLaunchParity:
                 _DRAFT_SPEC_CONFIG,
             ),
             ({"vllm": {"speculative-config.model": "Qwen/Qwen3-0.6B-Draft"}}, 1, {"model": "Qwen/Qwen3-0.6B-Draft"}),
+            # vLLM 0.32 rebuilds the config from dotted fields, so they replace the
+            # whole-key value instead of merging field by field.
             (
                 {
                     "vllm": {
@@ -399,7 +401,20 @@ class TestSpeculativeConfigLaunchParity:
                     }
                 },
                 1,
-                {"method": "eagle", "model": "Qwen/Qwen3-0.6B-Draft"},
+                {"model": "Qwen/Qwen3-0.6B-Draft"},
+            ),
+            # whole-key ngram plus a complete dotted draft config: the launch must
+            # carry the draft config only, with no leftover `method: ngram`.
+            (
+                {
+                    "vllm": {
+                        "speculative_config": _NGRAM_SPEC_CONFIG,
+                        "speculative_config.model": _DRAFT_SPEC_CONFIG["model"],
+                        "speculative_config.num_speculative_tokens": _DRAFT_SPEC_CONFIG["num_speculative_tokens"],
+                    }
+                },
+                1,
+                _DRAFT_SPEC_CONFIG,
             ),
             # launch_server drops None values; the resolver must ignore them too
             (

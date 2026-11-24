@@ -1572,35 +1572,18 @@ class vLLMHttpServer:
             return list(vars(vllm_kwargs).items())
         return []
 
-    def _merge_speculative_config(self, base: Any, overlay: Mapping) -> dict[str, Any]:
-        """Merge dotted sub-fields on top of the whole speculative config value."""
-        if isinstance(base, str):
-            try:
-                base = json.loads(base)
-            except json.JSONDecodeError:
-                # A bare method name (e.g. "ngram") means {"method": <name>}.
-                base = {"method": base}
-        if not isinstance(base, Mapping):
-            base = dict(vars(base)) if hasattr(base, "__dict__") else {}
-        merged = dict(base)
-        for key, value in overlay.items():
-            if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
-                merged[key] = self._merge_speculative_config(merged[key], value)
-            else:
-                merged[key] = value
-        return merged
-
     def _effective_speculative_config(self, engine_kwargs: Any = None) -> Any:
         """Return the speculative config vLLM effectively receives.
 
         vLLM exposes a single ``--speculative-config`` option but engine kwargs may
         carry it under either spelling (``speculative_config`` / ``speculative-config``)
         and as dotted sub-fields (``speculative_config.model``). All of them collapse
-        onto that one option, so this method applies one precedence rule: the
-        underscore exact key wins over the dashed one, and dotted sub-fields override
-        the corresponding fields of the exact value. Launch-argument preparation and
-        sleep-level detection both read this normalized value, so the engine cannot
-        start a configuration the resolver did not see. ``None`` values are ignored:
+        onto that one option: vLLM 0.32 collects the dotted arguments into one dict
+        and appends it after the whole-key value, so a non-empty set of dotted fields
+        *replaces* the whole configuration instead of merging into it. With no dotted
+        fields, the underscore exact key wins over the dashed one. Launch-argument
+        preparation and sleep-level detection both read this normalized value, so the
+        engine cannot start a configuration the resolver did not see. ``None`` values are ignored:
         ``launch_server()`` drops them before building the launch command, so a
         ``None`` spelling must not shadow a usable one here either.
         """
@@ -1635,21 +1618,21 @@ class vLLMHttpServer:
                     node[parts[-1]] = value
                     break
 
-        base = exact.get(_SPECULATIVE_CONFIG_KEYS[0], exact.get(_SPECULATIVE_CONFIG_KEYS[1]))
-        if not dotted:
-            return base
-        if base is None:
+        if dotted:
+            # vLLM 0.32 collects the dotted arguments into one dict and appends it
+            # after the whole-key value, so non-empty dotted fields replace the whole
+            # configuration rather than merging into it.
             return dotted
-        return self._merge_speculative_config(base, dotted)
+        return exact.get(_SPECULATIVE_CONFIG_KEYS[0], exact.get(_SPECULATIVE_CONFIG_KEYS[1]))
 
     def _apply_speculative_config_normalization(self, engine_kwargs: dict) -> None:
         """Collapse all speculative-config spellings onto one canonical entry.
 
-        ``build_cli_args_from_config()`` forwards every key, and vLLM maps both
-        spellings (and dotted sub-fields) onto the same ``--speculative-config``
-        argument, keeping the last value it sees. That lets the launched
-        configuration diverge from what the sleep resolver reads. Collapse the
-        spellings into a single ``speculative_config`` entry computed by
+        ``build_cli_args_from_config()`` forwards every key, and vLLM 0.32 turns one
+        ``--speculative-config`` argument out of them: dotted fields rebuild the whole
+        config and replace the whole-key value. That lets the launched configuration
+        diverge from what the sleep resolver reads when the spellings disagree.
+        Collapse the spellings into a single ``speculative_config`` entry computed by
         ``_effective_speculative_config()`` so the launch command and the resolver
         agree. A single spelling without dotted fields is left untouched.
         """

@@ -355,10 +355,23 @@ _NGRAM = {"method": "ngram"}
             _DRAFT,
         ),
         ({"vllm": {"speculative-config.model": "Qwen/Qwen3-0.6B-Draft"}}, 1, {"model": "Qwen/Qwen3-0.6B-Draft"}),
+        # vLLM 0.32 lets the dotted fields rebuild the config, so they replace the
+        # whole-key value instead of merging field by field.
         (
             {"vllm": {"speculative_config": {"method": "eagle"}, "speculative_config.model": "Qwen/Qwen3-0.6B-Draft"}},
             1,
-            {"method": "eagle", "model": "Qwen/Qwen3-0.6B-Draft"},
+            {"model": "Qwen/Qwen3-0.6B-Draft"},
+        ),
+        (
+            {
+                "vllm": {
+                    "speculative_config": _NGRAM,
+                    "speculative_config.model": "Qwen/Qwen3-0.6B-Draft",
+                    "speculative_config.num_speculative_tokens": 3,
+                }
+            },
+            1,
+            _DRAFT,
         ),
         ({"vllm": {"speculative_config.method": "ngram"}}, 2, _NGRAM),
         # a plain weightless config keeps level 2
@@ -397,6 +410,33 @@ def test_none_underscore_spelling_does_not_shadow_dashed_config(monkeypatch):
     assert len(spec_keys) == 1
     assert launch_kwargs[spec_keys[0]] == _DRAFT
     # The resolver reads the raw config, where the underscore key is still None.
+    assert server._effective_speculative_config() == _DRAFT
+    assert server._resolve_sleep_level() == 1
+
+
+def test_whole_ngram_is_replaced_by_complete_dotted_draft_config(monkeypatch):
+    """vLLM 0.32 rebuilds the config from dotted fields, dropping the whole-key value.
+
+    With a whole-key ngram config and a complete dotted draft config, the engine
+    starts the draft model (no ``method: ngram`` left), so sleep must stay level 1.
+    """
+    engine_kwargs = {
+        "vllm": {
+            "speculative_config": _NGRAM,
+            "speculative_config.model": _DRAFT["model"],
+            "speculative_config.num_speculative_tokens": _DRAFT["num_speculative_tokens"],
+        }
+    }
+    server = _make_sleep_server(monkeypatch, engine_kwargs)
+
+    launched_kwargs = dict(engine_kwargs["vllm"])
+    server._apply_speculative_config_normalization(launched_kwargs)
+
+    spec_keys = [key for key in launched_kwargs if key in _SPEC_KEYS or key.startswith(_SPEC_DOTTED_PREFIXES)]
+    assert len(spec_keys) == 1
+    launched_config = launched_kwargs[spec_keys[0]]
+    assert launched_config == _DRAFT
+    assert "method" not in launched_config
     assert server._effective_speculative_config() == _DRAFT
     assert server._resolve_sleep_level() == 1
 
