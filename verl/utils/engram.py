@@ -28,7 +28,7 @@ import torch
 _ENGRAM_TABLE_SCOPES = (
     # Qwen4-Exp PLE n-gram embedding shards and runtime/FP8 scale variants.
     re.compile(
-        r"^(?P<scope>(?:.+\.)?ngram_embedding)(?:\.shard_\d+)?\.(?:weight|weight_scale|scale|weight_scale_inv)$"
+        r"^(?P<scope>(?:.+\.)?ngram_embedding(?:\.shard_\d+)?)\.(?:weight|weight_scale|scale|weight_scale_inv)$"
     ),
     # DeepSeek-V4.1 Engram embedding lookup table and block scale.
     re.compile(
@@ -46,14 +46,17 @@ _PLE_HASH_BUFFER_PATTERN = re.compile(
 
 _LAYER_ID_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)\.")
 _NATURAL_SPLIT_PATTERN = re.compile(r"(\d+)")
-_WRAPPER_SEGMENTS = ("_orig_mod.", "_fsdp_wrapped_module.", "module.")
+_MID_WRAPPER_SEGMENTS = ("_orig_mod.", "_fsdp_wrapped_module.")
 
 
 def _strip_wrapper_prefixes(name: str) -> str:
     changed = True
     while changed:
         changed = False
-        for seg in _WRAPPER_SEGMENTS:
+        if name.startswith("module."):
+            name = name.removeprefix("module.")
+            changed = True
+        for seg in _MID_WRAPPER_SEGMENTS:
             if name.startswith(seg):
                 name = name[len(seg) :]
                 changed = True
@@ -70,6 +73,18 @@ def _engram_table_scope(name: str) -> str | None:
         if match is not None:
             return match.group("scope")
     return None
+
+
+def canonical_engram_scope(name: str) -> str | None:
+    """Return a normalized Engram / PLE table scope across runtime and HF checkpoint key layouts."""
+    scope = _engram_table_scope(name)
+    if scope is None:
+        return None
+    scope = scope.replace(".engram.embed_tokens", ".engram.embed")
+    scope = scope.replace("language_model.model.", "model.language_model.")
+    if scope.startswith("model."):
+        scope = scope.removeprefix("model.")
+    return scope
 
 
 def is_engram_table_param(name: str) -> bool:
@@ -107,7 +122,11 @@ def collect_frozen_engram_keys(
         if len(converted_map) == len(raw_params):
             converted_names = dict(zip(raw_params.keys(), converted_map.keys(), strict=True))
         else:
-            converted_names = {name: next(iter(key_converter({name: None}).keys())) for name in raw_params}
+            converted_names = {}
+            for name in raw_params:
+                converted = key_converter({name: None})
+                if converted:
+                    converted_names[name] = next(iter(converted))
     else:
         converted_names = {name: name for name in raw_params}
 
@@ -118,7 +137,7 @@ def collect_frozen_engram_keys(
     for raw_name, param in raw_params.items():
         mapped_name = converted_names.get(raw_name, raw_name)
         for candidate in (raw_name, mapped_name, _strip_wrapper_prefixes(mapped_name)):
-            scope = _engram_table_scope(candidate)
+            scope = canonical_engram_scope(candidate)
             if scope is not None:
                 break
         else:
@@ -140,7 +159,7 @@ def collect_frozen_engram_keys(
             if key in frozen_keys or clean_key in frozen_keys:
                 frozen_keys.add(key)
                 continue
-            scope = _engram_table_scope(clean_key)
+            scope = canonical_engram_scope(clean_key)
             if scope is not None and scope in pure_frozen_scopes:
                 frozen_keys.add(key)
                 frozen_keys.add(clean_key)
@@ -209,12 +228,20 @@ def _matches_local_layer(key: str, local_layer_ids: set[int] | None) -> bool:
     return int(match.group(1)) in local_layer_ids
 
 
+def _is_excluded_engram_scope(key: str, exclude_scopes: set[str] | None) -> bool:
+    if not exclude_scopes:
+        return False
+    scope = canonical_engram_scope(key)
+    return scope is not None and scope in exclude_scopes
+
+
 def _resolve_engram_safetensors_plan(
     model_name_or_path: str,
     *,
     revision: str | None = None,
     download_dir: str | None = None,
     local_layer_ids: set[int] | None = None,
+    exclude_scopes: set[str] | None = None,
 ) -> list[tuple[str, list[str] | None]]:
     """Resolve ``(safetensors_file_path, keys_or_none)`` containing Engram / PLE tensors."""
     index_filename = "model.safetensors.index.json"
@@ -226,7 +253,11 @@ def _resolve_engram_safetensors_plan(
                 weight_map: dict[str, str] = json.load(f).get("weight_map", {})
             keys_by_rel_file: dict[str, list[str]] = {}
             for key, rel_file in weight_map.items():
-                if is_engram_safetensors_key(key) and _matches_local_layer(key, local_layer_ids):
+                if (
+                    is_engram_safetensors_key(key)
+                    and _matches_local_layer(key, local_layer_ids)
+                    and not _is_excluded_engram_scope(key, exclude_scopes)
+                ):
                     keys_by_rel_file.setdefault(rel_file, []).append(key)
             return [
                 (os.path.join(model_name_or_path, rel_file), keys)
@@ -265,7 +296,11 @@ def _resolve_engram_safetensors_plan(
         weight_map = json.load(f).get("weight_map", {})
     keys_by_rel_file = {}
     for key, rel_file in weight_map.items():
-        if is_engram_safetensors_key(key) and _matches_local_layer(key, local_layer_ids):
+        if (
+            is_engram_safetensors_key(key)
+            and _matches_local_layer(key, local_layer_ids)
+            and not _is_excluded_engram_scope(key, exclude_scopes)
+        ):
             keys_by_rel_file.setdefault(rel_file, []).append(key)
 
     plan: list[tuple[str, list[str] | None]] = []
@@ -286,6 +321,7 @@ def iter_engram_safetensors_batches(
     revision: str | None = None,
     download_dir: str | None = None,
     local_layer_ids: set[int] | None = None,
+    exclude_scopes: Iterable[str] | None = None,
 ) -> Iterator[list[tuple[str, torch.Tensor]]]:
     """Stream Engram / PLE tensors from ``safetensors`` one shard file at a time.
 
@@ -295,11 +331,18 @@ def iter_engram_safetensors_batches(
     """
     from safetensors import safe_open
 
+    normalized_exclude: set[str] | None = None
+    if exclude_scopes:
+        normalized_exclude = set()
+        for scope_or_key in exclude_scopes:
+            normalized_exclude.add(canonical_engram_scope(scope_or_key) or scope_or_key)
+
     plan = _resolve_engram_safetensors_plan(
         model_name_or_path,
         revision=revision,
         download_dir=download_dir,
         local_layer_ids=local_layer_ids,
+        exclude_scopes=normalized_exclude,
     )
     for st_file, expected_keys in plan:
         with safe_open(st_file, framework="pt", device="cpu") as sf:
@@ -307,7 +350,9 @@ def iter_engram_safetensors_batches(
                 candidate_keys = [
                     key
                     for key in sf.keys()
-                    if is_engram_safetensors_key(key) and _matches_local_layer(key, local_layer_ids)
+                    if is_engram_safetensors_key(key)
+                    and _matches_local_layer(key, local_layer_ids)
+                    and not _is_excluded_engram_scope(key, normalized_exclude)
                 ]
             else:
                 available = set(sf.keys())

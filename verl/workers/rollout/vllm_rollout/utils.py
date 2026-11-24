@@ -29,10 +29,10 @@ from vllm.outputs import RequestOutput
 
 from verl.utils.device import get_device_name, is_npu_available
 from verl.utils.engram import (
+    canonical_engram_scope,
     extract_engram_layer_ids,
     find_model_engram_parameters,
     has_unpreserved_device_engram_params,
-    is_engram_table_param,
     iter_engram_safetensors_batches,
 )
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
@@ -372,10 +372,9 @@ class vLLMColocateWorkerExtension:
 
             pin_memory = is_pin_memory_available()
 
-        received_engram_from_ipc = False
+        received_engram_scopes: set[str] = set()
 
         def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
-            nonlocal received_engram_from_ipc
             if lora_weights is not None:
                 # Copy: add_lora keeps these past the callback (reused IPC buffer, #6454). One CPU block per
                 # bucket in vLLM's LoRA dtype turns vLLM's per-tensor cast and pin_memory into no-ops.
@@ -399,8 +398,10 @@ class vLLMColocateWorkerExtension:
                 )
                 lora_weights.clear()
                 return
-            if not received_engram_from_ipc and any(is_engram_table_param(name) for name, _ in weights):
-                received_engram_from_ipc = True
+            for name, _ in weights:
+                scope = canonical_engram_scope(name)
+                if scope is not None:
+                    received_engram_scopes.add(scope)
             self._update_weights(
                 weights,
                 peft_config=peft_config,
@@ -409,13 +410,12 @@ class vLLMColocateWorkerExtension:
 
         receiver.receive_weights(on_bucket_received=on_bucket_received)
         if lora_weights is None:
-            if received_engram_from_ipc:
-                self._engram_weights_loaded = True
-                self._engram_discarded_by_sleep = False
-            else:
-                should_load_engram, local_layer_ids = self._should_load_engram_from_safetensors()
-                if should_load_engram:
-                    self._load_engram_weights_from_safetensors(local_layer_ids=local_layer_ids)
+            should_load_engram, local_layer_ids = self._should_load_engram_from_safetensors()
+            if should_load_engram:
+                self._load_engram_weights_from_safetensors(
+                    local_layer_ids=local_layer_ids,
+                    exclude_scopes=received_engram_scopes,
+                )
 
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
@@ -522,7 +522,11 @@ class vLLMColocateWorkerExtension:
             return False, None
         return True, extract_engram_layer_ids(engram_params)
 
-    def _load_engram_weights_from_safetensors(self, local_layer_ids: Optional[set[int]] = None) -> int:
+    def _load_engram_weights_from_safetensors(
+        self,
+        local_layer_ids: Optional[set[int]] = None,
+        exclude_scopes: Optional[set[str]] = None,
+    ) -> int:
         vllm_config = self.model_runner.vllm_config
         model_config = vllm_config.model_config
         load_config = getattr(vllm_config, "load_config", None)
@@ -536,11 +540,12 @@ class vLLMColocateWorkerExtension:
             revision=revision,
             download_dir=download_dir,
             local_layer_ids=local_layer_ids,
+            exclude_scopes=exclude_scopes,
         ):
             self._update_weights(batch, peft_config=None, base_sync_done=False)
             loaded_count += len(batch)
 
-        if loaded_count == 0:
+        if loaded_count == 0 and not exclude_scopes:
             raise RuntimeError(
                 f"Rollout model expects Engram/PLE weights, but no matching tensors were found in safetensors "
                 f"under {model_path!r}."
@@ -548,7 +553,8 @@ class vLLMColocateWorkerExtension:
 
         self._engram_weights_loaded = True
         self._engram_discarded_by_sleep = False
-        logger.info(f"Loaded {loaded_count} Engram/PLE tensor(s) from safetensors under {model_path!r}")
+        if loaded_count > 0:
+            logger.info(f"Loaded {loaded_count} Engram/PLE tensor(s) from safetensors under {model_path!r}")
         return loaded_count
 
     def update_verl_delta_weights(self, update_info: dict) -> None:

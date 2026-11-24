@@ -723,7 +723,7 @@ class VeOmniEngine(FSDPEngine):
         if converter is not None and hasattr(converter, "export_weights"):
             import inspect
 
-            from verl.utils.engram import is_engram_table_param
+            from verl.utils.engram import canonical_engram_scope
 
             sig = inspect.signature(converter.export_weights)
             accepts_skip = "skip_frozen_engram" in sig.parameters or any(
@@ -732,10 +732,20 @@ class VeOmniEngine(FSDPEngine):
             if accepts_skip:
                 return converter.export_weights(self.module, skip_frozen_engram=skip_frozen_engram), None
             exported = converter.export_weights(self.module)
-            if skip_frozen_engram and any(
-                not p.requires_grad and is_engram_table_param(n) for n, p in self.module.named_parameters()
-            ):
-                exported = ((n, t) for n, t in exported if not is_engram_table_param(n))
+            if skip_frozen_engram:
+                frozen_scopes: set[str] = set()
+                trainable_scopes: set[str] = set()
+                for n, p in self.module.named_parameters():
+                    scope = canonical_engram_scope(n)
+                    if scope is None:
+                        continue
+                    if p.requires_grad:
+                        trainable_scopes.add(scope)
+                    else:
+                        frozen_scopes.add(scope)
+                pure_frozen_scopes = frozen_scopes - trainable_scopes
+                if pure_frozen_scopes:
+                    exported = ((n, t) for n, t in exported if canonical_engram_scope(n) not in pure_frozen_scopes)
             return exported, None
 
         wrapped_module = getattr(self.module, "_fsdp_wrapped_module", self.module)

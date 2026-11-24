@@ -629,6 +629,66 @@ def test_rollout_does_not_overwrite_trainable_engram_sent_over_ipc(monkeypatch, 
     assert torch.all(model.layers["2"].ple.ple_embedding.ngram_embedding.weight == 42.0)
 
 
+def test_rollout_restores_omitted_frozen_engram_when_ipc_sends_partial_trainable_tables(monkeypatch, tmp_path):
+    _write_sharded_engram_checkpoint(tmp_path)
+    loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
+    loader_utils.process_weights_after_loading = lambda *args: None
+    monkeypatch.setitem(sys.modules, loader_utils.__name__, loader_utils)
+
+    trained_ple = torch.full((4, 8), 42.0, dtype=torch.bfloat16)
+
+    class _Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            # Layer 2 PLE is trainable (sent over IPC), while Layer 1 Engram is frozen (omitted from IPC).
+            on_bucket_received(
+                [("model.language_model.layers.2.ple.ple_embedding.ngram_embedding.shard_0.weight", trained_ple)],
+                True,
+            )
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", _Receiver)
+
+    model = _FakeEngramRolloutModel(include_layer1=True, include_layer2=True)
+    worker = _make_engram_worker(model, tmp_path, load_format="dummy")
+    worker.update_weights_from_ipc()
+
+    # Omitted frozen Layer 1 Engram weight + scale are restored from safetensors, while Layer 2 keeps 42.0 from IPC.
+    assert torch.all(model.layers["1"].engram.embed_tokens.weight.float() == 2.0)
+    assert torch.all(model.layers["1"].engram.embed_tokens.weight_scale_inv == 127)
+    assert torch.all(model.layers["2"].ple.ple_embedding.ngram_embedding.weight == 42.0)
+
+
+def test_collect_frozen_engram_keys_handles_key_converter_dropping_lora_keys():
+    from verl.utils.engram import collect_frozen_engram_keys
+
+    model = torch.nn.Module()
+    model.layers = torch.nn.ModuleList([torch.nn.Module()])
+    model.layers[0].engram = torch.nn.Module()
+    model.layers[0].engram.embed_tokens = torch.nn.Module()
+    model.layers[0].engram.embed_tokens.weight = torch.nn.Parameter(torch.ones(4, 2), requires_grad=False)
+    model.layers[0].engram.embed_tokens.register_buffer("scale", torch.ones(4, 1, dtype=torch.uint8))
+    model.layers[0].q_proj = torch.nn.Module()
+    model.layers[0].q_proj.base_layer = torch.nn.Linear(2, 2, bias=False)
+    model.layers[0].q_proj.lora_A = torch.nn.Parameter(torch.ones(1, 2), requires_grad=True)
+    model.layers[0].q_proj.lora_B = torch.nn.Parameter(torch.ones(2, 1), requires_grad=True)
+
+    def _peft_like_key_converter(mapping):
+        out = {}
+        for k, v in mapping.items():
+            if "lora_A" in k or "lora_B" in k:
+                continue
+            out[k.replace(".base_layer.", ".").replace(".engram.embed_tokens.", ".engram.embed.")] = v
+        return out
+
+    converted_state_keys = list(_peft_like_key_converter(dict.fromkeys(model.state_dict().keys())).keys())
+    frozen = collect_frozen_engram_keys(model, converted_state_keys, key_converter=_peft_like_key_converter)
+    assert "layers.0.engram.embed.weight" in frozen
+    assert "layers.0.engram.embed.scale" in frozen
+    assert "layers.0.q_proj.weight" not in frozen
+
+
 def test_veomni_engine_and_shard_export_skip_frozen_engram(monkeypatch, tmp_path):
     import torch.distributed as dist
     from torch.distributed.device_mesh import init_device_mesh
