@@ -87,7 +87,7 @@ def test_agent_reward_loop_standalone():
     llm_server_manager = LLMServerManager.create(config=config)
     agent_loop_manager = AgentLoopManager.create(
         config=config,
-        llm_client=llm_server_manager.get_client(),
+        llm_client=ray.get(llm_server_manager.get_client.remote()),
         reward_loop_worker_handles=reward_loop_manager.reward_loop_workers,
     )
 

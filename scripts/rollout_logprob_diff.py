@@ -184,7 +184,9 @@ def build_config(args: argparse.Namespace) -> DictConfig:
     return config
 
 
-def init_workers(config: DictConfig) -> tuple[AgentLoopManager, RayWorkerGroup, CheckpointEngineManager]:
+def init_workers(
+    config: DictConfig,
+) -> tuple[AgentLoopManager, RayWorkerGroup, CheckpointEngineManager, ray.actor.ActorHandle]:
     """Hybrid actor/rollout workers + agent loop, without reward model."""
     pool_id = "global_pool"
     resource_pool_manager = ResourcePoolManager(
@@ -211,17 +213,20 @@ def init_workers(config: DictConfig) -> tuple[AgentLoopManager, RayWorkerGroup, 
     llm_server_manager = LLMServerManager.create(config=config, worker_group=actor_rollout_wg)
     agent_loop_manager = AgentLoopManager.create(
         config=config,
-        llm_client=llm_server_manager.get_client(),
+        llm_client=ray.get(llm_server_manager.get_client.remote()),
         reward_loop_worker_handles=reward_loop_manager.reward_loop_workers,
     )
     checkpoint_manager = CheckpointEngineManager(
         config=omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine),
         actor_wg=actor_rollout_wg,
-        replicas=llm_server_manager.get_replicas(),
+        replicas=ray.get(llm_server_manager.get_replicas.remote()),
     )
     checkpoint_manager.sleep_replicas()
     checkpoint_manager.update_weights()
-    return agent_loop_manager, actor_rollout_wg, checkpoint_manager
+    # The clients built above hold only a weak self-handle, so the caller must
+    # keep this strong manager handle referenced — otherwise Ray may
+    # garbage-collect the actor while the clients are still in use.
+    return agent_loop_manager, actor_rollout_wg, checkpoint_manager, llm_server_manager
 
 
 def compute_old_log_prob(actor_rollout_wg: RayWorkerGroup, batch: DataProto) -> DataProto:
@@ -251,7 +256,8 @@ def main() -> int:
             }
         }
     )
-    agent_loop_manager, actor_rollout_wg, checkpoint_manager = init_workers(config)
+    # Keep the strong manager handle referenced until shutdown (weak self-handle in the client).
+    agent_loop_manager, actor_rollout_wg, checkpoint_manager, llm_server_manager = init_workers(config)
 
     raw_prompts = [[{"role": "user", "content": q}] for q in QUESTIONS]
     batch = DataProto(

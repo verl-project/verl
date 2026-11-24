@@ -100,13 +100,13 @@ def test_agent_reward_loop_standalone():
     llm_server_manager = LLMServerManager.create(config=config, worker_group=actor_rollout_wg)
     agent_loop_manager = AgentLoopManager.create(
         config=config,
-        llm_client=llm_server_manager.get_client(),
+        llm_client=ray.get(llm_server_manager.get_client.remote()),
     )
     # sleep rollout replicas
     checkpoint_manager = CheckpointEngineManager(
         config=omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine),
         actor_wg=actor_rollout_wg,
-        replicas=llm_server_manager.get_replicas(),
+        replicas=ray.get(llm_server_manager.get_replicas.remote()),
     )
     checkpoint_manager.sleep_replicas()
     reward_loop_manager = RewardLoopManager(config, rm_resource_pool=resource_pool)
