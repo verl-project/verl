@@ -819,9 +819,10 @@ class FSDPEngine(BaseEngine):
 
         ctx = torch.no_grad() if forward_only else nullcontext()
 
-        # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
-        # and _build_fsdp_module, so self.scaler may not be set.
-        scaler = self._get_scaler()
+        # getattr fallback: some subclasses (e.g. VeOmniEngine) or direct-call test doubles
+        # bypass FSDPEngine.__init__ and _build_fsdp_module, so self._get_scaler / self.scaler may not be set.
+        get_scaler = getattr(self, "_get_scaler", None)
+        scaler = get_scaler() if get_scaler is not None else getattr(self, "scaler", None)
 
         for micro_batch_idx, micro_batch in enumerate(micro_batches):
             sync_ctx = (

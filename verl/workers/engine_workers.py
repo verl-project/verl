@@ -314,7 +314,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
             dataloader_kwargs=dataloader_kwargs,
         )
 
+        lora_adapter_name = self._validate_single_adapter_request(
+            data, tu.get(data, key="lora_adapter_name", default=None)
+        )
+        adapter_ctx = self.engine.adapter_context(lora_adapter_name) if lora_adapter_name is not None else nullcontext()
         with (
+            adapter_ctx,
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None),
         ):
@@ -394,7 +399,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
             if hasattr(raw, "tolist") and not isinstance(raw, (str, bytes)):
                 raw = raw.tolist()
             if isinstance(raw, (list, tuple)):
-                unique = {str(x) for x in raw}
+                for idx, x in enumerate(raw):
+                    if not isinstance(x, str) or not x:
+                        raise ValueError(f"Expected non-empty string adapter name at index {idx}, got {x!r}.")
+                unique = set(raw)
                 if len(unique) > 1:
                     raise ValueError(
                         f"Mixed-adapter batch ({sorted(unique)}) passed directly to worker; "
@@ -415,6 +423,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
                         f"vs batch adapter_name={raw!r}."
                     )
                 lora_adapter_name = raw
+            else:
+                raise ValueError(f"Expected non-empty string or sequence of adapter names, got {raw!r}.")
 
         return lora_adapter_name
 
@@ -444,15 +454,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
             if key not in data.keys():
                 tu.assign_non_tensor(data, **{key: val})
 
+        adapter_ctx = self.engine.adapter_context(lora_adapter_name) if lora_adapter_name is not None else nullcontext()
         with (
+            adapter_ctx,
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None) as timer,
         ):
-            adapter_ctx = (
-                self.engine.adapter_context(lora_adapter_name) if lora_adapter_name is not None else nullcontext()
-            )
-            with adapter_ctx:
-                output = self.engine.train_batch(data, loss_function=self.loss_fn)
+            output = self.engine.train_batch(data, loss_function=self.loss_fn)
             # containing loss, model_output and metrics
             # for training, we only care about loss and metrics
         delta_time = timer.last

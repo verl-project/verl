@@ -204,12 +204,33 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         if hasattr(task_type, "value"):
             task_type = task_type.value
         meta = {"r": lora_rank, "lora_alpha": lora_alpha, "task_type": str(task_type)}
+        if hasattr(peft_cfg, "target_modules"):
+            target_modules = getattr(peft_cfg, "target_modules", None)
+            if target_modules is None:
+                meta["target_modules"] = None
+            elif isinstance(target_modules, str):
+                meta["target_modules"] = target_modules
+            elif isinstance(target_modules, set):
+                meta["target_modules"] = sorted(str(x) for x in target_modules)
+            elif isinstance(target_modules, (list, tuple)):
+                meta["target_modules"] = [str(x) for x in target_modules]
+        target_parameters = getattr(peft_cfg, "target_parameters", None)
+        if target_parameters is not None:
+            if isinstance(target_parameters, str):
+                meta["target_parameters"] = target_parameters
+            elif isinstance(target_parameters, set):
+                meta["target_parameters"] = sorted(str(x) for x in target_parameters)
+            elif isinstance(target_parameters, (list, tuple)):
+                meta["target_parameters"] = [str(x) for x in target_parameters]
         modules_to_save = getattr(peft_cfg, "modules_to_save", None)
         if modules_to_save:
             meta["modules_to_save"] = list(modules_to_save)
         bias = getattr(peft_cfg, "bias", None)
         if bias and bias != "none":
             meta["bias"] = str(bias)
+        use_rslora = getattr(peft_cfg, "use_rslora", None)
+        if isinstance(use_rslora, bool):
+            meta["use_rslora"] = use_rslora
         return meta
 
     def _get_lora_train_meta(self, unwrap_model):
@@ -265,6 +286,53 @@ class FSDPCheckpointManager(BaseCheckpointManager):
     def _has_lora(self) -> bool:
         unwrap = getattr(self.model, "_fsdp_wrapped_module", self.model)
         return hasattr(unwrap, "peft_config")
+
+    def _get_lora_bias_mode(self) -> str:
+        from verl.utils.lora_utils import unwrap_peft_model
+
+        peft_model = unwrap_peft_model(self.model)
+        peft_config = getattr(peft_model, "peft_config", None)
+        if not peft_config:
+            return "none"
+        configs = list(peft_config.values()) if isinstance(peft_config, dict) else [peft_config]
+        modes = [getattr(cfg, "bias", "none") or "none" for cfg in configs]
+        if "all" in modes:
+            return "all"
+        for mode in modes:
+            if isinstance(mode, str) and mode.endswith("_only"):
+                return mode
+        return "none"
+
+    def _collect_lora_only_bias_keys(self, state_dict: dict, bias_mode: str) -> set[str]:
+        if bias_mode == "none":
+            return set()
+        if bias_mode == "all":
+            return {
+                k
+                for k in state_dict
+                if self._is_bias_key(k) and ".original_module." not in k.replace("_fsdp_wrapped_module.", "")
+            }
+        if isinstance(bias_mode, str) and bias_mode.endswith("_only"):
+            from peft.tuners.tuners_utils import BaseTunerLayer
+
+            from verl.utils.lora_utils import unwrap_peft_model
+
+            peft_model = unwrap_peft_model(self.model)
+            tuner_bias_names: set[str] = set()
+            if hasattr(peft_model, "named_modules"):
+                for mod_name, sub in peft_model.named_modules():
+                    if isinstance(sub, BaseTunerLayer):
+                        clean_mod = mod_name.replace("_fsdp_wrapped_module.", "")
+                        tuner_bias_names.add(f"{clean_mod}.base_layer.bias" if clean_mod else "base_layer.bias")
+            if tuner_bias_names:
+                return {k for k in state_dict if k.replace("_fsdp_wrapped_module.", "") in tuner_bias_names}
+            return {
+                k
+                for k in state_dict
+                if k.replace("_fsdp_wrapped_module.", "") == "base_layer.bias"
+                or k.replace("_fsdp_wrapped_module.", "").endswith(".base_layer.bias")
+            }
+        return set()
 
     def _backfill_optimizer_state(self, state_dict: dict) -> dict:
         """Fill in entries that a flattened DSD optimizer checkpoint does not contain.
@@ -336,7 +404,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_model_path = copy_to_local(remote_model_path)
                 model_state_dict = torch.load(local_model_path, weights_only=False)
-                if self.is_lora_only_state_dict(model_state_dict):
+                bias_mode = self._get_lora_bias_mode() if self._has_lora() else "none"
+                if self.is_lora_only_state_dict(model_state_dict, bias_mode=bias_mode):
                     result = self.model.load_state_dict(model_state_dict, strict=False)
                     if result is not None and result.unexpected_keys:
                         raise ValueError(
@@ -357,6 +426,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 local_optim_path = copy_to_local(remote_optim_path)
                 optimizer_state_dict = torch.load(local_optim_path, weights_only=False)
                 optimizer_state_dict = self._backfill_optimizer_state(optimizer_state_dict)
+                from verl.utils.lora_utils import align_adapter_optimizer_state_dict
+
+                optimizer_state_dict = align_adapter_optimizer_state_dict(self.optimizer, optimizer_state_dict)
                 self.optimizer.load_state_dict(optimizer_state_dict)
                 log_with_rank(f"Loaded optimizer from {remote_optim_path}", rank=self.rank, logger=logger)
 
@@ -444,10 +516,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     model_state_dict = self.model.state_dict()
                     if self.should_save_lora_only and self._has_lora():
                         n_total = len(model_state_dict)
+                        bias_mode = self._get_lora_bias_mode()
+                        bias_keys = self._collect_lora_only_bias_keys(model_state_dict, bias_mode)
                         model_state_dict = {
-                            k: v
-                            for k, v in model_state_dict.items()
-                            if "lora_" in k or ".adapter_" in k or ".modules_to_save." in k
+                            k: v for k, v in model_state_dict.items() if self._is_lora_adapter_key(k) or k in bias_keys
                         }
                         if not model_state_dict:
                             raise ValueError(

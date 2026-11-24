@@ -106,10 +106,30 @@ class BaseCheckpointManager:
         return getattr(self.checkpoint_config, "save_lora_only", False)
 
     @staticmethod
-    def is_lora_only_state_dict(state_dict: dict) -> bool:
+    def _is_lora_adapter_key(key: str) -> bool:
+        return "lora_" in key or ".adapter_" in key or ".modules_to_save." in key
+
+    @staticmethod
+    def _is_bias_key(key: str) -> bool:
+        clean = key.replace("_fsdp_wrapped_module.", "")
+        return clean == "bias" or clean.endswith(".bias")
+
+    @classmethod
+    def is_lora_only_state_dict(cls, state_dict: dict, bias_mode: str = "none") -> bool:
         if not state_dict:
             return False
-        return all("lora_" in k or ".adapter_" in k or ".modules_to_save." in k for k in state_dict)
+        if not any(cls._is_lora_adapter_key(k) for k in state_dict):
+            return False
+        if bias_mode == "all":
+            return all(cls._is_lora_adapter_key(k) or cls._is_bias_key(k) for k in state_dict)
+        if isinstance(bias_mode, str) and bias_mode.endswith("_only"):
+            return all(
+                cls._is_lora_adapter_key(k)
+                or k.replace("_fsdp_wrapped_module.", "") == "base_layer.bias"
+                or k.replace("_fsdp_wrapped_module.", "").endswith(".base_layer.bias")
+                for k in state_dict
+            )
+        return all(cls._is_lora_adapter_key(k) for k in state_dict)
 
     @property
     def should_load_model(self) -> bool:

@@ -318,6 +318,33 @@ class BaseModelMerger(ABC):
                 parsed["bias"] = bias
             elif bias is not None:
                 warnings.warn(f"Invalid bias in {meta_path}: {bias}", stacklevel=2)
+
+        if "target_modules" in entry:
+            tm = entry["target_modules"]
+            if tm is None or isinstance(tm, str):
+                parsed["target_modules"] = tm
+            elif isinstance(tm, list) and all(isinstance(x, str) for x in tm):
+                parsed["target_modules"] = list(tm)
+            else:
+                warnings.warn(f"Invalid target_modules in {meta_path}: {tm}", stacklevel=2)
+
+        if "target_parameters" in entry:
+            tp = entry["target_parameters"]
+            if tp is None:
+                pass
+            elif isinstance(tp, str):
+                parsed["target_parameters"] = tp
+            elif isinstance(tp, list) and all(isinstance(x, str) for x in tp):
+                parsed["target_parameters"] = list(tp)
+            else:
+                warnings.warn(f"Invalid target_parameters in {meta_path}: {tp}", stacklevel=2)
+
+        if "use_rslora" in entry:
+            use_rslora = entry["use_rslora"]
+            if isinstance(use_rslora, bool):
+                parsed["use_rslora"] = use_rslora
+            elif use_rslora is not None:
+                warnings.warn(f"Invalid use_rslora in {meta_path}: {use_rslora}", stacklevel=2)
         return parsed
 
     def _load_lora_train_meta(self) -> Optional[dict[str, object]]:
@@ -335,6 +362,13 @@ class BaseModelMerger(ABC):
                 lora_meta = json.load(f)
         except Exception as e:
             warnings.warn(f"Failed to read LoRA metadata from {meta_path}: {e}", stacklevel=2)
+            return None
+
+        if not isinstance(lora_meta, dict):
+            warnings.warn(
+                f"Invalid LoRA metadata in {meta_path}: expected JSON object, got {type(lora_meta).__name__}.",
+                stacklevel=2,
+            )
             return None
 
         result = self._parse_single_lora_meta_entry(lora_meta, meta_path)
@@ -423,7 +457,13 @@ class BaseModelMerger(ABC):
                     parts = name.split(".")
                     mts_idx = parts.index("modules_to_save")
                     if mts_idx > 0:
-                        inferred_modules_to_save.add(parts[mts_idx - 1])
+                        prefix_path = ".".join(parts[:mts_idx])
+                        if prefix_path.startswith("base_model.model."):
+                            prefix_path = prefix_path[len("base_model.model.") :]
+                        elif prefix_path.startswith("base_model."):
+                            prefix_path = prefix_path[len("base_model.") :]
+                        if prefix_path:
+                            inferred_modules_to_save.add(prefix_path)
                 else:
                     target_modules.add(self._extract_target_module_name(lora_key))
                 tensor = state_dict.pop(name)
@@ -446,6 +486,10 @@ class BaseModelMerger(ABC):
             task_type = None
             modules_to_save = sorted(inferred_modules_to_save) if inferred_modules_to_save else None
             bias = None
+            has_meta_target_modules = False
+            meta_target_modules = None
+            target_parameters = None
+            use_rslora = None
 
             if adapter_meta is not None:
                 meta_rank = adapter_meta.get("r")
@@ -468,11 +512,28 @@ class BaseModelMerger(ABC):
 
                 meta_mts = adapter_meta.get("modules_to_save")
                 if meta_mts:
-                    modules_to_save = sorted(set(meta_mts) | inferred_modules_to_save)
+                    uncovered_inferred = {
+                        path
+                        for path in inferred_modules_to_save
+                        if not any(path == m or path.endswith(f".{m}") for m in meta_mts)
+                    }
+                    modules_to_save = sorted(set(meta_mts) | uncovered_inferred)
 
                 meta_bias = adapter_meta.get("bias")
                 if meta_bias is not None:
                     bias = meta_bias
+
+                if "target_modules" in adapter_meta:
+                    has_meta_target_modules = True
+                    meta_target_modules = adapter_meta["target_modules"]
+
+                meta_target_parameters = adapter_meta.get("target_parameters")
+                if meta_target_parameters is not None:
+                    target_parameters = meta_target_parameters
+
+                meta_use_rslora = adapter_meta.get("use_rslora")
+                if meta_use_rslora is not None:
+                    use_rslora = meta_use_rslora
 
             if lora_alpha == 0:
                 warnings.warn(
@@ -481,17 +542,22 @@ class BaseModelMerger(ABC):
                     stacklevel=2,
                 )
 
+            resolved_target_modules = meta_target_modules if has_meta_target_modules else sorted(target_modules)
             peft_dict = {
                 "r": lora_rank,
                 "lora_alpha": lora_alpha,
-                "target_modules": sorted(target_modules),
+                "target_modules": resolved_target_modules,
             }
+            if target_parameters is not None:
+                peft_dict["target_parameters"] = target_parameters
             if task_type is not None:
                 peft_dict["task_type"] = task_type
             if modules_to_save:
                 peft_dict["modules_to_save"] = modules_to_save
             if bias is not None:
                 peft_dict["bias"] = bias
+            if use_rslora is not None:
+                peft_dict["use_rslora"] = use_rslora
             peft_config = peft.LoraConfig(**peft_dict).to_dict()
             peft_config["task_type"] = (
                 peft_config["task_type"].value
@@ -503,7 +569,10 @@ class BaseModelMerger(ABC):
                 if hasattr(peft_config["peft_type"], "value")
                 else (peft_config["peft_type"] or None)
             )
-            peft_config["target_modules"] = list(peft_config["target_modules"])
+            if isinstance(peft_config.get("target_modules"), (set, tuple)):
+                peft_config["target_modules"] = sorted(peft_config["target_modules"])
+            if isinstance(peft_config.get("target_parameters"), (set, tuple)):
+                peft_config["target_parameters"] = sorted(peft_config["target_parameters"])
 
             lora_path = (
                 os.path.join(out_root, adapter_name)
@@ -517,13 +586,11 @@ class BaseModelMerger(ABC):
             last_lora_path = lora_path
 
         for name in list(state_dict.keys()):
-            key = (
-                name.replace("base_model.model.", "")
-                .replace(".base_layer.weight", ".weight")
-                .replace(".base_layer.bias", ".bias")
-                .replace(".original_module.weight", ".weight")
-                .replace(".original_module.bias", ".bias")
-            )
+            key = name.replace("base_model.model.", "").replace(".base_layer.", ".").replace(".original_module.", ".")
+            if key.startswith("original_module."):
+                key = key[len("original_module.") :]
+            if key.startswith("base_layer."):
+                key = key[len("base_layer.") :]
             state_dict[key] = state_dict.pop(name)
 
         return out_root if is_multi_adapter else last_lora_path

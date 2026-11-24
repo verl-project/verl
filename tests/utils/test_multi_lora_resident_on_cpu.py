@@ -28,10 +28,12 @@ from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from safetensors.torch import load_file
 from tensordict import NonTensorStack, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import FSDPModule
+from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
 
 from verl.model_merger.base_model_merger import BaseModelMerger, ModelMergerConfig
+from verl.model_merger.fsdp_model_merger import FSDPModelMerger
+from verl.utils.checkpoint.checkpoint_manager import BaseCheckpointManager
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.fsdp_utils import (
     _merge_or_unmerge_lora_,
@@ -39,10 +41,12 @@ from verl.utils.fsdp_utils import (
     collect_lora_params,
     get_fsdp_wrap_policy,
     layered_summon_lora_params,
+    merged_lora_context,
 )
 from verl.utils.lora_utils import (
     MultiAdapterLRScheduler,
     adapter_context,
+    align_adapter_optimizer_state_dict,
     bind_optimizer_to_adapter,
     build_adapter_param_groups,
     build_lora_config_from_spec,
@@ -411,13 +415,26 @@ def _gloo_fsdp2_multi_lora_worker(rank: int, world_size: int, rdzv_file: str):
         mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("dp",))
         pm = _make_multi_adapter_peft_model({"tenant_a": (4, 8), "tenant_b": (8, 32)}, dim=16)
 
-        # Capture ground-truth weights before FSDP2 sharding
+        # Capture ground-truth weights directly from unsharded adapter parameters
+        # (independent of collect_lora_params so omissions cannot be masked).
+        expected_keys = {
+            f"base_model.model.layers.{layer_idx}.{proj}.{lora_part}.weight"
+            for layer_idx in range(2)
+            for proj in ("q_proj", "v_proj")
+            for lora_part in ("lora_A", "lora_B")
+        }
         expected_a = {
-            k: v.detach().clone() for k, v in collect_lora_params(pm, False, True, adapter_name="tenant_a").items()
+            strip_adapter_name_from_param_key(name, "tenant_a"): param.detach().clone()
+            for name, param in pm.named_parameters()
+            if param_belongs_to_adapter(name, "tenant_a", all_adapter_names=("tenant_a", "tenant_b"))
         }
         expected_b = {
-            k: v.detach().clone() for k, v in collect_lora_params(pm, False, True, adapter_name="tenant_b").items()
+            strip_adapter_name_from_param_key(name, "tenant_b"): param.detach().clone()
+            for name, param in pm.named_parameters()
+            if param_belongs_to_adapter(name, "tenant_b", all_adapter_names=("tenant_a", "tenant_b"))
         }
+        assert set(expected_a.keys()) == expected_keys
+        assert set(expected_b.keys()) == expected_keys
 
         apply_fsdp2(pm, {"mesh": mesh}, {})
 
@@ -645,12 +662,18 @@ def test_checkpoint_manager_lora_train_meta_single_and_multi(monkeypatch):
     monkeypatch.setattr(dist, "get_world_size", lambda: 1)
     monkeypatch.setattr(dist, "barrier", lambda: None)
 
-    # Single "default" adapter keeps exact legacy JSON schema
+    # Single "default" adapter keeps flat top-level JSON schema while preserving target_modules/use_rslora
     single_pm = _make_multi_adapter_peft_model({"default": (8, 16)})
     mgr_single = FSDPCheckpointManager(model=single_pm, optimizer=None, lr_scheduler=None, processing_class=None)
-    assert mgr_single._get_lora_train_meta(single_pm) == {"r": 8, "lora_alpha": 16, "task_type": "CAUSAL_LM"}
+    assert mgr_single._get_lora_train_meta(single_pm) == {
+        "r": 8,
+        "lora_alpha": 16,
+        "task_type": "CAUSAL_LM",
+        "target_modules": ["q_proj", "v_proj"],
+        "use_rslora": False,
+    }
 
-    # Multi-adapter records per-adapter r/alpha/task_type plus active_adapter
+    # Multi-adapter records per-adapter metadata plus active_adapter
     multi_pm = _make_multi_adapter_peft_model({"tenant_a": (4, 8), "tenant_b": (8, 32)})
     multi_pm.set_adapter("tenant_b")
     mgr_multi = FSDPCheckpointManager(model=multi_pm, optimizer=None, lr_scheduler=None, processing_class=None)
@@ -659,8 +682,20 @@ def test_checkpoint_manager_lora_train_meta_single_and_multi(monkeypatch):
     assert meta["lora_alpha"] == 32
     assert meta["active_adapter"] == "tenant_b"
     assert meta["adapters"] == {
-        "tenant_a": {"r": 4, "lora_alpha": 8, "task_type": "CAUSAL_LM"},
-        "tenant_b": {"r": 8, "lora_alpha": 32, "task_type": "CAUSAL_LM"},
+        "tenant_a": {
+            "r": 4,
+            "lora_alpha": 8,
+            "task_type": "CAUSAL_LM",
+            "target_modules": ["q_proj", "v_proj"],
+            "use_rslora": False,
+        },
+        "tenant_b": {
+            "r": 8,
+            "lora_alpha": 32,
+            "task_type": "CAUSAL_LM",
+            "target_modules": ["q_proj", "v_proj"],
+            "use_rslora": False,
+        },
     }
 
 
@@ -1144,3 +1179,587 @@ def test_optimizer_and_scheduler_checkpoint_round_trip():
     p_b_first = select_adapter_parameters(pm2, "tenant_b")[0]
     assert opt2.state[p_a_first]["step"].item() == 3
     assert opt2.state[p_b_first]["step"].item() == 1
+
+
+# ---------------------------------------------------------------------------
+# 8. Regression tests for review findings (export, FSDP2, bias, routing, resume)
+# ---------------------------------------------------------------------------
+
+
+def test_peft_container_segment_parsing_ignores_adapter_blocks_prefix():
+    known = ("tenant_a", "tenant_b")
+    key_b = "base_model.model.adapter_blocks.tenant_a.q_proj.lora_A.tenant_b.weight"
+    key_a = "base_model.model.adapter_blocks.tenant_a.q_proj.lora_A.tenant_a.weight"
+
+    assert extract_adapter_name_from_param_key(key_b, known_adapters=known) == "tenant_b"
+    assert param_belongs_to_adapter(key_b, "tenant_b", all_adapter_names=known)
+    assert not param_belongs_to_adapter(key_b, "tenant_a", all_adapter_names=known)
+    assert (
+        strip_adapter_name_from_param_key(key_a, "tenant_a")
+        == "base_model.model.adapter_blocks.tenant_a.q_proj.lora_A.weight"
+    )
+    assert (
+        strip_adapter_name_from_param_key(key_b, "tenant_b")
+        == "base_model.model.adapter_blocks.tenant_a.q_proj.lora_A.weight"
+    )
+    # Standard forms remain unchanged
+    assert (
+        strip_adapter_name_from_param_key("base_model.model.q_proj.lora_A.tenant_b.weight", "tenant_b")
+        == "base_model.model.q_proj.lora_A.weight"
+    )
+    assert (
+        strip_adapter_name_from_param_key("base_model.model.lm_head.modules_to_save.tenant_b.weight", "tenant_b")
+        == "base_model.model.lm_head.weight"
+    )
+
+
+def test_get_max_lora_rank_rank_pattern_legacy_precedence_and_remote_path(tmp_path, monkeypatch):
+    # 1. rank_pattern larger than base r
+    pattern_dir = tmp_path / "pattern_adapter"
+    pattern_dir.mkdir()
+    (pattern_dir / "adapter_config.json").write_text(
+        json.dumps({"r": 4, "lora_alpha": 8, "rank_pattern": {"q_proj": 16, "v_proj": 8}}),
+        encoding="utf-8",
+    )
+    cfg_pattern = SimpleNamespace(lora={}, lora_rank=0, lora_adapters={"tenant_a": {"adapter_path": str(pattern_dir)}})
+    assert get_max_lora_rank(cfg_pattern) == 16
+
+    # 2. Legacy precedence when lora_adapters is empty: positive nested lora.rank wins over top-level lora_rank
+    cfg_legacy = SimpleNamespace(lora={"rank": 16}, lora_rank=1024, lora_adapters={})
+    assert get_max_lora_rank(cfg_legacy) == 16
+    cfg_fallback = SimpleNamespace(lora={"rank": 0}, lora_rank=32, lora_adapters={})
+    assert get_max_lora_rank(cfg_fallback) == 32
+
+    # 3. Remote HDFS adapter_path localized through verl.utils.fs.copy_to_local
+    localized_calls: list[str] = []
+
+    def _fake_copy_to_local(src: str, **kwargs):
+        localized_calls.append(src)
+        return str(pattern_dir)
+
+    monkeypatch.setattr("verl.utils.fs.copy_to_local", _fake_copy_to_local)
+    cfg_hdfs = SimpleNamespace(
+        lora={},
+        lora_rank=0,
+        use_shm=False,
+        lora_adapters={"tenant_hdfs": {"adapter_path": "hdfs://bucket/adapters/tenant_hdfs"}},
+    )
+    assert get_max_lora_rank(cfg_hdfs) == 16
+    assert localized_calls == ["hdfs://bucket/adapters/tenant_hdfs"]
+
+
+def test_split_batch_validates_types_and_ignores_empty_routing_order():
+    # None must not be coerced to "None" even when "None" is an allowed adapter
+    with pytest.raises(ValueError, match="non-empty string"):
+        split_batch_by_adapter(
+            {"x": torch.zeros(1, 4), "adapter_name": [None]},
+            allowed_adapters=["None"],
+        )
+    # Literal string "None" is still accepted
+    subs, idxs = split_batch_by_adapter(
+        {"x": torch.zeros(1, 4), "adapter_name": ["None"]},
+        allowed_adapters=["None"],
+    )
+    assert list(subs.keys()) == ["None"]
+    assert idxs == {"None": [0]}
+
+    # Empty routing list must not hide a non-empty dict batch regardless of field order
+    with pytest.raises(ValueError, match="does not match batch size"):
+        split_batch_by_adapter({"adapter_name": [], "x": torch.zeros(2, 4)})
+    with pytest.raises(ValueError, match="does not match batch size"):
+        split_batch_by_adapter({"x": torch.zeros(2, 4), "adapter_name": []})
+
+    # Genuinely empty batch returns no work
+    empty_subs, empty_idxs = split_batch_by_adapter({"adapter_name": [], "x": torch.zeros(0, 4)})
+    assert len(empty_subs) == 0
+    assert len(empty_idxs) == 0
+
+    # Non-empty routing metadata on an empty batch still raises
+    with pytest.raises(ValueError, match="does not match batch size"):
+        split_batch_by_adapter({"adapter_name": ["tenant_a"], "x": torch.zeros(0, 4)})
+
+    # Worker validation also rejects non-string None
+    td_none = TensorDict({"x": torch.zeros(1, 4), "adapter_name": NonTensorStack(None)}, batch_size=[1])
+    with pytest.raises(ValueError, match="non-empty string"):
+        TrainingWorker._validate_single_adapter_request(td_none, None)
+
+
+def test_single_resident_adapter_includes_shared_trainable_biases_and_lora_only_ckpt(tmp_path, monkeypatch):
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 1)
+    monkeypatch.setattr(dist, "barrier", lambda: None)
+
+    class _BiasModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(
+                tie_word_embeddings=False,
+                model_type="tiny",
+                save_pretrained=lambda path: None,
+            )
+            self.q_proj = nn.Linear(8, 8, bias=True)
+            self.other = nn.Linear(8, 8, bias=True)
+
+        def can_generate(self):
+            return False
+
+        def forward(self, x):
+            return self.other(self.q_proj(x))
+
+    # bias="all" on a single resident adapter
+    pm_all = get_peft_model(
+        _BiasModel(),
+        LoraConfig(r=2, lora_alpha=4, target_modules=["q_proj"], bias="all"),
+        adapter_name="tenant_a",
+    )
+    selected_all = select_adapter_parameters(pm_all, "tenant_a")
+    selected_ids = {id(p) for p in selected_all}
+    assert id(pm_all.base_model.model.q_proj.base_layer.bias) in selected_ids
+    assert id(pm_all.base_model.model.other.bias) in selected_ids
+
+    # Optimizer updates and zeroes the shared biases
+    opt = torch.optim.SGD(build_adapter_param_groups(pm_all), lr=0.1)
+    bias_before = pm_all.base_model.model.q_proj.base_layer.bias.detach().clone()
+    with bind_optimizer_to_adapter(opt, "tenant_a"):
+        opt.zero_grad()
+        pm_all(torch.randn(2, 8)).pow(2).mean().backward()
+        assert pm_all.base_model.model.q_proj.base_layer.bias.grad is not None
+        opt.step()
+        opt.zero_grad()
+    assert not torch.equal(pm_all.base_model.model.q_proj.base_layer.bias, bias_before)
+    assert pm_all.base_model.model.q_proj.base_layer.bias.grad is None
+
+    # LoRA-only checkpoint saves and restores trained biases without triggering full-model load
+    ckpt_dir = tmp_path / "lora_only_bias_all"
+    mgr_save = FSDPCheckpointManager(
+        model=pm_all,
+        optimizer=None,
+        lr_scheduler=None,
+        processing_class=None,
+        checkpoint_config={"save_lora_only": True, "save_contents": ["model"]},
+    )
+    mgr_save.save_checkpoint(local_path=str(ckpt_dir), global_step=1)
+    saved_sd = torch.load(ckpt_dir / "model_world_size_1_rank_0.pt", weights_only=False)
+    assert "base_model.model.q_proj.base_layer.bias" in saved_sd
+    assert "base_model.model.other.bias" in saved_sd
+    assert "base_model.model.q_proj.base_layer.weight" not in saved_sd
+    assert BaseCheckpointManager.is_lora_only_state_dict(saved_sd, bias_mode="all") is True
+    assert BaseCheckpointManager.is_lora_only_state_dict(saved_sd, bias_mode="none") is False
+
+    pm_reload = get_peft_model(
+        _BiasModel(),
+        LoraConfig(r=2, lora_alpha=4, target_modules=["q_proj"], bias="all"),
+        adapter_name="tenant_a",
+    )
+    with torch.no_grad():
+        pm_reload.base_model.model.q_proj.base_layer.bias.fill_(-99.0)
+        pm_reload.base_model.model.other.bias.fill_(-88.0)
+    mgr_load = FSDPCheckpointManager(
+        model=pm_reload,
+        optimizer=None,
+        lr_scheduler=None,
+        processing_class=None,
+        checkpoint_config={"load_contents": ["model"]},
+    )
+    mgr_load.load_checkpoint(local_path=str(ckpt_dir))
+    assert torch.allclose(
+        pm_reload.base_model.model.q_proj.base_layer.bias, pm_all.base_model.model.q_proj.base_layer.bias
+    )
+    assert torch.allclose(pm_reload.base_model.model.other.bias, pm_all.base_model.model.other.bias)
+
+    # bias="none" excludes ordinary biases
+    pm_none = get_peft_model(
+        _BiasModel(),
+        LoraConfig(r=2, lora_alpha=4, target_modules=["q_proj"], bias="none"),
+        adapter_name="tenant_a",
+    )
+    none_ids = {id(p) for p in select_adapter_parameters(pm_none, "tenant_a")}
+    assert id(pm_none.base_model.model.q_proj.base_layer.bias) not in none_ids
+    assert id(pm_none.base_model.model.other.bias) not in none_ids
+
+
+def test_optimizer_resume_aligns_reordered_adapter_param_groups():
+    pm_ab = _make_multi_adapter_peft_model({"tenant_a": (4, 8), "tenant_b": (4, 8)})
+    specs = {"tenant_a": {"lr": 1e-2}, "tenant_b": {"lr": 2e-3}}
+    opt_ab = torch.optim.AdamW(build_adapter_param_groups(pm_ab, adapter_specs=specs), lr=1e-4)
+
+    x = torch.randn(2, 16)
+    for _ in range(3):
+        with adapter_context(pm_ab, "tenant_a"), bind_optimizer_to_adapter(opt_ab, "tenant_a"):
+            opt_ab.zero_grad()
+            pm_ab(x).pow(2).mean().backward()
+            opt_ab.step()
+    with adapter_context(pm_ab, "tenant_b"), bind_optimizer_to_adapter(opt_ab, "tenant_b"):
+        opt_ab.zero_grad()
+        pm_ab(x).pow(2).mean().backward()
+        opt_ab.step()
+
+    saved_sd = opt_ab.state_dict()
+
+    # Resume with adapters registered in reversed order: tenant_b, tenant_a
+    pm_ba = _make_multi_adapter_peft_model({"tenant_b": (4, 8), "tenant_a": (4, 8)})
+    opt_ba = torch.optim.AdamW(build_adapter_param_groups(pm_ba, adapter_specs=specs), lr=1e-4)
+    aligned_sd = align_adapter_optimizer_state_dict(opt_ba, saved_sd)
+    opt_ba.load_state_dict(aligned_sd)
+
+    assert [g["adapter_name"] for g in opt_ba.param_groups] == ["tenant_b", "tenant_a"]
+    assert opt_ba.param_groups[0]["lr"] == pytest.approx(2e-3)
+    assert opt_ba.param_groups[1]["lr"] == pytest.approx(1e-2)
+    p_b = select_adapter_parameters(pm_ba, "tenant_b")[0]
+    p_a = select_adapter_parameters(pm_ba, "tenant_a")[0]
+    assert opt_ba.state[p_b]["step"].item() == 1
+    assert opt_ba.state[p_a]["step"].item() == 3
+    assert any(p is p_b for p in opt_ba.param_groups[0]["params"])
+    assert any(p is p_a for p in opt_ba.param_groups[1]["params"])
+
+    # Mismatched adapter set raises before mutating optimizer state
+    pm_other = _make_multi_adapter_peft_model({"tenant_a": (4, 8), "tenant_c": (4, 8)})
+    opt_other = torch.optim.AdamW(build_adapter_param_groups(pm_other), lr=1e-4)
+    with pytest.raises(ValueError, match="do not match"):
+        align_adapter_optimizer_state_dict(opt_other, saved_sd)
+    assert len(opt_other.state) == 0
+
+
+def test_model_merger_preserves_target_parameters_rslora_subtree_full_mts_and_nonobject_meta(tmp_path, monkeypatch):
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 1)
+    monkeypatch.setattr(dist, "barrier", lambda: None)
+
+    # 1. target_parameters + q_proj + use_rslora=True reload round-trip
+    class _ExpertModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = nn.Linear(8, 8, bias=False)
+            self.experts = nn.Module()
+            self.experts.gate_up_proj = nn.Parameter(torch.randn(2, 8, 8))
+
+        def prepare_inputs_for_generation(self, *args, **kwargs):
+            return {}
+
+        def forward(self, x):
+            return self.q_proj(x)
+
+    em = get_peft_model(
+        _ExpertModel(),
+        LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=["q_proj"],
+            target_parameters=["experts.gate_up_proj"],
+            use_rslora=True,
+        ),
+        adapter_name="tenant_b",
+    )
+    mgr = FSDPCheckpointManager(model=em, optimizer=None, lr_scheduler=None, processing_class=None)
+    meta = mgr._get_lora_train_meta(em)
+    src = tmp_path / "ckpt_expert"
+    dst = tmp_path / "export_expert"
+    src.mkdir()
+    (src / "lora_train_meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    sd = {k: v.detach().clone() for k, v in em.state_dict().items()}
+    merger = _DummyMerger(str(src), str(dst))
+    lora_path = merger.save_lora_adapter(sd)
+    assert "experts.gate_up_proj" in sd
+    assert "q_proj.weight" in sd
+
+    reloaded = PeftModel.from_pretrained(_ExpertModel(), lora_path, adapter_name="tenant_b")
+    reloaded_cfg = reloaded.peft_config["tenant_b"]
+    assert reloaded_cfg.use_rslora is True
+    assert list(reloaded_cfg.target_parameters) == ["experts.gate_up_proj"]
+    assert reloaded.base_model.model.q_proj.scaling["tenant_b"] == pytest.approx(8 / (4**0.5))
+    assert "tenant_b" in reloaded.base_model.model.experts.lora_A
+
+    # 2. Nested original_module subtree + direct lm_head control + full modules_to_save path inference
+    src_sub = tmp_path / "ckpt_subtree"
+    dst_sub = tmp_path / "export_subtree"
+    src_sub.mkdir()
+    # Non-object metadata [] must warn and return None instead of raising AttributeError
+    (src_sub / "lora_train_meta.json").write_text("[]", encoding="utf-8")
+
+    sd_sub = {
+        "base_model.model.q_proj.base_layer.weight": torch.randn(8, 8),
+        "base_model.model.q_proj.lora_A.default.weight": torch.randn(2, 8),
+        "base_model.model.q_proj.lora_B.default.weight": torch.randn(8, 2),
+        "base_model.model.lm_head.original_module.weight": torch.randn(10, 8),
+        "base_model.model.lm_head.modules_to_save.default.weight": torch.randn(10, 8),
+        "base_model.model.encoder.proj.original_module.dense.weight": torch.randn(8, 8),
+        "base_model.model.encoder.proj.original_module.bn.num_batches_tracked": torch.tensor(257, dtype=torch.int64),
+        "base_model.model.encoder.proj.modules_to_save.default.dense.weight": torch.randn(8, 8),
+    }
+    merger_sub = _DummyMerger(str(src_sub), str(dst_sub))
+    with pytest.warns(UserWarning):
+        out_sub = merger_sub.save_lora_adapter(sd_sub)
+    assert "lm_head.weight" in sd_sub
+    assert "encoder.proj.dense.weight" in sd_sub
+    assert "encoder.proj.bn.num_batches_tracked" in sd_sub
+    assert sd_sub["encoder.proj.bn.num_batches_tracked"].item() == 257
+
+    exported_cfg = json.loads((dst_sub / "lora_adapter" / "adapter_config.json").read_text(encoding="utf-8"))
+    assert "encoder.proj" in exported_cfg["modules_to_save"]
+    assert "proj" not in exported_cfg["modules_to_save"]
+    assert out_sub == str(dst_sub / "lora_adapter")
+
+
+def test_fsdp_model_merger_preserves_integer_and_bool_buffers(tmp_path):
+    shard_0 = {
+        "float_w": torch.tensor([1.5, 2.5], dtype=torch.float32),
+        "bn.num_batches_tracked": torch.tensor(257, dtype=torch.int64),
+        "mask": torch.tensor([True, False], dtype=torch.bool),
+    }
+    shard_1 = {
+        "float_w": torch.tensor([1.5, 2.5], dtype=torch.float32),
+        "bn.num_batches_tracked": torch.tensor(257, dtype=torch.int64),
+        "mask": torch.tensor([True, False], dtype=torch.bool),
+    }
+    torch.save(shard_0, tmp_path / "model_world_size_2_rank_0.pt")
+    torch.save(shard_1, tmp_path / "model_world_size_2_rank_1.pt")
+
+    merger = FSDPModelMerger.__new__(FSDPModelMerger)
+    merger.config = ModelMergerConfig(
+        operation="merge", backend="fsdp", local_dir=str(tmp_path), target_dir=str(tmp_path)
+    )
+    merged = merger._load_and_merge_state_dicts(world_size=2, total_shards=2, mesh_shape=(2,), mesh_dim_names=("fsdp",))
+    assert merged["float_w"].dtype == torch.bfloat16
+    assert merged["bn.num_batches_tracked"].dtype == torch.int64
+    assert merged["bn.num_batches_tracked"].item() == 257
+    assert merged["mask"].dtype == torch.bool
+    assert torch.equal(merged["mask"], torch.tensor([True, False]))
+
+
+def test_training_worker_keeps_selected_adapter_active_during_train_mode_cleanup(monkeypatch):
+    monkeypatch.setattr(dist, "get_world_size", lambda group=None: 1)
+
+    events: list[tuple[str, str]] = []
+    state = {"active": "tenant_a"}
+
+    class _FakeAdapterCtx:
+        def __init__(self, target: str):
+            self.target = target
+            self.prev = None
+
+        def __enter__(self):
+            self.prev = state["active"]
+            state["active"] = self.target
+            events.append(("enter_adapter", self.target))
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            events.append(("exit_adapter", state["active"]))
+            state["active"] = self.prev
+
+    class _FakeTrainModeCtx:
+        def __enter__(self):
+            events.append(("enter_train_mode", state["active"]))
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            # Mirrors EngineTrainModeCtx.__exit__ calling optimizer_zero_grad() on error
+            if exc_type is not None:
+                events.append(("zero_grad_on_error", state["active"]))
+
+    def _failing_train_batch(data, loss_function=None):
+        events.append(("train_batch", state["active"]))
+        raise RuntimeError("boom after backward")
+
+    fake_engine = SimpleNamespace(
+        adapter_context=lambda name: _FakeAdapterCtx(name),
+        train_mode=lambda **kwargs: _FakeTrainModeCtx(),
+        train_batch=_failing_train_batch,
+        get_data_parallel_size=lambda: 1,
+        get_data_parallel_rank=lambda: 0,
+        get_data_parallel_group=lambda: None,
+        is_mp_src_rank_with_outputs=lambda: False,
+    )
+    worker = TrainingWorker.__new__(TrainingWorker)
+    worker.engine = fake_engine
+    worker.loss_fn = lambda: None
+    worker.engine_config = SimpleNamespace(
+        forward_only=False,
+        use_dynamic_bsz=False,
+        max_token_len_per_gpu=128,
+        micro_batch_size_per_gpu=1,
+        use_fused_kernels=False,
+    )
+    worker.model_config = {}
+    worker.profiler = SimpleNamespace(step=lambda: None, rank=0, check_enable=lambda: False)
+
+    # 1. train_batch failure clears tenant_b grads (not tenant_a)
+    td = TensorDict({"x": torch.zeros(2, 4)}, batch_size=[2])
+    from tensordict import NonTensorData
+
+    td["global_token_num"] = NonTensorData([4, 4])
+    td["lora_adapter_name"] = NonTensorData("tenant_b")
+    with pytest.raises(RuntimeError, match="boom after backward"):
+        TrainingWorker.train_batch.__wrapped__(worker, td)
+    assert ("zero_grad_on_error", "tenant_b") in events
+    assert ("zero_grad_on_error", "tenant_a") not in events
+    assert state["active"] == "tenant_a"
+
+    # 2. train_mini_batch failure also keeps tenant_b active for outer train_mode cleanup
+    events.clear()
+    td_mb = TensorDict({"x": torch.zeros(2, 4)}, batch_size=[2])
+    td_mb["mini_batch_size"] = NonTensorData(2)
+    td_mb["lora_adapter_name"] = NonTensorData("tenant_b")
+    with pytest.raises(RuntimeError, match="boom after backward"):
+        TrainingWorker.train_mini_batch.__wrapped__(worker, td_mb)
+    zero_grad_events = [e for e in events if e[0] == "zero_grad_on_error"]
+    assert len(zero_grad_events) == 2
+    assert all(adapter == "tenant_b" for _, adapter in zero_grad_events)
+    assert state["active"] == "tenant_a"
+
+
+class _TinyEmbedLMModel(nn.Module):
+    _no_split_modules = ["_TinyDecoderLayer"]
+
+    def __init__(self, vocab_size: int = 16, dim: int = 8, tie_embeddings: bool = False):
+        super().__init__()
+        self.config = SimpleNamespace(tie_word_embeddings=tie_embeddings, model_type="tiny")
+        self.model = nn.Module()
+        self.model.embed_tokens = nn.Embedding(vocab_size, dim)
+        self.model.layers = nn.ModuleList([_TinyDecoderLayer(dim=dim) for _ in range(2)])
+        self.lm_head = nn.Linear(dim, vocab_size, bias=False)
+        if tie_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
+
+    def enable_input_require_grads(self):
+        pass
+
+    def prepare_inputs_for_generation(self, *args, **kwargs):
+        return {}
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        h = self.model.embed_tokens(input_ids)
+        for layer in self.model.layers:
+            h = layer(h)
+        return self.lm_head(h)
+
+
+def _gloo_fsdp2_review_fixes_worker(rank: int, world_size: int, rdzv_file: str):
+    dist.init_process_group("gloo", init_method=f"file://{rdzv_file}", rank=rank, world_size=world_size)
+    try:
+        mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("dp",))
+
+        # --- Case A (Threads 5 & 6): untied modules_to_save=["embed_tokens"] + outside-unit lm_head ---
+        torch.manual_seed(7)
+        base_a = _TinyEmbedLMModel(vocab_size=16, dim=8, tie_embeddings=False)
+        cfg_a = LoraConfig(
+            r=2, lora_alpha=4, target_modules=["q_proj"], modules_to_save=["embed_tokens"], task_type=TaskType.CAUSAL_LM
+        )
+        cfg_b = LoraConfig(
+            r=2,
+            lora_alpha=4,
+            target_modules=["q_proj"],
+            modules_to_save=["embed_tokens", "lm_head"],
+            task_type=TaskType.CAUSAL_LM,
+        )
+        pm_mts = get_peft_model(base_a, cfg_a, adapter_name="tenant_a")
+        pm_mts.add_adapter("tenant_b", cfg_b)
+
+        # Must not shard saved nn.Embedding copies twice
+        apply_fsdp2(pm_mts, {"mesh": mesh}, {})
+
+        # Layered export must succeed (no KeyError from outside-unit lm_head) and match full export
+        for adapter in ("tenant_a", "tenant_b"):
+            full = collect_lora_params(pm_mts, layered_summon=False, base_sync_done=True, adapter_name=adapter)
+            layered = collect_lora_params(pm_mts, layered_summon=True, base_sync_done=True, adapter_name=adapter)
+            assert set(layered.keys()) == set(full.keys())
+            for k in full:
+                assert torch.allclose(layered[k], full[k], atol=1e-6)
+        assert any("lm_head" in k for k in collect_lora_params(pm_mts, True, True, adapter_name="tenant_b"))
+
+        # --- Case B (Thread 7): adapter tensor owned directly by a wrapped .model unit ---
+        torch.manual_seed(11)
+        base_b = _TinyEmbedLMModel(vocab_size=16, dim=8, tie_embeddings=True)
+        cfg_embed_lora = LoraConfig(
+            r=2, lora_alpha=4, target_modules=["embed_tokens", "q_proj"], task_type=TaskType.CAUSAL_LM
+        )
+        pm_model_unit = get_peft_model(base_b, cfg_embed_lora, adapter_name="tenant_a")
+        for layer in pm_model_unit.base_model.model.model.layers:
+            fully_shard(layer, mesh=mesh)
+        # Wrap `.model` itself so unwrapped `embed_tokens` LoRA sits directly in the `.model` FSDP unit
+        fully_shard(pm_model_unit.base_model.model.model, mesh=mesh)
+        fully_shard(pm_model_unit, mesh=mesh)
+
+        full_b = collect_lora_params(pm_model_unit, layered_summon=False, base_sync_done=True, adapter_name="tenant_a")
+        layered_b = collect_lora_params(
+            pm_model_unit, layered_summon=True, base_sync_done=True, adapter_name="tenant_a"
+        )
+        assert set(layered_b.keys()) == set(full_b.keys())
+        assert any("embed_tokens" in k for k in layered_b)
+        for k in full_b:
+            assert torch.allclose(layered_b[k], full_b[k], atol=1e-6)
+
+        # --- Case C (Threads 8 & 9): root-owned LoRA merge & partial-merge rollback ---
+        torch.manual_seed(13)
+        base_c = _TinyEmbedLMModel(vocab_size=16, dim=8, tie_embeddings=True)
+        pm_merge = get_peft_model(
+            base_c,
+            LoraConfig(r=2, lora_alpha=4, target_modules=["embed_tokens", "q_proj"], task_type=TaskType.CAUSAL_LM),
+            adapter_name="tenant_a",
+        )
+        pm_merge.add_adapter(
+            "tenant_b",
+            LoraConfig(r=2, lora_alpha=4, target_modules=["embed_tokens", "q_proj"], task_type=TaskType.CAUSAL_LM),
+        )
+        from peft.tuners.lora import LoraLayer
+
+        with torch.no_grad():
+            for mod in pm_merge.modules():
+                if isinstance(mod, LoraLayer):
+                    for attr in ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B"):
+                        c = getattr(mod, attr, None)
+                        if c:
+                            for v in c.values():
+                                (v.weight if hasattr(v, "weight") else v).data.fill_(0.5)
+
+        embed_w_orig = pm_merge.base_model.model.model.embed_tokens.base_layer.weight.detach().clone()
+        apply_fsdp2(pm_merge, {"mesh": mesh}, {})
+        # embed_tokens is root-owned (not wrapped as child FSDPModule because tie_word_embeddings=True)
+        assert not isinstance(pm_merge.base_model.model.model.embed_tokens, FSDPModule)
+
+        # Normal merge & exit via merged_lora_context(backup_adapters=False)
+        with merged_lora_context(pm_merge, backup_adapters=False, adapter_names=["tenant_b"]):
+            embed_layer = pm_merge.base_model.model.model.embed_tokens
+            assert embed_layer.merged is True
+            assert embed_layer.merged_adapters == ["tenant_b"]
+            embed_w_merged = embed_layer.base_layer.weight.full_tensor().detach().clone()
+            assert not torch.allclose(embed_w_merged, embed_w_orig)
+
+        assert pm_merge.base_model.model.model.embed_tokens.merged is False
+        embed_w_restored = pm_merge.base_model.model.model.embed_tokens.base_layer.weight.full_tensor().detach().clone()
+        assert torch.allclose(embed_w_restored, embed_w_orig, atol=1e-5)
+
+        # Failure on second LoRA layer rolls back newly merged first layer while preserving pre-merged layer
+        lora_layers = [m for m in pm_merge.modules() if isinstance(m, LoraLayer)]
+        assert len(lora_layers) >= 3
+        pre_merged_layer = lora_layers[0]
+        # Pre-merge layer 0 beforehand
+        with torch.no_grad():
+            pre_merged_layer.merge(adapter_names=["tenant_a"])
+        assert pre_merged_layer.merged is True
+
+        # Make the last unmerged layer fail during merge
+        failing_layer = lora_layers[-1]
+        orig_merge = failing_layer.merge
+
+        def _boom_merge(*args, **kwargs):
+            raise RuntimeError("injected merge failure")
+
+        failing_layer.merge = _boom_merge
+        try:
+            with pytest.raises(RuntimeError, match="injected merge failure"):
+                with merged_lora_context(pm_merge, backup_adapters=False, adapter_names=["tenant_b"]):
+                    pass
+        finally:
+            failing_layer.merge = orig_merge
+
+        # Pre-merged layer 0 stayed merged; intermediate newly-merged layer(s) were rolled back!
+        assert pre_merged_layer.merged is True
+        for mid_layer in lora_layers[1:]:
+            assert mid_layer.merged is False
+    finally:
+        dist.destroy_process_group()
+
+
+def test_fsdp2_review_fixes_two_rank_gloo(tmp_path):
+    rdzv_file = str(tmp_path / "rdzv_fsdp2_review_fixes")
+    mp.spawn(_gloo_fsdp2_review_fixes_worker, args=(2, rdzv_file), nprocs=2, join=True)

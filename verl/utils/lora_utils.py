@@ -37,6 +37,23 @@ DEFAULT_ADAPTER_NAME = "default"
 
 _UNADAPTED_LEAF_NAMES = frozenset({"weight", "bias"})
 
+_PEFT_LORA_CONTAINERS = frozenset(
+    {
+        "lora_A",
+        "lora_B",
+        "lora_embedding_A",
+        "lora_embedding_B",
+        "lora_magnitude_vector",
+        "lora_E",
+        "lora_P",
+        "lora_Q",
+        "lora_g",
+        "lora_lambda",
+        "lora_A_scale",
+        "lora_B_scale",
+    }
+)
+
 
 def validate_adapter_name(adapter_name: str) -> str:
     """Validate that ``adapter_name`` is a non-empty, PEFT-safe, filesystem-safe identifier."""
@@ -56,8 +73,32 @@ def validate_adapter_name(adapter_name: str) -> str:
 
 
 def _is_peft_container_segment(segment: str) -> bool:
-    """Return whether a dotted parameter-key segment is a PEFT adapter container."""
-    return segment == "modules_to_save" or segment.startswith("lora_") or segment.startswith("adapter_")
+    """Return whether a dotted parameter-key segment is a verified PEFT adapter container."""
+    return segment == "modules_to_save" or segment in _PEFT_LORA_CONTAINERS
+
+
+def _find_peft_container_index(
+    parts: Sequence[str],
+    known_adapters: Optional[Collection[str]] = None,
+    target_adapter: Optional[str] = None,
+) -> Optional[int]:
+    """Locate the rightmost verified PEFT container segment in ``parts``."""
+    for idx in range(len(parts) - 2, -1, -1):
+        part = parts[idx]
+        if not _is_peft_container_segment(part):
+            continue
+        if part == "modules_to_save" and idx + 2 >= len(parts):
+            continue
+        candidate = parts[idx + 1]
+        if target_adapter is not None:
+            if candidate == target_adapter:
+                return idx
+        elif known_adapters is not None:
+            if candidate in known_adapters:
+                return idx
+        elif candidate not in _UNADAPTED_LEAF_NAMES or idx + 2 < len(parts):
+            return idx
+    return None
 
 
 def unwrap_peft_model(module: Any) -> Any:
@@ -133,10 +174,10 @@ def extract_adapter_name_from_param_key(
 ) -> Optional[str]:
     """Extract the PEFT adapter name from a parameter or state-dict key.
 
-    Inspects the segment immediately following a PEFT container segment
-    (``lora_*``, ``modules_to_save``, ``adapter_*``) so adapter names that happen
-    to collide with base module names (such as ``model`` or ``layers``) are never
-    misidentified.
+    Inspects the segment immediately following a verified PEFT container segment
+    (such as ``lora_A``, ``lora_B``, ``lora_embedding_A``, ``modules_to_save``)
+    from right to left so base-model module names (such as ``adapter_blocks``,
+    ``model``, or ``layers``) are never misidentified as PEFT containers.
 
     Examples:
         - ``...q_proj.lora_A.tenant_a.weight`` -> ``"tenant_a"``
@@ -146,14 +187,9 @@ def extract_adapter_name_from_param_key(
     """
     clean_name = param_name.replace("_fsdp_wrapped_module.", "")
     parts = clean_name.split(".")
-    for idx, part in enumerate(parts):
-        if _is_peft_container_segment(part) and idx + 1 < len(parts):
-            candidate = parts[idx + 1]
-            if known_adapters is not None:
-                if candidate in known_adapters:
-                    return candidate
-            elif candidate not in _UNADAPTED_LEAF_NAMES or idx + 2 < len(parts):
-                return candidate
+    idx = _find_peft_container_index(parts, known_adapters=known_adapters)
+    if idx is not None:
+        return parts[idx + 1]
     return None
 
 
@@ -176,11 +212,11 @@ def strip_adapter_name_from_param_key(param_name: str, adapter_name: str) -> str
     - ``...head.modules_to_save.<adapter>.weight`` -> ``...head.weight``
     """
     parts = param_name.split(".")
-    for idx, part in enumerate(parts):
-        if _is_peft_container_segment(part) and idx + 1 < len(parts) and parts[idx + 1] == adapter_name:
-            if part == "modules_to_save":
-                return ".".join(parts[:idx] + parts[idx + 2 :])
-            return ".".join(parts[: idx + 1] + parts[idx + 2 :])
+    idx = _find_peft_container_index(parts, target_adapter=adapter_name)
+    if idx is not None:
+        if parts[idx] == "modules_to_save":
+            return ".".join(parts[:idx] + parts[idx + 2 :])
+        return ".".join(parts[: idx + 1] + parts[idx + 2 :])
     return param_name
 
 
@@ -205,18 +241,48 @@ def adapter_context(module: Any, adapter_name: str):
 
 
 def select_adapter_parameters(module: nn.Module, adapter_name: str) -> list[nn.Parameter]:
-    """Return all parameters belonging to ``adapter_name`` regardless of current ``requires_grad`` state."""
+    """Return all parameters belonging to ``adapter_name`` regardless of current ``requires_grad`` state.
+
+    When ``module`` has a single resident PEFT adapter configured with ``bias="all"`` or
+    ``bias="lora_only"``, also includes the shared trainable biases enabled by PEFT so
+    optimizer updates, gradient clearing, and gradient clipping cover them consistently.
+    """
     all_adapters: Optional[list[str]] = None
+    include_all_bias = False
+    lora_bias_param_ids: set[int] = set()
+    lora_bias_names: set[str] = set()
     if is_peft_model(module):
-        adapter_name = resolve_adapter_name(module, adapter_name)
-        all_adapters = list_peft_adapters(module)
+        peft_model = unwrap_peft_model(module)
+        adapter_name = resolve_adapter_name(peft_model, adapter_name)
+        all_adapters = list_peft_adapters(peft_model)
+        if len(all_adapters) == 1:
+            bias_mode = getattr(peft_model.peft_config[adapter_name], "bias", "none")
+            if bias_mode == "all":
+                include_all_bias = True
+            elif isinstance(bias_mode, str) and bias_mode.endswith("_only"):
+                from peft.tuners.tuners_utils import BaseTunerLayer
+
+                for mod_name, sub in peft_model.named_modules():
+                    if isinstance(sub, BaseTunerLayer):
+                        clean_mod = mod_name.replace("_fsdp_wrapped_module.", "")
+                        lora_bias_names.add(f"{clean_mod}.base_layer.bias" if clean_mod else "base_layer.bias")
+                        base_layer = sub.get_base_layer() if hasattr(sub, "get_base_layer") else sub
+                        bias_param = getattr(base_layer, "bias", None)
+                        if isinstance(bias_param, nn.Parameter):
+                            lora_bias_param_ids.add(id(bias_param))
 
     params: list[nn.Parameter] = []
     seen: set[int] = set()
     for name, param in module.named_parameters():
         if id(param) in seen:
             continue
-        if param_belongs_to_adapter(name, adapter_name, all_adapter_names=all_adapters):
+        clean_name = name.replace("_fsdp_wrapped_module.", "")
+        is_match = param_belongs_to_adapter(clean_name, adapter_name, all_adapter_names=all_adapters)
+        if not is_match and include_all_bias:
+            is_match = (clean_name == "bias" or clean_name.endswith(".bias")) and ".original_module." not in clean_name
+        elif not is_match and (lora_bias_param_ids or lora_bias_names):
+            is_match = id(param) in lora_bias_param_ids or clean_name in lora_bias_names
+        if is_match:
             seen.add(id(param))
             params.append(param)
     return params
@@ -310,52 +376,74 @@ def build_lora_config_from_spec(
     return LoraConfig(**kwargs)
 
 
-def _read_adapter_rank_from_path(adapter_path: str) -> Optional[int]:
-    """Read LoRA rank ``r`` from a local PEFT ``adapter_config.json`` if accessible."""
-    config_path = os.path.join(os.path.expanduser(str(adapter_path)), "adapter_config.json")
+def _read_adapter_rank_from_path(adapter_path: str, use_shm: bool = False) -> Optional[int]:
+    """Read effective LoRA rank from a PEFT ``adapter_config.json``, localizing remote URIs if needed."""
+    path_str = os.path.expanduser(str(adapter_path))
+    config_path = os.path.join(path_str, "adapter_config.json")
+    if not os.path.isfile(config_path):
+        from verl.utils.fs import copy_to_local, is_non_local
+
+        if is_non_local(path_str):
+            localized = copy_to_local(path_str.rstrip("/"), use_shm=use_shm)
+            config_path = os.path.join(localized, "adapter_config.json")
     if not os.path.isfile(config_path):
         return None
     with open(config_path, encoding="utf-8") as f:
         cfg = json.load(f)
     raw_r = cfg.get("r")
-    return int(raw_r) if raw_r is not None and int(raw_r) > 0 else None
+    if raw_r is None or int(raw_r) <= 0:
+        return None
+    rank_pattern = cfg.get("rank_pattern") or {}
+    pattern_ranks = (
+        [int(rank) for rank in rank_pattern.values() if rank is not None and int(rank) > 0]
+        if isinstance(rank_pattern, Mapping)
+        else []
+    )
+    return max([int(raw_r), *pattern_ranks])
 
 
 def get_max_lora_rank(model_config: Any) -> int:
     """Return the maximum configured LoRA rank across single-adapter and multi-adapter config fields.
 
-    When an adapter specifies ``adapter_path`` (or ``lora_adapter_path``), inspects the
-    local ``adapter_config.json`` so path-only adapter configs do not resolve to rank 0
-    or underestimate a loaded adapter's rank.
+    Preserves the legacy precedence when ``lora_adapters`` is not configured (positive nested
+    ``lora.rank`` takes precedence over top-level ``lora_rank``). When an adapter specifies
+    ``adapter_path`` (or ``lora_adapter_path``), inspects ``adapter_config.json`` (localizing
+    remote URIs through the same ``copy_to_local`` path FSDP uses) and accounts for per-module
+    ``rank_pattern`` overrides so rollout servers are sized for the largest effective rank.
     """
     lora_dict = getattr(model_config, "lora", None) or {}
-    ranks = [
-        int(lora_dict.get("rank", 0) or 0),
-        int(getattr(model_config, "lora_rank", 0) or 0),
-    ]
+    use_shm = bool(getattr(model_config, "use_shm", False))
+    nested_rank = int(lora_dict.get("rank", 0) or 0)
+    top_rank = int(getattr(model_config, "lora_rank", 0) or 0)
+    base_rank = nested_rank if nested_rank > 0 else top_rank
+
+    ranks = [base_rank]
     top_adapter_path = getattr(model_config, "lora_adapter_path", None)
     if top_adapter_path is not None:
-        loaded_r = _read_adapter_rank_from_path(top_adapter_path)
+        loaded_r = _read_adapter_rank_from_path(top_adapter_path, use_shm=use_shm)
         if loaded_r is not None:
             ranks.append(loaded_r)
 
     lora_adapters = getattr(model_config, "lora_adapters", None) or {}
-    for adapter_name, spec in lora_adapters.items():
-        if not isinstance(spec, Mapping):
-            continue
-        raw_r = spec.get("r", spec.get("rank", 0))
-        explicit_r = int(raw_r or 0)
-        adapter_path = spec.get("adapter_path", spec.get("lora_adapter_path", None))
-        loaded_r = _read_adapter_rank_from_path(adapter_path) if adapter_path is not None else None
-        if adapter_path is not None and loaded_r is None and explicit_r <= 0:
-            raise ValueError(
-                f"Cannot determine LoRA rank for adapter {adapter_name!r} from adapter_path={adapter_path!r}: "
-                f"no readable local adapter_config.json and no explicit 'r'/'rank' in lora_adapters[{adapter_name!r}]."
-            )
-        if loaded_r is not None:
-            ranks.append(loaded_r)
-        if explicit_r > 0:
-            ranks.append(explicit_r)
+    if lora_adapters:
+        for adapter_name, spec in lora_adapters.items():
+            if not isinstance(spec, Mapping):
+                continue
+            raw_r = spec.get("r", spec.get("rank", 0))
+            explicit_r = int(raw_r or 0)
+            adapter_path = spec.get("adapter_path", spec.get("lora_adapter_path", None))
+            loaded_r = _read_adapter_rank_from_path(adapter_path, use_shm=use_shm) if adapter_path is not None else None
+            if adapter_path is not None and loaded_r is None and explicit_r <= 0:
+                raise ValueError(
+                    f"Cannot determine LoRA rank for adapter {adapter_name!r} from adapter_path={adapter_path!r}: "
+                    f"no readable adapter_config.json and no explicit 'r'/'rank' in lora_adapters[{adapter_name!r}]."
+                )
+            if loaded_r is not None:
+                ranks.append(loaded_r)
+            if explicit_r > 0:
+                ranks.append(explicit_r)
+            if adapter_path is None and explicit_r <= 0 and top_rank > 0:
+                ranks.append(top_rank)
     return max(ranks)
 
 
@@ -411,6 +499,62 @@ def has_adapter_param_groups(optimizer: Optional[torch.optim.Optimizer]) -> bool
     if optimizer is None:
         return False
     return any("adapter_name" in group for group in optimizer.param_groups)
+
+
+def align_adapter_optimizer_state_dict(
+    optimizer: torch.optim.Optimizer,
+    state_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Align saved optimizer ``param_groups`` with ``optimizer`` by ``adapter_name``.
+
+    PyTorch's ``Optimizer.load_state_dict`` matches parameter groups by position and copies
+    saved group metadata (including ``adapter_name``) onto the current groups. When adapters
+    are registered in a different order on resume, positional loading would silently swap
+    optimizer moments and ``adapter_name`` tags between adapters. Reordering ``param_groups``
+    by ``adapter_name`` before loading preserves exact per-adapter ownership; mismatches that
+    cannot be safely aligned raise ``ValueError`` before mutating optimizer state.
+    """
+    if not has_adapter_param_groups(optimizer):
+        return state_dict
+    if not isinstance(state_dict, Mapping) or "param_groups" not in state_dict:
+        return state_dict
+
+    cur_groups = optimizer.param_groups
+    saved_groups = state_dict["param_groups"]
+    if len(saved_groups) != len(cur_groups):
+        raise ValueError(
+            f"Optimizer checkpoint has {len(saved_groups)} param_groups, but current optimizer has {len(cur_groups)}."
+        )
+
+    cur_names = [group.get("adapter_name") for group in cur_groups]
+    saved_names = [group.get("adapter_name") for group in saved_groups]
+    if saved_names == cur_names:
+        return state_dict
+
+    if any(name is None for name in cur_names) or any(name is None for name in saved_names):
+        raise ValueError(
+            f"Cannot safely align optimizer param_groups across adapter order change: "
+            f"checkpoint adapters={saved_names!r}, current adapters={cur_names!r}."
+        )
+    if len(set(cur_names)) != len(cur_names) or len(set(saved_names)) != len(saved_names):
+        raise ValueError(
+            f"Cannot unambiguously align duplicate adapter param_groups: "
+            f"checkpoint adapters={saved_names!r}, current adapters={cur_names!r}."
+        )
+    if set(saved_names) != set(cur_names):
+        raise ValueError(f"Optimizer checkpoint adapters {saved_names!r} do not match current adapters {cur_names!r}.")
+
+    saved_by_name = {group["adapter_name"]: group for group in saved_groups}
+    aligned_groups = [saved_by_name[name] for name in cur_names]
+    for name, cur_group, saved_group in zip(cur_names, cur_groups, aligned_groups, strict=True):
+        if len(saved_group.get("params", [])) != len(cur_group.get("params", [])):
+            raise ValueError(
+                f"Parameter count mismatch for adapter {name!r}: checkpoint has "
+                f"{len(saved_group.get('params', []))} params, current optimizer has "
+                f"{len(cur_group.get('params', []))}."
+            )
+
+    return {**state_dict, "param_groups": aligned_groups}
 
 
 @contextmanager
@@ -539,20 +683,37 @@ def _extract_batch_adapter_names(
     if isinstance(raw, (list, tuple)):
         if len(raw) != batch_size:
             raise ValueError(f"Length of {adapter_key!r} ({len(raw)}) does not match batch size ({batch_size}).")
-        return [str(x) for x in raw]
+        return list(raw)
     raise TypeError(f"Unsupported type for batch[{adapter_key!r}]: {type(raw).__name__}")
 
 
-def _infer_batch_size(batch: Any) -> int:
+def _infer_batch_size(batch: Any, adapter_key: Optional[str] = None) -> int:
     if hasattr(batch, "batch_size") and len(batch.batch_size) > 0:
         return int(batch.batch_size[0])
     if isinstance(batch, Mapping):
-        for val in batch.values():
+        tensor_sizes: list[int] = []
+        seq_sizes: list[int] = []
+        adapter_size: Optional[int] = None
+        for key, val in batch.items():
             if isinstance(val, (torch.Tensor, np.ndarray)):
                 if val.ndim > 0:
-                    return int(val.shape[0])
+                    size = int(val.shape[0])
+                    if key == adapter_key:
+                        adapter_size = size
+                    else:
+                        tensor_sizes.append(size)
             elif isinstance(val, (list, tuple)):
-                return len(val)
+                size = len(val)
+                if key == adapter_key:
+                    adapter_size = size
+                else:
+                    seq_sizes.append(size)
+        for sizes in (tensor_sizes, seq_sizes):
+            if sizes:
+                non_zero = [s for s in sizes if s > 0]
+                return non_zero[0] if non_zero else 0
+        if adapter_size is not None:
+            return adapter_size
     raise ValueError("Unable to infer batch size from batch.")
 
 
@@ -587,8 +748,10 @@ def split_batch_by_adapter(
     Supports both ``TensorDict`` batches and plain Python ``dict`` batches.
     Returns ``(sub_batches, indices_by_adapter)`` keyed by adapter name.
     """
-    batch_size = _infer_batch_size(batch)
+    batch_size = _infer_batch_size(batch, adapter_key=adapter_key)
     if batch_size == 0:
+        if adapter_key in batch:
+            _extract_batch_adapter_names(batch, 0, adapter_key, default_adapter)
         return OrderedDict(), OrderedDict()
 
     adapter_names = _extract_batch_adapter_names(batch, batch_size, adapter_key, default_adapter)
