@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import logging
+import time
 import uuid
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -28,6 +29,12 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, Ra
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name
 from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.rollout.fault_tolerance import (
+    ReplicaRestartError,
+    WeightSourceOverride,
+    _get_actor_state_dict,
+    verify_process_dead,
+)
 
 logger = logging.getLogger(__file__)
 
@@ -58,11 +65,51 @@ class TokenOutput(BaseModel):
     routed_experts: Optional[Any] = None
     """routed experts of response token ids"""
     stop_reason: Optional[str] = None
-    """stop reason: 'completed', 'length', 'aborted', or None for unknown"""
+    """stop reason: 'completed', 'length', 'aborted', 'engine_failed', or None for unknown"""
     num_preempted: Optional[int] = None
     """number of preempted times for metric calculation"""
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
+
+
+def engine_failure_receipt(global_steps: Optional[int], partial_output: Any = None) -> TokenOutput:
+    """Build the ``engine_failed`` progress receipt for an in-flight request.
+
+    Completeness-first: the accumulated prefix is kept only when its per-token
+    logprobs are complete; anything partial drops the whole prefix — recompute
+    beats corrupt data. The server serves this receipt when the engine core
+    dies mid-request (or is already known dead); the client recognizes it and
+    bounded-replays (request-path self-healing only — the client reports
+    nothing, detection is the manager's polling channel).
+    """
+    token_ids: list[int] = []
+    log_probs: Optional[list[float]] = None
+
+    outputs = getattr(partial_output, "outputs", None) or []
+    if outputs:
+        out = outputs[0]
+        token_ids = list(getattr(out, "token_ids", None) or [])
+        raw = getattr(out, "logprobs", None)
+        if token_ids and isinstance(raw, list) and len(raw) >= len(token_ids):
+            try:
+                # strict=False: logprobs may legitimately trail tokens; the length
+                # check above already guarantees every kept token has its entry.
+                log_probs = [float(entry[token_id].logprob) for entry, token_id in zip(raw, token_ids, strict=False)]
+            except (KeyError, TypeError, AttributeError, ValueError):
+                log_probs = None
+
+    if log_probs is None:
+        # Incomplete or unparsable progress: drop the prefix entirely.
+        token_ids = []
+
+    return TokenOutput(
+        token_ids=token_ids,
+        log_probs=log_probs,
+        routed_experts=None,
+        stop_reason="engine_failed",
+        num_preempted=None,
+        extra_fields={"engine_failed": True, "global_steps": global_steps},
+    )
 
 
 class RolloutMode(Enum):
@@ -79,6 +126,59 @@ class RolloutMode(Enum):
     # Standalone rollout server with separate GPU resource, disaggregated architecture.
     # Usage scenarios: off-policy training.
     STANDALONE = "standalone"
+
+
+WITNESS_RETRY_WINDOW_S = 30.0  # bounded retry window absorbing the Ray GCS -> OS death lag
+
+
+def _witness_server_process_dead(worker, pid: int, create_time: float) -> bool:
+    """Executed inside a checkpoint-engine worker actor via ``__ray_call__``: same-node witness
+    probe (module-level so it serializes to the worker)."""
+    return verify_process_dead(pid, create_time)
+
+
+async def _witness_server_dead(old_workers: list, pid: int, create_time: float) -> None:
+    """Confirm the server process is really dead before relaunching.
+
+    The surviving checkpoint-engine workers share the server actor's node and
+    witness the OS-level death; the driver-local probe is the single-node
+    fallback. Ray's GCS can publish an actor DEAD before the OS process exits,
+    so the probe retries within a bounded window — fail-closed once the
+    deadline passes.
+    """
+    deadline = time.monotonic() + WITNESS_RETRY_WINDOW_S
+    while True:
+        for worker in old_workers:
+            try:
+                dead = await asyncio.wait_for(
+                    worker.__ray_call__.remote(_witness_server_process_dead, pid, create_time), timeout=5.0
+                )
+            except Exception:
+                continue
+            if dead:
+                return
+        if verify_process_dead(pid, create_time):
+            return
+        if time.monotonic() >= deadline:
+            raise ReplicaRestartError(
+                f"witness probe could not confirm server process death (pid={pid}) within "
+                f"{WITNESS_RETRY_WINDOW_S:g}s; refusing to relaunch"
+            )
+        await asyncio.sleep(1.0)
+
+
+async def _wait_actor_terminal(handle, timeout: float = 10.0) -> None:
+    """Bounded wait for a ``ray.kill``-ed actor to leave ALIVE — Ray GCS can
+    publish DEAD before the OS process dies; this sequences killing old
+    actors against respawning under the same names."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        # Blocking GCS query — keep it off the manager actor's event loop.
+        state_dict = await asyncio.to_thread(_get_actor_state_dict, handle)
+        if state_dict is None or state_dict.get("state") != "ALIVE":
+            return
+        await asyncio.sleep(0.2)
+    raise ReplicaRestartError(f"actor did not leave the ALIVE state within {timeout}s after ray.kill")
 
 
 class RolloutReplica(ABC):
@@ -103,6 +203,10 @@ class RolloutReplica(ABC):
         model_config: DictConfig, model config.
         gpus_per_node: int, number of gpus per node.
     """
+
+    _restart_in_progress: bool = False
+    """Re-entry guard for restart(); the supervisor's per-replica mutex is the
+    primary defense, this is the belt-and-braces one."""
 
     def __init__(
         self,
@@ -232,24 +336,25 @@ class RolloutReplica(ABC):
         self.resource_pool = resource_pool
 
         # create worker group for this rollout
-        if self.is_reward_model:
-            name_prefix = f"rollout_reward_standalone_{self.replica_rank}{self.name_suffix}"
-        elif self.is_teacher_model:
-            name_prefix = f"rollout_teacher_standalone_{self.replica_rank}{self.name_suffix}"
-        else:
-            name_prefix = f"rollout_standalone_{self.replica_rank}{self.name_suffix}"
         # These workers share each bundle's device with the rollout engine's own workers. Where a
         # device cannot be shared between processes (TPU), they must not claim it.
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
             bin_pack=False,
-            name_prefix=name_prefix,
+            name_prefix=self._standalone_worker_name_prefix(),
             use_gpu=get_platform().supports_colocated_worker_groups(),
             device_name=get_device_name(),
         )
         self.workers = worker_group.workers
         await self.launch_servers()
+
+    def _standalone_worker_name_prefix(self) -> str:
+        if self.is_reward_model:
+            return f"rollout_reward_standalone_{self.replica_rank}{self.name_suffix}"
+        elif self.is_teacher_model:
+            return f"rollout_teacher_standalone_{self.replica_rank}{self.name_suffix}"
+        return f"rollout_standalone_{self.replica_rank}{self.name_suffix}"
 
     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
         """Get rollout worker actor class for colocated and standalone mode."""
@@ -266,7 +371,12 @@ class RolloutReplica(ABC):
 
     @abstractmethod
     async def launch_servers(self):
-        """Launch http server in each node."""
+        """Launch http server in each node.
+
+        A restart relaunch hands the checkpoint cold-start weight source down
+        through this launch chain; backends without restart support keep the
+        zero-argument signature.
+        """
         raise NotImplementedError
 
     @property
@@ -319,6 +429,112 @@ class RolloutReplica(ABC):
     async def resume_kv_cache(self):
         """Restore the kv_cache GPU memory after a weight sync."""
         await asyncio.gather(*[server.resume_kv_cache.remote() for server in self.servers])
+
+    async def check_health(self) -> None:
+        """Liveness probe: the head server's ``check_health`` (raises when the
+        engine is gone); a replica without a live server actor is a restart
+        error rather than a silent pass."""
+        if not self.servers:
+            raise ReplicaRestartError(f"replica {self.replica_rank}: no live server actor to probe")
+        await self.servers[0].check_health.remote()
+
+    async def restart(
+        self,
+        *,
+        cleanup_timeout_s: float = 60.0,
+        server_kill_timeout_s: float = 10.0,
+        weight_source: Optional[WeightSourceOverride] = None,
+    ) -> None:
+        """Unified whole-replica restart (orchestrated by the supervisor —
+        distinct from Ray's per-actor auto-restart).
+
+        Sequence: verified server shutdown -> server actor kill with bounded
+        terminal wait -> witness probe while the checkpoint-engine workers
+        are alive -> checkpoint-engine kill + terminal wait -> same-pool
+        respawn (bundles survive actor death) -> relaunch of the server
+        actors.
+
+        ``weight_source`` is the checkpoint cold-start source: it rides the
+        launch chain; backends without restart support keep the
+        zero-argument signature. The caller (supervisor) owns the LB fence,
+        the group-generation bump, and the VERIFYING gate; on any failure
+        the replica keeps no half-registered state and stays ISOLATED.
+        """
+        if self._restart_in_progress:
+            raise ReplicaRestartError(f"replica {self.replica_rank}: restart already in progress")
+        if self.rollout_mode != RolloutMode.STANDALONE or self.nnodes != 1:
+            raise NotImplementedError(
+                f"restart() requires a single-node STANDALONE replica (mode={self.rollout_mode}, nnodes={self.nnodes})"
+            )
+        if self.resource_pool is None:
+            raise ReplicaRestartError(f"replica {self.replica_rank}: no resource pool to respawn onto")
+
+        launch_kwargs = {"weight_source": weight_source} if weight_source is not None else {}
+        self._restart_in_progress = True
+        try:
+            old_server = self.servers[0] if self.servers else None
+            old_workers = list(self.workers)
+
+            server_identity = None
+            if old_server is not None:
+                # S1: verified shutdown — engine-owned children exit under the
+                # accounting ladder; a dead actor's RayActorError is swallowed
+                # (the terminal wait below proves the process gone instead).
+                try:
+                    server_identity = await asyncio.wait_for(old_server.shutdown.remote(), timeout=cleanup_timeout_s)
+                except (ray.exceptions.RayActorError, asyncio.TimeoutError):
+                    logger.warning(
+                        "server actor shutdown unavailable (likely already dead); "
+                        "continuing teardown without a witness identity"
+                    )
+                # S2: kill the server actor; the bounded terminal wait is required
+                # because Ray GCS can publish DEAD before the OS process dies.
+                ray.kill(old_server, no_restart=True)
+                await _wait_actor_terminal(old_server, timeout=server_kill_timeout_s)
+            if server_identity is not None:
+                # S3: witness probe — must run while the checkpoint-engine
+                # workers are still alive (they share the server actor's node).
+                pid, create_time = server_identity
+                await _witness_server_dead(old_workers, pid, create_time)
+            # S4: kill the remaining checkpoint-engine actors — a fault that
+            # killed one worker is not disprovable for its siblings (clean slate).
+            for worker in old_workers:
+                try:
+                    ray.kill(worker, no_restart=True)
+                except Exception:
+                    logger.warning("failed to kill a checkpoint-engine worker; terminal wait follows", exc_info=True)
+            await asyncio.gather(*[_wait_actor_terminal(w, timeout=server_kill_timeout_s) for w in old_workers])
+            # S5: respawn the checkpoint-engine workers on the same resource pool.
+            worker_group = RayWorkerGroup(
+                resource_pool=self.resource_pool,
+                ray_cls_with_init=self.get_ray_class_with_init_args(),
+                bin_pack=False,
+                name_prefix=self._standalone_worker_name_prefix(),
+                use_gpu=get_platform().supports_colocated_worker_groups(),
+                device_name=get_device_name(),
+            )
+            self.workers = worker_group.workers
+            # S6: relaunch — the weight source rides the launch chain into the
+            # new server's constructor; the replica re-registers with the LB
+            # only after VERIFYING.
+            self._reset_server_state()
+            self._pre_relaunch_cleanup()
+            await self.launch_servers(**launch_kwargs)
+        except BaseException:
+            self._reset_server_state()
+            raise
+        finally:
+            self._restart_in_progress = False
+
+    def _reset_server_state(self) -> None:
+        """Drop all server registration state (no half-updated fields survive a failed restart)."""
+        self.servers = []
+        self._server_handle = None
+        self._server_address = None
+
+    def _pre_relaunch_cleanup(self) -> None:
+        """Engine-specific pre-relaunch cleanup (e.g. stale IPC sockets); no-op by default."""
+        return None  # noqa: B027 — optional hook, not an abstract obligation
 
     async def start_profile(self, **kwargs):
         """Start profiling on the replica."""
