@@ -15,7 +15,7 @@
 import logging
 import os
 import random
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 import ray
 from cachetools import LRUCache
@@ -136,9 +136,10 @@ class GlobalRequestLoadBalancer:
     When a sticky session points to a removed server, the cache entry is
     automatically invalidated and a new server is selected.
 
-    This is a plain Python class (not a Ray actor). It is wrapped with
-    ``ray.remote(...)`` at instantiation time so callers can subclass it and
-    override :meth:`acquire_server` before registering the subclass as an actor.
+    This is a plain Python class (not a Ray actor). It is embedded in the
+    LLMServerManager actor (:func:`create_embedded_load_balancer`) or
+    actorized standalone (:func:`get_router_handle`, teacher models).
+    Subclasses may override :meth:`acquire_server` to take full control of routing.
 
     Key features:
     - **Atomic acquire**: ``acquire_server()`` returns ``(server_id, handle)``
@@ -298,28 +299,77 @@ class GlobalRequestLoadBalancer:
         return sum(self._inflight_requests.values())
 
 
-def _create_global_sticky_inflight(
+class RouterSpec(NamedTuple):
+    """Load-balancer strategy resolved on the caller's node: the class plus
+    its node-local inputs (the loaded router YAML), ready to serialize into
+    the host. Only construction from the host-local ``servers`` pool happens
+    at the hosting site."""
+
+    cls: type
+    yaml_config: dict | None = None
+
+
+def resolve_router_spec(
+    router_config_path: str | None = None,
+    load_balancer_cls: type | None = None,
+) -> RouterSpec:
+    """Resolve the configured load-balancer strategy on the caller's node.
+
+    File reads and FQN imports happen here, before any actor is launched, so
+    a zero-CPU host never needs the router YAML file locally. The resolved
+    class object then follows standard Ray class-transfer semantics: it is
+    pickled by reference when its module is importable, so every node that
+    may host the balancer needs that module installed — like any other class
+    verl ships to workers.
+
+    Precedence: ``load_balancer_cls`` (programmatic injection, e.g. verl-omni's
+    Deterministic* subclasses) > YAML plugin > the default sticky-session +
+    least-inflight strategy.
+    """
+    if router_config_path and load_balancer_cls is None:
+        yaml_config = _load_router_yaml(router_config_path)
+        router_class = yaml_config.get("router_class", None)
+        if not router_class:
+            raise ValueError(
+                "External router YAML must contain 'router_class'. "
+                "Example: router_class: uni_agent.llm_router.KvcAwareRouter"
+            )
+        cls = _resolve_router_class(router_class)
+        logger.info(
+            "Resolved plugin load balancer from YAML: class=%s, config=%s",
+            router_class,
+            yaml_config,
+        )
+        return RouterSpec(cls=cls, yaml_config=yaml_config)
+
+    # Programmatic injection overrides the config-selected strategy. If both
+    # are set, the YAML is ignored — warn so the mismatch doesn't fail silently.
+    if router_config_path and load_balancer_cls is not None:
+        logger.warning(
+            "Both router_config_path=%r and load_balancer_cls=%s are set; "
+            "the YAML plugin is ignored in favor of the injected subclass.",
+            router_config_path,
+            getattr(load_balancer_cls, "__name__", load_balancer_cls),
+        )
+    return RouterSpec(cls=load_balancer_cls or GlobalRequestLoadBalancer)
+
+
+def _spec_call_args(
+    spec: RouterSpec,
     servers: dict[str, Any],
     full_determinism: bool = False,
-    load_balancer_cls: type | None = None,
-):
-    """Factory for the default sticky-session + least-inflight strategy.
-
-    Args:
-        servers: ``{server_address: actor_handle}`` mapping.
-        full_determinism: Rollout-level ``rollout.full_determinism`` flag;
-            enables full-hash deterministic routing.
-        load_balancer_cls: Class to use as the routing actor. A subclass overrides
-            :meth:`acquire_server` and takes full control of routing, so
-            ``full_determinism`` is not forwarded to it.
-    """
+) -> tuple[tuple, dict]:
+    """Build the balancer constructor call args for a host-local ``servers`` pool."""
+    if spec.yaml_config is not None:
+        # Plugin constructors take the whole loaded dict: (servers, yaml_config).
+        return (servers, spec.yaml_config), {}
     kwargs = dict(servers=servers, max_cache_size=DEFAULT_ROUTING_CACHE_SIZE)
     # The default GlobalRequestLoadBalancer honors the full_determinism flag
     # in acquire_server. A custom subclass overrides acquire_server and takes
     # full control of routing, so the flag is not forwarded to it.
-    if load_balancer_cls is GlobalRequestLoadBalancer:
+    if spec.cls is GlobalRequestLoadBalancer:
         kwargs["full_determinism"] = full_determinism
-    return ray.remote(load_balancer_cls).remote(**kwargs)
+    return (), kwargs
 
 
 def _load_router_yaml(router_config_path: str) -> dict:
@@ -357,50 +407,20 @@ def _resolve_router_class(router_class: str) -> type:
     return cls
 
 
-def _create_plugin_extension(
-    servers: dict[str, Any],
-    router_config_path: str,
-):
-    """Factory for a user-defined load balancer loaded from an external YAML.
-
-    The file must contain ``router_class`` (FQN); the whole loaded dict is
-    passed to the constructor.
-
-    Args:
-        servers: ``{server_address: actor_handle}`` mapping.
-        router_config_path: Path to the external YAML file.
-
-    Raises:
-        ValueError: If ``router_config_path`` is missing or the YAML lacks
-            ``router_class``.
-        ImportError: If a module or package cannot be imported.
-        AttributeError: If the class does not exist in the module.
-    """
-    yaml_config = _load_router_yaml(router_config_path)
-    router_class = yaml_config.get("router_class", None)
-    if not router_class:
-        raise ValueError(
-            "External router YAML must contain 'router_class'. "
-            "Example: router_class: uni_agent.llm_router.KvcAwareRouter"
-        )
-    cls = _resolve_router_class(router_class)
-    logger.info(
-        "Creating plugin load balancer from YAML: class=%s, servers=%d, config=%s",
-        router_class,
-        len(servers),
-        yaml_config,
-    )
-    ray_cls = cls if isinstance(cls, ray.actor.ActorClass) else ray.remote(cls)
-    return ray_cls.remote(servers, yaml_config)
-
-
 def get_router_handle(
     servers: dict[str, Any],
     router_config_path: str | None = None,
     full_determinism: bool = False,
     load_balancer_cls: type | None = None,
 ) -> Any:
-    """Create a load balancer instance from router configuration.
+    """Create a standalone load-balancer actor from router configuration.
+
+    Teacher models and tests host routing outside the LLMServerManager; the
+    rollout manager embeds its balancer via :func:`create_embedded_load_balancer`.
+    The strategy is resolved on the caller's node, so the actor's scheduling
+    node never needs the router YAML file locally; the class itself follows
+    standard Ray class-transfer semantics (importable modules are pickled by
+    reference and must be installed on the hosting node).
 
     Args:
         servers: ``{server_address: actor_handle}`` mapping.
@@ -413,21 +433,32 @@ def get_router_handle(
             balancer. Takes precedence over the config-selected strategy; not
             applicable to the YAML plugin.
     """
-    if router_config_path and load_balancer_cls is None:
-        return _create_plugin_extension(servers=servers, router_config_path=router_config_path)
-
-    # Programmatic injection (e.g. verl-omni's Deterministic* subclasses)
-    # overrides the config-selected strategy. If both are set, the YAML is
-    # ignored — warn so the mismatch doesn't fail silently.
-    if router_config_path and load_balancer_cls is not None:
-        logger.warning(
-            "Both router_config_path=%r and load_balancer_cls=%s are set; "
-            "the YAML plugin is ignored in favor of the injected subclass.",
-            router_config_path,
-            getattr(load_balancer_cls, "__name__", load_balancer_cls),
-        )
-    return _create_global_sticky_inflight(
-        servers=servers,
-        full_determinism=full_determinism,
-        load_balancer_cls=load_balancer_cls or GlobalRequestLoadBalancer,
+    spec = resolve_router_spec(
+        router_config_path=router_config_path,
+        load_balancer_cls=load_balancer_cls,
     )
+    args, kwargs = _spec_call_args(spec, servers, full_determinism)
+    ray_cls = spec.cls if isinstance(spec.cls, ray.actor.ActorClass) else ray.remote(spec.cls)
+    return ray_cls.remote(*args, **kwargs)
+
+
+def create_embedded_load_balancer(
+    servers: dict[str, Any],
+    router_spec: RouterSpec,
+    full_determinism: bool = False,
+) -> Any:
+    """Create a plain (non-actor) load balancer for embedding inside a host actor.
+
+    The LLMServerManager embeds the balancer and exposes its surface as its
+    own RPC methods, so the manager's own pool updates become in-process
+    calls. ``router_spec`` must be resolved on the caller's node via
+    :func:`resolve_router_spec`; plugin classes must be plain classes — the
+    manager actor is the host process.
+    """
+    if isinstance(router_spec.cls, ray.actor.ActorClass):
+        raise TypeError(
+            f"{router_spec.cls!r} is a Ray actor class; an embedded load balancer must be "
+            "a plain class — the LLMServerManager actor is the host process."
+        )
+    args, kwargs = _spec_call_args(router_spec, servers, full_determinism)
+    return router_spec.cls(*args, **kwargs)
