@@ -563,11 +563,13 @@ def set_router_replay_data(
             )
         route_positions = {layer_idx: pos for pos, layer_idx in enumerate(route_layer_ids or [])}
 
-        def route_index(layer_idx: int, moe_ordinal: int) -> int:
+        def route_index(layer_idx: int) -> int:
             """Row of ``layers_topk_idx_reshape`` holding a layer's routes, -1 where they are absent."""
             if route_layer_ids is not None:
                 return route_positions.get(layer_idx, -1)
-            return layer_idx if index_by_layer else moe_ordinal
+            if index_by_layer:
+                return layer_idx
+            return sum(1 for i in range(layer_idx) if is_moe_layer(tf_config, i))
 
         if model is not None:
             model_routers = list(iter_model_routers(model))
@@ -577,7 +579,7 @@ def set_router_replay_data(
             missing_layer_numbers = []
             for layer_number, router in model_routers:
                 layer_idx = layer_number - 1
-                idx = route_index(layer_idx, sum(1 for i in range(layer_idx) if is_moe_layer(tf_config, i)))
+                idx = route_index(layer_idx)
                 if not 0 <= idx < layers_topk_idx_reshape.shape[0]:
                     missing_layer_numbers.append(layer_number)
                     continue
@@ -597,15 +599,12 @@ def set_router_replay_data(
         offset, end = local_rank_info["start"], local_rank_info["end"]
         router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
 
-        # For R2: count MoE layers before `offset` as the starting position.
-        moe_idx = sum(1 for i in range(offset) if is_moe_layer(tf_config, i))
-
         router_offset = 0
         for layer_idx in range(offset, end):
             if not is_moe_layer(tf_config, layer_idx):
                 continue
             router = router_instances_list[router_offset]
-            idx = route_index(layer_idx, moe_idx)
+            idx = route_index(layer_idx)
             if not 0 <= idx < layers_topk_idx_reshape.shape[0]:
                 raise RuntimeError(f"router_replay REPLAY data does not cover layer {layer_idx}")
             router.set_target_indices(
@@ -613,7 +612,6 @@ def set_router_replay_data(
                 replay_mask=replay_mask_rmpad_split,
             )
             router_offset += 1
-            moe_idx += 1
 
 
 def iter_model_routers(model):

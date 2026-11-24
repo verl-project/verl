@@ -54,11 +54,12 @@ def slice_for_rank(
         return data
 
     # A pipeline stage owns consecutive layers, which a basic slice copies ~20x faster than fancy indexing.
-    span = (
-        (route_layers[0], route_layers[-1] + 1)
-        if route_layers and route_layers == list(range(route_layers[0], route_layers[-1] + 1))
-        else None
-    )
+    if route_layers is None:
+        layers = slice(None)
+    elif route_layers and route_layers == list(range(route_layers[0], route_layers[-1] + 1)):
+        layers = slice(route_layers[0], route_layers[-1] + 1)
+    else:
+        layers = route_layers
     # R3 rollout can miss the last token's route, so the padded length comes from input_ids instead.
     if cp_rows is not None and "input_ids" not in data:
         raise ValueError("slicing routed_experts per CP rank needs input_ids to give the aligned length")
@@ -71,12 +72,7 @@ def slice_for_rank(
             continue
         if route_layers and max(route_layers) >= routes.shape[1]:
             raise ValueError(f"route layers {route_layers} exceed routed_experts layers {routes.shape[1]}")
-        if route_layers is None:
-            part = routes
-        elif span is None:
-            part = routes[:, route_layers]
-        else:
-            part = routes[:, span[0] : span[1]]
+        part = routes[:, layers]
         if cp_rows is None:
             # A basic slice is a view, which would ship the whole tensor.
             sliced.append(part.contiguous())

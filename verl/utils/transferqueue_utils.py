@@ -79,15 +79,15 @@ class TQGetSpec:
 
     Attributes:
         data_parser: ``data_parser(data, args)`` the storage units apply before replying.
-        non_tensor: Non-tensor data assigned to the fetched batch, e.g. what ``data_parser`` kept.
+        non_tensor: Non-tensor data assigned to the fetched batch, describing what the parser kept.
     """
 
-    data_parser: Callable | None = None
+    data_parser: Callable
     non_tensor: dict[str, Any] = field(default_factory=dict)
 
 
 def tq_get_parser_supported() -> bool:
-    """Whether the connected TransferQueue runs ``data_parser`` on get (SimpleStorage, TransferQueue>=0.1.12)."""
+    """Whether the connected TransferQueue runs ``data_parser`` on get, which only SimpleStorage does."""
     global _GET_PARSER_SUPPORTED
     if _GET_PARSER_SUPPORTED is not None:
         return _GET_PARSER_SUPPORTED
@@ -99,9 +99,7 @@ def tq_get_parser_supported() -> bool:
         # Answer for this call only: a client that is not up yet says nothing about the backend.
         logger.warning(f"TransferQueue get parser is unavailable, every rank fetches whole samples: {e}")
         return False
-    _GET_PARSER_SUPPORTED = "data_parser" in inspect.signature(tq_client.async_get_data).parameters and isinstance(
-        tq_client.storage_manager, AsyncSimpleStorageManager
-    )
+    _GET_PARSER_SUPPORTED = isinstance(tq_client.storage_manager, AsyncSimpleStorageManager)
     return _GET_PARSER_SUPPORTED
 
 
@@ -110,14 +108,11 @@ async def _get_data_with_parser(tq_client, meta: BatchMeta, data_parser: Callabl
 
     TransferQueue never replays a parser-backed request, because it cannot know the parser has no
     side effects; the ones here only select stored rows, so a read is safe to repeat. A retry repeats
-    the whole batch, which recovers from fewer timeouts than a plain get, where every storage-unit
-    request has its own budget. So a read that keeps timing out ends in a plain get: it returns whole
-    samples, which every caller can still use, rather than failing a read a plain one would survive.
+    the whole batch, so it survives fewer timeouts than a plain get, where every storage-unit request
+    has its own budget. A read that keeps timing out therefore ends in a plain get, whose whole
+    samples every caller can still use, rather than failing where a plain read would recover.
     """
-    try:
-        from transfer_queue.storage.managers.simple_storage_manager import StorageUnitTimeout
-    except ImportError:
-        return await tq_client.async_get_data(meta, data_parser=data_parser), True
+    from transfer_queue.storage.managers.simple_storage_manager import StorageUnitTimeout
 
     attempts = max(1, int(os.environ.get("TQ_SIMPLE_STORAGE_MAX_ATTEMPTS", 3)))
     for attempt in range(1, attempts + 1):
@@ -234,7 +229,7 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta, spec: TQGetSpec
 
     tq_client = tq.get_client()
     parsed = False
-    if spec is not None and spec.data_parser is not None:
+    if spec is not None:
         tensordict, parsed = await _get_data_with_parser(tq_client, meta, spec.data_parser)
     else:
         tensordict = await tq_client.async_get_data(meta)
