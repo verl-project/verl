@@ -72,9 +72,24 @@ def _is_hopper() -> bool:
     return current_platform.is_device_capability(90)
 
 
+def _should_auto_disable_deep_gemm(hf_config: Any) -> bool:
+    if hf_config is None:
+        return False
+    text_config = getattr(hf_config, "text_config", None)
+    model_type = getattr(text_config, "model_type", None) or getattr(hf_config, "model_type", None)
+    if model_type is None:
+        return False
+    try:
+        from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
+    except ImportError:
+        return False
+    return bool(should_auto_disable_deep_gemm(model_type))
+
+
 def set_default_vllm_quantization_backends(
     quantization_config: Mapping[str, Any] | None,
     engine_kwargs: dict[str, Any],
+    hf_config: Any = None,
 ) -> None:
     """Default non-NVFP4 quantization backends to DeepGEMM."""
     if hasattr(quantization_config, "to_dict"):
@@ -83,6 +98,10 @@ def set_default_vllm_quantization_backends(
         return
     # DeepGEMM is NVIDIA-only; on ROCm, vLLM's automatic selection picks the AITER / Triton kernels.
     if torch.version.hip is not None:
+        return
+    # vLLM auto-disables DeepGEMM on certain Blackwell model types (e.g. qwen3_5_moe_text);
+    # pinning deep_gemm there leaves ScaledMM / FusedMoE with no eligible kernel.
+    if _should_auto_disable_deep_gemm(hf_config):
         return
     for option in ("linear_backend", "moe_backend"):
         engine_kwargs.setdefault(option, "deep_gemm")

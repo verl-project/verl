@@ -130,6 +130,37 @@ def _iter_engine_params(engine: Any, *, shards: bool = False, layered_summon: bo
     return iter(params)
 
 
+def _shard_spec_layout(spec: Any, trainer_world_size: int) -> tuple[dict[str, Any], tuple[int, ...]]:
+    """Map a verl ShardSpec to vLLM ParamMeta layout kwargs and this rank's local tensor shape."""
+    from vllm.distributed.weight_transfer.base import Replicate, Shard
+
+    full_shape = tuple(int(d) for d in spec.full_shape)
+    if spec.mesh is None or not spec.placements:
+        return {"owners": tuple(range(trainer_world_size))}, full_shape
+
+    from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+    from torch.distributed.tensor.placement_types import Replicate as TorchReplicate
+    from torch.distributed.tensor.placement_types import Shard as TorchShard
+
+    owners = tuple(int(r) for r in spec.mesh.mesh.reshape(-1).tolist())
+    mesh_shape = tuple(int(d) for d in spec.mesh.shape)
+    vllm_placements = []
+    for p in spec.placements:
+        if isinstance(p, TorchShard):
+            vllm_placements.append(Shard(p.dim))
+        elif isinstance(p, TorchReplicate):
+            vllm_placements.append(Replicate())
+        else:
+            raise TypeError(f"Unsupported DTensor placement for vllm_nccl_m2n: {p!r}")
+    local_shape, _ = compute_local_shape_and_global_offset(full_shape, spec.mesh, spec.placements)
+    extra: dict[str, Any] = {
+        "owners": owners,
+        "mesh_shape": mesh_shape,
+        "placements": None if all(isinstance(p, Replicate) for p in vllm_placements) else tuple(vllm_placements),
+    }
+    return extra, tuple(int(d) for d in local_shape)
+
+
 class VerlEngineWeightSource(_WeightSourceBase):
     """WeightSource adapter over a verl training engine's HF parameter export."""
 
@@ -152,23 +183,35 @@ class VerlEngineWeightSource(_WeightSourceBase):
             ]
         all_ranks = tuple(range(self._trainer_world_size))
         metas = []
-        for name, p in _iter_engine_params(self._engine, shards=True):
-            layout = _vllm_dtensor_layout(p) if _vllm_dtensor_layout is not None else None
-            extra = (
-                {"owners": all_ranks}
-                if layout is None
-                else {"owners": layout[0], "mesh_shape": layout[1], "placements": layout[2]}
-            )
-            metas.append(ParamMeta(name, p.dtype, tuple(p.shape), **extra))
+        for entry in _iter_engine_params(self._engine, shards=True):
+            if len(entry) == 3:
+                name, local_tensor, spec = entry
+                extra, _ = _shard_spec_layout(spec, self._trainer_world_size)
+                metas.append(ParamMeta(name, local_tensor.dtype, tuple(int(d) for d in spec.full_shape), **extra))
+            else:
+                name, p = entry
+                layout = _vllm_dtensor_layout(p) if _vllm_dtensor_layout is not None else None
+                extra = (
+                    {"owners": all_ranks}
+                    if layout is None
+                    else {"owners": layout[0], "mesh_shape": layout[1], "placements": layout[2]}
+                )
+                metas.append(ParamMeta(name, p.dtype, tuple(p.shape), **extra))
         return metas
 
     def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
         return _iter_engine_params(self._engine, layered_summon=self._layered_summon)
 
     def iter_local(self) -> Iterator[tuple[str, torch.Tensor]]:
-        for name, p in _iter_engine_params(self._engine, shards=True):
-            layout = _vllm_dtensor_layout(p) if _vllm_dtensor_layout is not None else None
-            yield name, p if layout is None else (p.full_tensor() if layout[2] is None else p.to_local())
+        for entry in _iter_engine_params(self._engine, shards=True):
+            if len(entry) == 3:
+                name, local_tensor, spec = entry
+                _, local_shape = _shard_spec_layout(spec, self._trainer_world_size)
+                yield name, local_tensor.reshape(local_shape).contiguous()
+            else:
+                name, p = entry
+                layout = _vllm_dtensor_layout(p) if _vllm_dtensor_layout is not None else None
+                yield name, p if layout is None else (p.full_tensor() if layout[2] is None else p.to_local())
 
 
 def _dist_rank_world() -> tuple[int, int]:

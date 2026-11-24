@@ -122,6 +122,7 @@ class vLLMHttpServer:
         cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
+        placement_group: Any = None,
     ):
         """
         Args:
@@ -149,8 +150,10 @@ class vLLMHttpServer:
         self._pd_prefill_side_channel_port: Optional[int] = None
         self._pd_prefill_engine_id: Optional[str] = None
         self._pd_peer_idx: int = 0
+        self._placement_group = placement_group
 
-        os.environ[get_visible_devices_keyword()] = cuda_visible_devices
+        if placement_group is None:
+            os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
         # Forward the Ray job id into the vLLM worker subprocess so the
         # colocated weight-transfer IPC socket path is unique per Ray job.
@@ -353,7 +356,9 @@ class vLLMHttpServer:
         effective_quantization_config = hf_overrides.get("quantization_config") or hf_quantization_config
         from verl.utils.vllm.vllm_quant_utils import set_default_vllm_quantization_backends
 
-        set_default_vllm_quantization_backends(effective_quantization_config, engine_kwargs)
+        set_default_vllm_quantization_backends(
+            effective_quantization_config, engine_kwargs, hf_config=self.model_config.hf_config
+        )
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
@@ -548,6 +553,8 @@ class vLLMHttpServer:
         usage_context = UsageContext.OPENAI_API_SERVER
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
         vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
+        if self._placement_group is not None and vllm_config.parallel_config.distributed_executor_backend == "ray":
+            vllm_config.parallel_config.placement_group = self._placement_group
 
         fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
         kwargs = {}
@@ -1509,8 +1516,14 @@ class vLLMHttpServer:
                     )
                 engine_kwargs["distributed_executor_backend"] = "ray"
 
-        if not is_torch_npu_available(check_device=False) and wt_backend != "sharded_rdt":
-            # refits update the weights in place (direct reload); sharded_rdt uses layerwise reload
+        lora_enabled = getattr(self, "lora_as_adapter", False) or bool(engine_kwargs.get("enable_lora"))
+        if (
+            not is_torch_npu_available(check_device=False)
+            and wt_backend != "sharded_rdt"
+            and not engine_kwargs.get("quantization")
+            and not lora_enabled
+        ):
+            # refits update the weights in place (direct reload); sharded_rdt, LoRA, and online quant use layerwise
             os.environ.setdefault("VLLM_RELOAD_MODE", "direct")
 
     def _get_override_generation_config(self) -> dict:
@@ -1663,6 +1676,29 @@ class vLLMReplica(RolloutReplica):
         # create server actor in each node with node affinity and cuda visible devices
         nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
         env_vars = self._get_server_env_vars(worker_node_ids[::gpus_per_replica_node])
+        placement_group = None
+        vllm_ek = (self.config.get("engine_kwargs", {}) or {}).get("vllm", {}) or {}
+        checkpoint_backend = getattr(getattr(self.config, "checkpoint_engine", None), "backend", None)
+        wtc_backend = (vllm_ek.get("weight_transfer_config") or {}).get("backend")
+        if checkpoint_backend == "vllm_nccl_m2n" or wtc_backend == "nccl_m2n":
+            # ncclDevCommCreate (NCCL Device API used by nccl_m2n) requires cuMem enabled.
+            env_vars = {**env_vars, "NCCL_CUMEM_ENABLE": "1"}
+        uses_ray_executor = (
+            checkpoint_backend == "vllm_sharded_rdt"
+            or wtc_backend == "sharded_rdt"
+            or vllm_ek.get("distributed_executor_backend") == "ray"
+        )
+        pgs = getattr(self.resource_pool, "pgs", None) if self.resource_pool is not None else None
+        if uses_ray_executor and pgs and len(pgs) == 1:
+            placement_group = pgs[0]
+            start_idx = int(getattr(self.resource_pool, "start_bundle_index", 0))
+            bundle_indices = list(range(start_idx, start_idx + self.world_size))
+            max_colocate = max(int(getattr(self.resource_pool, "max_colocate_count", 2)), 2)
+            env_vars = {
+                **env_vars,
+                "VLLM_RAY_BUNDLE_INDICES": ",".join(str(i) for i in bundle_indices),
+                "VLLM_RAY_PER_WORKER_GPUS": str(round(1.0 / max_colocate, 4)),
+            }
         for node_rank in range(nnodes):
             workers = self.workers[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             node_cuda_visible_devices = get_node_visible_devices(
@@ -1694,6 +1730,7 @@ class vLLMReplica(RolloutReplica):
                 gpus_per_node=gpus_per_replica_node,
                 nnodes=nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
+                placement_group=placement_group,
             )
             self.servers.append(server)
 

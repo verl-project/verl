@@ -205,6 +205,8 @@ def _install_fake_vllm_weight_transfer(monkeypatch):
     pkg_wt.WeightTransferTrainerFactory = _FakeFactory
     mod_base = types.ModuleType("vllm.distributed.weight_transfer.base")
     mod_base.ParamMeta = _ParamMeta
+    mod_base.Replicate = type("Replicate", (), {})
+    mod_base.Shard = dataclass(type("Shard", (), {"__annotations__": {"dim": int}}))
     mod_nccl = types.ModuleType("vllm.distributed.weight_transfer.nccl_engine")
     mod_nccl.NCCLTrainerInitInfo = _NCCLTrainerInitInfo
     mod_sparse = types.ModuleType("vllm.distributed.weight_transfer.sparse_nccl_engine")
@@ -246,6 +248,21 @@ def test_engine_weight_source_metadata_and_lora_guard(monkeypatch):
 
     with pytest.raises(NotImplementedError, match="unmerged LoRA"):
         _ = VerlEngineWeightSource(_LoraEngine()).metadata
+
+
+def test_engine_weight_source_local_shard_spec_3tuple(monkeypatch):
+    _install_fake_vllm_weight_transfer(monkeypatch)
+    spec = SimpleNamespace(full_shape=(2, 3), mesh=None, placements=None)
+
+    class _ShardEngine:
+        def get_per_tensor_param_shard(self, **kwargs):
+            return iter([("w0", torch.arange(6, dtype=torch.bfloat16), spec)]), None
+
+    source = VerlEngineWeightSource(_ShardEngine(), use_local_shards=True, trainer_world_size=2)
+    meta = source.metadata
+    assert [(m.name, m.dtype, m.shape, m.owners) for m in meta] == [("w0", torch.bfloat16, (2, 3), (0, 1))]
+    items = list(source.iter_local())
+    assert len(items) == 1 and items[0][0] == "w0" and tuple(items[0][1].shape) == (2, 3)
 
 
 def test_vllm_nccl_checkpoint_engine_reuse_and_reinit(monkeypatch):
@@ -461,7 +478,16 @@ def test_checkpoint_engine_manager_vllm_native_colocated_and_disaggregated():
 
 
 def _load_vllm_async_server_with_stubs(monkeypatch):
-    """Import vllm_async_server in a CPU-only test environment without vllm installed."""
+    """Import vllm_async_server, stubbing vllm only in CPU-only environments without vllm."""
+    try:
+        import vllm  # noqa: F401
+
+        from verl.workers.rollout.vllm_rollout import vllm_async_server
+
+        return vllm_async_server
+    except ImportError:
+        pass
+
     import importlib.util
     from pathlib import Path
 
@@ -494,8 +520,7 @@ def _load_vllm_async_server_with_stubs(monkeypatch):
         "verl.workers.rollout.vllm_rollout.utils",
     ]
     for name in stub_names:
-        if name not in sys.modules:
-            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     sys.modules["vllm"].__version__ = "0.34.0"
     sys.modules["vllm"].SamplingParams = object
     sys.modules["vllm.engine.arg_utils"].AsyncEngineArgs = object
@@ -548,12 +573,27 @@ def test_vllm_server_preprocess_engine_kwargs_and_sleep_level(monkeypatch):
         server.model_config = SimpleNamespace(lora_rank=0, lora={})
         return server
 
+    # Ensure monkeypatch always restores VLLM_RELOAD_MODE after this test.
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "")
+
     # vllm_nccl wires weight_transfer_config + VLLM_RELOAD_MODE=direct.
     monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
     ek = {}
     _make_server("vllm_nccl")._preprocess_engine_kwargs(ek)
     assert ek["weight_transfer_config"] == {"backend": "nccl"}
     assert os.environ.get("VLLM_RELOAD_MODE") == "direct"
+
+    # Online quantization and LoRA leave VLLM_RELOAD_MODE unset (direct reload refuses them).
+    monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
+    ek = {"quantization": "nvfp4_per_token"}
+    _make_server("naive")._preprocess_engine_kwargs(ek)
+    assert "VLLM_RELOAD_MODE" not in os.environ
+
+    monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
+    lora_srv = _make_server("naive")
+    lora_srv.model_config = SimpleNamespace(lora_rank=8, lora={"rank": 8, "merge": False})
+    lora_srv._preprocess_engine_kwargs({})
+    assert "VLLM_RELOAD_MODE" not in os.environ
 
     # vllm_sharded_rdt sets distributed_executor_backend=ray and leaves VLLM_RELOAD_MODE unset.
     monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
@@ -577,3 +617,99 @@ def test_vllm_server_preprocess_engine_kwargs_and_sleep_level(monkeypatch):
     hybrid_server = _make_server("delta_sharded")
     hybrid_server.rollout_mode = mod.RolloutMode.HYBRID
     hybrid_server._preprocess_engine_kwargs({})
+
+
+def test_vllm_pd_replica_lifecycle_fans_out_to_all_servers(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+
+    async_mod = _load_vllm_async_server_with_stubs(monkeypatch)
+    monkeypatch.setitem(sys.modules, "verl.workers.rollout.vllm_rollout.vllm_async_server", async_mod)
+    repo_root = Path(__file__).resolve().parents[2]
+    pd_path = repo_root / "verl" / "workers" / "rollout" / "vllm_rollout" / "vllm_pd_replica.py"
+    spec = importlib.util.spec_from_file_location("_test_vllm_pd_replica", pd_path)
+    pd_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pd_mod)
+
+    log: list = []
+    p0 = _FakeServerHandle("p0", log)
+    d0 = _FakeServerHandle("d0", log)
+    d1 = _FakeServerHandle("d1", log)
+    replica = object.__new__(pd_mod.vLLMPDReplica)
+    replica._prefill_servers = [p0]
+    replica._decode_servers = [d0, d1]
+    replica.servers = [p0, d0, d1]
+    replica._prefill_tp = 1
+    replica._decode_tp = 2
+
+    assert replica.get_weight_transfer_targets() == [(p0, 1), (d0, 2), (d1, 2)]
+
+    asyncio.run(replica.resume_generation())
+    assert [(sid, name) for sid, name, _, _ in log] == [
+        ("p0", "resume_engine_generation"),
+        ("d0", "resume_engine_generation"),
+        ("d1", "resume_engine_generation"),
+        ("p0", "open_submission_gate"),
+        ("d0", "open_submission_gate"),
+        ("d1", "open_submission_gate"),
+    ]
+
+    log.clear()
+    asyncio.run(replica.sleep())
+    assert [(sid, name) for sid, name, _, _ in log] == [
+        ("p0", "wait_for_requests_to_drain"),
+        ("d0", "wait_for_requests_to_drain"),
+        ("d1", "wait_for_requests_to_drain"),
+        ("p0", "sleep"),
+        ("d0", "sleep"),
+        ("d1", "sleep"),
+    ]
+
+    log.clear()
+    asyncio.run(replica.release_kv_cache())
+    assert [(sid, name) for sid, name, _, _ in log] == [
+        ("p0", "wait_for_requests_to_drain"),
+        ("d0", "wait_for_requests_to_drain"),
+        ("d1", "wait_for_requests_to_drain"),
+        ("p0", "release_kv_cache"),
+        ("d0", "release_kv_cache"),
+        ("d1", "release_kv_cache"),
+    ]
+
+
+def test_set_default_vllm_quantization_backends_respects_deep_gemm_exclusion(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+
+    # Stub verl.utils.vllm package so loading vllm_quant_utils.py does not import vllm on CPU-only CI.
+    pkg = types.ModuleType("verl.utils.vllm")
+    pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "verl.utils.vllm", pkg)
+    for sub in ("vllm_fp4_utils", "vllm_nvfp4_per_token_utils"):
+        m = types.ModuleType(f"verl.utils.vllm.{sub}")
+        m.install_mxfp4_mxfp8_compressed_tensors_patch = lambda: None
+        m.is_deepseek_v4_model = lambda model: False
+        m.install_nvfp4_per_token_compressed_tensors_patch = lambda: None
+        monkeypatch.setitem(sys.modules, f"verl.utils.vllm.{sub}", m)
+
+    path = Path(__file__).resolve().parents[2] / "verl" / "utils" / "vllm" / "vllm_quant_utils.py"
+    spec = importlib.util.spec_from_file_location("_test_vllm_quant_utils", path)
+    vllm_quant_utils = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vllm_quant_utils)
+
+    fp8_cfg = {"quant_method": "fp8", "weight_block_size": [128, 128]}
+    monkeypatch.setattr(vllm_quant_utils, "_is_hopper", lambda: False)
+
+    # Normal models default to deep_gemm.
+    monkeypatch.setattr(vllm_quant_utils, "_should_auto_disable_deep_gemm", lambda hf_config: False)
+    ek: dict = {}
+    vllm_quant_utils.set_default_vllm_quantization_backends(fp8_cfg, ek, hf_config=SimpleNamespace(model_type="qwen3"))
+    assert ek == {"linear_backend": "deep_gemm", "moe_backend": "deep_gemm"}
+
+    # Models where vLLM auto-disables DeepGEMM on Blackwell (e.g. qwen3_5_moe_text) stay unset.
+    monkeypatch.setattr(vllm_quant_utils, "_should_auto_disable_deep_gemm", lambda hf_config: True)
+    ek_excluded: dict = {}
+    vllm_quant_utils.set_default_vllm_quantization_backends(
+        fp8_cfg, ek_excluded, hf_config=SimpleNamespace(text_config=SimpleNamespace(model_type="qwen3_5_moe_text"))
+    )
+    assert ek_excluded == {}
