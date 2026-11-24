@@ -36,17 +36,19 @@ def validate_settings(config):
         raise ValueError("External distillation is not supported with turn hidden diversity")
 
 
-def pair_positions(codec, responses, generated):
-    """Response-relative endpoints; no retokenization, no pairing across invalid turns.
+def pair_positions(codec, responses, generated, *, return_stats=False):
+    """Use the actual token containing the final byte of the opening search tag.
 
-    An endpoint must end exactly after </think> (possibly followed by whitespace)
-    before the search tag. Cross-boundary BPE containing action text is rejected.
-    Only adjacent valid search turns form pairs; tool tokens cannot forge turns.
+    BPE may merge whitespace/query bytes after '>'; count this explicitly rather
+    than silently dropping otherwise valid searches. No retokenization is used.
     """
     ids, mask = responses.tolist(), generated.bool().tolist()
     current_mask = torch.zeros(len(ids), dtype=torch.bool)
     previous_positions = torch.full((len(ids),), -1, dtype=torch.long)
+    stats = dict(valid_searches=0, endpoints=0, eligible_pairs=0, captured_pairs=0,
+                 boundary_tokens_with_suffix=0, boundary_tokens_with_query=0)
     previous = None
+    previous_valid = False
     begin = 0
     while begin < len(ids):
         if not mask[begin] or ids[begin] in codec.special_ids:
@@ -57,29 +59,38 @@ def pair_positions(codec, responses, generated):
             end += 1
         pieces = [codec.token_bytes(t) for t in ids[begin:end]]
         text = b"".join(pieces)
-        # Exact single think + search protocol, rather than accepting nested XML.
-        match = re.fullmatch(
-            rb"\s*<think>(?:(?!</?think>|</?search>|</?answer>).)*</think>\s*<search>(?:(?!</?think>|</?search>|</?answer>).)+</search>\s*",
-            text,
-            re.S,
-        )
+        valid = parse_action(text.decode("utf-8", errors="replace"))[0] == "search"
         endpoint = None
-        if match and parse_action(text.decode("utf-8", errors="replace"))[0] == "search":
-            close = text.index(b"</think>") + len(b"</think>")
-            action = text.index(b"<search>", close)
+        if valid:
+            stats["valid_searches"] += 1
+            hidden_spans = list(re.finditer(rb"<think>.*?</think>", text, re.S))
+            tags = [m for m in re.finditer(rb"<search>", text)
+                    if not any(h.start() <= m.start() < h.end() for h in hidden_spans)]
+            if len(tags) != 1:
+                raise ValueError("Valid search has ambiguous opening tag")
+            close = tags[0].end()
             offset = 0
             for i, piece in enumerate(pieces, begin):
                 finish = offset + len(piece)
-                if offset < close <= finish <= action and not text[close:finish].strip():
+                if offset < close <= finish:
                     endpoint = i
+                    stats["boundary_tokens_with_suffix"] += int(finish > close)
+                    stats["boundary_tokens_with_query"] += int(bool(text[close:finish].strip()))
                     break
                 offset = finish
+            if endpoint is None:
+                raise ValueError("Valid search has no generated token endpoint")
+            stats["endpoints"] += 1
+        if valid and previous_valid:
+            stats["eligible_pairs"] += 1
         if endpoint is not None and previous is not None:
             current_mask[endpoint] = True
             previous_positions[endpoint] = previous
-        previous = endpoint
+            stats["captured_pairs"] += 1
+        previous, previous_valid = endpoint, valid
         begin = end
-    return current_mask, previous_positions
+    result = (current_mask, previous_positions)
+    return (*result, stats) if return_stats else result
 
 
 def distance_sums(current, previous, margin):
@@ -201,13 +212,17 @@ class TurnHiddenSupervisor:
             keys=batch.keys, partition_id=batch.partition_id, select_fields=["responses", "response_mask"]
         )
         masks, previous = [], []
+        coverage = {}
         for i, (response, generated) in enumerate(
             zip(data["responses"].unbind(), data["response_mask"].unbind(), strict=True)
         ):
-            mask, prior = pair_positions(self.codec, response, generated)
+            mask, prior, stats = pair_positions(self.codec, response, generated, return_stats=True)
             if batch.tags[i].get("is_padding", False):
                 mask.zero_()
                 prior.fill_(-1)
+            if not batch.tags[i].get("is_padding", False):
+                for key, value in stats.items():
+                    coverage[key] = coverage.get(key, 0) + value
             masks.append(mask)
             previous.append(prior)
         tq.kv_batch_put(
@@ -223,12 +238,17 @@ class TurnHiddenSupervisor:
         )
         batch.fields = None
         metrics["turn_hidden/prepared_pairs"] = sum(int(m.sum()) for m in masks)
+        metrics.update({f"turn_hidden/coverage/{k}": v for k, v in coverage.items()})
+        for label, numerator, denominator in [("endpoint_fraction", "endpoints", "valid_searches"),
+                                               ("pair_fraction", "captured_pairs", "eligible_pairs")]:
+            metrics[f"turn_hidden/coverage/{label}"] = coverage.get(numerator, 0) / max(1, coverage.get(denominator, 0))
         return batch
 
     def update_metadata(self, batch):
         names = list(batch.extra_info.get("auxiliary_loss_mask_names", []))
         batch.extra_info.update(
             turn_hidden_enabled=True,
+            turn_hidden_gradient_diagnostics=bool(getattr(self.config, "gradient_diagnostics", False)),
             turn_hidden_margin=float(self.config.margin),
             turn_hidden_coefficient=float(self.config.coefficient),
             auxiliary_loss_mask_names=list(dict.fromkeys(names + [PAIR_MASK])),

@@ -6,3 +6,6 @@ margin: 0.1
 
 # Weight added to the existing PPO and optional skill losses.
 coefficient: 0.001
+
+# Two extra full mini-batch backward passes; diagnostic only.
+gradient_diagnostics: false

@@ -722,6 +722,11 @@ class FSDPEngine(BaseEngine):
             yield
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
+        diagnostic_metrics = {}
+        if (not forward_only and tu.get(data, "turn_hidden_gradient_diagnostics", default=False)
+                and not getattr(self, "_turn_gradient_probe", False)):
+            from examples.search_r1.hidden_gradient_diagnostics import measure_gradients
+            diagnostic_metrics = measure_gradients(self, data, loss_function)
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         return_model_output = tu.get_non_tensor_data(data=data, key="return_model_output", default=False)
@@ -777,6 +782,10 @@ class FSDPEngine(BaseEngine):
 
             output_lst.append(meta_info)
 
+        if diagnostic_metrics:
+            from verl.utils.metric import Metric, AggregationType
+            output_lst[0]["metrics"].update({k: Metric(value=v, aggregation=AggregationType.SUM)
+                                           for k, v in diagnostic_metrics.items()})
         # postprocess and return
         return postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
 

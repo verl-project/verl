@@ -329,3 +329,21 @@ offline tiny-index CPU/GPU Top-3 preflight before the full evaluation. The
 single-GPU eval job uses 8 result workers, 128 inflight questions per worker and
 512 vLLM sequences, retaining the original questions, decoding and EM protocol.
 The four-GPU index implementation remains the default for other recipes.
+
+Search-anchor hidden-state diagnostics: `turn_hidden_diversity` now captures the
+actual generated token containing the final `>` of the opening `<search>` tag.
+It accepts valid search actions with reasoning outside `<think>`. BPE tokens that
+also include following whitespace/query bytes are counted explicitly in coverage
+metrics. Adjacent valid search turns are paired; answers/invalid turns break pairs.
+The final normalized pre-LM-head vectors use cosine hinge margin 0.1, coefficient
+0.001, and a detached previous endpoint. Tool tokens are excluded.
+
+Set `turn_hidden_diversity.gradient_diagnostics=true` for two extra full-mini-batch
+backward passes before each normal update. Metrics `turn_hidden/gradient/*` compare
+the GRPO policy surrogate (excluding KL/teacher terms) against the weighted hidden
+penalty, using synchronized FSDP gradient shards before clipping or Adam. They
+report norms, ratio, cosine, angle and validity flags for zero norms. Diagnostic
+gradients are cleared and RNG restored before normal training; CPU buffers retain
+local gradient shards. This substantially increases actor time and is off by
+default. `turn_hidden/coverage/*` reports valid searches, endpoints, possible and
+captured adjacent pairs, fractions, and merged-token boundary counts.

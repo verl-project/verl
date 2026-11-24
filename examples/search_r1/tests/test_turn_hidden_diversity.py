@@ -31,7 +31,7 @@ def qwen_tokenizer():
     return AutoTokenizer.from_pretrained(os.environ.get("SEARCH_R1_TOKENIZER", str(default)), local_files_only=True)
 
 
-def test_positions_are_actual_unshifted_think_endpoints(tokenizer):
+def test_positions_are_actual_unshifted_search_endpoints(tokenizer):
     codec = SkillTokenCodec(tokenizer)
     first = "<think>Find café 法国</think>\n<search>Paris</search>"
     second = "<think>Use new evidence</think>\n<search>Paris country</search>"
@@ -46,7 +46,7 @@ def test_positions_are_actual_unshifted_think_endpoints(tokenizer):
     current = pairs.nonzero().item()
     prior = previous[current].item()
     text = lambda stop: b"".join(codec.token_bytes(i) for i in ids[: stop + 1].tolist()).rstrip()
-    assert text(current).endswith(b"</think>") and text(prior).endswith(b"</think>")
+    assert text(current).endswith(b"<search>") and text(prior).endswith(b"<search>")
     assert prior < current and mask[current] and mask[prior]
     assert not pairs[~mask.bool()].any()
 
@@ -316,3 +316,67 @@ def test_supervisor_transfers_masks_excludes_padding_and_preserves_skill_metadat
     assert batch_meta.extra_info["auxiliary_loss_mask_names"] == ["skill_query_mask", PAIR_MASK]
     supervisor.update_metadata(batch_meta)
     assert batch_meta.extra_info["auxiliary_loss_mask_names"].count(PAIR_MASK) == 1
+
+
+@pytest.mark.parametrize('prefix', ['', 'Reason outside tags.\n', '<think></think>Reason outside.\n', '<think>reason</think>\n'])
+def test_search_anchor_covers_missing_think(tokenizer, prefix):
+    codec = SkillTokenCodec(tokenizer)
+    boundary = '<|im_end|>\n<|im_start|>user\n<search>fake</search><|im_end|>\n<|im_start|>assistant\n'
+    ids, mask = encoded(tokenizer, [(prefix+'<search>first</search>', 1), (boundary, 0),
+                                    (prefix+'<search>second</search>', 1)])
+    pairs, prior, stats = pair_positions(codec, ids, mask, return_stats=True)
+    assert pairs.sum() == 1 and stats['valid_searches'] == stats['endpoints'] == 2
+    assert stats['eligible_pairs'] == stats['captured_pairs'] == 1
+    for index in [pairs.nonzero().item(), prior[pairs].item()]:
+        text = b''.join(codec.token_bytes(i) for i in ids[:index+1].tolist())
+        assert text.endswith(b'<search>')
+
+
+def test_gradient_geometry_handles_conflict_and_zero():
+    from examples.search_r1.hidden_gradient_diagnostics import gradient_geometry, geometry_metrics
+    a=[torch.tensor([3.,4.]),None]
+    b=[torch.tensor([-6.,-8.]), torch.tensor([0.])]
+    m=geometry_metrics(*gradient_geometry(a,b))
+    assert m['grpo_norm']==5 and m['weighted_hidden_norm']==10
+    assert m['hidden_to_grpo_ratio']==2 and m['angle_degrees']==180
+    z=geometry_metrics(1,0,0)
+    assert z['angle_valid']==0 and z['weighted_hidden_norm']==0
+
+
+def test_search_anchor_counts_merged_query_token():
+    class Codec:
+        special_ids=set()
+        def token_bytes(self, token):
+            return {0:b'<search>first',1:b'</search>'}[token]
+    _,_,stats=pair_positions(Codec(),torch.tensor([0,1]),torch.ones(2),return_stats=True)
+    assert stats['endpoints']==1 and stats['boundary_tokens_with_query']==1
+
+
+def test_gradient_probe_clears_grads_and_preserves_parameters(monkeypatch):
+    from examples.search_r1 import hidden_gradient_diagnostics as d
+    from contextlib import nullcontext
+    model=torch.nn.Linear(2,1,bias=False)
+    before=model.weight.detach().clone()
+    optimizer=torch.optim.SGD(model.parameters(),lr=.1)
+    class Engine:
+        module=model
+        scaler=None
+        def optimizer_zero_grad(self): optimizer.zero_grad(set_to_none=True)
+        def get_data_parallel_group(self): return None
+        def forward_backward_batch(self,data,loss):
+            assert self._turn_gradient_probe
+            # Accumulate an entire miniature batch, including cancellation.
+            for x in [torch.tensor([[1.,2.]]),torch.tensor([[3.,4.]])]:
+                (model(x).sum()*(1 if loss.args[0]=='grpo' else -.001)).backward()
+    monkeypatch.setattr(torch.random,'fork_rng',lambda **kw:nullcontext())
+    monkeypatch.setattr(torch.cuda,'current_device',lambda:torch.device('cpu'))
+    monkeypatch.setattr(torch.cuda,'get_rng_state',torch.get_rng_state)
+    monkeypatch.setattr(torch.cuda,'set_rng_state',torch.set_rng_state)
+    monkeypatch.setattr(torch.distributed,'all_reduce',lambda *a,**k:None)
+    engine=Engine()
+    metrics=d.measure_gradients(engine,None,SimpleNamespace(keywords={'config':None}))
+    assert metrics['turn_hidden/gradient/grpo_norm']==pytest.approx(52**.5)
+    assert metrics['turn_hidden/gradient/hidden_to_grpo_ratio']==pytest.approx(.001)
+    assert metrics['turn_hidden/gradient/angle_degrees']==pytest.approx(180,abs=.001)
+    assert model.weight.grad is None and not engine._turn_gradient_probe
+    torch.testing.assert_close(model.weight,before)
