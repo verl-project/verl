@@ -157,6 +157,9 @@ class NCCLCheckpointEngine(CheckpointEngine):
     ) -> None:
         self.bucket_size = bucket_size
         self.group_name = group_name
+        # Fencing base: group_name becomes the generation-derived fenced name
+        # once a group_generation kwarg arrives.
+        self._base_group_name = group_name
         self.rebuild_group = rebuild_group
         self.rollout_dtype = rollout_dtype
         self.multi_sender = multi_sender
@@ -290,7 +293,14 @@ class NCCLCheckpointEngine(CheckpointEngine):
         self.socket.connect(address)
         self.socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)
 
-    def init_process_group(self, rank: int, world_size: int, master_metadata: MasterMetadata, num_senders: int):
+    def init_process_group(
+        self,
+        rank: int,
+        world_size: int,
+        master_metadata: MasterMetadata,
+        num_senders: int,
+        group_generation: int | None = None,
+    ):
         """Initialize the NCCL process group.
 
         Args:
@@ -299,6 +309,10 @@ class NCCLCheckpointEngine(CheckpointEngine):
             master_metadata (MasterMetadata): The endpoint of the broadcast source.
             num_senders (int): How many actor-side ranks the group starts with. Ranks below this
                 send or relay weights; ranks at or above it consume them.
+            group_generation: rollout-restart fencing generation — when set,
+                this worker joins the derived fenced name (``{base}_ft_g{N}``)
+                so a membership change or a sync retry forces a fresh group.
+                ``None`` keeps current behavior.
         """
         self.num_senders = num_senders
 
@@ -307,6 +321,17 @@ class NCCLCheckpointEngine(CheckpointEngine):
             self.rank = rank
             self.world_size = world_size
             return
+
+        if group_generation:
+            fenced_name = f"{self._base_group_name}_ft_g{group_generation}"
+            if self.group_name != fenced_name and collective.is_group_initialized(self.group_name):
+                # Generation changed (membership or retry): destroy the
+                # previous group so the rename cannot leak communicators.
+                try:
+                    collective.destroy_collective_group(self.group_name)
+                except Exception:
+                    logger.warning("failed to destroy previous group %s", self.group_name, exc_info=True)
+            self.group_name = fenced_name
 
         if self.rebuild_group or not collective.is_group_initialized(self.group_name):
             collective.init_collective_group(world_size, rank, "nccl", self.group_name)
