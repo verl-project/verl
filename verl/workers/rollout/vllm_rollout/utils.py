@@ -295,12 +295,30 @@ class vLLMColocateWorkerExtension:
             if draft_cfg is not None:
                 yield self._get_drafter_model(), draft_cfg
 
+    def _is_pooling_model(self) -> bool:
+        """Return whether the engine serves a pooling model rather than a generator."""
+        model_config = getattr(getattr(self.model_runner, "vllm_config", None), "model_config", None)
+        if model_config is None:
+            return False
+
+        runner_type = getattr(model_config, "runner_type", None)
+        if runner_type is not None:
+            return runner_type == "pooling"
+        if getattr(model_config, "runner", None) == "pooling":
+            return True
+        return bool(getattr(self.model_runner.model, "is_pooling_model", False))
+
     def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
-        for model in self._iter_all_models():
-            # patch compute_logits to avoid sampling OOV and other illegal tokens
-            monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
-            # patch weight loader to support MoE model
-            patch_vllm_moe_model_weight_loader(model)
+        if self._is_pooling_model():
+            # Pooling reward models do not expose the generation-only surfaces
+            # (compute_logits or the decoder/language_model MoE hierarchy).
+            logger.info("Skipping generation-only model patches for pooling model")
+        else:
+            for model in self._iter_all_models():
+                # patch compute_logits to avoid sampling OOV and other illegal tokens
+                monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
+                # patch weight loader to support MoE model
+                patch_vllm_moe_model_weight_loader(model)
         if self._nvfp4_per_token_config is not None:
             from verl.utils.vllm.vllm_nvfp4_per_token_utils import attest_nvfp4_per_token_runtime, clear_kv_cache
 

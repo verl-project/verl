@@ -187,14 +187,89 @@ class _ToyModel(torch.nn.Module):
 
 
 class _FakeVllmConfig:
-    def __init__(self, speculative_config=None):
+    def __init__(self, speculative_config=None, model_config=None):
         self.speculative_config = speculative_config
+        self.model_config = model_config
 
 
 class _FakeModelRunner:
-    def __init__(self, inner_model, speculative_config=None):
+    def __init__(self, inner_model, speculative_config=None, model_config=None):
         self.model = inner_model
-        self.vllm_config = _FakeVllmConfig(speculative_config=speculative_config)
+        self.vllm_config = _FakeVllmConfig(speculative_config=speculative_config, model_config=model_config)
+
+
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        types.SimpleNamespace(runner_type="pooling"),
+        types.SimpleNamespace(runner="pooling"),
+    ],
+)
+def test_monkey_patch_model_skips_generation_patches_for_pooling(monkeypatch, model_config):
+    """Pooling reward models do not expose compute_logits or decoder MoE structure."""
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(_ToyModel(), model_config=model_config)
+    events = []
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "monkey_patch_compute_logits",
+        lambda *args: events.append("compute_logits"),
+    )
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "patch_vllm_moe_model_weight_loader",
+        lambda model: events.append("moe_loader"),
+    )
+
+    worker.monkey_patch_model(vocab_size=16)
+
+    assert events == []
+
+
+def test_monkey_patch_model_uses_model_pooling_attribute_fallback(monkeypatch):
+    """Older configs without runner metadata use the model's pooling marker."""
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    model = _ToyModel()
+    model.is_pooling_model = True
+    model_config = types.SimpleNamespace(runner_type=None, runner=None)
+    worker.model_runner = _FakeModelRunner(model, model_config=model_config)
+    events = []
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "monkey_patch_compute_logits",
+        lambda *args: events.append("compute_logits"),
+    )
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "patch_vllm_moe_model_weight_loader",
+        lambda model: events.append("moe_loader"),
+    )
+
+    worker.monkey_patch_model(vocab_size=16)
+
+    assert events == []
+
+
+def test_monkey_patch_model_still_patches_generative_model(monkeypatch):
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    model = _ToyModel()
+    model_config = types.SimpleNamespace(runner_type="generate", runner="generate", is_pooling_model=False)
+    worker.model_runner = _FakeModelRunner(model, model_config=model_config)
+    events = []
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "monkey_patch_compute_logits",
+        lambda *args: events.append(("compute_logits", args)),
+    )
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "patch_vllm_moe_model_weight_loader",
+        lambda patched_model: events.append(("moe_loader", patched_model)),
+    )
+
+    worker.monkey_patch_model(vocab_size=16, banned_token_ids=[3])
+
+    assert events == [("compute_logits", (model, 16, [3])), ("moe_loader", model)]
 
 
 def test_split_buffer_updates_routes_registered_buffers():
