@@ -837,3 +837,120 @@ def test_sharded_nixl_rejects_quantized_rollout_and_qat():
     for model, qat in ((_model(fp8), None), (vlm, None), (_model(fp8), SimpleNamespace(enable=True, mode="fp8"))):
         with pytest.raises(NotImplementedError, match="sharded_nixl"):
             dispatch_rollout_weight_quantizer(model_config=model, rollout_config=_rollout(), qat_config=qat)
+
+
+@pytest.mark.parametrize("model", [{"lora_rank": 8}, {"lora_rank": 8, "lora": {"merge": True}}, {"lora": {"rank": 8}}])
+def test_sharded_nixl_rejects_lora_at_config_validation(model, monkeypatch):
+    """Shard export bypasses the trainer-side LoRA merge and adapter export, so ``validate_config``
+    rejects LoRA (FSDP's ``lora_rank``, merged or not, and Megatron's ``lora.rank``) with ``sharded_nixl``
+    before Ray starts or any model loads; other backends still accept it."""
+    from types import SimpleNamespace
+
+    from omegaconf import OmegaConf
+
+    from verl.utils import config as config_mod
+
+    monkeypatch.setattr(config_mod, "omega_conf_to_dataclass", lambda cfg: SimpleNamespace(validate=lambda *a: None))
+
+    def _validate(backend):
+        rollout = {"name": "sglang", "val_kwargs": {"do_sample": False}, "checkpoint_engine": {"backend": backend}}
+        cfg = OmegaConf.create(
+            {
+                "data": {"train_batch_size": 4},
+                "algorithm": {},
+                "trainer": {"n_gpus_per_node": 1, "nnodes": 1},
+                "actor_rollout_ref": {
+                    "actor": {"use_dynamic_bsz": True, "policy_loss": {}},
+                    "model": model,
+                    "rollout": rollout,
+                },
+            }
+        )
+        config_mod.validate_config(cfg, use_reference_policy=False, use_critic=False)
+
+    _validate("nixl")
+    with pytest.raises(NotImplementedError, match="LoRA"):
+        _validate("sharded_nixl")
+
+
+def test_fsdp_shard_export_rejects_lora():
+    """``FSDPEngine.get_per_tensor_param_shard`` rejects a LoRA actor even when ``validate_config`` is skipped."""
+    from types import SimpleNamespace
+
+    from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
+
+    with pytest.raises(NotImplementedError, match="LoRA"):
+        FSDPEngine.get_per_tensor_param_shard(SimpleNamespace(_is_lora=True))
+
+
+def test_rollout_layout_sent_until_a_sync_confirms_it():
+    """Steady-state hellos carry only the digest of the generator's ``RolloutLayout``, not its per-tensor
+    slices, and the trainer keeps using its cached copy. After a sync the generator missed, one where a
+    trainer lacked the layout (that sync fails instead of planning without it), or a layout change, the
+    generator sends the full layout again."""
+    import asyncio
+    from types import SimpleNamespace
+
+    cls = _load_sharded_nixl_engine_mod().ShardedNixlCheckpointEngine
+    t_eng = _cpu_engine("t0", is_master=True, notif_timeout_s=0.2)
+    g_eng = _cpu_engine("g0", notif_timeout_s=0.2)
+    agents = {"t0": t_eng.agent, "g0": g_eng.agent}
+    hellos = []
+
+    def _sender(src):
+        def send_message(peer, msg):
+            if msg["type"] == "hello":
+                hellos.append(msg)
+            agents[peer].messages[src].put_nowait(msg)
+
+        return send_message
+
+    t_eng.agent.send_message, g_eng.agent.send_message = _sender("t0"), _sender("g0")
+    slices = {"model.layers.0.w": {"full_shape": [4, 4], "box": [[0, 2], [0, 4]]}}
+    rank_local = ["named_tensors", "rank_local_named_tensors"]
+    g_eng.set_rollout_layout(RolloutLayout(tp_size=2, wire_formats=rank_local, slices=slices))
+    empty_model = SimpleNamespace(get_per_tensor_param_shard=lambda: (iter(()), None))
+
+    async def _receive(step):
+        async for _ in g_eng._receive_chunks(step):
+            pass
+
+    def _sync(step):
+        tkw, gkw = cls.build_topology(1, 1, [t_eng.prepare(), g_eng.prepare()])
+        t_eng.init_process_group(**{k: v[0] for k, v in tkw.items()})
+        g_eng.init_process_group(**{k: v[0] for k, v in gkw.items()})
+
+        async def _both():
+            return await asyncio.gather(t_eng.send_weights(empty_model, step), _receive(step), return_exceptions=True)
+
+        return asyncio.run(_both())
+
+    def _ok(step):
+        return not any(isinstance(r, Exception) for r in _sync(step))
+
+    try:
+        assert _ok(1) and hellos[-1]["layout"]["slices"] == slices
+        assert _ok(2) and "layout" not in hellos[-1]
+        assert hellos[-1]["layout_digest"] == g_eng._rollout_layout_digest
+        # the trainer still plans from its cached copy, rank-local shapes included
+        assert t_eng.peers["g0"].layout.slices == slices and t_eng.active_wire_format == "rank_local_named_tensors"
+
+        # a sync without g0 drops its layout on the trainer; g0 sees the attempt gap and resends it
+        t_eng.prepare()
+        t_eng.init_process_group(role="trainer", rank=0, world_size=1, peers=[], num_trainers=1)
+        assert _ok(3) and "layout" in hellos[-1]
+
+        # the trainer drops it without g0 missing a sync: that sync fails, the retry resends the layout
+        t_eng.init_process_group(role="trainer", rank=0, world_size=1, peers=[], num_trainers=1)
+        t_res, _g_res = _sync(4)
+        assert isinstance(t_res, RuntimeError) and "cached rollout layout" in str(t_res)
+        assert _ok(4) and "layout" in hellos[-1]
+
+        # a changed layout has a new digest: it is sent once, then cached again
+        new_slices = {"model.layers.0.w": {"full_shape": [4, 4], "box": [[2, 2], [0, 4]]}}
+        g_eng.set_rollout_layout(RolloutLayout(tp_size=2, tp_rank=1, wire_formats=rank_local, slices=new_slices))
+        assert _ok(5) and hellos[-1]["layout"]["slices"] == new_slices
+        assert _ok(6) and "layout" not in hellos[-1] and t_eng.peers["g0"].layout.slices == new_slices
+    finally:
+        t_eng.agent.close()
+        g_eng.agent.close()

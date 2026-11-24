@@ -40,13 +40,14 @@ HF names vLLM loads. A rollout that returns ``None`` receives everything.
 
 **Static layout.** Every trainer rank exports the same ``(name, shape, dtype)`` sequence, so all ranks
 compute the same bucket layout without communicating. The rollout side caches the layout and each trainer
-rank's write tables by digest, so after the first sync a sync exchanges only small headers.
+rank's write tables by digest, and the trainer ranks cache each worker's ``RolloutLayout`` by digest, so
+after the first sync a sync exchanges only small headers.
 
 **Transport.** Per sync (S = sync id, NB staging buffers per worker):
 
 ```text
-rollout worker g -> every trainer rank: hello{S, rollout layout, cached digests}     (ZMQ)
-trainer rank 0   -> every worker:       sync{S, layout digest, num_buckets}           (ZMQ)
+rollout worker g -> every trainer rank: hello{S, rollout layout or its digest, cached digests} (ZMQ)
+trainer rank 0   -> every worker:       sync{S, layout digest, num_buckets}                   (ZMQ)
 for bucket k:
     trainer rank r: wait ACK(S, k-NB) from every worker; pack its slices into buffer k % NB;
                     NIXL WRITE them into every worker's buffer k % NB with notification SNX{S, k, r, hashes}
@@ -124,8 +125,8 @@ It needs ``pip install nixl`` (tested with 1.4.1) and a trainer mode with a sepa
 
 ## Limitations and roadmap
 
-- Quantized rollouts / QAT and vLLM EPLB (redundant/rebalanced experts) are rejected at startup until
-  shard export and dynamic expert ownership support them.
+- LoRA, quantized rollouts / QAT and vLLM EPLB (redundant/rebalanced experts) are rejected at startup
+  until shard export and dynamic expert ownership support them.
 - Rank-local slices need vLLM with plain bf16, TP>1 and a local checkpoint; quantization, LoRA,
   speculative decoding and PP fall back to full tensors.
 - The fail-closed marker lives in ``CheckpointEngineManager``, so a replica resumed through another

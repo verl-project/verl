@@ -17,12 +17,14 @@ Every trainer rank exports only the shards it holds (``engine.get_per_tensor_par
 for Megatron, ``get_per_tensor_param_hf_shard``) and WRITEs them into each generator's
 registered bucket buffers; there is no trainer-side all-gather. Each generator reports its
 ``RolloutLayout`` and receives only the parameters it loads. The bucket layout follows from the
-rank-identical export order, so it is built once and cached on the generators by digest.
+rank-identical export order, so it is built once and cached on the generators by digest. The
+trainers cache each generator's ``RolloutLayout`` by digest: a generator sends it until a sync
+succeeds, and again after a failed or missed sync.
 Planning lives in ``sharded_nixl_layout``.
 
 Per-sync protocol (S = sync id, NB staging buffers per worker)::
 
-    generator g -> every trainer:   hello{S, rollout layout, cached layout/plan digests}   (ZMQ)
+    generator g -> every trainer:   hello{S, rollout layout or its digest, cached layout/plan digests} (ZMQ)
     trainer 0   -> every generator: sync{S, layout digest, num_buckets [, full layout]}     (ZMQ)
     trainer r   -> generator g:     plan{S, plan key, tables[k] = [(dst, len)...]}  if g lacks it (ZMQ)
     for bucket k:
@@ -110,6 +112,11 @@ class _Peer:
     name: str
     rank: int
     layout: Optional[RolloutLayout] = None
+    # digest of the generator's rollout layout the trainer holds: on a trainer, of the cached
+    # ``layout``; on a generator, of its own layout once a sync confirmed it (None: unknown)
+    layout_digest: Optional[str] = None
+    # trainer side: local_shapes_key of the cached layout's slices if it advertises rank-local, else None
+    shapes_key: Optional[str] = None
     owns: Any = None
     plan_key: str = ""
     # bucket -> [(dst, len)] (named_tensors) or [(dst, len, box_key)] (rank_local_named_tensors:
@@ -117,7 +124,7 @@ class _Peer:
     tables: dict[int, list[tuple]] = field(default_factory=dict)
     tables_key: str = ""
     known_digests: set = field(default_factory=set)
-    known_plan_keys: dict[str, str] = field(default_factory=dict)
+    known_plan_key: Optional[str] = None
 
 
 def _hash_u8_many(t: torch.Tensor, ranges: list[tuple[int, int]]) -> list[int]:
@@ -220,6 +227,7 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
         self._sync_counter = 0
         self._attempt = 0
         self._rollout_layout: Optional[RolloutLayout] = None
+        self._rollout_layout_digest = ""
         self._gen_plans: dict[tuple[str, str], dict[int, list[tuple[int, int]]]] = {}  # (trainer, plan_key) -> tables
         # rank_local_named_tensors, trainer side: local-shapes key -> layout; plan_key -> this rank's
         # {src_name: [BoxWriteSlice]}; the deduped union for the current generator set
@@ -350,6 +358,10 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
         """Adds new peers and drops vanished ones; existing connections are kept."""
         self.role, self.rank, self.world_size, self.num_trainers = role, rank, world_size, num_trainers
         if attempt:
+            if role == "rollout" and int(attempt) > self._attempt:
+                # this generator missed a sync, in which the trainers dropped its cached rollout layout
+                for p in self.peers.values():
+                    p.layout_digest = None
             self._attempt = max(self._attempt, int(attempt))
         new_order = []
         seen = set()
@@ -417,18 +429,18 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
         if isinstance(layout, dict):
             layout = RolloutLayout.from_dict(layout)
         self._rollout_layout = layout
+        self._rollout_layout_digest = ""
+        if layout is not None:
+            d = layout.to_dict()
+            slices = d.pop("slices", None)
+            d["slice_digest"] = layout.slice_digest or slices_digest(slices)
+            blob = json.dumps(d, sort_keys=True, default=list).encode()
+            self._rollout_layout_digest = hashlib.sha256(blob).hexdigest()
 
     @staticmethod
-    def _plan_key(layout_digest: str, rl: Optional[RolloutLayout], wire_format: str = NAMED) -> str:
+    def _plan_key(layout_digest: str, rollout_layout_digest: str, wire_format: str = NAMED) -> str:
         """Cache key of one generator's write plan: the layout plus that generator's ownership."""
-        h = hashlib.sha256(layout_digest.encode())
-        h.update(wire_format.encode())
-        if rl is not None:
-            d = rl.to_dict()
-            slices = d.pop("slices", None)
-            d["slice_digest"] = rl.slice_digest or slices_digest(slices)
-            h.update(json.dumps(d, sort_keys=True, default=list).encode())
-        return h.hexdigest()
+        return hashlib.sha256(f"{layout_digest}:{wire_format}:{rollout_layout_digest}".encode()).hexdigest()
 
     def _choose_wire_format(self, gens: list[_Peer]) -> tuple[str, Optional[str]]:
         """``(RANK_LOCAL, local-shapes key)`` iff every generator advertises it with the same local
@@ -437,10 +449,9 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
             return NAMED, None
         keys = set()
         for g in gens:
-            rl = g.layout
-            if rl is None or RANK_LOCAL not in (rl.wire_formats or []):
+            if g.shapes_key is None:
                 return NAMED, None
-            keys.add(local_shapes_key(rl.slices))
+            keys.add(g.shapes_key)
         if len(keys) != 1:
             logger.warning("sharded_nixl: generators disagree on rank-local shapes; falling back to named_tensors")
             return NAMED, None
@@ -646,10 +657,19 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
             msg = await self._read(g.name, "hello", self.notif_timeout_s)
             if msg["sync"] != S:
                 raise RuntimeError(f"sharded_nixl: generator {g.name} is at sync {msg['sync']}, trainer at {S}")
-            g.layout = RolloutLayout.from_dict(msg.get("layout"))
-            g.owns = owned_name_filter(g.layout)
+            if "layout" in msg:
+                g.layout = rl = RolloutLayout.from_dict(msg["layout"])
+                g.owns = owned_name_filter(rl)
+                g.layout_digest = msg["layout_digest"]
+                g.shapes_key = (
+                    local_shapes_key(rl.slices) if rl is not None and RANK_LOCAL in (rl.wire_formats or []) else None
+                )
+            elif g.layout_digest != msg["layout_digest"]:
+                raise RuntimeError(
+                    f"sharded_nixl: generator {g.name} assumed a cached rollout layout this trainer does not have"
+                )
             g.known_digests = set(msg.get("known_digests", []))
-            g.known_plan_keys = dict(msg.get("known_plan_keys", {}))
+            g.known_plan_key = msg.get("known_plan_key")
             hello_bytes += len(json.dumps(msg, default=str))
 
         # 1. layout: built on the first sync, then validated against the export below
@@ -666,9 +686,8 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
 
         # 2. sync header (rank 0) and this rank's write tables, for generators that lack them
         meta_bytes = 0
-        my_name = self.agent.agent_name
         for g in gens:
-            g.plan_key = self._plan_key(layout.digest, g.layout, wire_format)
+            g.plan_key = self._plan_key(layout.digest, g.layout_digest, wire_format)
             if self.rank == 0:
                 msg = {
                     "type": "sync",
@@ -695,7 +714,7 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
                 else:
                     g.tables = self._tables_for(layout, g.owns)
                 g.tables_key = g.plan_key
-            if g.known_plan_keys.get(my_name) != g.plan_key:
+            if g.known_plan_key != g.plan_key:
                 # the generator only needs (dst, len) per slice (its own box is implied)
                 wire_tables = {k: [(t[0], t[1]) for t in v] for k, v in g.tables.items()}
                 msg = {"type": "plan", "sync": S, "plan_key": g.plan_key, "rank": self.rank, "tables": wire_tables}
@@ -920,15 +939,23 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
         nb = self.num_buffers
         t_start = time.time()
 
-        # 0. hello to every trainer
-        hello = {
-            "type": "hello",
-            "sync": S,
-            "layout": self._rollout_layout.to_dict() if self._rollout_layout is not None else None,
-            "known_digests": [self._layout.digest] if self._layout is not None else [],
-            "known_plan_keys": {t: k for (t, k) in self._gen_plans.keys()},
-        }
+        # 0. hello to every trainer, with the rollout layout unless this trainer is known to hold it
+        known_plan_keys = dict(self._gen_plans.keys())
+        layout_dict = None
         for t in trainers:
+            hello = {
+                "type": "hello",
+                "sync": S,
+                "layout_digest": self._rollout_layout_digest,
+                "known_digests": [self._layout.digest] if self._layout is not None else [],
+                "known_plan_key": known_plan_keys.get(t.name),
+            }
+            if t.layout_digest != self._rollout_layout_digest:
+                if layout_dict is None and self._rollout_layout is not None:
+                    layout_dict = self._rollout_layout.to_dict()
+                hello["layout"] = layout_dict
+            # confirmed again only once this sync succeeds
+            t.layout_digest = None
             self.agent.send_message(t.name, hello)
 
         # 1. sync header (+ layout on first contact)
@@ -952,7 +979,7 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
         # rank-local: the tensors yielded below have their local (box) shapes
         self.active_wire_format = wire_format
         owns = owned_name_filter(self._rollout_layout)
-        plan_key = self._plan_key(layout.digest, self._rollout_layout, wire_format)
+        plan_key = self._plan_key(layout.digest, self._rollout_layout_digest, wire_format)
 
         # 2. per-trainer write tables, read only when not cached
         tables: dict[str, dict[int, list[tuple[int, int]]]] = {}
@@ -1000,6 +1027,9 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
             ack = b"ACK" + _ACK_HDR.pack(S, k)
             for t in trainers:
                 self.agent.send_notif(t.name, ack)
+        # every trainer read this sync's hello before sending its SNXs, so each now holds the layout
+        for t in trainers:
+            t.layout_digest = self._rollout_layout_digest
         dt = time.time() - t_start
         logger.info(
             "sharded_nixl recv v=%s done in %.2fs (buckets=%d, params=%d, bytes=%.1fMB)",

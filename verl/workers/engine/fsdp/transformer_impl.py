@@ -873,6 +873,8 @@ class FSDPEngine(BaseEngine):
         ``(name, local_flat_shard_bf16, ShardSpec)`` instead of all-gathering the full
         tensor. Pure DTensor export, no side effects -- delta bookkeeping lives in
         :meth:`get_per_tensor_param_delta_shard`. Non-LoRA base path only."""
+        if self._is_lora:
+            raise NotImplementedError("FSDP shard export does not support LoRA")
 
         # FSDP1's (SHARDED_)STATE_DICT export runs through the unshard machinery and
         # asserts flat params are GPU-resident; FSDP2 state_dict() only collects

@@ -240,6 +240,11 @@ def validate_config(
     lora_rank = lora_config.get("rank", 0)
     if lora_rank <= 0:
         lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+    if lora_rank > 0 and config.actor_rollout_ref.rollout.get("checkpoint_engine", {}).get("backend") == "sharded_nixl":
+        raise NotImplementedError(
+            "checkpoint_engine.backend='sharded_nixl' does not support LoRA: its shard export bypasses the "
+            "trainer-side LoRA merge and adapter export"
+        )
     if lora_config.get("merge", False):
         lora_rank = 0
     if lora_rank > 0 and config.actor_rollout_ref.rollout.name == "vllm":
