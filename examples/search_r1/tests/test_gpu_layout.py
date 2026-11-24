@@ -50,3 +50,11 @@ def test_telemetry_tracks_all_allocated_gpus_in_cuda_order(count):
     assert [int(row.split(",")[2]) for row in rows] == [100+i for i in range(count)]
     with pytest.raises(AssertionError):
         telemetry.normalize_gpu_sample(body, [], count)
+
+
+def test_single_gpu_layout_preserves_uuid_and_bounds():
+    gpus=devices(1)
+    layout=retrieval_gpu_layout(gpus,[0])
+    assert layout['cuda_visible_devices']==gpus[0]['uuid']
+    assert len(layout['retrieval_devices'])==1
+    with pytest.raises(ValueError):retrieval_gpu_layout(gpus,[1])

@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--device',default='cuda:0')
     parser.add_argument('--threads',type=int,default=20)
     parser.add_argument('--search-backend',choices=['cpu','gpu'],default='gpu')
+    parser.add_argument('--gpu-count',type=int,choices=[1,4],default=4)
     parser.add_argument('--gpu-scratch-mib',type=int,default=1536)
     parser.add_argument('--port',type=int,default=8000)
     parser.add_argument('--timing-log')
@@ -42,10 +43,15 @@ def main():
     if index.ntotal != len(corpus) or index.d != 768:
         raise ValueError('Index/corpus mismatch')
     if args.search_backend == 'gpu':
-        index = GpuShardedIndex(index,scratch_mib=args.gpu_scratch_mib)
+        if args.gpu_count == 1:
+            from .single_gpu_index import SingleGpuIndex
+            index = SingleGpuIndex(index,scratch_mib=args.gpu_scratch_mib)
+        else:
+            index = GpuShardedIndex(index,scratch_mib=args.gpu_scratch_mib)
     encoder = FP32Encoder(args.model,args.device)
     backend = RetrievalBackend(index,corpus,encoder)
     startup = {'backend':args.search_backend,'documents':len(corpus),'dimension':index.d,
+               'gpu_count':args.gpu_count if args.search_backend=='gpu' else 0,
                'encoder_device':args.device,'encoder':encoder.metadata(),'fp32':True,'tf32':False}
     if args.startup_report:
         Path(args.startup_report).write_text(json.dumps(startup,indent=2)+'\n')
@@ -78,7 +84,7 @@ def main():
         stages['other'] = elapsed-sum(stages.values())
         profile = {'request_id':request.request_id or uuid4().hex,'query_count':len(request.queries),
                    'total_s':elapsed,'exclusive_s':stages,'device':args.device,
-                   'threads':{'torch':torch.get_num_threads(),'faiss':4 if args.search_backend=='gpu' else args.threads},
+                   'threads':{'torch':torch.get_num_threads(),'faiss':args.gpu_count if args.search_backend=='gpu' else args.threads},
                    'blas_threshold':faiss.cvar.distance_compute_blas_threshold,'search_backend':args.search_backend}
         if args.timing_log:
             with Path(args.timing_log).open('a') as stream:

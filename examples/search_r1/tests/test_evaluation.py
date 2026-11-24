@@ -86,3 +86,39 @@ def test_native_search_agent_output_is_scored_without_postprocessing(request):
         assert result['messages'][-1]['content']=='<answer>Rome</answer>'
         assert 'Paris' in result['messages'][-2]['content']
     asyncio.run(check())
+
+
+def test_ten_shards_cover_global_ids_once_and_keep_dataset_balance():
+    from collections import Counter
+    from examples.search_r1.eval_reporting import select_eval_shard
+    rows=[{'eval_id':i,'data_source':'nq' if i<3610 else 'bamboogle'} for i in range(3735)]
+    shards=[select_eval_shard(rows,i,10) for i in range(10)]
+    ids=[r['eval_id'] for shard in shards for r in shard]
+    assert len(ids)==len(set(ids))==len(rows) and set(ids)==set(range(len(rows)))
+    assert max(map(len,shards))-min(map(len,shards))==1
+    for source in ['nq','bamboogle']:
+        counts=[Counter(r['data_source'] for r in shard)[source] for shard in shards]
+        assert max(counts)-min(counts)<=1
+    assert [r['eval_id'] for r in shards[7]][:3]==[7,17,27]
+    for idx,count in [(-1,10),(10,10),(0,0)]:
+        with pytest.raises(ValueError):select_eval_shard(rows,idx,count)
+    with pytest.raises(ValueError):select_eval_shard([{'eval_id':1},{'eval_id':1}],0,10)
+
+
+def test_sharded_scoring_uses_global_ids_and_global_merge_recomputes_counts(tmp_path):
+    from collections import Counter
+    from examples.search_r1.eval_reporting import select_eval_shard
+    rows,results=fixture_results()
+    # Every local result keeps its original global ID instead of renumbering.
+    paths=[]
+    for index in range(2):
+        selected=select_eval_shard(rows,index,2)
+        subset=[r for r in results if r['eval_id']%2==index]
+        path=tmp_path/f'shard-{index}.jsonl';path.write_text(''.join(json.dumps(r)+'\n' for r in subset));paths.append(path)
+        report=aggregate_results(selected,[path],Counter(r['data_source'] for r in selected))
+        assert report['total_count']==len(selected)
+    report=aggregate_results(rows,paths,Counter(r['data_source'] for r in rows))
+    assert report['total_count']==3 and report['total_correct']==2
+    assert report['overall_micro_em']==pytest.approx(2/3)
+    # Reusing one shard in place of the other is rejected.
+    with pytest.raises(AssertionError):aggregate_results(rows,[paths[0],paths[0]],Counter(r['data_source'] for r in rows))

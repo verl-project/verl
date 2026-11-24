@@ -13,6 +13,8 @@ TRAIN_PYTHON=${TRAIN_PYTHON:-/usr/bin/python3}
 TRAIN_ENTRYPOINT=${TRAIN_ENTRYPOINT:-verl.trainer.main_ppo}
 RETRIEVER_PYTHON=${RETRIEVER_PYTHON:-$SD_ROOT/.envs/sd-search/bin/python}
 RETRIEVAL_ENCODER_DEVICE=${RETRIEVAL_ENCODER_DEVICE:-cuda:0}
+RETRIEVAL_FAISS_GPUS=${RETRIEVAL_FAISS_GPUS:-4}
+RETRIEVAL_THREADS=${RETRIEVAL_THREADS:-20}
 START_RETRIEVER=${START_RETRIEVER:-1}
 DRY_RUN=${DRY_RUN:-0}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-256}
@@ -50,7 +52,9 @@ import json, os, re
 from pathlib import Path
 from examples.search_r1.gpu_layout import retrieval_gpu_layout
 expected = int(os.environ['N_GPUS'])
-if expected not in [4, 8] or torch.cuda.device_count() != expected:
+if expected == 1 and os.environ.get('TRAIN_ENTRYPOINT') != 'examples.search_r1.evaluate':
+    raise RuntimeError('Single-GPU support is restricted to standalone evaluation')
+if expected not in [1, 4, 8] or torch.cuda.device_count() != expected:
     raise RuntimeError(f'This recipe requires exactly {expected} visible training GPUs')
 devices = []
 for i in range(expected):
@@ -88,13 +92,13 @@ PY
     read -r retrieval_cuda_mask < "$RUN_DIR/retrieval/cuda-visible-devices.txt"
     env CUDA_VISIBLE_DEVICES="$retrieval_cuda_mask" \
         PYTHONPATH="$SD_ROOT/.envs/faiss-gpu-cu12-1.8.0.2:$VERL_ROOT:$SD_ROOT/src" \
-        NVIDIA_TF32_OVERRIDE=0 OPENBLAS_NUM_THREADS=20 OMP_NUM_THREADS=20 \
+        NVIDIA_TF32_OVERRIDE=0 OPENBLAS_NUM_THREADS="$RETRIEVAL_THREADS" OMP_NUM_THREADS="$RETRIEVAL_THREADS" \
         "$RETRIEVER_PYTHON" -u -m examples.search_r1.retrieval_service \
         --index "$SD_ROOT/data/retrieval/e5_Flat.index" \
         --corpus "$SD_ROOT/data/retrieval/wiki-18.jsonl" \
         --offsets "$SD_ROOT/data/retrieval/wiki-18.offsets.u64" \
         --model "$SD_ROOT/models/e5-base-v2" \
-        --device "$RETRIEVAL_ENCODER_DEVICE" --threads 20 --search-backend gpu --gpu-scratch-mib 1536 --port 8000 \
+        --device "$RETRIEVAL_ENCODER_DEVICE" --threads "$RETRIEVAL_THREADS" --search-backend gpu --gpu-count "$RETRIEVAL_FAISS_GPUS" --gpu-scratch-mib 1536 --port 8000 \
         --timing-log "$RUN_DIR/retrieval/timing.jsonl" \
         --startup-report "$RUN_DIR/retrieval/startup.json" \
         > "$RUN_DIR/retrieval/service.log" 2>&1 &

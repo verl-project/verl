@@ -319,3 +319,13 @@ that custom columns move. The acceptance launcher first runs verify_sd_gpu.py
 with eight tiny Qwen FSDP ranks and CPU auxiliary fields, checking actual SD
 backward and finite gradients before loading the large retrieval index. This
 preflight is a runtime integration check, not a trained-model quality result.
+
+Standalone evaluation also supports a single GPU with at least 130 GiB device
+memory. Set `N_GPUS=1`, `TRAIN_ENTRYPOINT=examples.search_r1.evaluate`,
+`RETRIEVAL_GPU_INDICES=0`, `RETRIEVAL_FAISS_GPUS=1`, and
+`ROLLOUT_GPU_MEMORY=0.40`. The full exact FP32 index (about 60 GiB), FP32 GPU E5,
+and vLLM share that GPU. This path uses a persistent FAISS owner thread and an
+offline tiny-index CPU/GPU Top-3 preflight before the full evaluation. The
+single-GPU eval job uses 8 result workers, 128 inflight questions per worker and
+512 vLLM sequences, retaining the original questions, decoding and EM protocol.
+The four-GPU index implementation remains the default for other recipes.

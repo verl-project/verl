@@ -13,6 +13,17 @@ DATASET_COUNTS = {'nq': 3610, 'triviaqa': 11313, 'popqa': 14267, 'hotpotqa': 740
 MULTIHOP = ['hotpotqa', '2wikimultihopqa', 'musique', 'bamboogle']
 
 
+
+def select_eval_shard(rows, shard_index=0, num_shards=1):
+    """Partition by original eval_id; IDs must remain global for final merging."""
+    if num_shards < 1 or not 0 <= shard_index < num_shards:
+        raise ValueError("Invalid evaluation shard index/count")
+    ids = [row["eval_id"] for row in rows]
+    if len(set(ids)) != len(ids) or any(not isinstance(i, int) or i < 0 for i in ids):
+        raise ValueError("Evaluation IDs must be distinct nonnegative integers")
+    return [row for row in rows if row["eval_id"] % num_shards == shard_index]
+
+
 def check_final_provenance(messages, prompt, final, termination):
     assert messages[:len(prompt)] == prompt
     assistants = [m for m in messages[len(prompt):] if m['role'] == 'assistant']

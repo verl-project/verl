@@ -17,7 +17,7 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.workers.rollout.llm_server import LLMServerManager
 
 from .agent_loop import SearchR1AgentLoop
-from .eval_reporting import DATASET_COUNTS, aggregate_results, result_record, run_bounded
+from .eval_reporting import DATASET_COUNTS, aggregate_results, result_record, run_bounded, select_eval_shard
 
 
 @ray.remote(num_cpus=1)
@@ -70,6 +70,12 @@ async def evaluate(config):
     assert Counter(r['data_source'] for r in rows) == Counter(DATASET_COUNTS)
     for i, row in enumerate(rows):
         row['eval_id'] = i
+    num_shards = int(os.environ.get("EVAL_NUM_SHARDS", "1"))
+    shard_index = int(os.environ.get("EVAL_SHARD_INDEX", "0"))
+    rows = select_eval_shard(rows, shard_index, num_shards)
+    if not rows:
+        raise ValueError("Empty evaluation shard")
+    expected_counts = Counter(r["data_source"] for r in rows)
     started = time.perf_counter()
     manager = await LLMServerManager.create(config)
     print('EVAL_SERVERS_READY', manager.get_addresses(), flush=True)
@@ -80,8 +86,8 @@ async def evaluate(config):
                for i in range(count)]
     results = await asyncio.gather(*[worker.evaluate.remote(rows[i::count], per_worker, str(directory))
                                      for i, worker in enumerate(workers)])
-    report = aggregate_results(rows, [r['file'] for r in results])
-    report.update(checkpoint_step=200, model_path=config.actor_rollout_ref.model.path,
+    report = aggregate_results(rows, [r['file'] for r in results], expected_counts=expected_counts)
+    report.update(eval_shard_index=shard_index, eval_num_shards=num_shards, checkpoint_step=200, model_path=config.actor_rollout_ref.model.path,
                   elapsed_s=time.perf_counter()-started, worker_results=results,
                   global_trajectory_concurrency=count*per_worker,
                   max_num_seqs_per_engine=config.actor_rollout_ref.rollout.max_num_seqs,
@@ -94,7 +100,7 @@ async def evaluate(config):
 def main(config):
     OmegaConf.resolve(config)
     (Path(os.environ['RUN_DIR'])/'resolved-eval-config.json').write_text(json.dumps(OmegaConf.to_container(config, resolve=True), indent=2)+'\n')
-    ray.init(num_cpus=60, runtime_env=get_ppo_ray_runtime_env(config))
+    ray.init(num_cpus=config.ray_kwargs.ray_init.get("num_cpus"), runtime_env=get_ppo_ray_runtime_env(config))
     try:
         asyncio.run(evaluate(config))
     finally:
