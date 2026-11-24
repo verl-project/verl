@@ -15,12 +15,14 @@
 import inspect
 import logging
 import os
+from dataclasses import replace
 from functools import partial
 from typing import Any, Callable, ContextManager, Iterator
 
 import torch
 import torch.distributed
 from megatron.core import parallel_state as mpu
+from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.package_info import __version__
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
@@ -1039,14 +1041,47 @@ class MegatronEngine(BaseEngine):
             self._hf_export_tasks = self.bridge.get_conversion_tasks(self.module)
         return self._hf_export_tasks
 
+    def _iter_staged_conversion_tasks(self, conversion_tasks, device):
+        offloaded_params = {}
+        for chunk in self.module:
+            if not isinstance(chunk, DDP):
+                continue
+            for buffer in chunk.buffers + chunk.expert_parallel_buffers:
+                param_data = buffer.param_data
+                if param_data is not None and param_data.untyped_storage().nbytes() == 0:
+                    for param, (start, end, _) in buffer.param_index_map.items():
+                        offloaded_params[param] = (param_data.cpu_data, start, end)
+
+        for task in conversion_tasks:
+            weight = task.param_weight
+            if weight is None:
+                # Other PP stages must still participate in this task's collectives.
+                yield task
+                continue
+
+            if weight in offloaded_params:
+                cpu_data, start, end = offloaded_params[weight]
+                source = cpu_data[start:end].view(weight.shape)
+            else:
+                source = weight.detach()
+
+            # Never rebind model parameters or cache the temporary device copies.
+            # The consumer keeps each copy alive until its conversion/send finishes.
+            yield replace(task, param_weight=source.to(device, non_blocking=True))
+
     def get_per_tensor_param(self, base_sync_done=False, **kwargs):
         peft_config = None
         non_merge_lora_sync = self.peft_cls is not None and not self.model_config.lora.get("merge", False)
         adapter_only = base_sync_done and non_merge_lora_sync
         if non_merge_lora_sync:
             peft_config = build_peft_config_for_vllm(self.model_config.lora)
-        # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
-        load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
+        conversion_tasks = None if adapter_only else self._mbridge_export_tasks()
+        stream_from_cpu = self.is_param_offload_enabled and self.peft_cls is None and conversion_tasks is not None
+        if stream_from_cpu:
+            conversion_tasks = self._iter_staged_conversion_tasks(conversion_tasks, get_device_id())
+        else:
+            load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
+
         if adapter_only:
             export_kwargs = {}
             if (
@@ -1072,15 +1107,12 @@ class MegatronEngine(BaseEngine):
                     export_kwargs["expand_shared_outer"] = True
             per_tensor_param = self.bridge.export_adapter_weights(self.module, **export_kwargs)
         else:
-            conversion_tasks = self._mbridge_export_tasks()
-            per_tensor_param = (
-                self.bridge.export_hf_weights(
-                    self.module,
-                    conversion_tasks=conversion_tasks,
-                    merge_adapter_weights=False,
-                )
-                if non_merge_lora_sync
-                else self.bridge.export_hf_weights(self.module, conversion_tasks=conversion_tasks)
+            per_tensor_param = self.bridge.export_hf_weights(
+                self.module,
+                conversion_tasks=conversion_tasks,
+                merge_adapter_weights=not non_merge_lora_sync,
+                # Bridge's progress bar requires len(tasks); staged tasks are lazy.
+                show_progress=not stream_from_cpu,
             )
 
         if self._qat_enabled:
