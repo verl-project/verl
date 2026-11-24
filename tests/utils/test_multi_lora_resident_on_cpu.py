@@ -1763,3 +1763,78 @@ def _gloo_fsdp2_review_fixes_worker(rank: int, world_size: int, rdzv_file: str):
 def test_fsdp2_review_fixes_two_rank_gloo(tmp_path):
     rdzv_file = str(tmp_path / "rdzv_fsdp2_review_fixes")
     mp.spawn(_gloo_fsdp2_review_fixes_worker, args=(2, rdzv_file), nprocs=2, join=True)
+
+
+def test_lora_adapters_resync_base_consistent_across_worker_and_rollouts(monkeypatch):
+    """When only lora_adapters configures LoRA (legacy ranks=0) with resync_base=True,
+    ActorRolloutRefWorker and rollout servers agree to discard and re-upload base weights
+    on every sleep/update cycle.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from verl.workers.engine_workers import ActorRolloutRefWorker
+    from verl.workers.rollout.sglang_rollout.utils import lora_base_kept_on_sleep, lora_served_as_adapter
+    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+
+    model_config = SimpleNamespace(
+        lora_rank=0,
+        lora_adapter_path=None,
+        lora={"rank": 0, "merge": False, "resync_base": True},
+        lora_adapters={"tenant_a": {"r": 8, "lora_alpha": 16}},
+    )
+
+    assert ActorRolloutRefWorker._resolve_lora_resync_base(model_config) is True
+    assert lora_served_as_adapter(model_config) is True
+    assert lora_base_kept_on_sleep(model_config) is False
+
+    # Server sleep level matches worker resync_base=True (level 2 discards base weights)
+    fake_server = object.__new__(vLLMHttpServer)
+    fake_server.model_config = model_config
+    fake_server.config = SimpleNamespace(mtp=None)
+    assert fake_server.lora_as_adapter is True
+    assert fake_server._resolve_sleep_level() == 2
+
+    # Run two consecutive update_weights cycles starting with preloaded base (base_sync_done=True)
+    from omegaconf import OmegaConf
+
+    worker = object.__new__(ActorRolloutRefWorker)
+    worker.config = OmegaConf.create(
+        {
+            "rollout": {
+                "name": "vllm",
+                "free_cache_engine": True,
+                "checkpoint_engine": {"backend": "naive"},
+            }
+        }
+    )
+    worker.base_sync_done = True
+    worker.layered_summon = False
+    worker.peft_merge = False
+    worker.lora_resync_base = ActorRolloutRefWorker._resolve_lora_resync_base(model_config)
+
+    peft_cfg = {"r": 8, "lora_alpha": 16}
+    engine = MagicMock()
+    engine.is_param_offload_enabled = False
+    engine.get_per_tensor_param.side_effect = lambda layered_summon=False, base_sync_done=True: (
+        "adapter_params" if base_sync_done else "base_params",
+        peft_cfg,
+    )
+    worker.actor = SimpleNamespace(engine=engine)
+    worker.rollout = AsyncMock()
+    worker.rollout.sleep_level = 2
+
+    monkeypatch.setattr("verl.workers.engine_workers.set_expandable_segments", lambda _v: None)
+    monkeypatch.setattr("verl.workers.engine_workers.log_gpu_memory_usage", lambda *_a, **_kw: None)
+    fake_dev = SimpleNamespace(empty_cache=lambda: None, synchronize=lambda: None)
+    monkeypatch.setattr("verl.workers.engine_workers.get_torch_device", lambda: fake_dev)
+    monkeypatch.setattr(dist, "barrier", lambda: None)
+
+    for step in (1, 2):
+        asyncio.run(worker.update_weights(global_steps=step))
+
+    # Each of the two consecutive cycles must upload base (base_sync_done=False) then adapter (True)
+    assert worker.rollout.update_weights.call_count == 4
+    calls = worker.rollout.update_weights.call_args_list
+    assert [c.kwargs["base_sync_done"] for c in calls] == [False, True, False, True]
+    assert [c.args[0] for c in calls] == ["base_params", "adapter_params", "base_params", "adapter_params"]

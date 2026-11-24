@@ -801,10 +801,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
             # resync_base only applies to an active, unmerged LoRA adapter.
-            lora_active = model_config.lora_rank > 0 or model_config.lora.get("rank", 0) > 0
-            self.lora_resync_base: bool = (
-                bool(model_config.lora.get("resync_base", False)) and lora_active and not self.peft_merge
-            )
+            self.lora_resync_base: bool = self._resolve_lora_resync_base(model_config)
 
         # 4. build checkpoint engine
         if "actor" in self.role:
@@ -866,6 +863,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+
+    @staticmethod
+    def _resolve_lora_resync_base(model_config) -> bool:
+        """Whether ``lora.resync_base`` applies to an active, unmerged LoRA configuration."""
+        from verl.utils.lora_utils import get_max_lora_rank
+
+        peft_merge = bool(model_config.lora.get("merge", False))
+        lora_active = get_max_lora_rank(model_config) > 0
+        return bool(model_config.lora.get("resync_base", False)) and lora_active and not peft_merge
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     @RLInsightLogger.trace_state_decorator(
