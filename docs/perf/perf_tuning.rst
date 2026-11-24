@@ -1,7 +1,7 @@
 Performance Tuning Guide
 ==============================
 
-Last updated: 10/22/2026.
+Last updated: 11/24/2026.
 
 Author: `Guangming Sheng <https://github.com/PeterSH6>`_, `Jiali Zheng <https://github.com/CurryRice233>`_
 
@@ -354,6 +354,24 @@ gradient communication; forward-only inference does not execute it.
 The option uses additional temporary buffers and may slow small communication
 buckets. Compare actor-update time and peak memory with it on and off, and keep
 it disabled unless the measured workload benefits.
+
+Dense FSDP log-probability packing
+---------------------------------
+
+For non-fused FSDP execution with ``use_remove_padding=False``, ordinary
+log-probability calculation uses a view of each sequence's valid logits and
+packs only the resulting per-token scalars. This avoids a second full
+``[total_valid_tokens, vocabulary_size]`` allocation. It requires no additional
+configuration. The log-probability kernel must preserve these views during
+backward because the model, entropy, or auxiliary losses can also retain the
+original logits.
+
+Top-k distillation, score centering, and batch-invariant sampler log-probabilities
+retain their existing packed-logits paths. The optimization does not change
+remove-padding or fused-kernel execution, eliminate the model's original logits,
+or bound all backward allocations. Non-contiguous inputs may still require a
+backend-local contiguous copy. Measure complete forward/backward memory and
+throughput for the actual micro-batch shape and backend.
 
 Memory optimization for entropy calculation from logits
 ----------------------

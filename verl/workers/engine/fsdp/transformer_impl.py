@@ -112,6 +112,32 @@ def _slice_topk_labels_for_ulysses(topk_labels: torch.Tensor, pad_size: int) -> 
     return slice_input_tensor(topk_labels, dim=1, padding=False)
 
 
+def _logprobs_from_dense_logits(logits, labels, seq_lengths):
+    """Compute packed token log-probabilities without packing vocabulary-sized logits.
+
+    Keep views into the dense model output and concatenate only the scalar
+    results. Do not let a log-probability kernel overwrite these views in
+    backward: entropy, auxiliary losses, or the model itself may save logits.
+    """
+    lengths = seq_lengths.tolist()
+    label_chunks = labels.split(lengths)
+    # squeeze has a view-only backward for the common micro-batch-size-one case;
+    # unbind would stack a vocabulary-sized gradient even for a single sample.
+    sequences = (logits.squeeze(0),) if logits.shape[0] == 1 else logits.unbind(0)
+    log_probs = []
+    for sequence, length, sequence_labels in zip(sequences, lengths, label_chunks, strict=True):
+        if length == 0:
+            continue
+        if length != sequence.shape[0]:
+            sequence = sequence[:length]
+        log_probs.append(logprobs_from_logits(sequence, sequence_labels, inplace_backward=False))
+    if not log_probs:
+        # Preserve a differentiable empty result, without invoking kernels that
+        # do not accept zero rows. Mixed empty/nonempty samples use the offsets.
+        return logits.sum(dim=-1).reshape(-1)[:0]
+    return log_probs[0] if len(log_probs) == 1 else torch.cat(log_probs)
+
+
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -1487,42 +1513,49 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     cu_seqlens = input_ids.offsets()
                     seq_lengths = cu_seqlens.diff()
                     starts = torch.zeros_like(seq_lengths, dtype=torch.int64)
-                    logits = torch.nested.narrow(logits, 1, starts, seq_lengths, layout=torch.jagged)
-                    logits_rmpad = torch.cat([t for t in logits.unbind()])
-                    if batch_invariant:
-                        if temperature_is_one:
-                            unscaled_logits_rmpad = logits_rmpad
-                        else:
-                            unscaled_logits = torch.nested.narrow(
-                                unscaled_logits, 1, starts, seq_lengths, layout=torch.jagged
-                            )
-                            unscaled_logits_rmpad = torch.cat([t for t in unscaled_logits.unbind()])
-                    input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
+                    # Preserve the packed-logits contract for these specialized consumers.
+                    if distillation_use_topk or score_centering or batch_invariant:
+                        logits = torch.nested.narrow(logits, 1, starts, seq_lengths, layout=torch.jagged)
+                        logits_rmpad = torch.cat([t for t in logits.unbind()])
+                        if batch_invariant:
+                            if temperature_is_one:
+                                unscaled_logits_rmpad = logits_rmpad
+                            else:
+                                unscaled_logits = torch.nested.narrow(
+                                    unscaled_logits, 1, starts, seq_lengths, layout=torch.jagged
+                                )
+                                unscaled_logits_rmpad = torch.cat([t for t in unscaled_logits.unbind()])
+                        input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
 
-                    # Mirror the use_remove_padding=True branch (see verl#6293).
-                    # No Ulysses SP gather here: this branch is the no-SP path
-                    # (log_probs is also not gathered) and pad_size is only
-                    # populated in output_args along the use_remove_padding=True
-                    # path of prepare_model_inputs.
-                    if distillation_use_topk or score_centering:
-                        outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
-                        for k, v in outputs.items():
-                            v = v.squeeze(0)
-                            assert v.shape == (logits_rmpad.shape[0],), (
-                                f"logits_rmpad len: {logits_rmpad.shape[0]}, {k} shape: {v.shape}"
-                            )
-                            model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
+                        # Mirror the use_remove_padding=True branch (see verl#6293).
+                        # No Ulysses SP gather here: this branch is the no-SP path
+                        # (log_probs is also not gathered) and pad_size is only
+                        # populated in output_args along the use_remove_padding=True
+                        # path of prepare_model_inputs.
+                        if distillation_use_topk or score_centering:
+                            outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
+                            for k, v in outputs.items():
+                                v = v.squeeze(0)
+                                assert v.shape == (logits_rmpad.shape[0],), (
+                                    f"logits_rmpad len: {logits_rmpad.shape[0]}, {k} shape: {v.shape}"
+                                )
+                                model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
 
-                    log_probs = None
-                    if not distillation_only:
-                        log_probs = logprobs_from_logits(
-                            logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
-                            labels=input_ids_rmpad_rolled,
-                            inplace_backward=not score_centering,
-                            batch_invariant=batch_invariant,
-                            temperature=None
-                            if temperature_is_one
-                            else temperature.flatten().repeat_interleave(seq_lengths),
+                        log_probs = None
+                        if not distillation_only:
+                            log_probs = logprobs_from_logits(
+                                logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
+                                labels=input_ids_rmpad_rolled,
+                                inplace_backward=not score_centering,
+                                batch_invariant=batch_invariant,
+                                temperature=None
+                                if temperature_is_one
+                                else temperature.flatten().repeat_interleave(seq_lengths),
+                            )
+
+                    elif not distillation_only:
+                        log_probs = _logprobs_from_dense_logits(
+                            logits, output_args["input_ids_rmpad_rolled"], seq_lengths
                         )
 
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
