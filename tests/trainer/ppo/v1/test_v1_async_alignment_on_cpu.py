@@ -43,11 +43,12 @@ def _make_trainer(
     trainer.current_mode = current_mode
     trainer.llm_server_manager = SimpleNamespace(
         get_replicas=lambda: ["hybrid"] * hybrid_replicas,
+        get_addresses=SimpleNamespace(remote=lambda: [f"hybrid-{i}" for i in range(hybrid_replicas)]),
         server_addresses=[f"hybrid-{i}" for i in range(hybrid_replicas)],
     )
     trainer.standalone_server_manager = SimpleNamespace(
         get_replicas=lambda: ["standalone"] * standalone_replicas,
-        global_load_balancer=MagicMock(),
+        remove_servers=SimpleNamespace(remote=lambda server_ids: None),
     )
     trainer.checkpoint_manager = MagicMock()
     return trainer
@@ -106,7 +107,9 @@ class TestUnconfiguredDefaultsPreserveBehavior:
         trainer.checkpoint_manager.abort_replicas.assert_called_once()
         trainer.checkpoint_manager.sleep_replicas.assert_called_once()
         assert trainer.current_mode == HybridEngineMode.TRAINER
-        assert len(balancer_calls) == 1  # balancer removal ran (original path)
+        # Balancer removal ran through the manager's load-balancing plane:
+        # one ray.get for the hybrid addresses, one for the removal.
+        assert len(balancer_calls) == 2
 
 
 class TestHybridEngineDisabled:

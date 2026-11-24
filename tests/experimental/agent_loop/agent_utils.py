@@ -99,13 +99,13 @@ def init_agent_loop_manager_and_workers(
     llm_server_manager = LLMServerManager.create(config=config, worker_group=actor_rollout_wg)
     agent_loop_manager = AgentLoopManager.create(
         config=config,
-        llm_client=llm_server_manager.get_client(),
+        llm_client=ray.get(llm_server_manager.get_client.remote()),
         reward_loop_worker_handles=reward_loop_manager.reward_loop_workers,
     )
     checkpoint_manager = CheckpointEngineManager(
         config=omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine),
         actor_wg=actor_rollout_wg,
-        replicas=llm_server_manager.get_replicas(),
+        replicas=ray.get(llm_server_manager.get_replicas.remote()),
     )
     checkpoint_manager.sleep_replicas()
     checkpoint_manager.update_weights()

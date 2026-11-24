@@ -156,7 +156,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
         # initialize standalone rollout
         # TODO: make initialization parallel with super().init()
-        hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
+        hybrid_num_replicas = len(ray.get(self.llm_server_manager.get_replicas.remote()))
         # Standalone replicas have dedicated GPUs; keep their memory budget
         # separate from the hybrid replicas that share GPUs with training.
         standalone_config = deepcopy(self.config)
@@ -169,8 +169,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         )
         rollout_config = self.config.actor_rollout_ref.rollout
         if rollout_config.prometheus.enable:
-            server_addresses = (
-                self.llm_server_manager.server_addresses + self.standalone_server_manager.server_addresses
+            server_addresses = ray.get(self.llm_server_manager.get_addresses.remote()) + ray.get(
+                self.standalone_server_manager.get_addresses.remote()
             )
             update_prometheus_config(rollout_config.prometheus, server_addresses, rollout_config.name)
 
@@ -179,7 +179,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self.standalone_checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,
-            replicas=self.standalone_server_manager.get_replicas(),
+            replicas=ray.get(self.standalone_server_manager.get_replicas.remote()),
         )
 
         # hybrid engine is in rollout mode after initialization
@@ -195,7 +195,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             logger.info(
                 "[V1SepAsync] no hybrid replicas on the training GPUs "
                 "(trainer.v1.separate_async.hybrid_rollout.enable_switch=False): "
-                f"rollout served by {len(self.standalone_server_manager.get_replicas())} standalone replicas only"
+                f"rollout served by {len(ray.get(self.standalone_server_manager.get_replicas.remote()))} "
+                "standalone replicas only"
             )
 
     def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
@@ -229,7 +230,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
     def get_llm_client(self):
         # get server client from standalone rollout
-        return self.standalone_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)
+        return ray.get(self.standalone_server_manager.get_client.remote(client_cls=FullyAsyncLLMServerClient))
 
     def _rollout_server_managers(self) -> list:
         managers = super()._rollout_server_managers()
@@ -443,18 +444,17 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     def add_replicas_to_balancer(self):
         if not self._enable_hybrid_replicas:
             return
-        global_load_balancer = self.standalone_server_manager.global_load_balancer
-        servers = dict(
-            zip(self.llm_server_manager.server_addresses, self.llm_server_manager.server_handles, strict=True)
-        )
-        ray.get(global_load_balancer.add_servers.remote(servers))
+        servers = ray.get(self.llm_server_manager.get_server_registry.remote())
+        ray.get(self.standalone_server_manager.add_servers.remote(servers))
 
     def remove_replicas_from_balancer(self):
         if not self._enable_hybrid_replicas:
             return
-        global_load_balancer = self.standalone_server_manager.global_load_balancer
-        ray.get(global_load_balancer.remove_servers.remote(self.llm_server_manager.server_addresses))
+        ray.get(
+            self.standalone_server_manager.remove_servers.remote(
+                ray.get(self.llm_server_manager.get_addresses.remote())
+            )
+        )
 
     def clear_sticky_cache(self) -> dict:
-        global_load_balancer = self.standalone_server_manager.global_load_balancer
-        return ray.get(global_load_balancer.clear_sticky_cache.remote())
+        return ray.get(self.standalone_server_manager.clear_sticky_cache.remote())
