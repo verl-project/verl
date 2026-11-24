@@ -105,6 +105,7 @@ def _megatron_gptmodel_postprocess(
     rotary_pos_sin,
     mtp_in_postprocess=None,
     loss_mask=None,
+    mtp_input_mask=None,
     decoder_input=None,
     attention_mask=None,
     padding_mask=None,
@@ -132,10 +133,14 @@ def _megatron_gptmodel_postprocess(
 
     if mtp_in_postprocess and labels is not None:
         mtp_kwargs = dict(extra_block_kwargs or {})
-        if not hasattr(self.mtp, "_forward_has_padding_mask"):
-            self.mtp._forward_has_padding_mask = "padding_mask" in signature(self.mtp.forward).parameters
-        if self.mtp._forward_has_padding_mask:
+        if not hasattr(self.mtp, "_forward_mask_params"):
+            self.mtp._forward_mask_params = {"padding_mask", "mtp_input_mask"}.intersection(
+                signature(self.mtp.forward).parameters
+            )
+        if "padding_mask" in self.mtp._forward_mask_params:
             mtp_kwargs["padding_mask"] = padding_mask
+        if "mtp_input_mask" in self.mtp._forward_mask_params:
+            mtp_kwargs["mtp_input_mask"] = mtp_input_mask
         if mhc_multistream is not None:
             mtp_kwargs["mhc_multistream"] = mhc_multistream
         hidden_states = self.mtp(
@@ -179,6 +184,7 @@ def _megatron_gptmodel_postprocess(
                 "packed_seq_params": packed_seq_params,
                 "scale_logits_fn": scale_logits_fn,
                 "input_ids": input_ids,
+                "mtp_input_mask": mtp_input_mask,
             }
             if "tp_group" in _PROCESS_MTP_LOSS_PARAMS:
                 process_mtp_loss_kwargs["tp_group"] = getattr(self, "tp_group", None) or (
@@ -285,9 +291,13 @@ def patch_mtp_layer_get_embeddings(model: torch.nn.Module):
         for layer in target_layers:
             if hasattr(layer, "_get_embeddings_backup"):
                 continue
-            layer._get_embeddings_has_padding_mask = "padding_mask" in signature(layer._get_embeddings).parameters
+            params = signature(layer._get_embeddings).parameters
+            layer._get_embeddings_has_padding_mask = "padding_mask" in params
             layer._get_embeddings_backup = layer._get_embeddings
-            layer._get_embeddings = _patched_get_embeddings_for_detach.__get__(layer, layer.__class__)
+            if "mtp_input_mask" in params:
+                layer._get_embeddings = _get_masked_embeddings_for_detach.__get__(layer)
+            else:
+                layer._get_embeddings = _patched_get_embeddings_for_detach.__get__(layer)
             patched_count += 1
         if patched_count:
             print(f"Found and patched {patched_count} MTP layer(s) in any of the actor modules")
@@ -413,6 +423,38 @@ def unpatch_mtp_layer_checkpointed_forward(model: torch.nn.Module):
         print(f"Unpatched checkpointed forward for {unpatched_count} MTP layer(s)")
         return True
     return False
+
+
+def _get_masked_embeddings_for_detach(
+    self,
+    input_ids,
+    position_ids,
+    embedding,
+    hidden_states,
+    packed_seq_params=None,
+    padding_mask=None,
+    mtp_input_mask=None,
+):
+    """Keep Core's token/mask rolling and sequence-parallel embedding layout when detaching."""
+    get_embeddings = self._get_embeddings_backup
+    cp_group = _resolve_cp_group(self, packed_seq_params)
+    if cp_group is not self.cp_group:
+        # Core reads the group from the layer. Keep the override local to this microbatch.
+        layer = copy.copy(self)
+        layer.cp_group = cp_group
+        get_embeddings = get_embeddings.__func__.__get__(layer)
+
+    *metadata, decoder_input, hidden_states = get_embeddings(
+        input_ids=input_ids,
+        position_ids=position_ids,
+        embedding=embedding,
+        hidden_states=hidden_states,
+        packed_seq_params=packed_seq_params,
+        padding_mask=padding_mask,
+        mtp_input_mask=mtp_input_mask,
+    )
+    # Recompute needs a grad-enabled input even after cutting the link to the backbone.
+    return *metadata, decoder_input.detach(), hidden_states.detach().requires_grad_(True)
 
 
 def _patched_get_embeddings_for_detach(

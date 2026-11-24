@@ -15,6 +15,7 @@
 
 from inspect import signature
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -30,12 +31,13 @@ if is_npu_available:
 pytest.importorskip("megatron.core")
 
 from megatron.core import parallel_state  # noqa: E402
-from megatron.core.transformer.multi_token_prediction import roll_tensor  # noqa: E402
+from megatron.core.models.gpt.gpt_model import GPTModel  # noqa: E402
+from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer, roll_tensor  # noqa: E402
 from megatron.core.transformer.transformer_config import TransformerConfig  # noqa: E402
 
 from verl.models.mcore.mtp_patch import (  # noqa: E402
     _megatron_gptmodel_postprocess,
-    _patched_get_embeddings_for_detach,
+    patch_mtp_layer_get_embeddings,
 )
 from verl.models.mcore.util import preprocess_thd_engine  # noqa: E402
 from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group  # noqa: E402
@@ -136,16 +138,24 @@ def test_mtp_roll_and_backward_use_each_microbatch_cp_group():
     local_ids, packed, position_ids = preprocess_thd_engine(input_ids, local_cp_size=cp_size)
     expected_labels, _ = roll_tensor(local_ids, cp_group=packed.cp_group, packed_seq_params=packed)
     padding_mask = torch.zeros_like(local_ids, dtype=torch.bool)
-    expected_padding, _ = roll_tensor(
-        padding_mask,
+    expected_valid, _ = roll_tensor(
+        ~padding_mask,
         cp_group=packed.cp_group,
         packed_seq_params=packed,
-        fill_value=True,
     )
 
-    layer = SimpleNamespace(cp_group=parallel_state.get_context_parallel_group(), _get_embeddings_has_padding_mask=True)
-    rolled_ids, _, rolled_padding, _, _ = _patched_get_embeddings_for_detach(
-        layer,
+    config = TransformerConfig(
+        num_layers=1, hidden_size=8, num_attention_heads=1, mtp_num_layers=1, calculate_per_token_loss=True
+    )
+    # Only the embedding method runs here; the per-microbatch group must override the layer's static group.
+    layer = MultiTokenPredictionLayer.__new__(MultiTokenPredictionLayer)
+    torch.nn.Module.__init__(layer)
+    layer.config = config
+    layer.cp_group = parallel_state.get_context_parallel_group()
+    gpt_model = Mock(spec=GPTModel)
+    gpt_model.mtp = SimpleNamespace(layers=[layer])
+    assert patch_mtp_layer_get_embeddings(gpt_model)
+    rolled_ids, _, rolled_padding, *_ = layer._get_embeddings(
         input_ids=local_ids,
         position_ids=position_ids,
         padding_mask=padding_mask,
@@ -154,7 +164,7 @@ def test_mtp_roll_and_backward_use_each_microbatch_cp_group():
         packed_seq_params=packed,
     )
     torch.testing.assert_close(rolled_ids, expected_labels, atol=0, rtol=0)
-    torch.testing.assert_close(rolled_padding, expected_padding, atol=0, rtol=0)
+    torch.testing.assert_close(rolled_padding, ~expected_valid, atol=0, rtol=0)
 
     local_tokens, hidden_size, vocab_size = local_ids.shape[-1], 8, 64
     hidden_states = torch.randn(2 * local_tokens, 1, hidden_size, device="cuda", requires_grad=True)
@@ -176,15 +186,7 @@ def test_mtp_roll_and_backward_use_each_microbatch_cp_group():
         compute_language_model_loss=language_model_loss,
         cp_group=parallel_state.get_context_parallel_group(),
         pg_collection=None,
-        config=SimpleNamespace(
-            mtp_num_layers=1,
-            mtp_loss_scaling_factor=0.1,
-            mtp_detach_heads=False,
-            calculate_per_token_loss=True,
-            cross_entropy_loss_fusion=False,
-            cross_entropy_fusion_impl="native",
-            use_mup=False,
-        ),
+        config=config,
     )
     output = _megatron_gptmodel_postprocess(
         model,
