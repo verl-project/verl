@@ -35,6 +35,7 @@ license_head_nvidia = "Copyright (c) 2025, NVIDIA CORPORATION. All rights reserv
 license_head_nvidia_26 = "Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved."
 license_head_baai = "Copyright (c) 2026 BAAI. All rights reserved."
 license_head_google = "Copyright (c) 2026 Google LLC. All rights reserved."
+license_head_meta = "Copyright (c) Meta Platforms, Inc. and affiliates."
 license_headers = [
     license_head_bytedance,
     license_head_bytedance_25,
@@ -54,6 +55,7 @@ license_headers = [
     license_head_nvidia_26,
     license_head_baai,
     license_head_google,
+    license_head_meta,
 ]
 
 

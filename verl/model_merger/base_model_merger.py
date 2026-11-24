@@ -24,7 +24,7 @@ from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification, GenerationConfig
 
 from verl.utils import hf_processor, hf_tokenizer
-from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
+from verl.utils.transformers_compat import copy_generation_config, drop_tied_target_keys, get_auto_model_for_vision2seq
 
 from .output_validation import validate_hf_model_output
 
@@ -437,7 +437,20 @@ class BaseModelMerger(ABC):
         drop_tied_target_keys(state_dict, model, self.model_config)
 
         print(f"Saving model to {self.config.target_dir}")
+        refused_generation_config = False
+        if model.can_generate():
+            try:
+                model.generation_config.validate(strict=True)
+            except ValueError:
+                # model.save_pretrained saves the generation config before the weights, and raises for one that
+                # transformers refuses to save (GLM-5's sets top_p without do_sample). Save the model with a
+                # generation config built from the model config, then write the pretrained one after it.
+                # TODO: drop once verl requires a transformers release with huggingface/transformers#49914.
+                refused_generation_config = True
+                model.generation_config = GenerationConfig.from_model_config(model.config)
         model.save_pretrained(self.config.target_dir, state_dict=state_dict)
+        if refused_generation_config:
+            copy_generation_config(self.hf_model_config_path, self.config.target_dir)
         del state_dict
         del model
 

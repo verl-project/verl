@@ -22,8 +22,7 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
-from verl.trainer.ppo.ray_trainer import ResourcePoolManager
+from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.trainer.ppo.utils import create_rl_sampler
 from verl.utils import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn

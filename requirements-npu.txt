@@ -21,4 +21,4 @@ einops
 qwen_vl_utils
 hf_transfer
 triton-ascend==3.2.2
-TransferQueue==0.1.11
+TransferQueue==0.1.12

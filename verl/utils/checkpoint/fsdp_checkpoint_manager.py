@@ -27,7 +27,7 @@ from safetensors.torch import save_file
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardedOptimStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp._common_utils import clean_tensor_name
-from transformers import GenerationConfig, PreTrainedTokenizer, ProcessorMixin
+from transformers import PreTrainedTokenizer, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 
 from verl.utils.device import is_device_available
@@ -35,6 +35,7 @@ from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
 from verl.utils.fsdp_utils import fsdp_version, get_fsdp_state_ctx, normalize_peft_param_name
 from verl.utils.logger import log_with_rank
 from verl.utils.model import convert_weight_keys
+from verl.utils.transformers_compat import copy_generation_config
 
 from .checkpoint_manager import BaseCheckpointManager
 
@@ -461,16 +462,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             hf_config_tokenizer_path = os.path.join(local_path, "huggingface")
             local_mkdir_safe(hf_config_tokenizer_path)
             model_config = unwrap_model.config
-            generation_config = None
+            # Some model's name_or_path is empty if not initialized from pretrained,
+            # in this cases, we don't save generation config.
             if unwrap_model.can_generate() and hasattr(model_config, "name_or_path") and model_config.name_or_path:
-                try:
-                    # Some model's name_or_path is empty if not initialized from pretrained,
-                    # in this cases, we don't save generation config.
-                    generation_config = GenerationConfig.from_pretrained(model_config.name_or_path)
-                    generation_config.save_pretrained(hf_config_tokenizer_path)
-                except Exception:
-                    # if the generation config isn't available, we don't save it
-                    pass
+                copy_generation_config(model_config.name_or_path, hf_config_tokenizer_path)
 
             if hasattr(model_config, "auto_map") and None in model_config.auto_map:
                 model_config.auto_map = {k: v for k, v in model_config.auto_map.items() if k is not None}
