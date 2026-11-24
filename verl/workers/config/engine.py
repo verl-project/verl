@@ -329,10 +329,12 @@ class VeOmniEngineConfig(EngineConfig):
         enable_fsdp_offload (bool): Enable CPU offload for FSDP1, default False
         enable_reentrant (bool): Use reentrant gradient checkpointing, default False
         broadcast_model_weights_from_rank0 (bool): Rank 0 reads the checkpoint and broadcasts
-            every tensor; False makes every rank read it instead, which avoids pushing the whole
-            model through a slow inter-node network. Default True
+            every tensor; False makes every rank read from disk instead (dense models load
+            weights per rank, while MoE/PLE models stream only their ExtraParallel slice when
+            ``ep_sharded_stream_load=True``). Default False
         ep_sharded_stream_load (bool): With broadcast_model_weights_from_rank0=False, each rank
-            reads only its own slice of expert-parallel tensors, default False
+            streams only its own slice of ExtraParallel (expert/PLE) tensors; automatically
+            ignored for dense models so each rank loads directly. Default True
         attn_implementation (str): Attention implementation to use.
             1. `eager`
             2. `sdpa`
@@ -432,6 +434,9 @@ class VeOmniEngineConfig(EngineConfig):
     fsdp_size: int = -1
     ulysses_parallel_size: int = 1
     expert_parallel_size: int = 1
+    ple_parallel_size: int = 1
+    freeze_ple_embeddings: bool = True
+    frozen_ple_dtype: Optional[str] = None
     seed: int = 42
     full_determinism: bool = False
     mixed_precision: bool = False
@@ -442,8 +447,8 @@ class VeOmniEngineConfig(EngineConfig):
     load_checkpoint_path: Optional[str] = None
     enable_fsdp_offload: bool = False
     enable_reentrant: bool = False
-    broadcast_model_weights_from_rank0: bool = True
-    ep_sharded_stream_load: bool = False
+    broadcast_model_weights_from_rank0: bool = False
+    ep_sharded_stream_load: bool = True
     attn_implementation: str = "flash_attention_2"
     moe_implementation: str = "fused"
     # Kernel-backend selectors for VeOmni's per-model patches; passed into
@@ -458,6 +463,7 @@ class VeOmniEngineConfig(EngineConfig):
     rms_norm_gated_implementation: str = "eager"
     causal_conv1d_implementation: str = "eager"
     chunk_gated_delta_rule_implementation: str = "eager"
+    qsa_attention_implementation: str = "eager"
     dsa_indexer_implementation: str = "eager"
     dsa_attention_implementation: str = "eager"
     mhc_implementation: str = "eager"
@@ -477,6 +483,24 @@ class VeOmniEngineConfig(EngineConfig):
 
         if self.batch_invariant:
             raise ValueError("batch_invariant is not supported by the VeOmni engine")
+
+        if self.ple_parallel_size < 1:
+            raise ValueError(f"ple_parallel_size must be >= 1, got {self.ple_parallel_size}.")
+        if self.enable_fsdp_offload and self.ple_parallel_size > 1:
+            raise ValueError("enable_fsdp_offload is not supported with ple_parallel_size > 1.")
+        if self.ple_parallel_size > 1 and (self.broadcast_model_weights_from_rank0 or not self.ep_sharded_stream_load):
+            raise ValueError(
+                "ple_parallel_size > 1 requires broadcast_model_weights_from_rank0=False and "
+                "ep_sharded_stream_load=True."
+            )
+        if self.frozen_ple_dtype is not None:
+            if not self.freeze_ple_embeddings:
+                raise ValueError("frozen_ple_dtype requires freeze_ple_embeddings=True.")
+            if self.frozen_ple_dtype not in {"bfloat16", "float16", "float32"}:
+                raise ValueError(
+                    "frozen_ple_dtype must be one of None, 'bfloat16', 'float16', 'float32'; "
+                    f"got {self.frozen_ple_dtype!r}."
+                )
 
         if not math.isfinite(self.activation_offload_host_cache_limit_gb) or (
             self.activation_offload_host_cache_limit_gb < 0

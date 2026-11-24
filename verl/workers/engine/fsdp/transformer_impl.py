@@ -927,7 +927,13 @@ class FSDPEngine(BaseEngine):
         gen, _ = self.get_per_tensor_param_shard()
         return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
 
-    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+    def get_per_tensor_param(
+        self,
+        layered_summon=False,
+        base_sync_done=False,
+        skip_frozen_engram: bool = True,
+        **kwargs,
+    ):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
@@ -969,11 +975,12 @@ class FSDPEngine(BaseEngine):
                 # restores the un-merged base weights on exit, so tensors must be
                 # materialized while the context is still open (inside the generator).
                 # Materializing after exit silently sends base weights without adapters.
-                return self._merged_lora_per_tensor_param(), None
+                return self._merged_lora_per_tensor_param(skip_frozen_engram=skip_frozen_engram), None
         else:
             params = self.module.state_dict()
 
-        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+        wrapped_module = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        params = convert_weight_keys(params, wrapped_module)
 
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
         if self._is_offload_param and not _skip_staging:
@@ -983,6 +990,15 @@ class FSDPEngine(BaseEngine):
         if peft_config is not None and base_sync_done:
             per_tensor_param = params.items()
         else:
+            frozen_engram_keys: set[str] = set()
+            if skip_frozen_engram:
+                from verl.utils.engram import collect_frozen_engram_keys
+
+                frozen_engram_keys = collect_frozen_engram_keys(
+                    self.module,
+                    params.keys(),
+                    key_converter=lambda d: convert_weight_keys(d, wrapped_module),
+                )
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
             per_tensor_param = (
                 (
@@ -990,13 +1006,14 @@ class FSDPEngine(BaseEngine):
                     param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param,
                 )
                 for name, param in params.items()
+                if name not in frozen_engram_keys
             )
             per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
 
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
 
-    def _merged_lora_per_tensor_param(self):
+    def _merged_lora_per_tensor_param(self, skip_frozen_engram: bool = True):
         """Stream merged (base + LoRA) weights for rollout weight sync.
 
         ``state_dict()`` returns tensors that alias the live FSDP parameter
@@ -1010,9 +1027,21 @@ class FSDPEngine(BaseEngine):
         device = get_device_id()
         try:
             with merged_lora_context(self.module, backup_adapters=True):
+                wrapped_module = getattr(self.module, "_fsdp_wrapped_module", self.module)
                 params = normalize_peft_param_name(self.module.state_dict())
-                params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+                params = convert_weight_keys(params, wrapped_module)
+                frozen_engram_keys: set[str] = set()
+                if skip_frozen_engram:
+                    from verl.utils.engram import collect_frozen_engram_keys
+
+                    frozen_engram_keys = collect_frozen_engram_keys(
+                        self.module,
+                        params.keys(),
+                        key_converter=lambda d: convert_weight_keys(normalize_peft_param_name(d), wrapped_module),
+                    )
                 for name, param in params.items():
+                    if name in frozen_engram_keys:
+                        continue
                     yield (
                         name,
                         param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
@@ -1030,8 +1059,8 @@ class FSDPEngine(BaseEngine):
     def _get_hf_export_per_tensor_param(self):
         """Full HF-format weights for the checkpoint 'hf_model' export, with LoRA adapters merged."""
         if self._is_lora:
-            return self._merged_lora_per_tensor_param(), None
-        return self.get_per_tensor_param()
+            return self._merged_lora_per_tensor_param(skip_frozen_engram=False), None
+        return self.get_per_tensor_param(skip_frozen_engram=False)
 
     def disable_adapter(self) -> ContextManager:
         return self.module.disable_adapter()

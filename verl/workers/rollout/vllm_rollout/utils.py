@@ -28,6 +28,13 @@ import torch
 from vllm.outputs import RequestOutput
 
 from verl.utils.device import get_device_name, is_npu_available
+from verl.utils.engram import (
+    extract_engram_layer_ids,
+    find_model_engram_parameters,
+    has_unpreserved_device_engram_params,
+    is_engram_table_param,
+    iter_engram_safetensors_batches,
+)
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.rocm_vllm_moe_expert_map import restore_moe_expert_maps
@@ -203,6 +210,8 @@ class vLLMColocateWorkerExtension:
 
     # Set per instance in __new__ when the rollout uses per-token NVFP4 experts.
     _nvfp4_per_token_config = None
+    _engram_weights_loaded: Optional[bool] = None
+    _engram_discarded_by_sleep: bool = False
 
     def __new__(cls, **kwargs):
         set_death_signal()
@@ -242,8 +251,28 @@ class vLLMColocateWorkerExtension:
                 if k not in os.environ:
                     os.environ[k] = VLLM_ASCEND_REQUIRED_ENV_VARS[k]
 
+        # Track level-2 sleep on the concrete worker class without defining ``sleep`` on
+        # ``vLLMColocateWorkerExtension`` itself (vLLM rejects overlapping extension attrs).
+        if hasattr(cls, "sleep") and not getattr(cls.sleep, "_verl_engram_sleep_hooked", False):
+            orig_sleep = cls.sleep
+
+            @functools.wraps(orig_sleep)
+            def _sleep_with_engram_tracking(self, level: int = 1, *args, **sleep_kwargs):
+                will_discard = level >= 2 and self._has_unpreserved_device_engram()
+                try:
+                    return orig_sleep(self, level, *args, **sleep_kwargs)
+                finally:
+                    if will_discard:
+                        self._engram_discarded_by_sleep = True
+                        self._engram_weights_loaded = False
+
+            _sleep_with_engram_tracking._verl_engram_sleep_hooked = True
+            cls.sleep = _sleep_with_engram_tracking
+
         instance = super().__new__(cls)
         instance._nvfp4_per_token_config = nvfp4_per_token_config
+        instance._engram_weights_loaded = None
+        instance._engram_discarded_by_sleep = False
         return instance
 
     def _get_drafter_model(self):
@@ -343,7 +372,10 @@ class vLLMColocateWorkerExtension:
 
             pin_memory = is_pin_memory_available()
 
+        received_engram_from_ipc = False
+
         def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
+            nonlocal received_engram_from_ipc
             if lora_weights is not None:
                 # Copy: add_lora keeps these past the callback (reused IPC buffer, #6454). One CPU block per
                 # bucket in vLLM's LoRA dtype turns vLLM's per-tensor cast and pin_memory into no-ops.
@@ -367,6 +399,8 @@ class vLLMColocateWorkerExtension:
                 )
                 lora_weights.clear()
                 return
+            if not received_engram_from_ipc and any(is_engram_table_param(name) for name, _ in weights):
+                received_engram_from_ipc = True
             self._update_weights(
                 weights,
                 peft_config=peft_config,
@@ -374,6 +408,14 @@ class vLLMColocateWorkerExtension:
             )
 
         receiver.receive_weights(on_bucket_received=on_bucket_received)
+        if lora_weights is None:
+            if received_engram_from_ipc:
+                self._engram_weights_loaded = True
+                self._engram_discarded_by_sleep = False
+            else:
+                should_load_engram, local_layer_ids = self._should_load_engram_from_safetensors()
+                if should_load_engram:
+                    self._load_engram_weights_from_safetensors(local_layer_ids=local_layer_ids)
 
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
@@ -456,6 +498,67 @@ class vLLMColocateWorkerExtension:
         trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
 
+    def _has_unpreserved_device_engram(self) -> bool:
+        model_runner = getattr(self, "model_runner", None)
+        if model_runner is None or getattr(model_runner, "model", None) is None:
+            return False
+        return has_unpreserved_device_engram_params(self._iter_all_models_with_config())
+
+    def _notify_engram_sleep(self, level: int = 1) -> None:
+        if level >= 2 and self._has_unpreserved_device_engram():
+            self._engram_discarded_by_sleep = True
+            self._engram_weights_loaded = False
+
+    def _should_load_engram_from_safetensors(self) -> tuple[bool, Optional[set[int]]]:
+        engram_params = find_model_engram_parameters(self._iter_all_models())
+        if not engram_params:
+            return False, None
+        if self._engram_weights_loaded is None:
+            vllm_config = getattr(self.model_runner, "vllm_config", None)
+            load_config = getattr(vllm_config, "load_config", None)
+            load_format = str(getattr(load_config, "load_format", "dummy") or "dummy").lower()
+            self._engram_weights_loaded = (load_format != "dummy") and not self._engram_discarded_by_sleep
+        if self._engram_weights_loaded:
+            return False, None
+        return True, extract_engram_layer_ids(engram_params)
+
+    def _load_engram_weights_from_safetensors(self, local_layer_ids: Optional[set[int]] = None) -> int:
+        vllm_config = self.model_runner.vllm_config
+        model_config = vllm_config.model_config
+        load_config = getattr(vllm_config, "load_config", None)
+        model_path = getattr(model_config, "model_weights", None) or model_config.model
+        revision = getattr(model_config, "revision", None)
+        download_dir = getattr(load_config, "download_dir", None)
+
+        loaded_count = 0
+        for batch in iter_engram_safetensors_batches(
+            model_path,
+            revision=revision,
+            download_dir=download_dir,
+            local_layer_ids=local_layer_ids,
+        ):
+            self._update_weights(batch, peft_config=None, base_sync_done=False)
+            loaded_count += len(batch)
+
+        if loaded_count == 0:
+            raise RuntimeError(
+                f"Rollout model expects Engram/PLE weights, but no matching tensors were found in safetensors "
+                f"under {model_path!r}."
+            )
+
+        self._engram_weights_loaded = True
+        self._engram_discarded_by_sleep = False
+        logger.info(f"Loaded {loaded_count} Engram/PLE tensor(s) from safetensors under {model_path!r}")
+        return loaded_count
+
+    def update_verl_delta_weights(self, update_info: dict) -> None:
+        """Add this worker's IPC endpoint and forward the delta update to vLLM."""
+        worker_update_info = dict(update_info)
+        worker_update_info["zmq_handle"] = self._get_zmq_handle()
+        self.update_weights(worker_update_info)
+        should_load_engram, local_layer_ids = self._should_load_engram_from_safetensors()
+        if should_load_engram:
+            self._load_engram_weights_from_safetensors(local_layer_ids=local_layer_ids)
 
 class SuppressSignalInThread:
     def __enter__(self):
