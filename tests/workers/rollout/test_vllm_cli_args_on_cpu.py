@@ -258,8 +258,9 @@ class TestEngineKwargsManagedArgs:
             ("enable-expert-parallel", "rollout.expert_parallel_size"),
             ("tensor_parallel_size", "rollout.tensor_model_parallel_size"),
             ("enable_return_routed_experts", "rollout.enable_rollout_routing_replay"),
+            ("enable_tower_connector_lora", "actor_rollout_ref.model.lora"),
         ],
-        ids=["ep", "ep-hyphen", "tp", "r3"],
+        ids=["ep", "ep-hyphen", "tp", "r3", "tower-connector-lora"],
     )
     def test_rejects_managed_arg(self, key, points_to):
         with pytest.raises(ValueError, match=points_to):
@@ -322,6 +323,21 @@ class TestEngineKwargsManagedArgs:
         self._preprocess(engine_kwargs)
 
         assert engine_kwargs["kv_transfer_config"]["kv_connector_extra_config"]["lookup_rpc_port"] == 4567
+
+    def test_ascend_rl_and_mooncake_defaults_apply_together(self, monkeypatch):
+        from packaging.version import Version
+
+        from verl.workers.rollout.vllm_rollout import vllm_async_server
+
+        monkeypatch.setattr(vllm_async_server, "_VLLM_VERSION", Version("0.27.1"))
+        monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device: True)
+        engine_kwargs = {"kv_transfer_config": {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"}}
+
+        self._preprocess(engine_kwargs)
+
+        assert engine_kwargs["additional_config"]["rl_config"]["enabled"] is True
+        assert engine_kwargs["kv_transfer_config"]["kv_connector_extra_config"]["lookup_rpc_port"] == 12345
+
 
 class TestVllmColocateZmqHandle:
     def test_dp_local_rank_offsets_tensor_parallel_rank(self):

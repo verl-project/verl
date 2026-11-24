@@ -214,7 +214,10 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             return super()._compute_old_log_prob(batch, metrics)
 
         if self.local_trigger_step == 0:
-            self.actor_rollout_wg.save_model_to_cpu(0)
+            # With parameter_sync_step == 1, local_trigger_step never reaches >= 1, so the
+            # π_old snapshot is never restored; skip the redundant full-model D2H copy.
+            if self.parameter_sync_step > 1:
+                self.actor_rollout_wg.save_model_to_cpu(0)
             return super()._compute_old_log_prob(batch, metrics)
         else:
             self.actor_rollout_wg.save_model_to_cpu(self.local_trigger_step)
@@ -244,10 +247,14 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     def on_train_begin(self):
         self._add_async_warmup_batches(self.config.trainer.v1.separate_async.num_warmup_batches)
 
+    def on_train_end(self):
+        self.standalone_checkpoint_manager.wait_for_weight_update()
+
     def on_validate_begin(self):
         if self.current_mode == HybridEngineMode.TRAINER:
             logger.info("Switching hybrid engine to rollout mode for validation")
             self.switch_to_rollout()
+        self.standalone_checkpoint_manager.wait_for_weight_update()
 
     def on_step_begin(self):
         self._step_sample_wait_seconds = 0.0

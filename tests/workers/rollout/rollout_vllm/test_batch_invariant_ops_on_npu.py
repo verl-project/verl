@@ -34,7 +34,7 @@ def _run_check(check, enabled):
     config = RolloutConfig(name="vllm", full_determinism=enabled, tensor_model_parallel_size=1, max_model_len=128)
     # Supply model metadata and Ray identity only. No model, Ray cluster or engine is started.
     model = SimpleNamespace(hf_config=SimpleNamespace(max_position_embeddings=128))
-    context = SimpleNamespace(get_job_id=lambda: "batch-invariant-ut")
+    context = SimpleNamespace(get_job_id=lambda: "batch-invariant-ut", get_actor_name=lambda: "server_0_0")
     with (
         patch("ray.get_runtime_context", return_value=context),
         patch("ray.util.get_node_ip_address", return_value="127.0.0.1"),

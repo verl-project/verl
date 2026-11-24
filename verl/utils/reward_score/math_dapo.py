@@ -163,7 +163,10 @@ def normalize_final_answer(final_answer: str) -> str:
 
 
 def is_correct_minerva(
-    solution_str: str, gt: str, gt_need_extract: bool = False, answer_pattern: str = r"(?i)Answer\s*:\s*([^\n]+)"
+    solution_str: str,
+    gt: str,
+    gt_need_extract: bool = False,
+    answer_pattern: str = r"(?i)(?:\*\*Answer(?:\*\*\s*:|\s*:\*\*)|(?<!\*)Answer\s*:)\s*([^\n]+)",
 ) -> tuple[bool, str]:
     """Check if the solution is correct according to Minerva criteria.
 
@@ -176,7 +179,7 @@ def is_correct_minerva(
     Returns:
         Tuple of (is_correct, normalized_prediction)
     """
-    # Extract answer from solution
+    # A bold Markdown label (**Answer:** 16) must not add its closing ** to the answer.
     match = re.findall(answer_pattern, solution_str)
     extracted_answer = match[-1] if match else "[INVALID]"
     pred = normalize_final_answer(extracted_answer)

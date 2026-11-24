@@ -21,6 +21,7 @@ import platform
 import signal
 import threading
 from collections.abc import Mapping
+from contextlib import nullcontext
 from types import MethodType
 from typing import Any, Literal, Optional, get_args
 
@@ -147,6 +148,48 @@ def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Option
     model.compute_logits = MethodType(compute_logits, model)
 
 
+def is_3d_moe_vllm_model(hf_config) -> bool:
+    """Whether the vLLM rollout target treats this model as a 3D-MoE LoRA model.
+
+    vLLM classifies a model as 3D-MoE when the model class sets
+    ``is_3d_moe_weight = True`` (a ``ClassVar`` on the vLLM model class, *not* an HF
+    config field) and ``enable_mixed_moe_lora_format`` is off — see
+    ``vllm/lora/model_manager.py``'s ``_is_3d_moe_model``. The flag is set on the class
+    definition (e.g. ``Qwen3_5MoeForConditionalGeneration``,
+    ``Qwen3VLMoeForConditionalGeneration``, ``GptOssForCausalLM``,
+    ``InternS1ProForConditionalGeneration``); pure-text MoE classes such as
+    ``Qwen3_5MoeForCausalLM`` do *not* set it.
+
+    The training/export side only has the HF config (no live vLLM model), so this
+    resolves the vLLM model class from the HF ``architectures`` field via vLLM's
+    registry and reads the static class attribute — no model instantiation. Returns
+    ``False`` for unknown architectures, non-vLLM setups, or any import failure.
+    """
+    architectures = getattr(hf_config, "architectures", None) or []
+    if not architectures:
+        return False
+    try:
+        import importlib
+
+        from vllm.model_executor.models.registry import _VLLM_MODELS
+    except Exception:
+        return False
+
+    for arch in architectures:
+        entry = _VLLM_MODELS.get(arch)
+        if entry is None:
+            continue
+        module_path, class_name = entry
+        try:
+            mod = importlib.import_module(f"vllm.model_executor.models.{module_path}")
+            cls = getattr(mod, class_name, None)
+        except Exception:
+            continue
+        if cls is not None and bool(getattr(cls, "is_3d_moe_weight", False)):
+            return True
+    return False
+
+
 class vLLMColocateWorkerExtension:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.
@@ -160,6 +203,9 @@ class vLLMColocateWorkerExtension:
     1. LoRA
     2. Online FP8 quantization
     """
+
+    # Set per instance in __new__ when the rollout uses per-token NVFP4 experts.
+    _nvfp4_per_token_config = None
 
     def __new__(cls, **kwargs):
         set_death_signal()
@@ -190,9 +236,13 @@ class vLLMColocateWorkerExtension:
 
         # 2. patch the refit of quantized weights, whether the quantization_config comes
         # from the checkpoint (e.g. DeepSeek-V4) or from rollout.quantization via hf_overrides.
+        nvfp4_per_token_config = None
         if is_quantized_model(vllm_config):
+            from verl.utils.vllm.vllm_nvfp4_per_token_utils import nvfp4_per_token_quantization_config
+
             configure_fp8_ignored_layers_match_mode(vllm_config)
             apply_vllm_quant_patches()
+            nvfp4_per_token_config = nvfp4_per_token_quantization_config(vllm_config)
 
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
@@ -203,12 +253,19 @@ class vLLMColocateWorkerExtension:
                     os.environ[k] = VLLM_ASCEND_REQUIRED_ENV_VARS[k]
 
         instance = super().__new__(cls)
+        instance._nvfp4_per_token_config = nvfp4_per_token_config
         return instance
 
     def _get_drafter_model(self):
-        """Return the drafter's model object, or None if unavailable."""
-        drafter = getattr(self.model_runner, "drafter", None)
-        return drafter.model if drafter is not None and hasattr(drafter, "model") else None
+        """Return the V1 drafter or V2 speculator model, if available."""
+        # V2 renamed the draft-model owner to speculator. Resolve both so MTP
+        # weight loading, buffer updates, and post-processing include its model.
+        for attr in ("drafter", "speculator"):
+            owner = getattr(self.model_runner, attr, None)
+            model = getattr(owner, "model", None)
+            if model is not None:
+                return model
+        return None
 
     def _get_draft_model_config(self):
         """Return the draft model config from speculative_config, or None."""
@@ -244,6 +301,13 @@ class vLLMColocateWorkerExtension:
             monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
+        if self._nvfp4_per_token_config is not None:
+            from verl.utils.vllm.vllm_nvfp4_per_token_utils import attest_nvfp4_per_token_runtime, clear_kv_cache
+
+            # get_model() unwraps vLLM's CUDA-graph wrapper.
+            model = self.model_runner.get_model()
+            attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
+            clear_kv_cache(model)
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
@@ -299,6 +363,23 @@ class vLLMColocateWorkerExtension:
 
             pin_memory = is_pin_memory_available()
 
+        # A bucket can contain only base-model weights, so skip the drafter's
+        # per-load completeness check during this bucketed transfer, including
+        # the initial base-weight sync for LoRA.
+        skip_mtp_completeness_check = (
+            not (peft_config and base_sync_done)
+            and not is_quantized_model(self.model_runner.vllm_config)
+            and self._use_mtp_drafter_weight_sync()
+        )
+        mtp_load_context = nullcontext
+        if skip_mtp_completeness_check:
+            try:
+                from vllm.model_executor.model_loader.mtp_validation import disable_mtp_completeness_check
+            except ImportError:
+                pass  # Older vLLM versions do not provide the scoped helper.
+            else:
+                mtp_load_context = disable_mtp_completeness_check
+
         def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
             if lora_weights is not None:
                 # Copy: add_lora keeps these past the callback (reused IPC buffer, #6454). One CPU block per
@@ -329,7 +410,8 @@ class vLLMColocateWorkerExtension:
                 base_sync_done=base_sync_done,
             )
 
-        receiver.receive_weights(on_bucket_received=on_bucket_received)
+        with mtp_load_context():
+            receiver.receive_weights(on_bucket_received=on_bucket_received)
 
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
@@ -537,8 +619,10 @@ def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional
         return
 
     prompt_logprobs_ls, prompt_ids_ls = [], []
-    # NOTE: logprob of first prompt token is None.
-    for logprobs_dict in output.prompt_logprobs[1:]:
+    # NOTE: logprob of first prompt token is None. Index instead of slicing [1:]: FlatLogprobs in vLLM < 0.29 raises
+    # IndexError on an empty slice, i.e. a one-token prompt.
+    for position in range(1, len(output.prompt_logprobs)):
+        logprobs_dict = output.prompt_logprobs[position]
         if num_prompt_logprobs == 0:
             token_id_str = list(logprobs_dict.keys())[0]
             logprob = logprobs_dict[token_id_str].logprob

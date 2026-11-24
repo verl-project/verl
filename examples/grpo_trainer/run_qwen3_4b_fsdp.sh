@@ -43,7 +43,7 @@ case "${DEVICE}" in
         ;;
     npu)
         export VLLM_USE_V1=1
-        export TASK_QUEUE_ENABLE=2
+        export TASK_QUEUE_ENABLE=1
         export CPU_AFFINITY_CONF=1
         export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
         NGPUS_PER_NODE=16
