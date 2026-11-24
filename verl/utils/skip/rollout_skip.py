@@ -13,6 +13,7 @@
 # limitations under the License.
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import torch
@@ -28,38 +29,84 @@ class _CacheLayoutMismatch(ValueError):
     """The selected dump cannot satisfy the current rollout request."""
 
 
-def _config_replay_keys(old_keys: list[str], data: TensorDict, new_prompt_uids: list[str], n: int) -> list[str]:
-    """Validate the full batch before mapping its saved rows onto fresh prompts."""
-    sessions_by_uid: dict[str, set[str]] = {}
-    expected_sessions = {str(i) for i in range(n)}
+def _config_trajectories(
+    old_keys: list[str], data: TensorDict, expected_sessions: set[str]
+) -> Iterator[tuple[str, str, str]]:
+    """Read keys and identity columns together from their original inner batch."""
     saved_uids = data.get("uid").tolist() if "uid" in data.keys() else None
     saved_sessions = data.get("session_id").tolist() if "session_id" in data.keys() else None
 
-    parsed = []
     for row, key in enumerate(old_keys):
         parts = key.rsplit("_", 2) if isinstance(key, str) else []
         if len(parts) != 3:
             raise _CacheLayoutMismatch(f"invalid trajectory key {key!r}")
         uid, session, index = parts
         if not uid or session not in expected_sessions or not index.isascii() or not index.isdecimal():
-            raise _CacheLayoutMismatch(f"invalid trajectory key {key!r} for rollout.n={n}")
+            raise _CacheLayoutMismatch(f"invalid trajectory key {key!r} for rollout.n={len(expected_sessions)}")
         if saved_uids is not None and saved_uids[row] != uid:
             raise _CacheLayoutMismatch(f"row uid disagrees with trajectory key {key!r}")
         if saved_sessions is not None and saved_sessions[row] != int(session):
             raise _CacheLayoutMismatch(f"row session_id disagrees with trajectory key {key!r}")
-        sessions_by_uid.setdefault(uid, set()).add(session)
-        parsed.append((uid, session, index))
+        yield uid, session, index
+
+
+def _config_replay_batches(
+    key_batches: list[list[str]], data_list: list[TensorDict], new_prompt_uids: list[str], n: int
+) -> list[list[str]]:
+    """Validate every saved row, then remap each inner batch in its original layout."""
+    from tensordict.tensorclass import NonTensorData
+
+    from verl.utils.tensordict_utils import assign_non_tensor_stack
+
+    expected_sessions = {str(i) for i in range(n)}
+    sessions_by_uid: dict[str, set[str]] = {}
+    seen = set()
+    parsed_batches = []
+    for keys, data in zip(key_batches, data_list, strict=True):
+        rows = list(_config_trajectories(keys, data, expected_sessions))
+        for uid, session, index in rows:
+            # Advantage grouping compares the numeric output index.
+            identity = (uid, session, index.lstrip("0") or "0")
+            if identity in seen:
+                raise _CacheLayoutMismatch("duplicate trajectory keys")
+            seen.add(identity)
+            sessions_by_uid.setdefault(uid, set()).add(session)
+        parsed_batches.append(rows)
 
     if len(sessions_by_uid) != len(new_prompt_uids):
         raise _CacheLayoutMismatch(f"expected {len(new_prompt_uids)} prompt groups, found {len(sessions_by_uid)}")
-    if len(set(old_keys)) != len(old_keys):
-        raise _CacheLayoutMismatch("duplicate trajectory keys")
     for uid, sessions in sessions_by_uid.items():
         if sessions != expected_sessions:
             raise _CacheLayoutMismatch(f"expected {n} sessions for prompt {uid!r}, found {len(sessions)}")
 
+    schemas = {
+        frozenset(data.keys(include_nested=True, leaves_only=True)) - {"uid", "session_id"}
+        for data in data_list
+        if len(data)
+    }
+    if len(schemas) > 1:
+        raise _CacheLayoutMismatch("inner batches have different trajectory fields")
+
     uid_map = dict(zip(sessions_by_uid, new_prompt_uids, strict=True))
-    return [f"{uid_map[uid]}_{session}_{index}" for uid, session, index in parsed]
+    session_template = next((data.get("session_id") for data in data_list if "session_id" in data.keys()), None)
+    mapped_batches = []
+    for data, rows in zip(data_list, parsed_batches, strict=True):
+        mapped_batches.append([f"{uid_map[uid]}_{session}_{index}" for uid, session, index in rows])
+        if not rows:
+            continue
+        assign_non_tensor_stack(data, "uid", [uid_map[uid] for uid, _, _ in rows])
+        if session_template is not None and "session_id" not in data.keys():
+            session_ids = [int(session) for _, session, _ in rows]
+            if isinstance(session_template, torch.Tensor):
+                data["session_id"] = session_template.new_tensor(session_ids)
+            else:
+                assign_non_tensor_stack(data, "session_id", session_ids)
+        # The storage writer selects individual positions from each field.
+        for name, value in list(data.items()):
+            if isinstance(value, NonTensorData):
+                assign_non_tensor_stack(data, name, value.tolist())
+
+    return mapped_batches
 
 
 @register_skip("rollout_tq")
@@ -295,9 +342,9 @@ class RolloutTqSkip(BaseSkip):
             )
 
         # Load all inner dirs and merge (parameter_sync_step == 1 → single dir)
-        old_keys: list = []
+        key_batches: list[list[str]] = []
         old_tags: list = []
-        data_list: list = []
+        data_list: list[TensorDict] = []
         for inner_idx in range(self.parameter_sync_step):
             inner_dir = self._get_v1_inner_dir(load_step, inner_idx)
             payload = torch.load(inner_dir / self.tq_batch_name, weights_only=False)
@@ -306,27 +353,21 @@ class RolloutTqSkip(BaseSkip):
             ):
                 raise _CacheLayoutMismatch(f"field, key and tag counts disagree in {inner_dir}")
             data_list.append(payload["tensordict"])
-            old_keys.extend(payload["keys"])
+            key_batches.append(payload["keys"])
             old_tags.extend(payload["tags"])
 
-        if len(data_list) > 1:
-            from verl.utils.tensordict_utils import concat_tensordict
-
-            data = concat_tensordict(data_list)
-        else:
-            data = data_list[0]
-
         if self.load_mode == "config":
-            from verl.utils.tensordict_utils import assign_non_tensor_stack
-
-            new_keys = _config_replay_keys(old_keys, data, new_prompt_uids, n)
-            assign_non_tensor_stack(data, "uid", [key.rsplit("_", 2)[0] for key in new_keys])
+            # Keep saved tensor layouts and per-inner metadata intact during injection.
+            key_batches = _config_replay_batches(key_batches, data_list, new_prompt_uids, n)
         else:
+            from verl.utils.tensordict_utils import concat_tensordict, index_select_tensor_dict
+
+            old_keys = [key for keys in key_batches for key in keys]
+            data = concat_tensordict(data_list) if len(data_list) > 1 else data_list[0]
             new_keys, traj_indices = self._dump_replay_rows(old_keys, new_prompt_uids, n, load_step)
             # NestedTensor (jagged prompts/responses) cannot be indexed directly on dim=0.
-            from verl.utils.tensordict_utils import index_select_tensor_dict
-
-            data = index_select_tensor_dict(data, traj_indices)
+            data_list = [index_select_tensor_dict(data, traj_indices)]
+            key_batches = [new_keys]
             old_tags = [old_tags[i] for i in traj_indices]
 
         new_tags = []
@@ -336,12 +377,17 @@ class RolloutTqSkip(BaseSkip):
             tag.pop("is_prompt", None)
             new_tags.append(tag)
 
-        tq.kv_batch_put(keys=new_keys, fields=data, tags=new_tags, partition_id=partition_id)
+        offset = 0
+        for keys, fields in zip(key_batches, data_list, strict=True):
+            end = offset + len(keys)
+            if keys:
+                tq.kv_batch_put(keys=keys, fields=fields, tags=new_tags[offset:end], partition_id=partition_id)
+            offset = end
         prompt_tags = [{"is_prompt": True, "status": "finished", "global_steps": global_steps}] * len(new_prompt_uids)
         tq.kv_batch_put(keys=new_prompt_uids, partition_id=partition_id, tags=prompt_tags)
 
         print(
-            f"{self.print_mark}\033[33mInjected {len(new_keys)} cached trajectories "
+            f"{self.print_mark}\033[33mInjected {len(new_tags)} cached trajectories "
             f"from step {load_step} ({len(new_prompt_uids)} prompts x {n} sessions) "
             f"into TQ partition '{partition_id}' at current step {step}\033[0m",
             flush=True,

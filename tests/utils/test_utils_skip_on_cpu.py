@@ -215,6 +215,7 @@ def save_keys(cache, tq, keys):
         (["a_0_0", "a_0_1", "b_0_0", "b_1_0"], None),  # Right number of rows, missing session.
         (["a_0_0", "a_2_0", "b_0_0", "b_1_0"], None),  # Session IDs disagree with rollout.n.
         (["a_0_0", "a_1_0", "a_1_0", "b_0_0", "b_1_0"], None),  # Duplicate trajectory key.
+        pytest.param(["a_0_0", "a_0_00", "a_1_0", "b_0_0", "b_1_0"], None, id="duplicate-numeric-index"),
         (["a_0_0", "a_1_0", "b_0_0", "b_1_0"], [1, 2]),  # A prompt overrides rollout.n.
         (["a_0_0", "a_1_0", "b_0_0", "b_1_0"], 1),  # An override broadcast to every prompt.
     ],
@@ -310,3 +311,92 @@ def test_config_replays_broadcast_row_metadata(config_cache, tq):
     trajectories = tq.kv_batch_put.call_args_list[0].kwargs
     assert trajectories["keys"] == ["new_0_0", "new_0_1"]
     assert list(trajectories["fields"]["uid"]) == ["new", "new"]
+
+
+def save_inner(config_cache, tq, keys, **fields):
+    tq.kv_batch_get.return_value = TensorDict(fields, batch_size=[len(keys)])
+    batch = SimpleNamespace(keys=keys, tags=[{} for _ in keys], partition_id="train")
+    config_cache.prepare_data(1, batch, global_steps=1)
+
+
+def test_config_replays_broadcast_uid_from_each_inner(config_cache, tq):
+    from tensordict.tensorclass import NonTensorData
+
+    config_cache.parameter_sync_step = 2
+    for uid in ("a", "b"):
+        save_inner(config_cache, tq, [f"{uid}_0_0", f"{uid}_1_0"], uid=NonTensorData(uid), session_id=torch.arange(2))
+    assert config_cache.maybe_load_and_inject(1, ["new-a", "new-b"])
+    *writes, prompts = (call.kwargs for call in tq.kv_batch_put.call_args_list)
+    assert [key for w in writes for key in w["keys"]] == ["new-a_0_0", "new-a_1_0", "new-b_0_0", "new-b_1_0"]
+    assert [uid for w in writes for uid in w["fields"].get("uid").tolist()] == ["new-a", "new-a", "new-b", "new-b"]
+    assert [s for w in writes for s in w["fields"]["session_id"].tolist()] == [0, 1, 0, 1]
+    assert prompts["keys"] == ["new-a", "new-b"]
+
+
+def test_config_rejects_wrong_broadcast_session_in_second_inner(config_cache, tq, caplog):
+    from tensordict.tensorclass import NonTensorData
+
+    config_cache.parameter_sync_step = 2
+    config_cache.n = 1
+    save_inner(config_cache, tq, ["a_0_0"], session_id=NonTensorData(0))
+    save_inner(config_cache, tq, ["b_0_0"], session_id=NonTensorData(1))
+    assert not config_cache.maybe_load_and_inject(1, ["new-a", "new-b"])
+    tq.kv_batch_put.assert_not_called()
+    assert "session_id" in caplog.text
+
+
+def test_config_preserves_session_column_across_inners(config_cache, tq):
+    from tensordict.tensorclass import NonTensorData
+
+    config_cache.parameter_sync_step = 2
+    save_inner(config_cache, tq, ["a_0_0", "a_0_1"], uid=NonTensorData("a"), session_id=NonTensorData(0))
+    save_inner(config_cache, tq, ["a_1_0"], session_id=NonTensorData(1))
+    assert config_cache.maybe_load_and_inject(1, ["new"])
+    *writes, prompts = (call.kwargs for call in tq.kv_batch_put.call_args_list)
+    assert [key for w in writes for key in w["keys"]] == ["new_0_0", "new_0_1", "new_1_0"]
+    assert [s for w in writes for s in w["fields"].get("session_id").tolist()] == [0, 0, 1]
+    assert prompts["keys"] == ["new"]
+
+
+def test_config_recollects_when_inner_trajectory_fields_differ(config_cache, tq, caplog):
+    config_cache.parameter_sync_step = 2
+    save_inner(config_cache, tq, ["a_0_0", "a_1_0"], responses=torch.arange(2))
+    save_inner(config_cache, tq, ["b_0_0", "b_1_0"], rewards=torch.arange(2))
+    assert not config_cache.maybe_load_and_inject(1, ["new-a", "new-b"])
+    tq.kv_batch_put.assert_not_called()
+    assert "different trajectory fields" in caplog.text
+
+
+@pytest.mark.parametrize("lengths", [((2, 2), (3, 3)), ((2, 2), (2, 3)), ((2, 3), (2, 2))])
+def test_config_replays_different_response_lengths_across_inners(config_cache, tq, lengths):
+    from tensordict.tensorclass import NonTensorData
+
+    from verl.utils.tensordict_utils import list_of_dict_to_tensordict
+
+    config_cache.parameter_sync_step = 2
+    for uid, sizes in zip(("a", "b"), lengths, strict=True):
+        data = list_of_dict_to_tensordict([{"responses": torch.arange(size)} for size in sizes])
+        data["source"] = NonTensorData(uid)
+        tq.kv_batch_get.return_value = data
+        batch = SimpleNamespace(keys=[f"{uid}_0_0", f"{uid}_1_0"], tags=[{"source": uid}] * 2, partition_id="train")
+        config_cache.prepare_data(1, batch, global_steps=1)
+    assert config_cache.maybe_load_and_inject(1, ["new-a", "new-b"])
+    *writes, prompts = (call.kwargs for call in tq.kv_batch_put.call_args_list)
+    rows = [row.tolist() for w in writes for row in w["fields"]["responses"].unbind()]
+    assert rows == [list(range(size)) for sizes in lengths for size in sizes]
+    assert [s for w in writes for s in w["fields"]["source"]] == ["a", "a", "b", "b"]
+    assert [tag["source"] for w in writes for tag in w["tags"]] == ["a", "a", "b", "b"]
+    assert prompts["keys"] == ["new-a", "new-b"]
+
+
+def test_config_does_not_publish_finished_prompts_after_an_inner_write_fails(config_cache, tq):
+    config_cache.parameter_sync_step = 2
+    for uid in ("a", "b"):
+        save_inner(config_cache, tq, [f"{uid}_0_0", f"{uid}_1_0"], responses=torch.arange(2))
+    tq.kv_batch_put.side_effect = [None, RuntimeError("second trajectory write failed")]
+    with pytest.raises(RuntimeError, match="second trajectory write failed"):
+        config_cache.maybe_load_and_inject(1, ["new-a", "new-b"])
+    assert [call.kwargs["keys"] for call in tq.kv_batch_put.call_args_list] == [
+        ["new-a_0_0", "new-a_1_0"],
+        ["new-b_0_0", "new-b_1_0"],
+    ]
