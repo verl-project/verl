@@ -772,7 +772,6 @@ class TestYamlResolutionPreservation:
 
     def test_checkpoint_section_values_preserved(self):
         ckpt = self.cfg.checkpoint
-        assert ckpt.save_only_adapter_if_lora is True
         assert list(ckpt.save_contents) == ["model", "optimizer", "extra", "hf_model"]
 
     def test_engine_strategy_preserved(self):

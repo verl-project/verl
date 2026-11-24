@@ -145,9 +145,6 @@ checkpoint:
   # Contents to load from checkpoint
   load_contents: ${checkpoint.save_contents}
 
-  # When doing LoRA training, save only the adapter (not full model) for regular checkpoints
-  save_only_adapter_if_lora: true
-
 # Trainer configuration
 trainer:
 
@@ -210,6 +207,3 @@ trainer:
 
   # Profile interval range
   profile_interval: [-1, -1]
-
-  # When true, also save a merged LoRA model for the final HF checkpoint
-  merge_lora_on_final_save: true

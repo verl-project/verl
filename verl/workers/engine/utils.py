@@ -20,6 +20,7 @@ import numpy as np
 import torch
 from tensordict import TensorDict
 
+from verl.trainer.dpo.utils import DPO_EXPAND_FLAG, expand_dpo_micro_batch
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.device import is_npu_available
@@ -167,6 +168,12 @@ def prepare_micro_batches(
         )
         micro_batches = tu.chunk_tensordict(data, total_data_size // (micro_batch_size_per_gpu * force_group_size))
         batch_idx_list = None
+
+    # DPO: each row packs a (chosen, rejected) pair so that micro-batching keeps the pair together.
+    # Split the pairs into separate sequences only now, after the micro-batches are fixed. The flag is
+    # set only by the DPO trainer; for every other caller this is a no-op.
+    if tu.get_non_tensor_data(data=data, key=DPO_EXPAND_FLAG, default=False):
+        micro_batches = [expand_dpo_micro_batch(mb) for mb in micro_batches]
     return micro_batches, batch_idx_list
 
 
