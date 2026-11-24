@@ -123,6 +123,38 @@ def calculate_debug_metrics(data: DataProto) -> dict:
         actor_old_log_probs.float(), rollout_old_log_probs.float(), response_mask_bool
     )
     logprobs_mismatch = rollout_logprobs_diff != 0
+    import os
+    audit_root = os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR")
+    if audit_root:
+        from pathlib import Path
+        import json, time
+        root = Path(audit_root)
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = str(time.time_ns())
+        left = actor_old_log_probs.detach().cpu().contiguous()
+        right = rollout_old_log_probs.detach().cpu().contiguous()
+        mask = response_mask_bool.detach().cpu()
+        finite = torch.isfinite(left) & torch.isfinite(right)
+        delta = (left.double() - right.double()).abs()[mask]
+        different = (left != right) & mask
+        where = different.nonzero()
+        summary = {
+            "comparison": "independent_actor_old_logprob_vs_rollout",
+            "valid_tokens": int(mask.sum()), "nonfinite_tokens": int((~finite & mask).sum()),
+            "different_tokens": int(different.sum()),
+            "mean_abs_diff": float(delta.mean()), "max_abs_diff": float(delta.max()),
+            "first_difference": where[0].tolist() if len(where) else None,
+            "actor_dtype": str(left.dtype), "rollout_dtype": str(right.dtype),
+            "passed": bool(mask.any() and finite[mask].all() and not different.any()),
+        }
+        artifact = {"actor_logprobs": left, "rollout_logprobs": right, "mask": mask,
+                    "responses": responses.detach().cpu()}
+        for key in ("input_ids", "attention_mask", "position_ids"):
+            if key in data.batch:
+                artifact[key] = data.batch[key].detach().cpu()
+        torch.save(artifact, root / (stamp + ".pt"))
+        (root / (stamp + ".json")).write_text(json.dumps(summary, indent=2) + "\n")
+        print("KIMI_ALIGNMENT_AUDIT " + json.dumps(summary), flush=True)
     return {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),

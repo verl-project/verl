@@ -165,6 +165,14 @@ class TaskRunnerV1:
         tq.init(config.transfer_queue)
         succeeded = False
         try:
+            # Task-local occupancy recheck before workers acquire any NPU.
+            import os
+            if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
+                import subprocess
+                subprocess.run(
+                    ["/usr/bin/python3", "/mnt/share/y00938198/kimi-k31/test_wxx_skill/scripts/check_idle.py"],
+                    check=True,
+                )
             self.trainer = trainer_cls(config=config)
             self.trainer.init()
             self.init_agent_loop_manager()

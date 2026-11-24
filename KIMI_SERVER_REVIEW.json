@@ -1,0 +1,162 @@
+{
+  "captured_at": "2026-11-24T11:44:59.445241+08:00",
+  "source": "423 task workspace, read only",
+  "upstream_base": "de742368df5d23e93ce9ba487d386f5265e1c9af",
+  "previous_pr_head": "68dcb3ba532c31545a73e7d538944ea4c3ad74ec",
+  "scope": "恢复训练侧独立评分、masked entropy、确定性设置、请求/前向/逐token误差记录和serving探针入口。删除PR额外引入的FSDPTurbo MC2回调解析和包内scoring重构。",
+  "main_context_notes": "当前main的logprobs_from_logits已改签名；只在两处评分调用分支衔接旧scorer的force_fp32参数，scorer本体保留服务器原文。主仓不再包含旧环境的图像展开、vendor隔离等部分基线代码，本草稿不复制这些继承实现，也不宣称当前main等价于423完整环境。",
+  "model_or_device_runs_started": false,
+  "unit_tests_run": false,
+  "files": [
+    {
+      "repo": "verl",
+      "server_path": "source/verl/verl/experimental/agent_loop/single_turn_agent_loop.py",
+      "target": "verl/experimental/agent_loop/single_turn_agent_loop.py",
+      "server_sha256": "792b161eeeb9600d3d03bb9515a75dddd2aeccd6379b5d409381b8b24dabb67b",
+      "pr_sha256": "b74945b6e22e5ae65877f5fe06034f3d8c3abfb93367a28ba5b1ca74713cc7a1",
+      "byte_identical": false
+    },
+    {
+      "repo": "verl",
+      "server_path": "source/verl/verl/trainer/main_ppo.py",
+      "target": "verl/trainer/main_ppo.py",
+      "server_sha256": "4f3e9efcc912bebebd1832aac2482272192a183973871268b5b9d3f10e2a20af",
+      "pr_sha256": "f472f10fbf4fd11972035efc78f130a643e1d48157d2c479f90fbf76edbd3967",
+      "byte_identical": false
+    },
+    {
+      "repo": "verl",
+      "server_path": "source/verl/verl/trainer/ppo/v1/trainer_base.py",
+      "target": "verl/trainer/ppo/v1/trainer_base.py",
+      "server_sha256": "6f344d469197303034ba41cf906b15bdf9f3333dbe556c45ace90320cceb5ea6",
+      "pr_sha256": "26e4534a698a37e608e4f01c2d526836f34c805a2c4f0501645c478e322f537b",
+      "byte_identical": false
+    },
+    {
+      "repo": "verl",
+      "server_path": "source/verl/verl/utils/debug/metrics.py",
+      "target": "verl/utils/debug/metrics.py",
+      "server_sha256": "f7d8f27ff830cef730b1a2e4bc6aa4268c837879089543beaa30fdbc104029b9",
+      "pr_sha256": "6f7075816a75e7556cd38d085c54c95cd4dc700cf818a6abc6eaeaae2e961773",
+      "byte_identical": false
+    },
+    {
+      "repo": "verl",
+      "server_path": "source/verl/verl/workers/engine/fsdp/transformer_impl.py",
+      "target": "verl/workers/engine/fsdp/transformer_impl.py",
+      "server_sha256": "effaad923ea5655150a57bdb28f03bd85ac8c6f8790e147d6c7eae282a2f4037",
+      "pr_sha256": "6048dbef9490a9b4ae1b9eae315a9fcf9fb005d4e0a8676b74504a894e95043b",
+      "byte_identical": false
+    },
+    {
+      "repo": "verl",
+      "server_path": "source/verl/verl/workers/engine_workers.py",
+      "target": "verl/workers/engine_workers.py",
+      "server_sha256": "e52e6e4daf08b9b4795bf235caaca16f559698d61c118540d67c5b65e41fabd3",
+      "pr_sha256": "2c2959823476f755bb546286e6889f15360f20c385534be353d2b949ce9f6d18",
+      "byte_identical": false
+    },
+    {
+      "repo": "verl",
+      "server_path": "source/verl/verl/workers/rollout/llm_server.py",
+      "target": "verl/workers/rollout/llm_server.py",
+      "server_sha256": "7ce8f9143b8dabe91070dd966191792133e258df203b3577cb6b5620b98cbe7a",
+      "pr_sha256": "0f130aa8fcf0c82985814f5030526dde782a7854723500fcae1cd1b1f7a4dbc1",
+      "byte_identical": false
+    },
+    {
+      "repo": "verl",
+      "server_path": "source/verl/verl/workers/rollout/vllm_rollout/vllm_async_server.py",
+      "target": "verl/workers/rollout/vllm_rollout/vllm_async_server.py",
+      "server_sha256": "b50d4e930efd3f0c2e4007e2af407e03a36f841fa38ade40d517dc08cea18424",
+      "pr_sha256": "fbd20d7c4f35b21cebfcd5e183305045ef463247098912a65a10cb39541c9106",
+      "byte_identical": false
+    },
+    {
+      "repo": "verl",
+      "server_path": "source/verl/verl/utils/kimi_logprob.py",
+      "target": "verl/utils/kimi_logprob.py",
+      "server_sha256": "b98815e7de1ecaaf89f19bcfe85fae96a5d9744340054c0b69c6e5a3a7133300",
+      "pr_sha256": "b98815e7de1ecaaf89f19bcfe85fae96a5d9744340054c0b69c6e5a3a7133300",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/alignment_audit.py",
+      "target": "examples/kimi_alignment/runtime/alignment_audit.py",
+      "server_sha256": "16d9ed1c6c2fc6ed0f843e041b943d96e3ed0d8308adfb583f5c954765d951f5",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/dsa_alignment.py",
+      "target": "examples/kimi_alignment/runtime/dsa_alignment.py",
+      "server_sha256": "d82906981cd7029321d486af134a4fb3269127fab872272a02df3302b9116d69",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/dsa_trace.py",
+      "target": "examples/kimi_alignment/runtime/dsa_trace.py",
+      "server_sha256": "4dba0a01e28c80a0ce92fdb7142431df6e41a3e635a466ee421c9ff4b72be53e",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/kda_alignment.py",
+      "target": "examples/kimi_alignment/runtime/kda_alignment.py",
+      "server_sha256": "ff45bec6255669d2fddbd39bbda83816f1f798acfbd4f0cc80e3acd70ebcbe78",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/kda_trace.py",
+      "target": "examples/kimi_alignment/runtime/kda_trace.py",
+      "server_sha256": "c8e9846076e91e61d4e0d6142652edc6b2c4365417f3196b9c2fb2d80f0a8635",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/kimi_scoring.py",
+      "target": "examples/kimi_alignment/runtime/kimi_scoring.py",
+      "server_sha256": "beba32a7c9edad031e64d2e70a66e64fa4be3b42e9c65a30f1264fca0e357dbc",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/linear_alignment.py",
+      "target": "examples/kimi_alignment/runtime/linear_alignment.py",
+      "server_sha256": "4b3af01b594f7d84c477a5c88e7806bd35cef25cc822e505348d5f5c1be81ab7",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/mm_trace.py",
+      "target": "examples/kimi_alignment/runtime/mm_trace.py",
+      "server_sha256": "7a66a983b910d69e1a236bfdcb21cf1ebecfbd9b13106485987983fb54defc61",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/moe_alignment.py",
+      "target": "examples/kimi_alignment/runtime/moe_alignment.py",
+      "server_sha256": "2ddd0f0340691d91892fbaf095fa197901e01f4e70c182d130a16a0020bba280",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/moe_trace.py",
+      "target": "examples/kimi_alignment/runtime/moe_trace.py",
+      "server_sha256": "574319ca6652f364f9532c27ad865b456a4293e3089b68a18ec648376c4bafb1",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/package_metadata_cache.py",
+      "target": "examples/kimi_alignment/runtime/package_metadata_cache.py",
+      "server_sha256": "ed266b620ca4dd18291c8d1b8aa20880f238d672e4553c635905ce6c5ab528a8",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/residual_alignment.py",
+      "target": "examples/kimi_alignment/runtime/residual_alignment.py",
+      "server_sha256": "a73cf9aa23ffd59f44844ec2c73bbcf60221204d7c802f9579dc09a4e788969f",
+      "byte_identical": true
+    },
+    {
+      "server_path": "source/alignment_runtime/serving_invariance_probe.py",
+      "target": "examples/kimi_alignment/runtime/serving_invariance_probe.py",
+      "server_sha256": "6864269bb97178a8aa6c2618bb36ac3e58f486400d900ced07d7cfd96e66ae18",
+      "byte_identical": true
+    }
+  ]
+}
