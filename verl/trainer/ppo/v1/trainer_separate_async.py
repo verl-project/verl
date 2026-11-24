@@ -42,6 +42,12 @@ class HybridEngineMode(Enum):
     ROLLOUT = "rollout"
 
 
+# Pacing guard for the replay-buffer poll hook's out-of-band starvation syncs:
+# a failed attempt is itself slow and bounded, this only stops a fast-failing
+# sync from hammering the manager on every poll round.
+_STARVATION_SYNC_COOLDOWN_S = 60.0
+
+
 @register_trainer("separate_async")
 class PPOTrainerSeparateAsync(PPOTrainer):
     """Asynchronous PPO trainer
@@ -52,6 +58,9 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     # Default for instances that bypass __init__ (e.g. test stubs): hybrid
     # replicas are enabled unless hybrid_rollout.enable_switch=False.
     _enable_hybrid_replicas = True
+    # Last out-of-band starvation sync (time.monotonic); a class-level default
+    # keeps the poll hook safe on instances that bypass _setup.
+    _last_starvation_sync_ts = float("-inf")
 
     def __init__(self, config: DictConfig):
         train_batch_size = config.data.train_batch_size
@@ -182,6 +191,25 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             replicas=ray.get(self.standalone_server_manager.get_replicas.remote()),
         )
 
+        # Rollout-restart wiring (inert unless rollout.restart.enabled): the
+        # manager actor owns detection and rebuild; the trainer registers the
+        # membership pull and the promotion callback, and arms the starvation
+        # sync below.
+        restart_cfg = self.config.get("actor_rollout_ref", {}).get("rollout", {}).get("restart", None)
+        if restart_cfg is not None and restart_cfg.get("enabled", False):
+            from verl.workers.rollout.fault_tolerance import make_pre_sync_reconcile, make_sync_succeeded_callback
+
+            self.standalone_checkpoint_manager.enable_fault_tolerance(
+                pre_sync_hook=make_pre_sync_reconcile(
+                    self.standalone_checkpoint_manager, self.standalone_server_manager
+                ),
+                sync_succeeded_callback=make_sync_succeeded_callback(self.standalone_server_manager),
+            )
+            # A starved step never reaches on_step_end's update_weights, so
+            # the promoting sync is fired from the replay buffer's wait loop.
+            self._last_starvation_sync_ts = float("-inf")
+            self.replay_buffer.poll_hook = self._on_replay_buffer_poll
+
         # hybrid engine is in rollout mode after initialization
         if self._enable_hybrid_replicas:
             self.current_mode = HybridEngineMode.ROLLOUT
@@ -198,6 +226,37 @@ class PPOTrainerSeparateAsync(PPOTrainer):
                 f"rollout served by {len(ray.get(self.standalone_server_manager.get_replicas.remote()))} "
                 "standalone replicas only"
             )
+
+    def _on_replay_buffer_poll(self) -> None:
+        """While the sampler waits for data: run an out-of-band weight sync
+        when nothing is serving but a rebuilt replica awaits its weights
+        (COLD_START promotion); raise on the manager's fatal flag so an
+        all-DEAD rollout fails visibly instead of hanging."""
+        try:
+            snapshot = ray.get(self.standalone_server_manager.get_membership.remote())
+        except Exception:
+            # Every update_weights entry re-pulls membership anyway; a broken
+            # probe here must not break the wait.
+            logger.warning("membership probe from the replay-buffer poll failed (non-fatal)", exc_info=True)
+            return
+        if snapshot.fatal_error is not None:
+            raise RuntimeError(f"rollout restart is in a fatal state: {snapshot.fatal_error}")
+        if not snapshot.awaiting_weight_sync:
+            return
+        now = time.monotonic()
+        if now - self._last_starvation_sync_ts < _STARVATION_SYNC_COOLDOWN_S:
+            return
+        self._last_starvation_sync_ts = now
+        logger.warning(
+            "no serving rollout replica while a rebuilt replica awaits its deferred weight sync "
+            "— running an out-of-band weight sync to promote it"
+        )
+        try:
+            self.standalone_checkpoint_manager.update_weights(self.global_steps)
+        except Exception:
+            # The wait continues; the next poll re-probes and retries after
+            # the cooldown (the fatal branch above owns the terminal case).
+            logger.warning("out-of-band weight sync failed (will retry after cooldown)", exc_info=True)
 
     def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Version-aware old_log_probs computation for Decoupled PPO.
