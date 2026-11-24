@@ -144,8 +144,9 @@ def test_score_centering_config_accepts_sampling_parameters_without_a_manual_cen
     )
 
 
-def test_score_centering_config_accepts_megatron_actor():
-    _validate_score_centering_config(_config(**{"actor_rollout_ref.actor.strategy": "megatron"}))
+@pytest.mark.parametrize("strategy", ["fsdp", "fsdp2", "veomni", "megatron"])
+def test_score_centering_config_accepts_supported_actor_strategies(strategy):
+    _validate_score_centering_config(_config(**{"actor_rollout_ref.actor.strategy": strategy}))
 
 
 def test_score_centering_config_skips_checks_when_off():
@@ -165,7 +166,7 @@ def test_score_centering_config_skips_checks_when_off():
         (dict(algorithm_rc={"score_centering": False}), "both"),
         (dict(actor_rc={"rollout_is": "sequence"}), "score_centering"),
         (dict(actor_rc={"rollout_is_threshold": 3.0}), "match"),
-        ({"actor_rollout_ref.actor.strategy": "veomni"}, "strategy"),
+        ({"actor_rollout_ref.actor.strategy": "torchtitan"}, "strategy"),
         ({"actor_rollout_ref.rollout.name": "sglang"}, "vllm"),
         ({"actor_rollout_ref.rollout.topk_log_probs": 0}, "topk_log_probs"),
         ({"actor_rollout_ref.rollout.temperature": 0}, "temperature"),
