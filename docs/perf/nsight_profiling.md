@@ -1,6 +1,6 @@
 # NVIDIA Nsight Systems profiling in verl
 
-Last updated: 10/19/2026.
+Last updated: 11/24/2026.
 
 This guide explains how to use NVIDIA Nsight Systems for profiling verl training runs.
 
@@ -67,7 +67,7 @@ reward:
 
 The role's `ray_actor_nsight_options` defaults to `global_profiler.global_tool_config.nsys.worker_nsight_options` and can be overridden with a role-specific option mapping. For `capture-range: cudaProfilerApi`, an unspecified `capture-range-end` is filled from the global step window: adjacent selected steps share one capture when `profile_continuous_steps` is true; otherwise each selected step has its own capture. An explicit `capture-range-end` is preserved. The trainer or integration must also call the manager's start/stop methods at those boundaries; launch options alone do not define the runtime windows.
 
-The `o` option is an output-name template. For independent actors, `{role}` and `{rank}` are replaced at launch, while `%q{RANK}` is replaced with the actor's profiling rank. Nsight resolves `%h` and `%p` to the hostname and process ID. An output name with no `{role}` or `{rank}` receives a `<role>_rank_<rank>_` prefix; an omitted output name defaults to `<role>_rank_<rank>_%h_pid%p`. Include `%p` when using automatic report relocation so each process can identify its own reports.
+The `o` option is an output-name template. For independent actors, `{role}` and `{rank}` are replaced at launch, while `%q{RANK}` is replaced with the actor's profiling rank. Nsight resolves `%h` and `%p` to the hostname and process ID. An output name with no `{role}` or `{rank}` receives a `<role>.rank<rank>.` prefix; an omitted output name defaults to `<role>.rank<rank>.%h.pid%p`. Automatically generated fields use dots as separators; explicit templates keep their existing separators. Include `%p` when using automatic report relocation so each process can identify its own reports.
 
 ### Dedicated GPU metrics collection
 
@@ -84,7 +84,7 @@ global_profiler:
       gpu_metrics_nsight_options:
         capture-range: cudaProfilerApi
         gpu-metrics-devices: all
-        o: gpu_metrics_%h_pid%p
+        o: gpu_metrics.%h.pid%p
 ```
 
 Only one process may collect GPU metrics for a device. Remove GPU metrics collection options from controller and worker sessions that cover the same devices. Create the metrics actor after other GPU workers have initialized, start it after their profiling sessions, and stop it before them. This actor uses profiling rank 0 independently of the training roles and inherits the global save path, report relocation, and finish hook settings.
@@ -99,7 +99,7 @@ Some users may think it is not convenient, but it is understandable that Ray may
 
 Because Ray hardcodes the Nsight output directory, verl provides a *finish hook*. It has two independent parts, configured under `global_profiler` where role configs inherit those values, or explicitly under a role's `profiler`:
 
-* **`relocate_results`** (bool, default `False`). When `True`, each profiled worker moves *its own* reports out of `/tmp/ray/session_latest/logs/nsight/` into `save_path`, **on every profiled step**. Matching is by PID (nsys's `%p` token equals the worker process PID), so co-located ranks never touch each other's files and there is no race. In addition to the default `worker_process_<pid>.*` names, matching covers configured output names containing `%p`, including role-prefixed independent actor names. Destination filenames are prefixed with the role and hostname (e.g. `actor_<host>_worker_process_<pid>.nsys-rep`) to stay unique across nodes. The move is best-effort: nsys only finalizes a report after the capture session shuts down, so files that are not present yet are simply skipped and nothing is ever deleted. The same flag also flattens rollout engine traces, which the engines write into `<save_path>/agent_loop_rollout_replica_<n>/`, into `save_path` — see [PyTorch profiling](torch_profiling.md).
+* **`relocate_results`** (bool, default `False`). When `True`, each profiled worker moves *its own* reports out of `/tmp/ray/session_latest/logs/nsight/` into `save_path`, **on every profiled step**. Matching is by PID (nsys's `%p` token equals the worker process PID), so co-located ranks never touch each other's files and there is no race. In addition to the default `worker_process_<pid>.*` names, matching covers configured output names containing `%p`, including role-prefixed independent actor names. Destination filenames are prefixed with the role and hostname (e.g. `actor.<host>.worker_process_<pid>.nsys-rep`) to stay unique across nodes. The move is best-effort: nsys only finalizes a report after the capture session shuts down, so files that are not present yet are simply skipped and nothing is ever deleted. The same flag also flattens rollout engine traces, which the engines write into `<save_path>/agent_loop_rollout_replica_<n>/`, into `save_path` — see [PyTorch profiling](torch_profiling.md).
 * **`finish_hook_cmd`** (str, default `null`). A shell command executed on the selected ranks **once, after the last profiled step** (not once per step). Use it for post-processing, compression, or uploading traces to remote storage. Backend stop and `relocate_results` still run every profiled step, so by the last step `save_path` holds every profiled step's reports; because the command runs a single time, a command that uploads the whole directory sends each report exactly once. It runs with these environment variables:
   * `VERL_PROFILE_SAVE_PATH` — the configured `save_path` (holds all profiled steps' reports by the time the command runs).
   * `VERL_PROFILE_TOOL` — the profiler tool (e.g. `nsys`).

@@ -42,11 +42,11 @@ def _resolve_nsight_capture_options(options, profile_steps, profile_continuous_s
 def _render_nsight_output_name(output, *, rank: int, role: str) -> str:
     """Render role/rank in the output template, leaving Nsight host/PID placeholders intact."""
     if output is None:
-        return f"{role}_rank_{rank}_%h_pid%p"
+        return f"{role}.rank{rank}.%h.pid%p"
     output = str(output).replace("%q{RANK}", str(rank))
     if "{role}" in output or "{rank}" in output:
         return output.replace("{role}", role).replace("{rank}", str(rank))
-    return f"{role}_rank_{rank}_{output}"
+    return f"{role}.rank{rank}.{output}"
 
 
 def _config_select(config, path: str, default=None):

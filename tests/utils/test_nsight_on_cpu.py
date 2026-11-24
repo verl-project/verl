@@ -376,15 +376,16 @@ def test_build_gpu_metrics_nsight_launch_options():
 @pytest.mark.parametrize(
     "output, expected",
     [
-        (None, "reward_loop_rank_2_%h_pid%p"),
-        ("trace_%h_pid%p", "reward_loop_rank_2_trace_%h_pid%p"),
+        (None, "reward_loop.rank2.%h.pid%p"),
+        ("trace_%h_pid%p", "reward_loop.rank2.trace_%h_pid%p"),
         ("{role}_rank_{rank}_%h_pid%p", "reward_loop_rank_2_%h_pid%p"),
         ("{role}_%p", "reward_loop_%p"),
         ("rank_{rank}_%p", "rank_2_%p"),
-        ("rank_%q{RANK}_%p", "reward_loop_rank_2_rank_2_%p"),
+        ("rank_%q{RANK}_%p", "reward_loop.rank2.rank_2_%p"),
         ("{role}_%q{RANK}_%p", "reward_loop_2_%p"),
+        ("worker.run-1.rank%q{RANK}.%h.pid%p", "reward_loop.rank2.worker.run-1.rank2.%h.pid%p"),
     ],
-    ids=["default", "prefix", "role-and-rank", "role-only", "rank-only", "rank-env", "role-and-rank-env"],
+    ids=["default", "prefix", "role-and-rank", "role-only", "rank-only", "rank-env", "role-and-rank-env", "run-field"],
 )
 def test_render_nsight_output_name(output, expected):
     assert _render_nsight_output_name(output, rank=2, role="reward_loop") == expected
