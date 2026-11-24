@@ -55,7 +55,10 @@ def test_v1_truncation_metadata_survives_transfer_queue_and_padding(monkeypatch,
 
     monkeypatch.setattr(trainer_base.tq, "kv_batch_get", get_batch)
     config = OmegaConf.create(
-        {"actor_rollout_ref": {"rollout": {}, "model": {"mtp": {"enable": mtp, "enable_rollout": mtp}}}}
+        {
+            "algorithm": {"use_kl_in_reward": False},
+            "actor_rollout_ref": {"rollout": {}, "model": {"mtp": {"enable": mtp, "enable_rollout": mtp}}},
+        }
     )
     trainer = SimpleNamespace(
         config=config, use_critic=False, _rollout_moe_lb_metrics_accumulator=None, _get_n_gpus_for_throughput=lambda: 1
