@@ -15,16 +15,19 @@ set -xeuo pipefail
 n_gpus_per_node=1
 trainer_nnodes=8
 
+BACKEND=${BACKEND:-megatron}
 project_name='wuxibin_dapo'
-exp_name='qwen3_30b_score_centering_megatron_1112'
+exp_name="qwen3_30b_grpo_score_centering_${BACKEND}_1123"
 
 # ===================================== Algorithm =====================================
-adv_estimator=grpo
+adv_estimator=rloo
 loss_mode=bypass_mode
 rollout_is=token
-rollout_is_threshold=2.0
+rollout_is_threshold=${ROLLOUT_IS_THRESHOLD:-2.0}
 bypass_mode=true
 loss_type=reinforce
+loss_agg_mode=token-mean
+loss_scale_factor=null
 score_centering=true
 
 # reference policy
@@ -32,6 +35,7 @@ use_kl_in_reward=False
 kl_coef=0.001
 use_kl_loss=False
 kl_loss_coef=0.001
+entropy_coeff=0.0
 
 clip_ratio_low=3e-4
 clip_ratio_high=4e-4
@@ -55,7 +59,7 @@ n_resp_per_prompt_val=16
 enable_thinking=${enable_thinking:-True}
 
 NUM_WARMUP_BATCHES=${NUM_WARMUP_BATCHES:-4}
-MAX_OFF_POLICY_THRESHOLD=${MAX_OFF_POLICY_THRESHOLD:-null}
+MAX_OFF_POLICY_THRESHOLD=${MAX_OFF_POLICY_THRESHOLD:-16}
 
 # Training config
 TP=${TP:-2}
@@ -81,7 +85,7 @@ gpu_memory_utilization=0.8
 
 # ---- no user adjustment needed below ----
 # Megatron config
-ENGINE_CONFIG=(
+MEGATRON_ENGINE_CONFIG=(
     model_engine=megatron
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
@@ -104,6 +108,26 @@ ENGINE_CONFIG=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
 )
 
+VEOMNI_ENGINE_CONFIG=(
+    model_engine=veomni
+    # actor_rollout_ref.actor.veomni.enable_fsdp_offload=True
+    actor_rollout_ref.actor.veomni.param_offload=True
+    actor_rollout_ref.actor.veomni.optimizer_offload=True
+    actor_rollout_ref.actor.veomni.enable_async_activation_offload=True
+    actor_rollout_ref.actor.veomni.enable_full_shard=True
+    actor_rollout_ref.actor.veomni.ulysses_parallel_size=${CP}
+    actor_rollout_ref.actor.veomni.expert_parallel_size=${EP}
+    actor_rollout_ref.actor.veomni.moe_implementation=fused_triton
+    actor_rollout_ref.actor.veomni.attn_implementation=flash_attention_2
+    actor_rollout_ref.actor.veomni.router_replay.mode=R3
+)
+
+if [ "$BACKEND" == "veomni" ]; then
+    ENGINE_CONFIG=("${VEOMNI_ENGINE_CONFIG[@]}")
+else
+    ENGINE_CONFIG=("${MEGATRON_ENGINE_CONFIG[@]}")
+fi
+
 # Actor model config
 ACTOR_CONFIG=(
     actor_rollout_ref.model.path=$model_path
@@ -113,13 +137,16 @@ ACTOR_CONFIG=(
     actor_rollout_ref.actor.optim.lr=$actor_lr
     actor_rollout_ref.actor.use_kl_loss=$use_kl_loss
     actor_rollout_ref.actor.kl_loss_coef=$kl_loss_coef
+    actor_rollout_ref.actor.entropy_coeff=$entropy_coeff
+    actor_rollout_ref.actor.calculate_entropy=True
     actor_rollout_ref.actor.clip_ratio_low=$clip_ratio_low
     actor_rollout_ref.actor.clip_ratio_high=$clip_ratio_high
     actor_rollout_ref.actor.clip_ratio_c=10.0
     actor_rollout_ref.actor.policy_loss.loss_mode=${loss_mode}
     '+actor_rollout_ref.actor.policy_loss.rollout_correction=${algorithm.rollout_correction}'
+    actor_rollout_ref.actor.loss_agg_mode=$loss_agg_mode
+    actor_rollout_ref.actor.loss_scale_factor=$loss_scale_factor
     actor_rollout_ref.actor.use_dynamic_bsz=$use_dynamic_bsz
-    actor_rollout_ref.actor.megatron.pad_to_length=True
     actor_rollout_ref.actor.ppo_mini_batch_size=$ppo_mini_batch_size
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_max_token_len_per_gpu}
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${actor_max_token_len_per_gpu}
@@ -150,6 +177,7 @@ ROLLOUT_CONFIG=(
 
 DATA=(
     algorithm.adv_estimator=$adv_estimator
+    algorithm.norm_adv_by_std_in_grpo=False
     algorithm.use_kl_in_reward=$use_kl_in_reward
     algorithm.kl_ctrl.kl_coef=$kl_coef
     algorithm.gamma=$gae_gamma
@@ -184,7 +212,7 @@ TRAINER=(
     trainer.val_before_train=False
     trainer.log_val_generations=100
     trainer.save_freq=-1
-    trainer.test_freq=20
+    trainer.test_freq=80
     trainer.max_actor_ckpt_to_keep=2
     trainer.default_local_dir=$checkpoint_dir
     trainer.total_epochs=10
