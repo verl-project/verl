@@ -141,7 +141,7 @@ fsdp = [
     "torchaudio==2.11.0",
     "liger-kernel==0.8.4",
     "trl==0.27.0",
-    "flash-linear-attention==0.5.2",
+    "flash-linear-attention==0.6.0",
     # transformers NOT pinned here: verl-core carries it and the project-wide
     # override below settles the version (5.12.1). See override-dependencies.
 ]
@@ -170,7 +170,7 @@ megatron = [
     # Native MoE dispatcher, built against this extra's torch 2.13 / CUDA 13.0.
     "deep-ep==1.2.1",
     # Qwen3.5 Gated DeltaNet kernels; Bridge's dependencies are disabled below.
-    "flash-linear-attention==0.5.2",
+    "flash-linear-attention==0.6.0",
     # megatron.bridge.training.config imports megatron.energon at module level,
     # and bridge is installed deps-free, so it has to be listed here.
     "megatron-energon==7.4.1",
@@ -202,7 +202,7 @@ veomni = [
     "torchaudio==2.11.0",
     "liger-kernel==0.8.4",
     "trl==0.27.0",
-    "flash-linear-attention==0.5.2",
+    "flash-linear-attention==0.6.0",
     "veomni==0.1.12",
 ]
 
