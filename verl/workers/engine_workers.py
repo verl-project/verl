@@ -691,6 +691,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
+            vllm_engine_kwargs = (self.config.rollout.get("engine_kwargs", {}) or {}).get("vllm", {}) or {}
+            # vLLM accepts hyphenated option names as well.
+            vllm_engine_kwargs = {str(key).replace("-", "_"): value for key, value in vllm_engine_kwargs.items()}
+            self.actor.engine.rollout_name = self.config.rollout.name
+            self.actor.engine.vllm_enable_moe_shared_loras = bool(
+                vllm_engine_kwargs.get("enable_moe_shared_loras", False)
+            )
+            self.actor.engine.vllm_enable_mixed_moe_lora_format = bool(
+                vllm_engine_kwargs.get("enable_mixed_moe_lora_format", False)
+            )
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
         # 3. build rollout engine
@@ -720,6 +730,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
+            # resync_base only applies to an active, unmerged LoRA adapter.
+            lora_active = model_config.lora_rank > 0 or model_config.lora.get("rank", 0) > 0
+            self.lora_resync_base: bool = (
+                bool(model_config.lora.get("resync_base", False)) and lora_active and not self.peft_merge
+            )
 
         # 4. build checkpoint engine
         if "actor" in self.role:
@@ -818,6 +833,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
+            if getattr(self, "lora_resync_base", False):
+                raise ValueError(
+                    f"model.lora.resync_base needs the naive weight sync, got {effective_mode!r}: other modes never "
+                    "re-send the LoRA adapter, so discarding the rollout weights on sleep would lose it."
+                )
             if effective_mode == "delta_sharded":
                 # the delta engine owns the sync state machine (seed vs steady,
                 # snapshot prime), so it drives the training engine itself.
@@ -851,13 +871,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             layered_summon=self.layered_summon, base_sync_done=True
         )
 
-        do_lora_base_sync = False
-        if not self.peft_merge and peft_config is not None:
-            self.rollout.sleep_level = 1
-            do_lora_base_sync = not self.base_sync_done
+        do_lora_base_sync = (
+            not self.peft_merge and peft_config is not None and (self.lora_resync_base or not self.base_sync_done)
+        )
 
         # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
         if do_lora_base_sync:
+            # The FSDP exporter rejects layered_summon for a base export; Megatron ignores the flag.
             per_tensor_param_base, _base_peft_config = self.actor.engine.get_per_tensor_param(
                 layered_summon=self.layered_summon, base_sync_done=False
             )

@@ -19,6 +19,7 @@ import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
@@ -150,8 +151,7 @@ def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeyp
 
     server = object.__new__(vllm_async_server.vLLMHttpServer)
     server.config = SimpleNamespace(
-        mtp=SimpleNamespace(enable=True, enable_rollout=True),
-        external_kv_cache_invalidation="reset",
+        mtp=SimpleNamespace(enable=True, enable_rollout=True), external_kv_cache_invalidation="reset"
     )
     server.model_config = SimpleNamespace(lora_rank=0, lora={})
     server.engine = _FakeMtpEngine()
@@ -308,6 +308,15 @@ def test_underscore_speculative_config_takes_precedence(monkeypatch, engine_kwar
     assert server._resolve_sleep_level() == expected
 
 
+@pytest.mark.parametrize("lora", [{"rank": 8, "resync_base": True}, {"rank": 8, "resync_base": False}])
+def test_resync_base_does_not_outrank_separate_draft_model(monkeypatch, lora):
+    """resync_base re-syncs base weights; separately launched draft weights stay level 1."""
+    server = _make_sleep_server(monkeypatch, {"vllm": {"speculative_config": _DRAFT}})
+    server.model_config = SimpleNamespace(lora_rank=0, lora=lora)
+
+    assert server._resolve_sleep_level() == 1
+
+
 _SPEC_KEYS = ("speculative_config", "speculative-config")
 _SPEC_DOTTED_PREFIXES = ("speculative_config.", "speculative-config.")
 
@@ -375,6 +384,23 @@ def test_normalized_speculative_config_drives_sleep_level(
     assert server._resolve_sleep_level() == expected_level
 
 
+def test_none_underscore_spelling_does_not_shadow_dashed_config(monkeypatch):
+    """Launch drops None values, so the sleep resolver must ignore them too."""
+    engine_kwargs = {"vllm": {"speculative_config": None, "speculative-config": _DRAFT}}
+    server = _make_sleep_server(monkeypatch, engine_kwargs)
+
+    # launch_server() drops None values before the launch arguments are built.
+    launch_kwargs = {key: value for key, value in engine_kwargs["vllm"].items() if value is not None}
+    server._apply_speculative_config_normalization(launch_kwargs)
+
+    spec_keys = [key for key in launch_kwargs if key in _SPEC_KEYS or key.startswith(_SPEC_DOTTED_PREFIXES)]
+    assert len(spec_keys) == 1
+    assert launch_kwargs[spec_keys[0]] == _DRAFT
+    # The resolver reads the raw config, where the underscore key is still None.
+    assert server._effective_speculative_config() == _DRAFT
+    assert server._resolve_sleep_level() == 1
+
+
 def test_single_spelling_configuration_is_not_rewritten(monkeypatch):
     server = _make_sleep_server(monkeypatch, {"vllm": {"speculative-config": _DRAFT}})
     launched_kwargs = dict(server.config.engine_kwargs["vllm"])
@@ -423,3 +449,56 @@ def test_resolve_sleep_level_preserves_lora_and_npu_guards(monkeypatch):
     assert server._resolve_sleep_level() == 1
     monkeypatch.setattr(vllm_async_server, "_VLLM_VERSION", version.parse("0.30.0"))
     assert server._resolve_sleep_level() == 2
+
+
+@pytest.mark.parametrize("lora,expected_level", [({"rank": 8}, 1), ({"rank": 8, "resync_base": True}, 2)])
+def test_lora_adapter_sleep_level_follows_resync_base(monkeypatch, lora, expected_level):
+    """Adapter mode keeps the base (level 1) unless lora.resync_base re-syncs it on every update."""
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace()
+    server.model_config = SimpleNamespace(lora_rank=0, lora=lora)
+
+    assert server._resolve_sleep_level() == expected_level
+
+
+@pytest.mark.parametrize(("mode", "expected_level"), [("COLOCATED", 1), ("HYBRID", 2)])
+def test_resync_base_sleep_depends_on_whether_the_trainer_reloads_weights(monkeypatch, mode, expected_level):
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace(free_cache_engine=True, external_kv_cache_invalidation="reset")
+    server.model_config = SimpleNamespace(lora_rank=0, lora={"rank": 8, "resync_base": True})
+    server.node_rank = 0
+    server.rollout_mode = vllm_async_server.RolloutMode[mode]
+    server.engine = AsyncMock()
+
+    asyncio.run(server.sleep())
+    server.engine.sleep.assert_awaited_once_with(level=expected_level)
+    if mode == "COLOCATED":
+        asyncio.run(server.wake_up())
+        server.engine.wake_up.assert_awaited_once_with(tags=["kv_cache", "weights"])
+
+
+def test_kv_cache_release_keeps_adapter_weights_with_resync_base(monkeypatch):
+    """KV cache release preserves adapter weights and the salted external store."""
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    sleep_calls = []
+
+    class Engine:
+        async def sleep(self, level, reset_connector=True):
+            sleep_calls.append((level, reset_connector))
+
+        async def wake_up(self, tags):
+            pass
+
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace(free_cache_engine=True, external_kv_cache_invalidation="salt")
+    server.model_config = SimpleNamespace(lora_rank=0, lora={"rank": 8, "resync_base": True})
+    server.node_rank = 0
+    server.rollout_mode = vllm_async_server.RolloutMode.HYBRID
+    server.engine = Engine()
+
+    asyncio.run(server.release_kv_cache())
+
+    assert sleep_calls == [(1, False)]

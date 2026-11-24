@@ -256,8 +256,9 @@ class TestEngineKwargsManagedArgs:
             ("enable-expert-parallel", "rollout.expert_parallel_size"),
             ("tensor_parallel_size", "rollout.tensor_model_parallel_size"),
             ("enable_return_routed_experts", "rollout.enable_rollout_routing_replay"),
+            ("enable_tower_connector_lora", "actor_rollout_ref.model.lora"),
         ],
-        ids=["ep", "ep-hyphen", "tp", "r3"],
+        ids=["ep", "ep-hyphen", "tp", "r3", "tower-connector-lora"],
     )
     def test_rejects_managed_arg(self, key, points_to):
         with pytest.raises(ValueError, match=points_to):
@@ -399,6 +400,12 @@ class TestSpeculativeConfigLaunchParity:
                 },
                 1,
                 {"method": "eagle", "model": "Qwen/Qwen3-0.6B-Draft"},
+            ),
+            # launch_server drops None values; the resolver must ignore them too
+            (
+                {"vllm": {"speculative_config": None, "speculative-config": _DRAFT_SPEC_CONFIG}},
+                1,
+                _DRAFT_SPEC_CONFIG,
             ),
             ({"vllm": {"speculative_config.method": "ngram"}}, 2, _NGRAM_SPEC_CONFIG),
             ({"vllm": {"speculative_config": _NGRAM_SPEC_CONFIG}}, 2, _NGRAM_SPEC_CONFIG),

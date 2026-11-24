@@ -490,7 +490,7 @@ class AgentLoopBase(ABC):
                 len(prompt_ids),
                 prompt_length,
             )
-            return prompt_ids[len(prompt_ids) - prompt_length:]
+            return prompt_ids[len(prompt_ids) - prompt_length :]
         if truncation_policy == "right":
             logger.warning(
                 "Prompt of %d tokens exceeds rollout.prompt_length=%d; right-truncating.",
@@ -506,7 +506,7 @@ class AgentLoopBase(ABC):
             )
             head = max(1, prompt_length // 2)
             tail_length = prompt_length - head
-            return prompt_ids[:head] + prompt_ids[len(prompt_ids) - tail_length:]
+            return prompt_ids[:head] + prompt_ids[len(prompt_ids) - tail_length :]
 
         raise ValueError(
             f"Prompt of {len(prompt_ids)} tokens exceeds rollout.prompt_length={prompt_length}; "
