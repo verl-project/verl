@@ -505,7 +505,7 @@ deep-ep              = { index = "verl-wheelhouse" }
 apex                 = { index = "verl-wheelhouse" }
 flash-attn           = { index = "verl-wheelhouse" }
 transformer-engine   = { index = "verl-wheelhouse" }
-veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "10a26aca258f91a7af3e698cc0db8c6c51705989" }
+veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "9f533f4613e8b3470fcc6b9b409c539e2391e6c1" }
 
 # Keep the Core release tag aligned with the Megatron-Bridge pin above.
 megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",          tag = "core_v0.20.1" }

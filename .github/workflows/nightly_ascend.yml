@@ -361,6 +361,8 @@ jobs:
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3.5-2B
       TRANSFORMERS_VERBOSITY: 'error'
+      TRAIN_BATCH_SIZE: "32"
+      PPO_MINI_BATCH_SIZE: "32"
     steps:
       - name: Check npu and CANN info
         run: |
