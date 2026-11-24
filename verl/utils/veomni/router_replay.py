@@ -123,8 +123,12 @@ class VeOmniRouterReplay:
     def _mixed_decoder_mask(model: nn.Module) -> tuple[bool, ...]:
         """Identify mixed text decoders with routed experts and gated dense MLPs."""
         model = getattr(model, "module", model)
-        base = getattr(model, "base_model", model)
-        decoder = getattr(base, "language_model", base)
+        get_decoder = getattr(model, "get_decoder", None)
+        if callable(get_decoder):
+            decoder = get_decoder()
+        else:
+            base = getattr(model, "base_model", model)
+            decoder = getattr(base, "language_model", base)
         mask = []
         for layer in getattr(decoder, "layers", ()):
             mlp = getattr(layer, "mlp", None)

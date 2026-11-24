@@ -361,12 +361,17 @@ def _make_veomni_stub():
     return stub, captured
 
 
-def test_rollout_targets_follow_mixed_text_decoder(ctrl, monkeypatch):
+@pytest.mark.parametrize("has_get_decoder", [True, False])
+def test_rollout_targets_follow_mixed_text_decoder(ctrl, monkeypatch, has_get_decoder):
     model = nn.Module()
     model.base_model = nn.Module()
-    model.base_model.language_model = nn.Module()
+    decoder = nn.Module()
+    if has_get_decoder:
+        model.get_decoder = lambda: decoder
+    else:
+        model.base_model.language_model = decoder
     layers = nn.ModuleList(nn.Module() for _ in range(4))
-    model.base_model.language_model.layers = layers
+    decoder.layers = layers
     for i, layer in enumerate(layers):
         layer.mlp = nn.Module()
         if i in (1, 3):
