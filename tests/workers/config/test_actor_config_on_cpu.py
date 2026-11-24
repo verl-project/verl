@@ -131,39 +131,16 @@ class TestActorConfig(unittest.TestCase):
                         ],
                     )
 
-                config = OmegaConf.create(
-                    {
-                        "trainer": {"use_v1": True},
-                        "actor_rollout_ref": {"actor": cfg},
-                    }
-                )
-                with self.assertRaisesRegex(ValueError, "top-level `strategy`.*source of truth"):
-                    _validate_v1_fsdp_strategy(config)
-
-    def test_legacy_fsdp_actor_config_preserves_nested_strategy_compatibility(self):
-        """Test that deprecated runners keep their existing nested-selector behavior."""
-        from hydra import compose, initialize_config_dir
-
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
-            cfg = compose(
-                config_name="dp_actor",
-                overrides=[
-                    "fsdp_config.strategy=fsdp2",
-                    "ppo_micro_batch_size_per_gpu=128",
-                ],
-            )
-
-        global_config = OmegaConf.create(
-            {
-                "trainer": {"use_v1": False},
-                "actor_rollout_ref": {"actor": cfg},
-            }
-        )
-        _validate_v1_fsdp_strategy(global_config)
-
-        config = omega_conf_to_dataclass(cfg)
-        self.assertEqual(config.strategy, "fsdp")
-        self.assertEqual(config.engine.strategy, "fsdp")
+                # main_ppo always runs V1, so the deprecated trainer.use_v1 flag must not bypass the check.
+                for trainer_config in ({"use_v1": True}, {"use_v1": False}, {}):
+                    config = OmegaConf.create(
+                        {
+                            "trainer": trainer_config,
+                            "actor_rollout_ref": {"actor": cfg},
+                        }
+                    )
+                    with self.assertRaisesRegex(ValueError, "top-level `strategy`.*source of truth"):
+                        _validate_v1_fsdp_strategy(config)
 
     def test_fsdp_actor_config_rejects_unsupported_top_level_strategy(self):
         """Test that an FSDP actor cannot overwrite its engine with an invalid backend."""

@@ -72,10 +72,11 @@ def update_dict_with_config(dictionary: dict, config: DictConfig):
 
 
 def _validate_v1_fsdp_strategy(config: DictConfig) -> None:
-    """Reject conflicting FSDP backend selectors in the V1 trainer only."""
-    if not config.trainer.get("use_v1", False):
-        return
+    """Reject conflicting FSDP backend selectors.
 
+    ``main_ppo`` always runs the V1 trainer, so the deprecated ``trainer.use_v1`` flag does not
+    disable this check.
+    """
     actor_config = config.actor_rollout_ref.actor
     fsdp_config = actor_config.get("fsdp_config")
     if fsdp_config is None:
