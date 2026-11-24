@@ -8,11 +8,11 @@ Last updated: 02/24/2026.
 
 ### 强化学习计算流程概述
 
-1. **Rollout**：策略（actor）模型基于输入的prompt序列，推理生成回答（response序列）
-2. **ref logprob**：基于prompt和生成的response，reference模型计算ref logprob用于KL散度计算
-3. **logprob**：基于prompt和生成的response，actor模型计算logprob用于重要性采样
+1. **Rollout**：策略（actor）模型基于输入的prompt序列，推理生成回答（response序列）。
+2. **ref logprob**：基于prompt和生成的response，reference模型计算ref logprob用于KL散度计算。
+3. **logprob**：基于prompt和生成的response，actor模型计算logprob用于重要性采样。
 4. **reward**：基于prompt和生成的response，奖励模型评估奖励值R_N。
-5. **update**：基于计算得到的R_N、ref logprob、logprob计算优化函数和策略梯度，对actor模型进行更新
+5. **update**：基于计算得到的R_N、ref logprob、logprob计算优化函数和策略梯度，对actor模型进行更新。
 
 ![rl_data_stream](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/rl_data_stream.png)
 
@@ -66,7 +66,7 @@ Last updated: 02/24/2026.
 ##### **通过 Profiling 结合调用栈分析系统内存变化**
 
 - **操作**：采集数据时开启调用栈和内存视图功能。
-- **价值**：观察框架、CANN内存申请释放情况，可结合调用栈跟踪到前端python代码。
+- **价值**：观察框架、CANN内存申请释放情况，可结合调用栈跟踪到前端Python代码。
 - **效果展示**：结合调用栈进行内存变化分析。效果如下所示：
 
 ![in-memory%20analytics](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/in-memory%20analytics.gif)
@@ -85,7 +85,7 @@ Last updated: 02/24/2026.
 
 ### 1.host bound诊断
 
-host bound是指CPU任务量总和大于NPU，导致NPU执行出现空泡的现象。可以通过看Host2Device的同步连线来判断，如果连线都是歪的，那证明这里的set信号早于wait信号，NPU一ready就执行了，那也是device bound：
+host bound是指CPU任务量总和大于NPU耗时，导致NPU执行出现空泡的现象。可以通过看Host2Device的同步连线来判断，如果连线都是歪的，那证明这里的set信号早于wait信号，NPU一ready就执行了，那也是device bound：
 
 ![host_bound_1](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/host_bound_1.png)
 
@@ -93,7 +93,7 @@ host bound是指CPU任务量总和大于NPU，导致NPU执行出现空泡的现�
 
 ![host_bound_2](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/host_bound_2.png)
 
-此时有的算子在负重前行，有的算子拖了后腿，后者多于了前者。我们优先**找出来host耗时大于device的top算子，这些算子是拖后腿的**，可以交予算子团队重点分析。
+此时有的算子在负重前行，有的算子拖了后腿，后者多于前者。我们优先**找出来host耗时大于device的top算子，这些算子是拖后腿的**，可以交予算子团队重点分析。
 
 ### 2.组网合理性分析
 
@@ -113,7 +113,7 @@ host bound是指CPU任务量总和大于NPU，导致NPU执行出现空泡的现�
 
 ### 3.算子性能初诊
 
-需要利用 `"./ASCEND_PROFILER_OUTPUT/operator_details.csv"`来做分析，从而判断算子是否有性能问题。
+需要利用 `./ASCEND_PROFILER_OUTPUT/operator_details.csv`来做分析，从而判断算子是否有性能问题。
 
 Profiling工具会统计这些流水线在不同核上的平均繁忙时间（xxx_time），与最慢核的完整kernel耗时（task_duration）做除法，得到流水线利用率（xxx_ratio）。这些流水线之间虽然互有依赖，且搬运类流水线会互抢带宽，但算子只要设计得当，是可以做到互相掩盖的。因此我们可以初步认为，**当算子的执行耗时大到一定程度上，算子应当在某一条流水线上形成bound**，即利用率要高到一定程度。经验上，在单算子耗时达到50μs时，就可以认为算子应当在bound流水线上，达成80%+的占用率了。
 
@@ -127,10 +127,10 @@ Profiling工具会统计这些流水线在不同核上的平均繁忙时间（xx
 
 #### 4.1 搬运效率亲和的shape
 
-mte2是一个自身效率严重受shape影响的流水线。要想让mte2保证最大搬运效率，我们需要保障如下两个条件至少满足其一：
+MTE2是一个自身效率严重受shape影响的流水线。要想让MTE2保证最大搬运效率，我们需要保障如下两个条件至少满足其一：
 
 **（1）被搬运的矩阵使用nz作为format（最优）
-（2）被搬运的矩阵的尾轴512B对齐，且不为16KB的整数倍（近似最优）**
+（2）被搬运的矩阵的尾轴512Byte对齐，且不为16KB的整数倍（近似最优）**
 
 对于权重矩阵来说，推理阶段尤其是decode，我们通常满足（1），训练阶段我们通常满足（2）。**如果我们做不到（1），我们就要迎合（2）**。典型的手段有：
 
@@ -143,9 +143,9 @@ mte2是一个自身效率严重受shape影响的流水线。要想让mte2保证�
 
 首先，我们明确出当前NPU卡是多少核的，如果不清楚，跑出来的profiling里都是20、40这样的数，就说明是20核，反之是24核。这里我的24核其实是代表了一个cube和两个vector组成的小组，我们可以认为是一个cube作为主核，带了两个vector作为从核。如果一个算子是纯vector算子，那么就不再有组的概念，40或48个vector核会作为主核直接独立去拿逻辑任务。
 
-对于LLM中的vector算子，它的一种常见分核策略有可能是分在最高维，也就是batch维，常见于对低维（也叫尾轴）有规约操作的norm类、动态量化类等算子；另一种是整体拍平，允许算子切分得非常细的算子，如elementwise算子。对于第一种，我们就可以在模型侧关注它的负载均衡问题。例如我们打48batch，而硬件却是个40个vector核，那这40个核会循环2次，第二次有多数的核会无事可做，这个batch数就可以认为是不友好的。如果将batch打到64或80，性能可以预见会是无损的。同样的情况下，如果是48核的卡，那我们可以认为这就是个非常友好的batch数。
+对于LLM中的vector算子，它的一种常见分核策略有可能是分在最高维，也就是batch维，常见于对低维（也叫尾轴）有规约操作的norm类、动态量化类等算子；另一种是整体拍平，允许算子切分得非常细的算子，如elementwise算子。对于第一种，我们就可以在模型侧关注它的负载均衡问题。例如我们打48batch，而硬件却是40个vector核，那这40个核会循环2次，第二次有多数的核会无事可做，这个batch数就可以认为是不友好的。如果将batch打到64或80，性能可以预见会是无损的。同样的情况下，如果是48核的卡，那我们可以认为这就是个非常友好的batch数。
 
-对于cube类算子，它常见的分核策略是以base快去切分M和N（K轴是累加轴，对它分核会引入确定性问题）。最常见的分块是baseM=128，baseN=256。在decode阶段，我们的耗时基本可以看做都是在搬权重，这是因为激活的M极小，M方向大概率只分了一块，那么右矩阵就只需要搬一次。所以我们在M≤128的范围内可以尽情提高M，对性能都基本是无损的，如果M大于128，可以认为(128, 256]是下一个性能分档。
+对于cube类算子，它常见的分核策略是以base块去切分M和N（K轴是累加轴，对它分核会引入确定性问题）。最常见的分块是baseM=128，baseN=256。在decode阶段，我们的耗时基本可以看做都是在搬权重，这是因为激活的M极小，M方向大概率只分了一块，那么右矩阵就只需要搬一次。所以我们在M≤128的范围内可以尽情提高M，对性能都基本是无损的，如果M大于128，可以认为(128, 256]是下一个性能分档。
 除了M外，N轴切分的任务也影响算子亲和性，以deepseekR1中的MLA预处理为例，它会使用同一个激活（shape为[batch_size, 7168]）与两个权重做矩阵乘(shape为[7168, 1536]和[7168, 576])。在batch_size打不大的情况下，即使baseN缩短为128，N轴都不能用满核数，所以此时这两个矩阵乘各自的耗时，会约等于将他们权重N轴拼起来乘(shape为[7168, 2112])的矩阵乘的耗时。如果仅考虑模型竞争力，我们更希望对这两个权重做合并，否则两个小的矩阵乘带宽利用率都会非常差。
 
 对于Attention算子，它常见的分核策略是q_seqlen、batch_size和kv_headnum。增量阶段q_seqlen会以MTP和GQA倍数做合并，但是通常也不会大过128，划分不出第二个任务，那么并行度基本就是batch_size * kv_headnum。

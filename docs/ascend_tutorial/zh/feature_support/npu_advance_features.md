@@ -1,9 +1,5 @@
----
-myst:
-  heading_anchors: 6
----
 
-# NPU 高级特性指南
+  # NPU高级特性指南
 
 > 本文档介绍昇腾 NPU 在 verl 生态中的高级特性与优化能力，供开发者参考。
 >
@@ -13,7 +9,7 @@ Last updated: 05/13/2026.
 
 ## 目录
 
-- [NPU 高级特性指南](#npu-高级特性指南)
+- [NPU高级特性指南](#npu-高级特性指南)
   - [目录](#目录)
   - [1. 推理后端高级特性](#1-推理后端高级特性)
     - [1.1 vLLM 推理后端](#11-vllm-推理后端)
@@ -54,7 +50,7 @@ Last updated: 05/13/2026.
 
 ### 1.2 SGLang 推理后端
 
-昇腾通过向 SGLang 社区持续建设与维护来支持相关功能，涉及以下核心组件：
+昇腾通过 SGLang 社区持续建设与维护来支持相关功能，涉及以下核心组件：
 
 | 组件 | 描述 |
 |:---|:---|
@@ -68,8 +64,7 @@ Last updated: 05/13/2026.
 | `attention_backend` | `actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend` | **注意力后端选择** — NPU 上应设置为 `ascend` 以调用昇腾优化内核 |
 | `quantization` | `actor_rollout_ref.rollout.engine_kwargs.sglang.quantization` | **量化支持** — 支持模型量化加载与推理 |
 
-
-> 更多 SGLang NPU 特性参数请参考 [sglang 社区 NPU 特性支持文档](https://docs.sglang.io/docs/hardware-platforms/ascend-npus/ascend_npu_support_features)
+> 更多 SGLang NPU 特性参数请参考 [SGLang社区NPU特性支持文档](https://docs.sglang.io/docs/hardware-platforms/ascend-npus/ascend_npu_support_features)
 
 ---
 
@@ -85,13 +80,15 @@ Megatron 是 NVIDIA 推出的模型并行训练框架。在 NPU 上运行需额�
 
 #### MindSpeed Monkey Patch 框架原理
 
-**触发入口:**
+**触发入口：**
+
 ```python
 from mindspeed.megatron_adaptor import repatch
 ```
 
 **调用链:**
-```
+
+```text
 repatch
 ├── 执行 megatron_adaptor.py 模块导入
 ├── 导入 features_manager 模块
@@ -127,7 +124,7 @@ repatch
 |:---|:---|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn` | **Flash Attention** — 是否使用 Flash Attention 加速注意力计算，默认 `true` |
 | `actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_rotary_pos_emb` | **融合旋转位置编码** — 使用融合算子加速 RoPE 计算，默认 `False` |
-| `actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu` | **融合 SwiGLU** — 使用融合算子加速 SwiGLU 激活函数，默认 `False` |
+| `actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu` | **融合 SwiGLU** — 使用融合算子加速 SwiGLU，默认 `False` |
 | `actor_rollout_ref.actor.megatron.override_transformer_config.persist_layer_norm` | **持久化 LayerNorm** — 使用持久化策略优化 LayerNorm，默认 `False` |
 
 ##### 流水线并行优化
@@ -202,7 +199,7 @@ repatch
 | verl 参数 | 功能说明 |
 |:---|:---|
 | `actor_rollout_ref.actor.megatron.expert_model_parallel_size` | 专家并行 (EP) 大小，默认 `1` |
-| `actor_rollout_ref.actor.megatron.expert_tensor_parallel_size` | TP 拓展 EP 大小，默认 `null` |
+| `actor_rollout_ref.actor.megatron.expert_tensor_parallel_size` | TP 扩展 EP 大小，默认 `null` |
 | `actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm` | **Group GEMM** — MoE 场景下使用 Group GEMM 优化专家计算，默认 `False` |
 | `actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype` | **路由数据类型** — 路由与专家输出加权平均的数据类型，可选 `fp32`/`fp64`，默认 `fp32`，提高多专家场景稳定性 |
 
@@ -212,14 +209,14 @@ repatch
 
 1. **FSDP1 vs FSDP2 差异**
    - `forward_prefetch` 和 `use_orig_params` 仅适用于 FSDP1
-   - FSDP2 为默认推荐版本，API 支持度参照 [昇腾 PyTorch 版本说明](https://www.hiascend.com/document/detail/zh/Pytorch/730/apiref/PyTorchNativeapi/docs/zh/native_apis/pytorch_2-7-1/torch-distributed-fsdp.md)
+   - FSDP2 为默认推荐版本，API 支持度参照 [昇腾 PyTorch版本说明](https://www.hiascend.com/document/detail/zh/Pytorch/730/apiref/PyTorchNativeapi/docs/zh/native_apis/pytorch_2-7-1/torch-distributed-fsdp.md)
 
 2. **重计算参数依赖关系**
    - `recompute_method` 需 `recompute_granularity='full'` 才生效
    - `recompute_num_layers` 需 `recompute_granularity='full'` 才生效
    - 当 `recompute_method='uniform'` 时，`recompute_num_layers` 表示每个重计算单元的 Transformer 层数，需能被当前进程模型层数整除
 
-4. **SGLang NPU 特有配置**
+3. **SGLang NPU 特有配置**
    - `attention_backend` 必须设置为 `ascend` 以调用昇腾优化内核
    - `enable_memory_saver` 在 verl 中默认启用，无需额外配置
 

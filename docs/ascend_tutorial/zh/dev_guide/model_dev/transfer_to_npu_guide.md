@@ -1,4 +1,4 @@
-# 模型迁移至 NPU 指南
+# 模型迁移至 NPU指南
 
 Last updated: 05/14/2026
 
@@ -8,14 +8,13 @@ Last updated: 05/14/2026
 
 搭建可支持 NPU 运行的基础运行环境，保证模型正常加载、数据集可顺利读取，作为后续迁移调试、业务跑通的基础。
 
-
 ### 1.1 软硬件环境与依赖配置
 
-参照官方文档[昇腾安装指南](../../get_start/install_guidance.rst)；若模型依赖的推理引擎 vllm、vllm_ascend 和训练引擎Megatron、MindSpeed、transformers 版本与教程存在差异，**以模型实际适配版本为准**。
+参照官方文档[昇腾安装指南](../../get_start/install_guidance.rst)；若模型依赖的推理引擎 vLLM、vllm_ascend 和训练引擎Megatron、MindSpeed、transformers 版本与教程存在差异，**以模型实际适配版本为准**。
 
 ### 1.2 模型权重
 
-BF16 为 VeRL 框架中 FSDP 与 Megatron 等训练后端**默认混合精度训练数据类型**。昇腾 NPU 环境统一采用 **BF16** 作为基准精度格式，权重需对齐反量化为 BF16。目前 A2、A3 机型**暂不支持 FP8 精度训练**，仅支持 BF16 精度；Ascend 950PR&950DT系列产品 后续版本将开放 FP8 低精度训练能力。
+BF16 为 VeRL 框架中 FSDP 与 Megatron 等训练后端**默认混合精度训练数据类型**。昇腾 NPU 环境统一采用 **BF16** 作为基准精度格式，权重需对齐反量化为 BF16。目前 A2、A3 机型**暂不支持 FP8 精度训练**，仅支持 BF16 精度；Ascend 950PR&950DT系列产品后续版本将开放 FP8 低精度训练能力。
 
 ### 1.3 数据准备
 
@@ -27,7 +26,7 @@ VeRL 框架采用推理引擎、训练引擎与权重同步桥接（Checkpoint E
 
 ### 2.1 推理引擎适配
 
-VeRL 推理引擎采用分层架构设计，通过抽象接口与工厂模式，实现 vllm、sglang 等多种主流推理后端的灵活支持。在完成 GPU 向 NPU 的迁移适配过程中，推理引擎适配推荐按以下流程操作：
+VeRL 推理引擎采用分层架构设计，通过抽象接口与工厂模式，实现 vLLM、SGLang 等多种主流推理后端的灵活支持。在完成 GPU 向 NPU 的迁移适配过程中，推理引擎适配推荐按以下流程操作：
 
 在 NPU 上跑通 VeRL 整网链路前，建议参考 [vllm-ascend](https://github.com/vllm-project/vllm-ascend/tree/main/docs/source/tutorials/models)、[sglang](https://github.com/sgl-project/sglang/tree/main/docs/docs/basic_usage) 官方模型部署教程，优先调通**单实例推理链路**，完整验证模型加载与初始化、Tokenizer 加载正常、单轮 / 批量生成、停止词终止、长上下文推理等**基础推理功能**，前置底层推理引擎稳定可用后，再接入 VeRL 训练流程。
 
@@ -35,19 +34,19 @@ VeRL 推理引擎采用分层架构设计，通过抽象接口与工厂模式，
 
 VeRL 主线代码将训练引擎抽象为 `Engine`类，通过标准化接口层实现调度逻辑与底层训练实现的解耦。该架构设计支持 FSDP、Megatron 等多种训练后端灵活接入、即插即用，无需修改 VeRL 核心算法与调度逻辑，大幅降低迁移适配成本。
 
-当前 NPU 已通过 `is_npu_available` 接口完成设备自动检测，并自动应用对应的 NPU 设备适配补丁。目前只需通过配置 model_engine=fsdp/megatron，即可一键切换训练后端至 FSDP、Megatron，系统会自动加载对应后端的 NPU 适配逻辑，无需额外修改代码。VeRL中昇腾对Megatron做了适配与优化，具体特性配置参考[verl-MindSpeed特性文档](https://gitcode.com/Ascend/MindSpeed/blob/master/docs/zh/user-guide/verl.md)设置。
+当前 NPU 已通过 `is_npu_available` 接口完成设备自动检测，并自动应用对应的 NPU 设备适配补丁。目前只需通过配置 model_engine=fsdp/megatron，即可一键切换训练后端至 FSDP、Megatron，系统会自动加载对应后端的 NPU 适配逻辑，无需额外修改代码。VeRL中昇腾对Megatron做了适配与优化，具体特性配置参考[MindSpeed-verl文档](https://gitcode.com/Ascend/MindSpeed/blob/master/docs/zh/user-guide/verl.md)设置。
 
 ### 2.3 Megatron-Bridge适配
 
 Megatron-Bridge 主要用于在 VeRL 框架下，完成推理引擎依赖的 HuggingFace 权重与 Megatron-Core 所需 mcore 权重的双向转换，可通过以下配置启用该功能：
 
-```
+```text
 actor_rollout_ref.actor.megatron.use_mbridge=True
 ```
 
 Megatron-Bridge已在社区原生适配大量主流模型结构，支持列表可参考：[supported model](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docs/models/README.md)，在昇腾 NPU 环境开展模型迁移适配时，可基于社区现有能力完成基础配置，但仍有部分模型特殊结构与场景需要补充定制化适配。
 
-以​DSA （DeepSeek Sparse Attention）稀疏注意力结构为示例，介绍定制化适配的方法。昇腾 MindSpeed 支持基于吸收矩阵的 DSA能力，该特性要求将 Megatron 中原有的 `linear_kv_up_proj` 算子拆分为 `linear_k_up_proj` 与 `linear_v_up_proj` 两个独立算子。拆分所需权重需从 HuggingFace 格式的 `self_attn.kv_b_proj.weight` 转换生成，而上述原生 PR 并未适配该算子拆分逻辑。
+以DSA（DeepSeek Sparse Attention）稀疏注意力结构为示例，介绍定制化适配的方法。昇腾 MindSpeed 支持基于吸收矩阵的DSA能力，该特性要求将 Megatron 中原有的 `linear_kv_up_proj` 算子拆分为 `linear_k_up_proj` 与 `linear_v_up_proj` 两个独立算子。拆分所需权重需从 HuggingFace 格式的 `self_attn.kv_b_proj.weight` 转换生成，而上述原生 PR 并未适配该算子拆分逻辑。
 
 因此需手动改造适配相关权重转换逻辑，保障吸收矩阵可正常加载与生效。只有在吸收矩阵可用的基础上，才能正常使能 [sparse\_flash\_attention](https://gitcode.com/cann/ops-transformer/tree/master/attention/sparse_flash_attention) 与 [lightning\_indexer](https://gitcode.com/cann/ops-transformer/tree/master/attention/lightning_indexer) 融合算子；通过引入两个融合算子，可大幅减少内存访问频次、优化内存占用率，同时提升计算性能，最终实现大模型训练与推理链路的运行效率提升及资源开销降低。
 
@@ -57,7 +56,7 @@ Megatron-Bridge已在社区原生适配大量主流模型结构，支持列表�
 
 ## 三、精度对齐
 
-大模型强化学习的精度问题定位链路复杂、影响因素繁多，各类精度问题通常由**训练阶段、推理阶段、训推一致性**问题引入。**精度对齐**是保障训练流程可复现、问题可调试的核心关键。
+大模型强化学习的精度问题定位链路复杂、影响因素繁多，各类精度问题通常由**训练阶段、推理阶段、训推一致性**问题引入。**精度对齐**是保障训练流程可复现、问题可调试的关键。
 
 训练与推理阶段的精度对齐，可参考官方文档：[精度对齐指南](../precision_analysis/precision_alignment.md)。因此本节不再赘述基础阶段对齐流程，将**重点围绕训推一致性场景**，基于 msprobe 精度工具，开展精度对齐落地实践与问题定位排查工作。
 
@@ -67,8 +66,8 @@ Megatron-Bridge已在社区原生适配大量主流模型结构，支持列表�
 
 * **训推一致性参考指标**：
   * `training/rollout_probs_diff_mean`（rollout概率差异均值），模型正常收敛状态下，该指标建议维持在 0.01 以内；若数值持续高于 0.01 或与 GPU 基准存在明显偏离，可判定存在训推精度异常。
-  * `training/rollout_probs_diff_max`（rollout概率差异最大值）
-  * `training/rollout_actor_probs_pearson_corr`（rollout与actor概率的皮尔逊相关系数）
+  * `training/rollout_probs_diff_max`（rollout概率差异最大值）。
+  * `training/rollout_actor_probs_pearson_corr`（rollout与actor概率的皮尔逊相关系数）。
 * **模型训练稳定性指标**：
   * `actor/grad_norm`：需关注其是否呈整体下降趋势，以此判断模型训练是否正常收敛。
 
@@ -106,6 +105,7 @@ Megatron-Bridge已在社区原生适配大量主流模型结构，支持列表�
 
 * **根因**：尽管已在 VeRL 参数中添加了 `swiglu` 使能配置，但 Megatron-Bridge 在 NPU 适配 PR 中，未显式配置 `provider.bias_activation_fusion=True`，导致代码未进入 NPU 融合算子分支。
 * **修复方案**：在 Megatron-Bridge 中添加配置项使训练侧正确调用融合算子：
+
   ```
   +actor_rollout_ref.actor.megatron.override_transformer_config.swiglu=True \
   +actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu=True \
@@ -115,9 +115,9 @@ Megatron-Bridge已在社区原生适配大量主流模型结构，支持列表�
 
 在严格对齐过程中，发现 `indexer_k_norm` 处存在精度类型与超参不一致：
 
-* **精度差异**：推理侧在 LayerNorm 中存在升精度到 fp32 操作 `F.layer_norm( x.float(), (self.dim,), self.weight, self.bias, self.eps).type_as(x)`，而训练侧 Megatron 实现为 BF16。微小差异经多层累积不可忽视。
+* **精度差异**：推理侧在 LayerNorm 中存在升精度到 FP32 操作 `F.layer_norm( x.float(), (self.dim,), self.weight, self.bias, self.eps).type_as(x)`，而训练侧 Megatron 实现为 BF16。微小差异经多层累积不可忽视。
 * **修复方案**：统一训练侧代码增加升精降精操作。
-* **超参差异**：GLM5 推理侧vllm继承 DeepSeek-V3.2 逻辑，`k_norm` 的 EPS 值被硬编码为 `1e-6`；而训练引擎及官方技术报告统一采用 `1e-5`。
+* **超参差异**：GLM5 推理侧vLLM继承 DeepSeek-V3.2 逻辑，`k_norm` 的 EPS 值被硬编码为 `1e-6`；而训练引擎及官方技术报告统一采用 `1e-5`。
 * **修复方案**：将推理侧 EPS 修改为 `1e-5` 与训练侧对齐。
 
 ```
@@ -130,14 +130,14 @@ self.k_norm=LayerNorm(self.head_dim,eps=1e-6 -> 1e-5)
 
 * **缺失（推理侧遗漏）**：推理侧缺失了 `weights` 的缩放逻辑。参考 Megatron 训练侧、slime 及 transformers 的标准实现，均包含该缩放，故在推理侧补齐以对齐前向：
 
-```
+```python
 weights, _ = self.weights_proj(x)
 +weights = weights * (self.n_head**-0.5) * (self.head_dim**-0.5)
 ```
 
 * **冗余（训练侧多余错误实现）**：训练侧 Megatron 实现中多出了 `rotate_activation`（哈达玛变换）。经查阅大量资料确认，该操作专用于量化场景，在 BF16 格式中属于错误实现。参考 [Transformer PR#45017](https://github.com/huggingface/transformers/pull/45017)，将训练侧该冗余逻辑移除。
 
-```
+```python
 class DSAIndexer(MegatronModule):
     def forward_with_scores(
 -		q = rotate_activation(q)
@@ -154,7 +154,7 @@ class DSAIndexer(MegatronModule):
 
 为了解决这一通用问题，业界引入了 **Routing Replay（路由回放）** 机制。其核心思想是通过锁定特定阶段的专家路由路径，屏蔽微小扰动对路由决策的干扰，从而保证模型训练的稳定性。目前主流包含R2和R3两种变体：
 
-* **（1）Vanilla Routing Replay (R2)**： (对应`actor_rollout_ref.actor.megatron.router_replay.mode="R2"`，VeOmni 则为 `actor_rollout_ref.actor.veomni.router_replay.mode="R2"`)
+* **（1）Vanilla Routing Replay (R2)**：(对应`actor_rollout_ref.actor.megatron.router_replay.mode="R2"`，VeOmni 则为 `actor_rollout_ref.actor.veomni.router_replay.mode="R2"`)
   
   * **机制**：在梯度更新阶段，复现训练引擎在上一轮采样阶段计算出的专家路径。
   * **作用**：主要缓解**策略陈旧性**对路由的影响。随着策略的更新，当前前向传播计算出的路由可能与生成旧数据时的路由不一致，R2通过回放旧路由来维持优化信号的连贯性。
@@ -176,7 +176,7 @@ VeOmni 后端请改用 `actor_rollout_ref.actor.veomni.router_replay.mode="R3"`�
 
 ## 四、性能优化
 
-在昇腾 NPU 上进行大模型 RL（强化学习）训练性能优化时，基础配置调优可优先参考官方文档：[perf_tuning.rst](https://github.com/verl-project/verl/blob/04833f01/docs/perf/perf_tuning.rst)。为实现更高效的优化，建议遵循**数据采集​​→​瓶颈定位​→配置调优→迭代验证**的标准化流程，该流程可显著提升 Rollout、Reward、Update 等核心阶段的吞吐量，同时有效降低资源空转与负载不均问题。性能分析与调优的具体操作，可严格参照以下官方指引：
+在昇腾 NPU 上进行大模型 RL（强化学习）训练性能优化时，基础配置调优可优先参考官方文档：[perf_tuning.rst](https://github.com/verl-project/verl/blob/04833f01/docs/perf/perf_tuning.rst)。为实现更高效的优化，建议遵循**数据采集→瓶颈定位→配置调优→迭代验证**的标准化流程，该流程可显著提升 Rollout、Reward、Update 等核心阶段的吞吐量，同时有效缓解资源空转与负载不均问题。性能分析与调优的具体操作，可严格参照以下官方指引：
 
 1. [昇腾性能分析指南](../performance/ascend_performance_analysis_guide.md)
 2. [Profiling采集指导](../performance/ascend_profiling.rst)
@@ -192,7 +192,7 @@ Rollout 阶段作为大模型 RL 训练的核心推理环节，其推理耗时�
 
 对应配置参数如下：
 
-```
+```text
 # 图模式启用
 actor_rollout_ref.rollout.enforce_eager=False
 +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
@@ -205,16 +205,16 @@ actor_rollout_ref.rollout.enforce_eager=False
 
 ### 4.2 训练性能优化
 
-大模型 RL 训练的 Update 阶段具有序列长度差异大、显存消耗高等特点。除了基础的算子融合，还需结合序列并行与显存-计算权衡策略来打破瓶颈。常见训练性能优化特性可参考 [MindSpeed-verl 文档](https://gitcode.com/Ascend/MindSpeed/blob/master/docs/zh/user-guide/verl.md) 完成启用，核心优化手段包括：
+大模型 RL 训练的 Update 阶段具有序列长度差异大、显存消耗高等特点。除了基础的算子融合，还需结合序列并行与显存-计算权衡策略来打破瓶颈。常见训练性能优化特性可参考 [MindSpeed-verl文档](https://gitcode.com/Ascend/MindSpeed/blob/master/docs/zh/user-guide/verl.md) 完成启用，核心优化手段包括：
 
-1. ​**算子融合**​：启用 RoPE、SwiGLU、RMSNorm、DSA 等融合算子。通过算子融合减少计算开销与显存，提升训练效率。
-2. ​**Remove padding**​：RL 训练中各 Response 长度参差不齐，传统 Padding 策略会导致大量无效计算。开启 Remove padding后可将多个短序列打包填满 Tensor，极大提升 NPU 计算单元的利用率（MFU）。
+1. **算子融合**：启用 RoPE、SwiGLU、RMSNorm、DSA 等融合算子。通过算子融合减少计算开销与显存，提升训练效率。
+2. **Remove padding**：RL 训练中各 Response 长度参差不齐，传统 Padding 策略会导致大量无效计算。开启 Remove padding后可将多个短序列打包填满 Tensor，极大提升 NPU 计算单元的利用率（MFU）。
 
 ## 五、评测验证
 
-训练完成后，需对目标数据集进行评测验证，确保模型迁移后的业务效果达标。不同模型的评测步骤一致，以下以 GLM-5 为例，详细说明评测流程（采用 AISBenchmark 工具，支持 vllm/sglang 多种推理后端的评估）。
+训练完成后，需对目标数据集进行评测验证，确保模型迁移后的业务效果达标。不同模型的评测步骤一致，以下以 GLM-5 为例，详细说明评测流程（采用 AISBenchmark 工具，支持 vLLM/SGLang 多种推理后端的评估）。
 
-评测采用了数学类的数据集aime2025与研究生级专业理科数据集gpqa，验证在目标方向上分数上升，且无关方向不会出现知识灾难遗忘情况。
+评测采用了数学类的数据集aime2025与研究生级专业理科数据集gpqa，验证在目标方向上分数上升，且无关方向不会出现知识灾难性遗忘情况。
 
 ### 5.1 安装aisbench
 
@@ -234,11 +234,11 @@ unzip aime2025.zip
 rm aime2025.zip
 ```
 
-### 5.3 修改AISBench配置代码使能vllm/sglang推理评测
+### 5.3 修改AISBench配置代码使能vLLM/SGLang推理评测
 
 打开 benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py 文件，这是推理评测配置文件，输出长度`max_out_len`建议与训练的`max_response_len`保持一致。
 
-```shell
+```python
 from ais_bench.benchmark.models import VLLMCustomAPIChat
 from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
 
@@ -249,12 +249,12 @@ models = [
         abbr='vllm-api-general-chat',
         path="/path/to/GLM-5", # 修改为 GLM-5 模型路径
         model="GLM-5",
-	    stream=True,
+        stream=True,
         request_rate = 0,
-	    use_timestamp=False,
+        use_timestamp=False,
         max_seq_len=2048,
         retry = 2,
-	    api_key="",
+        api_key="",
         host_ip = "localhost", # 推理服务的IP
         host_port = 12890 , # 推理服务的端口
         max_out_len = 8192,  # 最大输出tokens长度
@@ -273,11 +273,11 @@ models = [
 
 参考[vllm_ascend GLM5指南](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/GLM5.md)拉起双机A3推理服务，`host_port`与上一小节配置保持一致，`max_model_len`设置为训练时的`max_prompt_length`与`max_response`之和。
 
-### 5.5 启动vllm评测任务
+### 5.5 启动vLLM评测任务
 
 执行以下命令启动在线推理评测任务，调用已部署的 vLLM 推理后端，加载对应模型配置完成自动化评测：
 
-```
+```bash
 ais_bench --models vllm_api_stream_chat --datasets aime2025_gen_0_shot_chat_prompt
 ```
 
