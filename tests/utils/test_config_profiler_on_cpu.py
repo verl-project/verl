@@ -25,7 +25,7 @@ import warnings
 import pytest
 from omegaconf import OmegaConf
 
-from verl.utils.config import _validate_profiler_config
+from verl.utils.config import _reference_shares_actor_group, _validate_profiler_config
 
 _ACTOR = "actor_rollout_ref.actor.profiler.enable"
 _REF = "actor_rollout_ref.ref.profiler.enable"
@@ -69,10 +69,15 @@ def _config(*, tool="npu", steps=(1,), enabled=(), role_tools=None, actor_use_kl
     )
 
 
-def _run(config, *, use_reference_policy=False, use_critic=False):
+def _run(config, *, use_reference_policy=False, use_critic=False, ref_aliased=True):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        _validate_profiler_config(config, use_reference_policy=use_reference_policy, use_critic=use_critic)
+        _validate_profiler_config(
+            config,
+            use_reference_policy=use_reference_policy,
+            use_critic=use_critic,
+            ref_aliased=ref_aliased,
+        )
     return [str(item.message) for item in caught]
 
 
@@ -131,6 +136,45 @@ def test_colocated_reference_alone_is_not_a_trigger():
 
     assert len(messages) == 1
     assert "no active role enables it" in messages[0]
+
+
+def test_standalone_reference_alone_is_a_trigger():
+    # v1 separate_async without hybrid replicas gives the reference its own worker group, so its
+    # enabled profiler block is a real collector and must not trigger the colocated warning.
+    messages = _run(_config(enabled=(_REF,)), use_reference_policy=True, ref_aliased=False)
+
+    assert messages == []
+
+
+def _aliasing_config(*, trainer_mode="sync", enable_switch=False, hybrid_engine=True, lora_rank=0):
+    return OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {"lora": {"rank": lora_rank}},
+                "hybrid_engine": hybrid_engine,
+            },
+            "trainer": {
+                "v1": {
+                    "trainer_mode": trainer_mode,
+                    "separate_async": {"hybrid_rollout": {"enable_switch": enable_switch}},
+                }
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [
+        ({}, True),
+        ({"trainer_mode": "separate_async", "enable_switch": False}, False),
+        ({"trainer_mode": "separate_async", "enable_switch": True}, True),
+        ({"trainer_mode": "separate_async", "enable_switch": True, "hybrid_engine": False}, False),
+        ({"trainer_mode": "separate_async", "enable_switch": False, "lora_rank": 8}, True),
+    ],
+)
+def test_reference_group_aliasing_follows_the_trainer_config(kwargs, expected):
+    assert _reference_shares_actor_group(_aliasing_config(**kwargs)) is expected
 
 
 def test_profiler_enable_on_an_inactive_critic_is_not_a_trigger():

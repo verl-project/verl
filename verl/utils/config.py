@@ -140,7 +140,7 @@ _PROFILER_ROLES = (
 # start_profile call reaches a worker whose profiler block is `actor.profiler`
 # (trainer_base.py::_start_profiling drives ref_policy_wg only when it is a distinct group). A
 # `ref.profiler.enable` on its own therefore cannot catch the scheduled steps. It still counts for a
-# standalone reference worker, which the caller signals through `use_reference_policy`.
+# standalone reference worker, which v1 separate_async creates without hybrid replicas.
 _HYBRID_ALIASED_ROLES = frozenset({"actor_rollout_ref.ref.profiler.enable"})
 
 
@@ -162,7 +162,34 @@ def _effective_tool(config: DictConfig, enable_key: str) -> Any:
     return _select_profiler_field(config, enable_key.removesuffix(".enable") + ".tool", None)
 
 
-def _validate_profiler_config(config: DictConfig, use_reference_policy: bool, use_critic: bool) -> None:
+def _reference_shares_actor_group(config: DictConfig) -> bool:
+    """Whether the reference worker is colocated with the actor/rollout group.
+
+    Mirrors ``PPOTrainer._init_resource_pool_mgr``: LoRA keeps the reference in the actor group, and
+    a v1 ``separate_async`` run only creates a distinct reference worker when hybrid replicas are
+    enabled (``enable_switch`` and ``hybrid_engine``).
+    """
+    lora_rank = _select_profiler_field(config, "actor_rollout_ref.model.lora.rank", 0) or _select_profiler_field(
+        config, "actor_rollout_ref.model.lora_rank", 0
+    )
+    lora_adapter_path = _select_profiler_field(config, "actor_rollout_ref.model.lora_adapter_path", None)
+    if lora_rank > 0 or lora_adapter_path is not None:
+        return True
+
+    trainer_mode = _select_profiler_field(config, "trainer.v1.trainer_mode", "sync")
+    if trainer_mode != "separate_async":
+        return True
+
+    enable_switch = bool(
+        _select_profiler_field(config, "trainer.v1.separate_async.hybrid_rollout.enable_switch", False)
+    )
+    hybrid_engine = bool(_select_profiler_field(config, "actor_rollout_ref.hybrid_engine", True))
+    return enable_switch and hybrid_engine
+
+
+def _validate_profiler_config(
+    config: DictConfig, use_reference_policy: bool, use_critic: bool, ref_aliased: bool = True
+) -> None:
     """Warn about profiler configurations that silently collect nothing.
 
     ``global_profiler.steps`` and the per-role ``profiler.enable`` are two halves of one switch that
@@ -175,6 +202,9 @@ def _validate_profiler_config(config: DictConfig, use_reference_policy: bool, us
     not reported: that is how code-instrumented collection works, where the user calls the profiler
     API from their own script and ``global_profiler.steps`` must stay null to avoid a second,
     conflicting profiler.
+
+    ``ref_aliased`` says whether the reference shares the actor/rollout worker group; only then does
+    its enabled flag fail to reach a distinct worker.
     """
     steps = _select_profiler_field(config, "global_profiler.steps", None)
     # An empty step list schedules nothing, exactly like null.
@@ -194,7 +224,7 @@ def _validate_profiler_config(config: DictConfig, use_reference_policy: bool, us
         if not active_roles.get(key, True):
             logger.warning("%s is set, but that role does not run in this job; it will not profile.", key)
             continue
-        if key in _HYBRID_ALIASED_ROLES:
+        if key in _HYBRID_ALIASED_ROLES and ref_aliased:
             # Colocated: the scheduled call lands on the actor's block, not this one.
             logger.warning(
                 "%s is set, but the reference is colocated in the actor/rollout worker group, whose "
@@ -360,6 +390,11 @@ def validate_config(
 
         get_vllm_max_lora_rank(lora_rank)
 
-    _validate_profiler_config(config, use_reference_policy=use_reference_policy, use_critic=use_critic)
+    _validate_profiler_config(
+        config,
+        use_reference_policy=use_reference_policy,
+        use_critic=use_critic,
+        ref_aliased=_reference_shares_actor_group(config),
+    )
 
     print("[validate_config] All configuration checks passed successfully!")
