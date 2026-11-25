@@ -128,8 +128,9 @@ class TiledMLP(torch.autograd.Function):
 
         # Split on dim=0
         x_shards = list(torch.chunk(x, chunks=shards, dim=0))
+        num_actual_shards = len(x_shards)
 
-        grad_accumulator = GradientAccumulator(compute_params, shards, dtype=x.dtype)
+        grad_accumulator = GradientAccumulator(compute_params, num_actual_shards, dtype=x.dtype)
 
         for i, x_shard in enumerate(x_shards):
             x_shard.requires_grad_(x_requires_grad)
@@ -141,7 +142,7 @@ class TiledMLP(torch.autograd.Function):
             x_shard.grad = x_grad.narrow(0, shard_offset, shard_step)
             incoming_grad_shard = incoming_grad.narrow(0, shard_offset, shard_step)
 
-            is_last_shard = i + 1 == shards
+            is_last_shard = i + 1 == num_actual_shards
             grad_accumulator.install_hooks(is_last_shard)
 
             with torch.enable_grad():
