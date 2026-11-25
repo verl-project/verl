@@ -1,4 +1,4 @@
-昇腾 ReTool 最佳实践
+昇腾ReTool最佳实践
 ===================================
 
 Last updated: 07/03/2026.
@@ -12,7 +12,7 @@ ReTool论文参考([ReTool](https://arxiv.org/pdf/2504.11536))
 1. 环境构建
 2. 模型训练
 
-用例模型脚本以及其需要的硬件条件各自如下：
+示例模型脚本及其需要的硬件条件如下：
 
 .. list-table::
    :header-rows: 1
@@ -43,11 +43,11 @@ ReTool论文参考([ReTool](https://arxiv.org/pdf/2504.11536))
      - ``==2.9.0``
    * - torch_npu
      - ``==2.9.0``
-   * - triton_ascend
+   * - Triton-Ascend
      - ``==3.2.1``
    * - verl
      - ``main``
-   * - vllm
+   * - vLLM
      - ``v0.18.0``
    * - vllm-ascend
      - ``v0.18.0``
@@ -70,13 +70,9 @@ ReTool论文参考([ReTool](https://arxiv.org/pdf/2504.11536))
 
 .. code-block:: bash
 
-  git clone https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k
-
-**下载评估数据集**
-
-.. code-block:: bash
-
-  git clone https://huggingface.co/datasets/Maxwell-Jia/AIME_2024
+  mkdir -p $DATA_ROOT/dataset/BytedTsinghua-SIA $DATA_ROOT/dataset/Maxwell-Jia
+  git clone https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k $DATA_ROOT/dataset/BytedTsinghua-SIA/DAPO-Math-17k
+  git clone https://huggingface.co/datasets/Maxwell-Jia/AIME_2024 $DATA_ROOT/dataset/Maxwell-Jia/AIME_2024
 
 **预训练数据预处理**
 
@@ -84,7 +80,7 @@ ReTool论文参考([ReTool](https://arxiv.org/pdf/2504.11536))
 
   python3 recipe/retool/retool_sft_preprocess.py
 
-*注：自动下载ReTool-SFT，最后生成数据默认保存在~/ReTool-SFT/data目录下*
+*注：自动下载ReTool-SFT，最后生成的数据默认保存在~/ReTool-SFT/data目录下。*
 
 **执行预训练脚本**
 
@@ -102,8 +98,8 @@ ReTool论文参考([ReTool](https://arxiv.org/pdf/2504.11536))
 
 2. 代码沙箱准备
 
-开源沙箱代码及部署参考
-https://github.com/bytedance/SandboxFusion
+开源沙箱代码及部署参考：
+`SandboxFusion 开源沙箱代码 <https://github.com/bytedance/SandboxFusion>`_
 
 **沙箱代码下载**
 
@@ -129,8 +125,8 @@ https://github.com/bytedance/SandboxFusion
 
 3. 训练
 
-示例配置文件如下，在recipe/retool目录下创建一个run_qwen2.5_7b_dapo_npu.sh
-根据开发者实际路径配置情况修改模型训练脚本中的以下参数
+示例配置文件如下，在recipe/retool目录下创建一个run_qwen2.5_7b_dapo_npu.sh。
+根据开发者实际路径配置情况修改模型训练脚本中的以下参数：
 
 .. code-block:: bash 
 
@@ -277,5 +273,4 @@ https://github.com/bytedance/SandboxFusion
     actor_rollout_ref.ref.use_torch_compile=False \
     actor_rollout_ref.actor.entropy_checkpointing=True \
     actor_rollout_ref.ref.entropy_checkpointing=True \
-    actor_rollout_ref.ref.use_torch_compile=False \
     trainer.total_epochs=1 $@ > $LOG_FILE 2>&1 &
