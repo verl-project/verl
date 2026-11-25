@@ -359,9 +359,13 @@ class VeOmniEngineConfig(EngineConfig):
             ``"npu"``.
         swiglu_mlp_implementation (str): SwiGLU MLP kernel. ``"eager"`` (default) or
             ``"liger_kernel"``.
+        gated_mlp_implementation (str): VeOmni gated-MLP slot. ``"eager"`` (default),
+            ``"liger_kernel"``, or another backend registered by VeOmni.
         rotary_pos_emb_implementation (str): RoPE kernel. ``"eager"`` (default), ``"triton"``
             (deterministic Triton bmm — required for bitwise-aligned RoPE on DeepSeek-V3 /
             Moonlight), ``"liger_kernel"``, ``"npu"``.
+        rotary_pos_emb_vision_implementation (str): Full-layout vision RoPE kernel.
+            ``"eager"`` (default), ``"liger_kernel"``, or ``"torch_npu"``.
         load_balancing_loss_implementation (str): MoE load-balancing loss kernel.
             ``"eager"`` (default) or ``"triton"``.
         force_use_huggingface (bool): Force loading model from huggingface, default False
@@ -458,7 +462,9 @@ class VeOmniEngineConfig(EngineConfig):
     cross_entropy_loss_implementation: str = "eager"
     rms_norm_implementation: str = "eager"
     swiglu_mlp_implementation: str = "eager"
+    gated_mlp_implementation: str = "eager"
     rotary_pos_emb_implementation: str = "eager"
+    rotary_pos_emb_vision_implementation: str = "eager"
     load_balancing_loss_implementation: str = "eager"
     rms_norm_gated_implementation: str = "eager"
     causal_conv1d_implementation: str = "eager"

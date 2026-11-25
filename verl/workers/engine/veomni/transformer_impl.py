@@ -169,10 +169,12 @@ class VeOmniEngine(FSDPEngine):
         extra_parallel_sizes = []
         extra_parallel_placement_innermost = []
         if self.engine_config.ple_parallel_size > 1:
-            param_shard_size = data_parallel_replicate_size * data_parallel_shard_size
-            if param_shard_size % self.engine_config.ple_parallel_size != 0:
+            # VeOmni builds ExtraParallel over dp_shard_sp, which includes Ulysses
+            # but excludes the HSDP replicate axis.
+            dp_shard_sp_size = data_parallel_shard_size * self.engine_config.ulysses_parallel_size
+            if dp_shard_sp_size % self.engine_config.ple_parallel_size != 0:
                 raise ValueError(
-                    f"Parameter shard domain ({param_shard_size}) must be divisible by "
+                    f"Parameter shard domain ({dp_shard_sp_size}) must be divisible by "
                     f"ple_parallel_size ({self.engine_config.ple_parallel_size})."
                 )
             extra_parallel_names.append("ple")
