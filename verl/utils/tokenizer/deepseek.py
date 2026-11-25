@@ -166,7 +166,8 @@ def expand_image_tokens(
 def align_deepseek_v41_routes(routes: torch.Tensor, vision_types: list[int]) -> torch.Tensor:
     """Align token-order R3 rows with either full image spans or one row per image.
 
-    A producer may omit the final autoregressive row in either layout. Visual
+    Callers must validate route length against the producer token sequence before
+    alignment. A producer may omit the final autoregressive row. Visual
     rows stay native in replay, and intermediate layouts need explicit producer
     positions to be aligned safely.
     """

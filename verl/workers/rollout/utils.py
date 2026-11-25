@@ -140,6 +140,18 @@ def routing_replay_prompts_match(
     return True
 
 
+def validate_deepseek_v41_route_count(route_rows: int, model_prompt_tokens: int | None, generated_tokens: int) -> None:
+    """Require routes to cover the rollout model's token order, including its expanded prompt."""
+    if model_prompt_tokens is None:
+        raise ValueError("DeepSeek-V4.1 routing replay requires the rollout model's prompt token count")
+    sequence_length = model_prompt_tokens + generated_tokens
+    if route_rows not in (sequence_length, sequence_length - 1):
+        raise ValueError(
+            "DeepSeek-V4.1 routing replay requires one route row per rollout token "
+            f"(apart from the optional final row), got {route_rows} route rows for {sequence_length} tokens"
+        )
+
+
 def dedup_image_tokens(prompt_ids: list[int], processor):
     """Deduplicate image tokens in prompt_ids, since vLLM will expand each image placeholder by image_data.
     For example,

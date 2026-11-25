@@ -71,7 +71,7 @@ from verl.workers.rollout.sglang_rollout.utils import (
     lora_served_as_adapter,
     sglang_lora_target_modules,
 )
-from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn, validate_deepseek_v41_route_count
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -731,6 +731,10 @@ class SGLangHttpServer:
                 routed_experts = routed_experts.reshape(
                     -1, text_config.num_hidden_layers, text_config.num_experts_per_tok
                 )
+                if getattr(hf_config, "model_type", None) == "deepseek_v41" and image_data:
+                    validate_deepseek_v41_route_count(
+                        routed_experts.shape[0], meta_info.get("prompt_tokens"), len(token_ids)
+                    )
 
         extra_fields = {"global_steps": self.global_steps}
         if prompt_logprobs is not None:

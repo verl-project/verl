@@ -14,7 +14,7 @@
 
 import pytest
 
-from verl.workers.rollout.utils import routing_replay_prompts_match
+from verl.workers.rollout.utils import routing_replay_prompts_match, validate_deepseek_v41_route_count
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -50,3 +50,20 @@ def test_replay_rejects_mismatched_expanded_or_compact_prompts(actor, rollout, c
 def test_other_replay_prompts_require_exact_token_equality():
     assert routing_replay_prompts_match([1, 10, 10, 2], [1, 10, 10, 2])
     assert not routing_replay_prompts_match([1, 10, 2], [1, 10, 10, 2])
+
+
+def test_deepseek_replay_rejects_partial_visual_rows_that_look_compact():
+    # [text, image_start, patch, newline, image_end, text] + one generated token
+    # A four-row partial result looks like the complete compact layout downstream.
+    with pytest.raises(ValueError, match="4 route rows for 7 tokens"):
+        validate_deepseek_v41_route_count(route_rows=4, model_prompt_tokens=6, generated_tokens=1)
+
+
+@pytest.mark.parametrize("prompt_tokens,route_rows", [(6, 7), (6, 6), (3, 4), (3, 3)])
+def test_deepseek_replay_accepts_complete_producer_token_order(prompt_tokens, route_rows):
+    validate_deepseek_v41_route_count(route_rows, prompt_tokens, generated_tokens=1)
+
+
+def test_deepseek_replay_requires_the_producers_prompt_count():
+    with pytest.raises(ValueError, match="requires the rollout model's prompt token count"):
+        validate_deepseek_v41_route_count(route_rows=4, model_prompt_tokens=None, generated_tokens=1)

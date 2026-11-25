@@ -181,10 +181,6 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
         assert agent_data.response_mask == [0, 0]
         assert agent_data.tool_rewards == [1.0]
 
-
-if __name__ == "__main__":
-    unittest.main()
-
     async def test_deepseek_tool_loop_keeps_image_expanded_routes(self) -> None:
         async def process_multi_modal_info(messages):
             return {"images": [object()]}
@@ -201,6 +197,8 @@ if __name__ == "__main__":
             processor=SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v41")),
             rollout_config=SimpleNamespace(full_determinism=True),
             response_length=2,
+            tools={},
+            tool_schemas=[],
             process_multi_modal_info=process_multi_modal_info,
             _get_mm_processor_kwargs=lambda audios: {},
             _make_request_id=ToolAgentLoop._make_request_id,
@@ -311,3 +309,7 @@ if __name__ == "__main__":
         assert state is AgentState.TERMINATED
         assert agent_data.routed_experts is None
         parse_tools.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
