@@ -34,6 +34,7 @@ __all__ = [
     "RolloutConfig",
     "RolloutQuantizationConfig",
     "CheckpointEngineConfig",
+    "RolloutFaultToleranceConfig",
 ]
 
 
@@ -141,6 +142,31 @@ class CheckpointEngineConfig(BaseConfig):
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
+
+
+@dataclass
+class RolloutFaultToleranceConfig(BaseConfig):
+    """Rollout-side independent restart.
+
+    ``enabled`` defaults to False; every hook the feature adds is unreachable
+    in that case, so merged code has zero impact on default scenarios.
+    """
+
+    enabled: bool = False
+
+    weight_source: str = "checkpoint"
+    """``checkpoint`` = cold start from the checkpoint HF export first, with
+    automatic fallback to the next weight sync when no valid checkpoint
+    exists; ``next_weight_sync`` = always defer to the next weight sync.
+    """
+
+    max_restarts: int = 3
+    """Per-replica restarts allowed within the internal 1h sliding window (anti-flapping)."""
+
+    probe_interval_s: float = 10.0
+    """Manager-side polling interval for the detection channel. Worst-case
+    conviction latency ≈ probe_interval_s + 2 × probe timeout; request-level
+    replay is independent of this poll and stays millisecond-scale."""
 
 
 @dataclass
@@ -312,6 +338,10 @@ class RolloutConfig(BaseConfig):
 
     # Checkpoint Engine config for update weights from trainer to rollout
     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
+
+    # Rollout-side independent restart. Everything it adds is gated by
+    # restart.enabled (default False): merged code has zero default impact.
+    restart: RolloutFaultToleranceConfig = field(default_factory=RolloutFaultToleranceConfig)
 
     profiler: Optional[ProfilerConfig] = None
 

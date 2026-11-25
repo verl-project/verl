@@ -288,16 +288,20 @@ class KIMICheckpointEngine(CheckpointEngine):
         actor_wg_world_size: int,
         rollout_world_size: int,
         master_metadata: MasterMetadata,
+        group_generation: int | None = None,
     ):
         """Initialize the ckpt engine process group.
 
         Args:
             rank (int): The rank of the current process.
             world_size (int): The total number of processes.
+            group_generation: rollout-restart fencing generation — informational
+                here: the process group is re-created fresh every round.
         """
         self.rank = rank
         self.actor_wg_world_size = actor_wg_world_size
         self.rollout_world_size = rollout_world_size
+        self.group_generation = group_generation
         self.world_size = actor_wg_world_size + rollout_world_size
 
         if not self.initialized:

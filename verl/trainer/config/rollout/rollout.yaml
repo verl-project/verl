@@ -360,6 +360,35 @@ enable_rollout_routing_replay: False
 moe_load_balance_metrics_interval: 0
 
 
+# Rollout-side independent restart. Everything it adds is gated by
+# restart.enabled (default false): merged code has zero default impact.
+# All timeouts, budget shape, replay budgets and bounded waits are internal
+# constants.
+restart:
+
+  # Target class for restart config
+  _target_: verl.workers.config.RolloutFaultToleranceConfig
+
+  # Master switch: manager polling detection + unified replica rebuild +
+  # weight recovery (checkpoint cold start or deferred weight sync) + client
+  # bounded replay all live behind it.
+  enabled: false
+
+  # Weight source after a rebuild: "checkpoint" = engine cold start from the
+  # checkpoint HF export first, auto-deferring to the next weight sync when
+  # no valid checkpoint exists; "next_weight_sync" = always defer.
+  weight_source: checkpoint
+
+  # Per-replica restarts allowed within the internal 1h sliding window.
+  max_restarts: 3
+
+  # Manager-side polling interval for the detection channel: every
+  # probe_interval_s the manager actor probes all replicas. Worst-case
+  # conviction latency ~ probe_interval_s + 2 x probe timeout (10s) ~ 30s by
+  # default; request-level self-healing is independent of this poll.
+  probe_interval_s: 10.0
+
+
 # profile the rollout model in `generate_sequence`
 profiler:
 

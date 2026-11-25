@@ -13,13 +13,17 @@
 # limitations under the License.
 """
 Utility classes for manage and request LLM servers:
-- LLMServerManager: manage life-cycle of LLM servers, including launch, tear-down replicas.
+- LLMServerManager: rollout control plane as a single dedicated Ray actor
+  (zero CPUs): replica lifecycle + the embedded global load balancer
+  + the rollout-restart fault supervisor.
 - LLMServerClient: proxy client to request LLM servers, used by AgentLoopWorker.
 """
 
 import asyncio
+import inspect
 import logging
 import os
+import time
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -32,12 +36,18 @@ from verl.utils import normalize_token_ids
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.tracking import RLInsightLogger
+from verl.workers.rollout.fault_tolerance import EngineRecovery, is_engine_failure, make_engine_recovery
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
 from verl.workers.rollout.router import GlobalRequestLoadBalancer  # noqa: F401
 from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _as_actor(cls: type["LLMServerManager"]) -> "ray.actor.ActorClass":
+    """Wrap a manager class as a zero-CPU Ray actor (``ray.remote(cls)`` picks up subclass overrides)."""
+    return ray.remote(cls).options(num_cpus=0)
 
 
 class LLMServerClient:
@@ -57,9 +67,9 @@ class LLMServerClient:
 
         Args:
             config (DictConfig): whole config for main entrypoint.
-            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor
-                that also holds the server-handle registry. Optional; subclasses that
-                manage server routing externally can pass None.
+            load_balancer_handle (ray.actor.ActorHandle): the LLMServerManager
+                actor handle (hosts the load balancer). Optional; subclasses
+                that manage server routing externally can pass None.
         """
         self.config = config
         self._load_balancer = load_balancer_handle
@@ -80,12 +90,116 @@ class LLMServerClient:
         fields = {name: extra[name] for name in self._lb_require_acquire_fields if name in extra}
         return await self._load_balancer.acquire_server.remote(request_id=request_id, **fields)
 
-    def _release_server(self, server_id: str, request_id: str | None = None) -> None:
+    def _release_server(self, server_id: str, request_id: str | None = None, expected_handle: Any = None) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
         # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
         pool = {"request_id": request_id}
         fields = {name: pool[name] for name in self._lb_require_release_fields if name in pool}
+        if expected_handle is not None:
+            fields["expected_handle"] = expected_handle
         self._load_balancer.release_server.remote(server_id=server_id, **fields)
+
+    def _restart_config(self):
+        rollout = getattr(getattr(self.config, "actor_rollout_ref", None), "rollout", None)
+        return getattr(rollout, "restart", None)
+
+    def _new_engine_recovery(self) -> Optional[EngineRecovery]:
+        """None unless ``rollout.restart.enabled`` — replay is inherent to enabled=true."""
+        restart = self._restart_config()
+        if restart is None or not getattr(restart, "enabled", False):
+            return None
+        return make_engine_recovery()
+
+    def _server_supports_receipt(self) -> bool:
+        """Whether the rollout server implements generate(recover_engine_failure)."""
+        rollout = getattr(getattr(self.config, "actor_rollout_ref", None), "rollout", None)
+        return getattr(rollout, "name", None) == "vllm"
+
+    async def _remove_server_if_current(self, server_id: str, server) -> None:
+        """CAS fence at the router; custom balancers fall back to legacy removal.
+
+        Request-path self-healing only: the client reports nothing —
+        detection is the manager's polling channel.
+        """
+        try:
+            await self._load_balancer.remove_server_if_current.remote(server_id, server)
+        except Exception:
+            logger.warning("balancer without remove_server_if_current; falling back to remove_servers", exc_info=True)
+            try:
+                await self._load_balancer.remove_servers.remote([server_id])
+            except Exception:
+                logger.warning("remove_servers fallback also failed (non-fatal)", exc_info=True)
+
+    async def _acquire_server_with_recovery(self, request_id: str, recovery, **extra):
+        """Plain acquire without restart (current behavior); bounded pool-wait with it."""
+        if recovery is None:
+            return await self._acquire_server(request_id, **extra)
+        try:
+            return await self._acquire_server(request_id, **extra)
+        except RuntimeError as exc:
+            if "No available servers in load balancer" not in str(exc):
+                raise
+            deadline = time.monotonic() + recovery.remaining()
+            while True:
+                await asyncio.sleep(1.0)
+                try:
+                    return await self._acquire_server(request_id, **extra)
+                except RuntimeError as exc2:
+                    if "No available servers in load balancer" not in str(exc2):
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "no rollout server became available within the engine recovery window"
+                        ) from exc2
+
+    async def _generate_on_server(
+        self,
+        server,
+        request_id: str,
+        *,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        recover_engine_failure: bool = False,
+        **kwargs: Any,
+    ) -> TokenOutput:
+        """Issue one generation RPC on the acquired server (extracted from generate)."""
+        multimodal_kwargs = {}
+        if audio_data is not None:
+            multimodal_kwargs["audio_data"] = audio_data
+        if mm_processor_kwargs:
+            multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+        # SGLang cannot take raw frames: its video_data accepts only a path/url/base64 or a
+        # processor_output dict. Always hand it the pre-computed payload (None when the model's
+        # processor produced no pixel_values_videos, e.g. a non-Qwen-VL family) and never the raw
+        # frames -- dropping video beats sending SGLang tensors it cannot parse. vLLM keeps the
+        # frames and never enters this branch. Neither server signature accepts **kwargs, so pop.
+        mm_processor_output = kwargs.pop("mm_processor_output", None)
+        if self.config.actor_rollout_ref.rollout.name == "sglang":
+            video_data = mm_processor_output
+        # priority is only supported by vLLM rollout server.
+        priority = kwargs.pop("priority", 0)
+        priority_kwargs = (
+            {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
+        )
+        remote_kwargs = {}
+        if recover_engine_failure:
+            remote_kwargs["recover_engine_failure"] = True
+        return await server.generate.remote(
+            request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
+            prompt_ids=prompt_ids,
+            sampling_params=sampling_params,
+            image_data=image_data,
+            video_data=video_data,
+            **multimodal_kwargs,
+            **priority_kwargs,
+            session_id=request_id,
+            **kwargs,
+            **remote_kwargs,
+        )
 
     def _vllm_request_id(self, request_id: str) -> str:
         # request_id passed to vLLM. Default: a fresh uuid per turn so each turn
@@ -117,9 +231,15 @@ class LLMServerClient:
 
         Returns:
             TokenOutput | DiffusionOutput: token or diffusion output
+
+        With ``rollout.restart.enabled``, an engine failure or an
+        ``engine_failed`` receipt triggers bounded replay: the failed server
+        is fenced out via CAS removal and the request replays once any
+        server is available. With restart disabled the code path is the
+        current behavior byte-for-byte.
         """
-        server_id, server = await self._acquire_server(
-            request_id,
+        recovery = self._new_engine_recovery()
+        acquire_fields = dict(
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
             image_data=image_data,
@@ -128,45 +248,44 @@ class LLMServerClient:
             mm_processor_kwargs=mm_processor_kwargs,
             **kwargs,
         )
-        try:
-            multimodal_kwargs = {}
-            if audio_data is not None:
-                multimodal_kwargs["audio_data"] = audio_data
-            if mm_processor_kwargs:
-                multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
-            # SGLang cannot take raw frames: its video_data accepts only a path/url/base64 or a
-            # processor_output dict. Always hand it the pre-computed payload (None when the model's
-            # processor produced no pixel_values_videos, e.g. a non-Qwen-VL family) and never the raw
-            # frames -- dropping video beats sending SGLang tensors it cannot parse. vLLM keeps the
-            # frames and never enters this branch. Neither server signature accepts **kwargs, so pop.
-            mm_processor_output = kwargs.pop("mm_processor_output", None)
-            if self.config.actor_rollout_ref.rollout.name == "sglang":
-                video_data = mm_processor_output
-            # priority is only supported by vLLM rollout server.
-            priority = kwargs.pop("priority", 0)
-            priority_kwargs = (
-                {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
-            )
-            output: TokenOutput = await server.generate.remote(
-                request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
-                prompt_ids=prompt_ids,
-                sampling_params=sampling_params,
-                image_data=image_data,
-                video_data=video_data,
-                **multimodal_kwargs,
-                **priority_kwargs,
-                session_id=request_id,
-                **kwargs,
-            )
-            global_steps = output.extra_fields.get("global_steps")
-            output.extra_fields.setdefault("min_global_steps", global_steps)
-            output.extra_fields.setdefault("max_global_steps", global_steps)
-            return output
-        finally:
-            self._release_server(
-                server_id,
-                request_id=request_id,
-            )
+        while True:
+            server_id, server = await self._acquire_server_with_recovery(request_id, recovery, **acquire_fields)
+            try:
+                output = await self._generate_on_server(
+                    server,
+                    request_id,
+                    prompt_ids=prompt_ids,
+                    sampling_params=sampling_params,
+                    image_data=image_data,
+                    video_data=video_data,
+                    audio_data=audio_data,
+                    mm_processor_kwargs=mm_processor_kwargs,
+                    recover_engine_failure=recovery is not None and self._server_supports_receipt(),
+                    **kwargs,
+                )
+            except BaseException as exc:
+                if recovery is None or not is_engine_failure(exc):
+                    raise
+                await self._remove_server_if_current(server_id, server)
+                # Budget check last: exhausting it stops the replay, but the failed
+                # server is already fenced out for every other request.
+                recovery.failed()
+                continue
+            finally:
+                self._release_server(
+                    server_id,
+                    request_id=request_id,
+                    expected_handle=server if recovery is not None else None,
+                )
+            if recovery is None or not output.extra_fields.get("engine_failed"):
+                global_steps = output.extra_fields.get("global_steps")
+                output.extra_fields.setdefault("min_global_steps", global_steps)
+                output.extra_fields.setdefault("max_global_steps", global_steps)
+                return output
+            # engine_failed receipt: same bounded-replay handling (the receipt's
+            # partial prefix is dropped — recompute beats corrupt data).
+            await self._remove_server_if_current(server_id, server)
+            recovery.failed()
 
 
 class FullyAsyncLLMServerClient(LLMServerClient):
@@ -185,8 +304,8 @@ class FullyAsyncLLMServerClient(LLMServerClient):
 
         Args:
             config (DictConfig): whole config for main entrypoint.
-            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor
-                that also holds the server-handle registry.
+            load_balancer_handle (ray.actor.ActorHandle): the LLMServerManager
+                actor handle (hosts the load balancer).
             only_hybrid (bool): When ``True``, hybrid replicas are the *only* rollout
                 resource.  If the load balancer is temporarily empty (e.g. during
                 weight synchronisation) :meth:`_acquire_server` will keep retrying
@@ -372,8 +491,14 @@ class FullyAsyncLLMServerClient(LLMServerClient):
 class LLMServerManager:
     """LLMServerManager is responsible for:
     - Launch server replicas
-    - Launch global load balancer
+    - Host the global load balancer as an internal component (sticky-session
+      routing, in-flight accounting, CAS registry) and expose its surface as
+      this actor's RPC methods
     - Elastic launch/tear-down new replicas
+
+    Created via :meth:`create` / :meth:`create_empty` it lives as a zero-CPU
+    Ray actor (call methods via ``handle.method.remote()``); the class stays
+    plain Python so unit tests can construct it directly (``__new__``).
 
     Args:
         config (DictConfig): Config for the trainer entrypoint.
@@ -382,10 +507,10 @@ class LLMServerManager:
         rollout_resource_pool (RayResourcePool): Resource pool for the server replicas, only needed for TensorRT-LLM.
         start_rank (int): First ``replica_rank`` to assign.  Defaults to 0.
         load_balancer_cls: Optional subclass of the default router strategy's
-            load balancer to use as the routing actor (wrapped with
-            ``ray.remote`` at instantiation). When given, it takes precedence
-            over ``rollout.router_config_path``. Pass a subclass that
-            overrides :meth:`acquire_server` to take full control of routing.
+            load balancer, embedded as a plain object inside this actor. When
+            given, it takes precedence over ``rollout.router_config_path``.
+            Pass a subclass that overrides :meth:`acquire_server` to take
+            full control of routing.
     """
 
     def __init__(
@@ -413,14 +538,101 @@ class LLMServerManager:
                 disaggregation_enabled=self.rollout_config.disaggregation.enabled,
             )
 
+        # Rollout-restart state: the fault supervisor is mounted by
+        # start_fault_supervisor() when rollout.restart.enabled; the fencing
+        # generation and the fatal flag are the membership-authority fields
+        # the pulled snapshot carries to the driver-side checkpoint manager.
+        self.fault_supervisor = None
+        self._group_generation = 0
+        self._fatal_error: str | None = None
+
+    async def start_fault_supervisor(self) -> None:
+        """Mount the rollout-restart fault supervisor when
+        ``rollout.restart.enabled`` (a no-op otherwise, so merged code has zero
+        default impact).
+
+        Called by the factories, so every manager-centric rollout shape
+        (separate_async / one_step_off_policy / fully_async) gets detection
+        out of the box: the supervisor's polling task lives on this actor's
+        event loop. The applicability gate fails loud at startup for
+        unsupported configurations.
+        """
+        restart_cfg = getattr(self.rollout_config, "restart", None)
+        if restart_cfg is None or not getattr(restart_cfg, "enabled", False):
+            return
+        if getattr(self, "fault_supervisor", None) is not None:
+            return
+        from verl.workers.rollout.fault_tolerance import ReplicaFaultSupervisor
+
+        self.fault_supervisor = ReplicaFaultSupervisor(manager=self, config=restart_cfg)
+        self.fault_supervisor.start()
+
+    async def weight_sync_succeeded(self) -> None:
+        """Weight-sync completion: the checkpoint manager's fire-and-forget
+        notification that a sync finished — every rebuilt (cold-start) replica
+        walks verification -> re-registration. No-op without a supervisor."""
+        supervisor = getattr(self, "fault_supervisor", None)
+        if supervisor is None:
+            return
+        await supervisor.weight_sync_succeeded()
+
+    async def get_membership(self):
+        """Authoritative membership snapshot: syncable replicas, the fencing
+        generation, the fatal flag, and the awaiting-weight-sync flag.
+        Without a supervisor (restart disabled) the manager's own view is
+        trivially authoritative — every replica is serving, nothing awaits
+        a weight sync. This is the cheap pull (as fresh as the last periodic
+        round); the update_weights entry uses probe_and_get_membership()."""
+        from verl.workers.rollout.fault_tolerance import MembershipSnapshot
+
+        supervisor = getattr(self, "fault_supervisor", None)
+        if supervisor is not None:
+            return supervisor.get_membership()
+        return MembershipSnapshot(
+            replicas=list(self.rollout_replicas),
+            group_generation=self._group_generation,
+            fatal_error=self._fatal_error,
+            awaiting_weight_sync=False,
+        )
+
+    async def probe_and_get_membership(self):
+        """Fresh membership for the ``update_weights`` entry reconcile: run
+        one detection round first (``ReplicaFaultSupervisor.probe_membership``,
+        bounded) so a replica that died inside the detection window is
+        convicted and fenced out before the sync group is built, instead of
+        stalling the transfer until the commit watchdog burns it into a
+        failed attempt."""
+        supervisor = getattr(self, "fault_supervisor", None)
+        if supervisor is not None:
+            return await supervisor.probe_membership()
+        return await self.get_membership()
+
+    def invalidate_group(self) -> int:
+        """Bump the weight-sync group generation: the next sync builds under
+        the derived fenced name, so survivors' cached groups cannot be reused
+        across a membership change. Called at every fault conviction."""
+        self._group_generation += 1
+        return self._group_generation
+
+    def mark_fatal(self, message: str) -> None:
+        """Mark the rollout as fatally broken (all replicas DEAD): the pulled
+        snapshot propagates this to the checkpoint manager, whose next
+        update_weights raises — the job-level fail-closed path."""
+        self._fatal_error = message
+
     @classmethod
     @auto_await
     async def create(cls, *args, **kwargs):
-        """Create the LLMServerManager."""
-        instance = cls(*args, **kwargs)
-        await instance._initialize_llm_servers()
-        await instance._init_global_load_balancer()
-        return instance
+        """Create the LLMServerManager as a Ray actor and fully initialize it.
+
+        The factory signature is unchanged (``auto_await`` keeps sync/async
+        callers working); initialization runs inside the actor.
+        """
+        handle = _as_actor(cls).remote(*args, **kwargs)
+        await handle._initialize_llm_servers.remote()
+        await handle._init_global_load_balancer.remote()
+        await handle.start_fault_supervisor.remote()
+        return handle
 
     @classmethod
     @auto_await
@@ -432,12 +644,17 @@ class LLMServerManager:
         resources (e.g. v1 separate_async without ``hybrid_rollout.enable_switch``)
         so that no inference engine is initialized on the training GPUs.
         """
-        instance = cls(*args, **kwargs)
-        instance.rollout_replicas = []
-        instance.server_handles = []
-        instance.server_addresses = []
-        await instance._init_global_load_balancer()
-        return instance
+        handle = _as_actor(cls).remote(*args, **kwargs)
+        await handle._init_empty_replicas.remote()
+        await handle._init_global_load_balancer.remote()
+        await handle.start_fault_supervisor.remote()
+        return handle
+
+    async def _init_empty_replicas(self) -> None:
+        """Empty the replica tracking lists (actor-side step of ``create_empty``)."""
+        self.rollout_replicas = []
+        self.server_handles = []
+        self.server_addresses = []
 
     async def _initialize_llm_servers(self, start_rank: int = None):
         """Initialize the LLM server replicas.
@@ -522,17 +739,83 @@ class LLMServerManager:
                 )
 
     async def _init_global_load_balancer(self) -> None:
-        from verl.workers.rollout.router import get_router_handle
+        """Embed the load balancer as a plain component of this actor."""
+        from verl.workers.rollout.router import create_embedded_load_balancer
 
-        self.global_load_balancer = get_router_handle(
+        self.global_load_balancer = create_embedded_load_balancer(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
             router_config_path=getattr(self.rollout_config, "router_config_path", None),
             full_determinism=getattr(self.rollout_config, "full_determinism", False),
             load_balancer_cls=self._load_balancer_cls,
         )
 
-    def get_client(self, client_cls: type[LLMServerClient] | None = None, **kwargs) -> LLMServerClient:
+    # ── load-balancing plane: the embedded balancer's surface, exposed as
+    # this actor's RPC methods ─────────────────────────────────────────────
+
+    async def acquire_server(self, request_id: str, **extra) -> tuple[str, "ray.actor.ActorHandle"]:
+        """Sticky-session + least-inflight acquire: returns ``(server_id, handle)``."""
+        return self.global_load_balancer.acquire_server(request_id, **extra)
+
+    async def release_server(
+        self,
+        server_id: str,
+        request_id: str | None = None,
+        expected_handle: Any = None,
+    ) -> None:
+        """Release a server after a request completes (ABA-safe via ``expected_handle``)."""
+        lb = self.global_load_balancer
+        if expected_handle is None or "expected_handle" in inspect.signature(lb.release_server).parameters:
+            return lb.release_server(server_id, request_id=request_id, expected_handle=expected_handle)
+        # A custom balancer predating the rollout-restart signature: fall back
+        # to the legacy release contract instead of failing the call.
+        return lb.release_server(server_id, request_id=request_id)
+
+    async def require_acquire_fields(self) -> list[str]:
+        """Acquire-time ``generate()`` kwargs this router consumes."""
+        return self.global_load_balancer.require_acquire_fields()
+
+    async def require_release_fields(self) -> list[str]:
+        """Release-time identity fields this router consumes."""
+        return self.global_load_balancer.require_release_fields()
+
+    async def add_servers(self, servers: dict[str, "ray.actor.ActorHandle"]) -> None:
+        """Bulk-add servers to the embedded load balancer pool."""
+        return self.global_load_balancer.add_servers(servers)
+
+    async def remove_servers(self, server_ids: list[str]) -> None:
+        """Bulk-remove servers from the embedded load balancer pool."""
+        return self.global_load_balancer.remove_servers(server_ids)
+
+    async def remove_server_if_current(self, server_id: str, expected_handle: Any) -> bool:
+        """CAS removal (rollout-restart ABA defense) on the embedded balancer."""
+        return self.global_load_balancer.remove_server_if_current(server_id, expected_handle)
+
+    async def clear_sticky_cache(self) -> dict:
+        """Clear sticky-session state to force request redistribution."""
+        return self.global_load_balancer.clear_sticky_cache()
+
+    async def get_total_inflight(self) -> int:
+        """Total in-flight requests across registered servers."""
+        return self.global_load_balancer.get_total_inflight()
+
+    async def get_inflight_count(self, server_id: str) -> int:
+        """In-flight request count for one server."""
+        return self.global_load_balancer.get_inflight_count(server_id)
+
+    async def get_all_servers(self) -> list[str]:
+        """List all active server IDs."""
+        return self.global_load_balancer.get_all_servers()
+
+    async def get_status(self) -> dict:
+        """Current load balancer state for debugging."""
+        return self.global_load_balancer.get_status()
+
+    async def get_client(self, client_cls: type[LLMServerClient] | None = None, **kwargs) -> LLMServerClient:
         """Get the LLMServerClient to request LLM server replicas.
+
+        The client is constructed inside the actor and returned by value; its
+        routing handle is this actor's own handle
+        (``ray.get_runtime_context().current_actor``).
 
         Args:
             client_cls: The client class to instantiate. Defaults to
@@ -545,24 +828,26 @@ class LLMServerManager:
         client_cls = client_cls or LLMServerClient
         return client_cls(
             config=self.config,
-            load_balancer_handle=self.global_load_balancer,
+            load_balancer_handle=ray.get_runtime_context().current_actor,
             **kwargs,
         )
 
-    def get_addresses(self) -> list[str]:
+    async def get_addresses(self) -> list[str]:
         """Get the OpenAI chat completion API http addresses of the LLM server replicas."""
         return self.server_addresses
 
-    def get_replicas(self) -> list[RolloutReplica]:
-        """Get the LLM server replicas."""
+    async def get_server_registry(self) -> dict[str, "ray.actor.ActorHandle"]:
+        """Get the ``{server_address: server actor handle}`` mapping."""
+        return dict(zip(self.server_addresses, self.server_handles, strict=True))
+
+    async def get_replicas(self) -> list[RolloutReplica]:
+        """Get the LLM server replicas (by value — each RPC returns a fresh snapshot)."""
         return self.rollout_replicas
 
-    @auto_await
     async def start_profile(self, **kwargs):
         """Start profiling on all rollout replicas."""
         await asyncio.gather(*[replica.start_profile(**kwargs) for replica in self.rollout_replicas])
 
-    @auto_await
     async def stop_profile(self):
         """Stop profiling on all rollout replicas."""
         await asyncio.gather(*[replica.stop_profile() for replica in self.rollout_replicas])

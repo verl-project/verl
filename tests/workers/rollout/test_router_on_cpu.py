@@ -375,5 +375,5 @@ class TestGetRouterHandlePrecedence:
 
         asyncio.run(manager._init_global_load_balancer())
 
-        status = ray.get(manager.global_load_balancer.get_status.remote())
+        status = manager.global_load_balancer.get_status()
         assert status["active_servers"] == 2

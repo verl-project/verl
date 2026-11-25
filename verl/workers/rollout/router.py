@@ -63,7 +63,12 @@ class RequestLoadBalancer(Protocol):
         only ``"request_id"``); ``[]`` if counting by ``server_id`` alone."""
         ...
 
-    def release_server(self, server_id: str, request_id: str | None = None) -> None:
+    def release_server(
+        self,
+        server_id: str,
+        request_id: str | None = None,
+        expected_handle: Any = None,
+    ) -> None:
         """Release a server after a request completes.
 
         Args:
@@ -72,6 +77,10 @@ class RequestLoadBalancer(Protocol):
                 the prompt length at release time look it up by this id from
                 their own acquire-time bookkeeping, so the full token list is
                 not re-serialized over RPC.
+            expected_handle: Optional handle identity (ABA defense on actor
+                replacement; ``None`` = current unconditional semantics).
+                Custom balancers may ignore it, in which case a late release
+                from a replaced actor only mis-counts by one.
         """
         ...
 
@@ -88,6 +97,13 @@ class RequestLoadBalancer(Protocol):
 
         Args:
             server_ids: List of server identifiers to remove.
+        """
+        ...
+
+    def remove_server_if_current(self, server_id: str, expected_handle: Any) -> bool:
+        """CAS removal: remove ``server_id`` only if it is still registered
+        with ``expected_handle``. Strategies without this method keep the
+        legacy ``remove_servers`` contract; callers catch and fall back.
         """
         ...
 
@@ -136,9 +152,10 @@ class GlobalRequestLoadBalancer:
     When a sticky session points to a removed server, the cache entry is
     automatically invalidated and a new server is selected.
 
-    This is a plain Python class (not a Ray actor). It is wrapped with
-    ``ray.remote(...)`` at instantiation time so callers can subclass it and
-    override :meth:`acquire_server` before registering the subclass as an actor.
+    This is a plain Python class (not a Ray actor). It is embedded in the
+    LLMServerManager actor (:func:`create_embedded_load_balancer`) or
+    actorized standalone (:func:`get_router_handle`, teacher models).
+    Subclasses may override :meth:`acquire_server` to take full control of routing.
 
     Key features:
     - **Atomic acquire**: ``acquire_server()`` returns ``(server_id, handle)``
@@ -203,14 +220,26 @@ class GlobalRequestLoadBalancer:
         self._inflight_requests[server_id] += 1
         return server_id, self._servers[server_id]
 
-    def release_server(self, server_id: str, request_id: str | None = None) -> None:
+    def release_server(
+        self,
+        server_id: str,
+        request_id: str | None = None,
+        expected_handle: Any = None,
+    ) -> None:
         """Release a server after a request completes.
 
         ``request_id`` is accepted for signature parity with content-aware
         balancers (which look up the prompt length from their own
         acquire-time bookkeeping); this balancer tracks request counts only
         and ignores it.
+
+        ``expected_handle`` is the ABA defense: when it is given and the
+        registered server is no longer that handle (the actor was replaced
+        at the same address), the release is a no-op instead of
+        decrementing the replacement's counter.
         """
+        if expected_handle is not None and self._servers.get(server_id) != expected_handle:
+            return
         if server_id not in self._inflight_requests:
             return
         if self._inflight_requests[server_id] > 0:
@@ -251,6 +280,21 @@ class GlobalRequestLoadBalancer:
             self._inflight_requests.pop(sid, None)
             self._servers.pop(sid, None)
         logger.info(f"[GlobalLoadBalancer] removed {len(server_ids)} servers")
+
+    def remove_server_if_current(self, server_id: str, expected_handle: Any) -> bool:
+        """CAS removal: remove only if the registered handle still is
+        ``expected_handle``.
+
+        Ray ``ActorHandle`` objects compare by actor identity across
+        serialization round-trips — an equality check cannot be spoofed by a
+        replacement actor at the same address. Returns whether the removal
+        actually happened.
+        """
+        current = self._servers.get(server_id)
+        if current is None or current != expected_handle:
+            return False
+        self.remove_servers([server_id])
+        return True
 
     def get_inflight_count(self, server_id: str) -> int:
         """Get number of in-flight requests for a server."""
@@ -298,28 +342,65 @@ class GlobalRequestLoadBalancer:
         return sum(self._inflight_requests.values())
 
 
-def _create_global_sticky_inflight(
+def _resolve_load_balancer_spec(
     servers: dict[str, Any],
+    router_config_path: str | None = None,
     full_determinism: bool = False,
     load_balancer_cls: type | None = None,
-):
-    """Factory for the default sticky-session + least-inflight strategy.
+) -> tuple[type, tuple, dict]:
+    """Resolve the configured load-balancer strategy into ``(cls, args, kwargs)``.
+
+    Shared by both hosting modes (:func:`get_router_handle`,
+    :func:`create_embedded_load_balancer`); YAML plugin classes may be Ray
+    actor classes — only the actorized path can host those.
 
     Args:
         servers: ``{server_address: actor_handle}`` mapping.
-        full_determinism: Rollout-level ``rollout.full_determinism`` flag;
-            enables full-hash deterministic routing.
-        load_balancer_cls: Class to use as the routing actor. A subclass overrides
-            :meth:`acquire_server` and takes full control of routing, so
-            ``full_determinism`` is not forwarded to it.
+        router_config_path: Optional external router YAML path. When set, a
+            user-defined plugin is loaded; otherwise the default sticky-session
+            + least-inflight strategy is used.
+        full_determinism: Rollout-level ``rollout.full_determinism`` flag,
+            forwarded to strategies that support deterministic routing.
+        load_balancer_cls: Optional subclass of the default strategy's load
+            balancer. Takes precedence over the config-selected strategy; not
+            applicable to the YAML plugin.
     """
+    if router_config_path and load_balancer_cls is None:
+        yaml_config = _load_router_yaml(router_config_path)
+        router_class = yaml_config.get("router_class", None)
+        if not router_class:
+            raise ValueError(
+                "External router YAML must contain 'router_class'. "
+                "Example: router_class: uni_agent.llm_router.KvcAwareRouter"
+            )
+        cls = _resolve_router_class(router_class)
+        logger.info(
+            "Creating plugin load balancer from YAML: class=%s, servers=%d, config=%s",
+            router_class,
+            len(servers),
+            yaml_config,
+        )
+        # Plugin constructors take the whole loaded dict: (servers, yaml_config).
+        return cls, (servers, yaml_config), {}
+
+    # Programmatic injection (e.g. verl-omni's Deterministic* subclasses)
+    # overrides the config-selected strategy. If both are set, the YAML is
+    # ignored — warn so the mismatch doesn't fail silently.
+    if router_config_path and load_balancer_cls is not None:
+        logger.warning(
+            "Both router_config_path=%r and load_balancer_cls=%s are set; "
+            "the YAML plugin is ignored in favor of the injected subclass.",
+            router_config_path,
+            getattr(load_balancer_cls, "__name__", load_balancer_cls),
+        )
+    cls = load_balancer_cls or GlobalRequestLoadBalancer
     kwargs = dict(servers=servers, max_cache_size=DEFAULT_ROUTING_CACHE_SIZE)
     # The default GlobalRequestLoadBalancer honors the full_determinism flag
     # in acquire_server. A custom subclass overrides acquire_server and takes
     # full control of routing, so the flag is not forwarded to it.
-    if load_balancer_cls is GlobalRequestLoadBalancer:
+    if cls is GlobalRequestLoadBalancer:
         kwargs["full_determinism"] = full_determinism
-    return ray.remote(load_balancer_cls).remote(**kwargs)
+    return cls, (), kwargs
 
 
 def _load_router_yaml(router_config_path: str) -> dict:
@@ -357,50 +438,16 @@ def _resolve_router_class(router_class: str) -> type:
     return cls
 
 
-def _create_plugin_extension(
-    servers: dict[str, Any],
-    router_config_path: str,
-):
-    """Factory for a user-defined load balancer loaded from an external YAML.
-
-    The file must contain ``router_class`` (FQN); the whole loaded dict is
-    passed to the constructor.
-
-    Args:
-        servers: ``{server_address: actor_handle}`` mapping.
-        router_config_path: Path to the external YAML file.
-
-    Raises:
-        ValueError: If ``router_config_path`` is missing or the YAML lacks
-            ``router_class``.
-        ImportError: If a module or package cannot be imported.
-        AttributeError: If the class does not exist in the module.
-    """
-    yaml_config = _load_router_yaml(router_config_path)
-    router_class = yaml_config.get("router_class", None)
-    if not router_class:
-        raise ValueError(
-            "External router YAML must contain 'router_class'. "
-            "Example: router_class: uni_agent.llm_router.KvcAwareRouter"
-        )
-    cls = _resolve_router_class(router_class)
-    logger.info(
-        "Creating plugin load balancer from YAML: class=%s, servers=%d, config=%s",
-        router_class,
-        len(servers),
-        yaml_config,
-    )
-    ray_cls = cls if isinstance(cls, ray.actor.ActorClass) else ray.remote(cls)
-    return ray_cls.remote(servers, yaml_config)
-
-
 def get_router_handle(
     servers: dict[str, Any],
     router_config_path: str | None = None,
     full_determinism: bool = False,
     load_balancer_cls: type | None = None,
 ) -> Any:
-    """Create a load balancer instance from router configuration.
+    """Create a standalone load-balancer actor from router configuration.
+
+    Teacher models and tests host routing outside the LLMServerManager; the
+    rollout manager embeds its balancer via :func:`create_embedded_load_balancer`.
 
     Args:
         servers: ``{server_address: actor_handle}`` mapping.
@@ -413,21 +460,38 @@ def get_router_handle(
             balancer. Takes precedence over the config-selected strategy; not
             applicable to the YAML plugin.
     """
-    if router_config_path and load_balancer_cls is None:
-        return _create_plugin_extension(servers=servers, router_config_path=router_config_path)
-
-    # Programmatic injection (e.g. verl-omni's Deterministic* subclasses)
-    # overrides the config-selected strategy. If both are set, the YAML is
-    # ignored — warn so the mismatch doesn't fail silently.
-    if router_config_path and load_balancer_cls is not None:
-        logger.warning(
-            "Both router_config_path=%r and load_balancer_cls=%s are set; "
-            "the YAML plugin is ignored in favor of the injected subclass.",
-            router_config_path,
-            getattr(load_balancer_cls, "__name__", load_balancer_cls),
-        )
-    return _create_global_sticky_inflight(
+    cls, args, kwargs = _resolve_load_balancer_spec(
         servers=servers,
+        router_config_path=router_config_path,
         full_determinism=full_determinism,
-        load_balancer_cls=load_balancer_cls or GlobalRequestLoadBalancer,
+        load_balancer_cls=load_balancer_cls,
     )
+    ray_cls = cls if isinstance(cls, ray.actor.ActorClass) else ray.remote(cls)
+    return ray_cls.remote(*args, **kwargs)
+
+
+def create_embedded_load_balancer(
+    servers: dict[str, Any],
+    router_config_path: str | None = None,
+    full_determinism: bool = False,
+    load_balancer_cls: type | None = None,
+) -> Any:
+    """Create a plain (non-actor) load balancer for embedding inside a host actor.
+
+    The LLMServerManager embeds the balancer and exposes its surface as its
+    own RPC methods, so the manager's own pool updates become in-process
+    calls. Plugin classes from ``router_config_path`` must be plain classes —
+    the manager actor is the host process.
+    """
+    cls, args, kwargs = _resolve_load_balancer_spec(
+        servers=servers,
+        router_config_path=router_config_path,
+        full_determinism=full_determinism,
+        load_balancer_cls=load_balancer_cls,
+    )
+    if isinstance(cls, ray.actor.ActorClass):
+        raise TypeError(
+            f"{cls!r} is a Ray actor class; an embedded load balancer must be "
+            "a plain class — the LLMServerManager actor is the host process."
+        )
+    return cls(*args, **kwargs)

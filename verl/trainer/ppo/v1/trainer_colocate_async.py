@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ray
+
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.debug import marked_timer
 from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
@@ -25,7 +27,7 @@ class PPOTrainerColocateAsync(PPOTrainer):
 
     def get_llm_client(self):
         """Get the LLM server client for rollout generation."""
-        return self.llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)
+        return ray.get(self.llm_server_manager.get_client.remote(client_cls=FullyAsyncLLMServerClient))
 
     def on_init_end(self):
         # update weights after loading checkpoint

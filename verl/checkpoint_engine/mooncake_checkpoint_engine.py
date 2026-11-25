@@ -115,9 +115,14 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         }
         return actor_wg_kwargs, rollout_kwargs
 
-    def init_process_group(self, rank: int, world_size: int, metadata: dict[str, Any]):
+    def init_process_group(
+        self, rank: int, world_size: int, metadata: dict[str, Any], group_generation: int | None = None
+    ):
         self.rank = rank
         self.world_size = world_size
+        # Rollout-restart fencing generation: informational here — the store
+        # is re-created fresh every round.
+        self.group_generation = group_generation
         if rank < 0:
             logger.info(f"init_process_group rank={rank}")
             return
