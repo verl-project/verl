@@ -39,7 +39,12 @@ from verl.utils.tokenizer.continuous_token_wiring import (
     list_continuous_token_builder_families,
     resolve_continuous_token_model_family,
 )
-from verl.utils.tokenizer.deepseek import DeepSeekV4ContinuousTokenBuilder, DeepSeekV41ContinuousTokenBuilder
+from verl.utils.tokenizer.deepseek import (
+    DeepSeekV4ContinuousTokenBuilder,
+    DeepSeekV4VLContinuousTokenBuilder,
+    DeepSeekV41ContinuousTokenBuilder,
+    DeepSeekV41VLContinuousTokenBuilder,
+)
 
 
 class _DummyTokenizer:
@@ -1735,19 +1740,65 @@ def test_deepseek_v4_does_not_duplicate_existing_assistant_eos():
     assert result.inserted_token_ids == []
 
 
-def test_deepseek_v41_thinking_adds_numeric_reasoning_effort_prefix():
+@pytest.mark.parametrize(
+    "reasoning_effort, budget",
+    [(None, 50), ("low", 25), ("high", 50), ("xhigh", 75), ("max", 100), (1, 1), (37, 37), (100, 100)],
+)
+def test_deepseek_v41_thinking_adds_numeric_reasoning_effort_prefix(reasoning_effort, budget):
     tokenizer = _DeepSeekBoundaryTokenizer()
     builder = DeepSeekV41ContinuousTokenBuilder(
         tokenizer,
-        chat_template_kwargs={"enable_thinking": True},
+        chat_template_kwargs={"enable_thinking": True, "reasoning_effort": reasoning_effort},
     )
 
     token_ids = builder.build_initial_tokens([{"role": "user", "content": "question"}])
     rendered = (
-        "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the "
+        f"<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: {budget} (range 1-100, the "
         + "higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>"
     )
     assert token_ids == [ord(char) for char in rendered]
+
+
+@pytest.mark.parametrize("reasoning_effort", [37, "xhigh"])
+def test_deepseek_v41_tool_append_keeps_effort_in_initial_prefix(reasoning_effort):
+    builder = DeepSeekV41ContinuousTokenBuilder(
+        _DeepSeekBoundaryTokenizer(),
+        chat_template_kwargs={"enable_thinking": True, "drop_thinking": False, "reasoning_effort": reasoning_effort},
+    )
+    initial_messages = [{"role": "user", "content": "question"}]
+    initial_tokens = builder.build_initial_tokens(initial_messages)
+    previous_messages = initial_messages + [{"role": "assistant", "content": "checking"}]
+    updated_messages = previous_messages + [{"role": "tool", "content": "result"}]
+
+    appended_tokens = builder.tokenize_context_incremental_messages(previous_messages, updated_messages)
+
+    assert "".join(map(chr, initial_tokens)).count("Reasoning Effort:") == 1
+    rendered = "<｜User｜><tool_result>result</tool_result><｜Assistant｜><think>"
+    assert appended_tokens == [ord(char) for char in rendered]
+
+
+@pytest.mark.parametrize("builder_cls", [DeepSeekV4VLContinuousTokenBuilder, DeepSeekV41VLContinuousTokenBuilder])
+@pytest.mark.parametrize("previous_role", ["user", "tool"])
+@pytest.mark.parametrize("appended_role", ["user", "tool"])
+def test_deepseek_vl_append_continues_existing_user_tool_turn(builder_cls, previous_role, appended_role):
+    builder = builder_cls(
+        _DeepSeekBoundaryTokenizer(),
+        processor=None,
+        chat_template_kwargs={"enable_thinking": True, "reasoning_effort": "high"},
+    )
+    previous_messages = [{"role": previous_role, "content": "previous"}]
+    if appended_role == "user":
+        content = [{"type": "text", "text": "next"}, {"type": "image_url", "image_url": {"url": "image"}}]
+        rendered_content = "next<｜deepseek_image｜>"
+    else:
+        content = "result"
+        rendered_content = "<tool_result>result</tool_result>"
+    updated_messages = previous_messages + [{"role": appended_role, "content": content}]
+
+    appended_tokens = builder.tokenize_context_incremental_messages(previous_messages, updated_messages)
+
+    rendered = f"\n\n{rendered_content}<｜Assistant｜><think>"
+    assert appended_tokens == [ord(char) for char in rendered]
 
 
 def test_unknown_family_fails_during_resolution():
