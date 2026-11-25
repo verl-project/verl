@@ -57,12 +57,12 @@ from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, prefix_cache_salt
 from verl.workers.rollout.utils import (
+    dedup_image_tokens,
     extract_response_topk_logprobs_with_coverage,
     extract_sampled_logprobs,
     get_max_position_embeddings,
     get_node_visible_devices,
     get_vision_placeholder_token_ids,
-    qwen2_5_vl_dedup_image_tokens,
     run_uvicorn,
     validate_topk_logprob_request,
     warn_topk_logprob_budget,
@@ -88,6 +88,7 @@ _VERL_MANAGED_VLLM_ARGS = {
     "enable_expert_parallel": "rollout.expert_parallel_size (= tensor_model_parallel_size * data_parallel_size)",
     "enable_lora": "actor_rollout_ref.model.lora",
     "max_lora_rank": "actor_rollout_ref.model.lora",
+    "enable_tower_connector_lora": "actor_rollout_ref.model.lora",
     "enable_return_routed_experts": "rollout.enable_rollout_routing_replay",
 }
 
@@ -500,6 +501,8 @@ class vLLMHttpServer:
                 "max_loras": 1,
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
+            if self.model_config.lora.get("enable_tower_connector_lora", False):
+                lora_args["enable_tower_connector_lora"] = True
             if self.model_config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
             args.update(lora_args)
@@ -725,7 +728,7 @@ class vLLMHttpServer:
         budget_warnings = getattr(self, "_topk_budget_warnings", set())
         warn_topk_logprob_budget(sampling_params, budget_warnings)
         self._topk_budget_warnings = budget_warnings
-        prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        prompt_ids = dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
@@ -992,6 +995,7 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
+            # A colocated teacher or reward server can wake without an actor weight upload.
             await self._engine_sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
@@ -1038,7 +1042,8 @@ class vLLMHttpServer:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self._engine_sleep(level=self._resolve_sleep_level())
+        # This sync path never re-sends LoRA adapters, so keep adapter-mode weights even with lora.resync_base.
+        await self._engine_sleep(level=1 if self.lora_as_adapter else self._resolve_sleep_level())
         await self.engine.wake_up(tags=["weights"])
 
     @RLInsightLogger.trace_state_decorator(
@@ -1577,8 +1582,10 @@ class vLLMHttpServer:
 
         MTP drafter-only weights are initialized by vLLM and are not guaranteed
         to be restored by actor weight sync after level 2 sleep discards them.
-        lora only update adapter weights, so set sleep level to 1.
-        vllm-ascend < 0.30.0 requires sleep level 1 to avoid EP precision issues.
+        LoRA normally updates only adapter weights, so it requires level 1.
+        With resync_base, hybrid mode restores discarded base weights on every
+        update and can use level 2. vllm-ascend < 0.30.0 requires level 1 to
+        avoid EP precision issues.
         """
         mtp_config = getattr(self.config, "mtp", None)
         mtp_rollout_enabled = (
@@ -1587,15 +1594,22 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable_rollout", False)
         )
         checkpoint_backend = getattr(getattr(self.config, "checkpoint_engine", None), "backend", None)
-        vllm_engine_kwargs = (self.config.get("engine_kwargs", {}) or {}).get(self._get_engine_kwargs_key(), {}) or {}
+        engine_kwargs = (
+            self.config.get("engine_kwargs", {})
+            if hasattr(self.config, "get")
+            else getattr(self.config, "engine_kwargs", None)
+        ) or {}
+        vllm_engine_kwargs = engine_kwargs.get(self._get_engine_kwargs_key(), {}) or {}
         wtc = vllm_engine_kwargs.get("weight_transfer_config")
         sparse_update = checkpoint_backend == "vllm_sparse_nccl" or (
             isinstance(wtc, Mapping) and wtc.get("backend") == "sparse_nccl"
         )
-        if mtp_rollout_enabled or self.lora_as_adapter or sparse_update:
+        if mtp_rollout_enabled or sparse_update:
             return 1
         if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
             return 1
+        if self.lora_as_adapter:
+            return 2 if self.model_config.lora.get("resync_base", False) else 1
         return 2
 
     def _preprocess_sampling_params(self, sampling_params: dict[str, Any]) -> None:
@@ -1616,7 +1630,7 @@ class vLLMHttpServer:
         return output
 
     async def _sleep_hybrid(self):
-        """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
+        """Sleep before the hybrid trainer restores weights and adapters.
 
         Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
         that sleep is properly propagated to all data-parallel worker processes.

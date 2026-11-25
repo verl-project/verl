@@ -1040,8 +1040,61 @@ def get_transformer_layer_offset(pipeline_rank, vp_stage, config: TransformerCon
     return offset
 
 
-def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
+def _get_megatron_grad_finalizer(model):
+    """Select the finalizer that reduces replicated expert adapter gradients across EP."""
     from megatron.core.distributed import finalize_model_grads
+
+    try:
+        from megatron.bridge.peft import utils as peft_utils
+    except ImportError:
+        return finalize_model_grads
+
+    enable_ep_sync = getattr(peft_utils, "enable_expert_parallel_grad_sync_in_finalize", None)
+    finalize_ep_grads = getattr(peft_utils, "finalize_model_grads_with_expert_adapter_sync", None)
+    if enable_ep_sync is not None and finalize_ep_grads is not None:
+        return finalize_ep_grads if enable_ep_sync(model) > 0 else finalize_model_grads
+
+    # Legacy Bridge hooks reduce autograd's wgrad, which fused MCore linears bypass.
+    for chunk in model:
+        ep_size = get_model_config(chunk).expert_model_parallel_size
+        for module in chunk.modules():
+            if isinstance(module, getattr(peft_utils, "SharedOuterGroupedExpertAdapter", ())):
+                outer = module.linear_in if module._is_fc1 else module.linear_out
+                # Broadcasting a frozen, unsharded projection only copies between replicas.
+                if (
+                    not outer.weight.requires_grad
+                    and (outer.tp_group is None or outer.tp_group.size() == 1)
+                    and getattr(outer, "gtp_remat_size", 1) == 1
+                ):
+                    continue
+                # Legacy Bridge also broadcasts the shared weight over this group during initialization.
+                stage = parallel_state.get_tensor_and_data_parallel_group(with_context_parallel=True)
+                ep = parallel_state.get_expert_model_parallel_group()
+                ep_ranks = set(torch.distributed.get_process_group_ranks(ep))
+                if set(torch.distributed.get_process_group_ranks(stage)) != ep_ranks:
+                    raise RuntimeError(
+                        "This Megatron-Bridge build synchronizes shared-outer LoRA weights across the entire "
+                        "pipeline stage. Use a Bridge build with expert-adapter gradient finalization when "
+                        "the stage and expert-parallel groups have different ranks."
+                    )
+                if len(ep_ranks) == 1:
+                    continue
+                shared = (outer,)
+            elif (
+                ep_size > 1
+                and isinstance(module, getattr(peft_utils, "ParallelLinearAdapter", ()))
+                and getattr(module, "_uses_grouped_expert_sharding", lambda: False)()
+            ):
+                shared = (module.linear_in, module.linear_out)
+            else:
+                continue
+            for linear in shared:
+                if linear.weight.requires_grad:
+                    linear.gradient_accumulation_fusion = False
+    return finalize_model_grads
+
+
+def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     from megatron.core.utils import get_model_config
 
     try:
@@ -1049,11 +1102,13 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     except ImportError:
         megatron_FSDP = DDP
 
+    finalize_fn = _get_megatron_grad_finalizer(model)
+
     # register some callbacks for megatron training, following https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.0rc7/megatron/training/training.py#L2039-L2057
     for one_model in model:
         config = get_model_config(one_model)
         config.grad_scale_func = optimizer.scale_loss
-        config.finalize_model_grads_func = finalize_model_grads
+        config.finalize_model_grads_func = finalize_fn
 
         overlap_param_gather = getattr(optimizer.config, "overlap_param_gather", False)
         overlap_grad_reduce = getattr(one_model.ddp_config, "overlap_grad_reduce", False)

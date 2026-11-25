@@ -569,7 +569,7 @@ megatron-bridge = [
     { index = "verl-wheelhouse-torch213", extra = "sglang" },
     { index = "verl-wheelhouse-torch213", extra = "native-cu130torch213" },
 ]
-veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "10a26aca258f91a7af3e698cc0db8c6c51705989" }
+veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "9f533f4613e8b3470fcc6b9b409c539e2391e6c1" }
 
 # megatron-core isn't in the wheelhouse; git-sourced (built at sync
 # time). The wheelhouse megatron-bridge 0.6.2 (v0.6.2 tag) pairs with
