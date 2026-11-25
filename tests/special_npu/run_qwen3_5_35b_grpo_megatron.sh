@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # E2E GRPO Qwen3.5-35B-A3B MoE with Megatron + vLLM on Ascend A3 (16 NPUs).
-# Fast validation config (PR CI): gbs=32, no MTP, 1 training step.
+# Fast validation config (PR CI): gbs=32, no MTP, 1 training step with R3.
 # Exercises the NPU path of examples/grpo_trainer/run_qwen3_5_35b_megatron.sh:
-# mbridge overrides, dynamic bsz, async scheduling, rl_config weight sync.
+# mbridge overrides, dynamic bsz, async scheduling, rl_config weight sync, R3.
 
 set -xeuo pipefail
 
@@ -29,7 +29,8 @@ export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export CPU_AFFINITY_CONF=1
 
-export VLLM_USE_V1=1
+# Routed-expert capture requires V2; use it for both baseline and R3 runs.
+export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
 
 ###########################
@@ -87,6 +88,7 @@ ACTOR=(
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.megatron.use_mbridge=True
+    actor_rollout_ref.actor.megatron.router_replay.mode=R3
     actor_rollout_ref.actor.megatron.use_remove_padding=True
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
@@ -125,6 +127,7 @@ ACTOR=(
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=True
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6
     actor_rollout_ref.rollout.n=5
@@ -158,6 +161,7 @@ TRAINER=(
 
 EXTRA=(
     model_engine=megatron
+    '++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V2_MODEL_RUNNER="1"'
 )
 
 ###########################
