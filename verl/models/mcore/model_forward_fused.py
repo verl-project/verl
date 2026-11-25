@@ -425,7 +425,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             local_output["entropy"] = output_orig.entropy
         if topk_labels_rmpad is not None:
             if output_orig.topk_log_probs is None:
-                raise RuntimeError("TileLang fused forward did not return topk_log_probs")
+                raise RuntimeError("Fused forward did not return topk_log_probs")
             if auxiliary_logits_processor is None:
                 raise RuntimeError("An auxiliary logits processor is required with fused top-k labels")
             local_output.update(auxiliary_logits_processor(student_topk_log_probs=output_orig.topk_log_probs))
