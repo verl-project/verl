@@ -129,15 +129,25 @@ class QATEngineConfig(BaseConfig):
 
     Args:
         enable (bool): Whether to enable QAT, default False
-        mode (str): Quantization mode, "fp8", "mxfp8", "mxfp4", or "nvfp4", default "fp8"
+        mode (str): Quantization mode, "fp8", "mxfp8", "mxfp4", "mxfp4_mxfp8", or "nvfp4", default "fp8"
         group_size (int): Group size for blockwise quantization, default 16
         ignore_patterns (list[str]): Module name patterns to exclude from quantization
+        activation (str): Routed-expert input fake-quant of the mxfp4 mode: "mxfp8" (default) or "none".
+            "none" makes the experts weight-only, for a W4A16 rollout (BF16 training) or for TE FP8
+            training (override_transformer_config.fp8), whose GEMM quantizes the activations itself.
     """
 
     enable: bool = False
     mode: str = "fp8"
     group_size: int = 16
     ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
+    activation: str = "mxfp8"
+
+    def __post_init__(self):
+        if self.activation not in ("mxfp8", "none"):
+            raise ValueError(f"qat.activation must be 'mxfp8' or 'none', got {self.activation!r}")
+        if self.activation == "none" and self.mode != "mxfp4":
+            raise ValueError(f"qat.activation=none is supported only with qat.mode=mxfp4, got mode={self.mode!r}")
 
 
 @dataclass

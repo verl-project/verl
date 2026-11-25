@@ -90,6 +90,7 @@ actor_rollout_ref:
         _target_: verl.workers.config.QATEngineConfig
         enable: false
         mode: fp8
+        activation: mxfp8
         group_size: 16
         ignore_patterns:
         - lm_head
@@ -286,6 +287,7 @@ actor_rollout_ref:
         _target_: verl.workers.config.QATEngineConfig
         enable: false
         mode: fp8
+        activation: mxfp8
         group_size: 16
         ignore_patterns:
         - lm_head
@@ -637,6 +639,7 @@ critic:
       _target_: verl.workers.config.QATEngineConfig
       enable: false
       mode: fp8
+      activation: mxfp8
       group_size: 16
       ignore_patterns:
       - lm_head

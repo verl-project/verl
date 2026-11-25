@@ -817,6 +817,10 @@ def dispatch_rollout_weight_quantizer(
             quantizer = CompressedTensorsWeightQuantizer(quantization_config)
     elif "fp8" in quant_method:
         qat_modes = {"fp8"}
+        if qat_mode == "mxfp4" and model_types & _DEEPSEEK_V4_MODEL_TYPES:
+            # The checkpoint's experts are MXFP4 and the rest FP8, and Megatron-Bridge exports that layout itself.
+            # MXFP4 QAT on the routed experts trains on the grid the bridge re-quantizes the experts to.
+            qat_modes = {"mxfp4"}
         quantizer = Fp8ConfigWeightQuantizer(quantization_config, model_types=model_types)
     else:
         raise NotImplementedError(

@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 _MXFP4_SF_BLOCK = 32
 _MXFP4_LIVE_ATTR = "_verl_mxfp4_live_params"
+_MXFP4_ALL_LIVE_ATTR = "_verl_mxfp4_all_live_params"
 _NVFP4_SF_BLOCK = 16
 _NVFP4_LIVE_ATTR = "_verl_nvfp4_live_params"
 # Parameters FlashInfer TRT-LLM registers afresh in each post-process; the CUDA graphs captured the first ones.
@@ -180,13 +181,17 @@ def _refittable_mxfp4_backends():
     """
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 
-    return (
+    backends = (
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         Mxfp4MoeBackend.DEEPGEMM_MXFP4,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
     )
+    # Humming (MXFP4 weights with FP8 activations on Hopper via WGMMA dequant) republishes its repacked expert
+    # params through replace_parameter as well.
+    humming = getattr(Mxfp4MoeBackend, "HUMMING", None)
+    return backends + ((humming,) if humming is not None else ())
 
 
 def _mxfp4_checkpoint_layout(module):
@@ -252,6 +257,9 @@ def _stage_mxfp4_moe_params(module):
     backend's conversion and folds the result back into the live storage.
     """
     live = {}
+    # Every parameter the CUDA graph may have captured, including any a backend registers beyond the checkpoint
+    # layout (Humming's FP8-activation path rebuilds each sublayer's whole parameter set with setattr).
+    setattr(module, _MXFP4_ALL_LIVE_ATTR, dict(module.named_parameters(recurse=False)))
     uses_packed_names = getattr(module.quant_method, "_verl_uses_packed_checkpoint_names", False)
     for name, (shape, dtype, scale_kind) in _mxfp4_checkpoint_layout(module).items():
         param = getattr(module, name, None)
@@ -299,6 +307,35 @@ def _replace_parameter_in_place(layer, param_name, new_data, prefer_copy=False):
     setattr(layer, param_name, param)
 
 
+def _fold_reregistered_params_in_place(module):
+    """Copy parameters a backend re-registered outside ``replace_parameter`` back into the captured storage.
+
+    Humming's FP8-activation conversion deletes and re-creates every ``w13_*``/``w2_*`` parameter with
+    ``setattr``; only some of them are also published through ``replace_parameter``. Without this, a refit
+    leaves the CUDA graph reading the previous values of the others.
+    """
+    all_live = getattr(module, _MXFP4_ALL_LIVE_ATTR, None) or {}
+    if hasattr(module, _MXFP4_ALL_LIVE_ATTR):
+        delattr(module, _MXFP4_ALL_LIVE_ATTR)
+    folded = []
+    for name, old in all_live.items():
+        new = getattr(module, name, None)
+        if not isinstance(new, torch.nn.Parameter) or new is old:
+            continue
+        if new.shape != old.shape or new.dtype != old.dtype:
+            raise RuntimeError(
+                f"mxfp4 refit re-registered {name} as {tuple(new.shape)}/{new.dtype}, but the captured parameter "
+                f"is {tuple(old.shape)}/{old.dtype}; its storage cannot be updated in place."
+            )
+        if new.data_ptr() != old.data_ptr():
+            old.data.copy_(new.data)
+        setattr(module, name, old)
+        folded.append(name)
+    if folded and not getattr(module, "_verl_mxfp4_fold_logged", False):
+        logger.info("mxfp4 refit folded re-registered params back into captured storage: %s", sorted(folded))
+        module._verl_mxfp4_fold_logged = True
+
+
 def _process_mxfp4_moe_params(module):
     from vllm.model_executor.layers.quantization import mxfp4 as vllm_mxfp4
 
@@ -310,6 +347,7 @@ def _process_mxfp4_moe_params(module):
     # other way and the live storage was never refreshed.
     leftover = getattr(module, _MXFP4_LIVE_ATTR, None) or {}
     delattr(module, _MXFP4_LIVE_ATTR)
+    _fold_reregistered_params_in_place(module)
     if leftover:
         raise RuntimeError(
             f"mxfp4 refit left {sorted(leftover)} un-reinstated; every backend listed in "

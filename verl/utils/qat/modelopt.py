@@ -182,6 +182,9 @@ _FP8_BLOCK_QUANTIZER_CFG = {
 
 _QUANTIZER_CFGS = {"fp8": _FP8_BLOCK_QUANTIZER_CFG}
 _SUPPORTED_QAT_MODES = {*_QUANTIZER_CFGS, "mxfp8", "mxfp4", "mxfp4_mxfp8", "nvfp4"}
+# qat.activation: "mxfp8" fake-quantizes the routed-expert inputs; "none" leaves them to the GEMM (mxfp4 only),
+# either BF16 (an MXFP4 W4A16 rollout) or Transformer Engine's real FP8 GEMM, which quantizes them itself.
+_QAT_ACTIVATIONS = ("mxfp8", "none")
 
 _ROUTED_EXPERT_WEIGHT_QUANTIZER = "*mlp.experts*weight_quantizer"
 _ROUTED_EXPERT_INPUT_QUANTIZER = "*mlp.experts*input_quantizer"
@@ -204,12 +207,14 @@ def _mxfp8_quantize_config() -> tuple[list[dict], None]:
     return quant_cfg, None
 
 
-def _mxfp4_quantize_config(*, dense_mxfp8: bool) -> tuple[list[dict], None]:
-    """MXFP4 routed-expert weights with MXFP8 activations.
+def _mxfp4_quantize_config(*, dense_mxfp8: bool, expert_inputs: bool = True) -> tuple[list[dict], None]:
+    """MXFP4 routed-expert weights, with MXFP8 activations unless ``expert_inputs`` is False.
 
     ModelOpt has native MXFP4/MXFP4 and MXFP8/MXFP8 presets but no MXFP4/MXFP8
     preset. Their quantizers are independent, so combine the weight numerics
-    from the former with the input numerics from the latter.
+    from the former with the input numerics from the latter. Without expert
+    inputs the experts are weight-only: the leading ``*`` disable keeps every
+    other quantizer off (an unmatched TensorQuantizer would default to INT8).
     """
     if dense_mxfp8:
         quant_cfg, _ = _mxfp8_quantize_config()
@@ -220,18 +225,9 @@ def _mxfp4_quantize_config(*, dense_mxfp8: bool) -> tuple[list[dict], None]:
     weight_cfg["backend"] = _MXFP4_BACKEND
     input_cfg = _modelopt_quantizer_cfg(mtq.MXFP8_DEFAULT_CFG, "*input_quantizer")
     input_cfg["backend"] = _MXFP8_BACKEND
-    quant_cfg.extend(
-        [
-            {
-                "quantizer_name": _ROUTED_EXPERT_WEIGHT_QUANTIZER,
-                "cfg": weight_cfg,
-            },
-            {
-                "quantizer_name": _ROUTED_EXPERT_INPUT_QUANTIZER,
-                "cfg": input_cfg,
-            },
-        ]
-    )
+    quant_cfg.append({"quantizer_name": _ROUTED_EXPERT_WEIGHT_QUANTIZER, "cfg": weight_cfg})
+    if expert_inputs:
+        quant_cfg.append({"quantizer_name": _ROUTED_EXPERT_INPUT_QUANTIZER, "cfg": input_cfg})
     return quant_cfg, None
 
 
@@ -269,10 +265,15 @@ def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> list[dict]:
 def build_quantize_config(
     qat_mode: str,
     ignore_patterns: list[str] | None = None,
+    activation: str = "mxfp8",
 ) -> dict:
     """Build a complete ModelOpt quantization config for ``mtq.quantize``."""
     if qat_mode not in _SUPPORTED_QAT_MODES:
         raise ValueError(f"Supported QAT modes are {sorted(_SUPPORTED_QAT_MODES)}, got: {qat_mode}")
+    if activation not in _QAT_ACTIVATIONS:
+        raise ValueError(f"Supported QAT activations are {list(_QAT_ACTIVATIONS)}, got: {activation}")
+    if activation == "none" and qat_mode != "mxfp4":
+        raise ValueError(f"qat.activation=none is supported only with qat.mode=mxfp4, got mode={qat_mode}")
 
     if ignore_patterns is None:
         ignore_patterns = []
@@ -282,7 +283,9 @@ def build_quantize_config(
     if qat_mode == "mxfp8":
         quant_cfg, algorithm = _mxfp8_quantize_config()
     elif qat_mode in ("mxfp4", "mxfp4_mxfp8"):
-        quant_cfg, algorithm = _mxfp4_quantize_config(dense_mxfp8=qat_mode == "mxfp4_mxfp8")
+        quant_cfg, algorithm = _mxfp4_quantize_config(
+            dense_mxfp8=qat_mode == "mxfp4_mxfp8", expert_inputs=activation == "mxfp8"
+        )
     elif qat_mode == "nvfp4":
         quant_cfg, algorithm = _nvfp4_quantize_config()
     else:
@@ -411,11 +414,19 @@ def apply_qat(
     model: nn.Module,
     qat_mode: str,
     ignore_patterns: list[str] | None = None,
+    activation: str = "mxfp8",
 ) -> nn.Module:
     """Apply Quantization-Aware Training to a Megatron model."""
-    config = build_quantize_config(qat_mode, ignore_patterns)
+    config = build_quantize_config(qat_mode, ignore_patterns, activation)
     _patch_te_grouped_weight_fake_quant()
-    mtq.quantize(model, config)
+    if qat_mode == "mxfp4":
+        # MXFP4 QAT is stateless (dynamic E8M0 scales), so checkpoints keep Megatron's native TE extra state.
+        from verl.utils.qat.checkpoint import preserve_native_checkpoint_methods
+
+        with preserve_native_checkpoint_methods(model):
+            mtq.quantize(model, config)
+    else:
+        mtq.quantize(model, config)
     return model
 
 
@@ -438,7 +449,8 @@ def apply_qat_to_modules(modules, qat_config):
     ignore_patterns = _get_qat_field(qat_config, "ignore_patterns", None)
     if ignore_patterns is not None:
         ignore_patterns = list(ignore_patterns)
+    activation = _get_qat_field(qat_config, "activation", "mxfp8") or "mxfp8"
 
     for i in range(len(modules)):
-        modules[i] = apply_qat(modules[i], qat_mode, ignore_patterns=ignore_patterns)
+        modules[i] = apply_qat(modules[i], qat_mode, ignore_patterns=ignore_patterns, activation=activation)
     return modules
