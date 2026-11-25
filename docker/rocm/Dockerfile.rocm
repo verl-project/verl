@@ -121,6 +121,7 @@ RUN cd /workspace && git clone https://github.com/sgl-project/sglang.git && \
     cp python/pyproject_other.toml python/pyproject.toml && \
     SGLANG_BUILD_RUST_EXTS=none pip install --no-cache-dir --no-build-isolation --no-deps \
       -e ./python \
+      gguf==0.19.0 \
       soundfile==0.13.1 \
       "git+https://github.com/fzyzcjy/torch_memory_saver.git" && \
     pip install --no-cache-dir IPython==9.15.0 && \
