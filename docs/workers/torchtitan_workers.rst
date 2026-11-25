@@ -61,8 +61,8 @@ Enable it with ``model_engine=torchtitan``.
 Installation
 ------------
 
-TorchTitan is a conflict-free add-on extra, layered on a cu130 training
-backend like ``veomni-sft``:
+TorchTitan is a conflict-free add-on extra layered on a cu130 training
+backend:
 
 .. code:: shell
 
