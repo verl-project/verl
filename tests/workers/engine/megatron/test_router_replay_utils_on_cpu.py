@@ -593,3 +593,20 @@ def test_compact_image_routes_are_consumed_at_each_span_start():
 
     assert aligned.unbind()[0][:, 0, 0].tolist() == [10, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 14, 15]
     torch.testing.assert_close(aligned.unbind()[1], text_routes)
+
+
+@pytest.mark.parametrize(
+    "vision_types, route_rows",
+    [
+        ([-1, 0, 1, 1, -1, 0, 1, 1, -1, -1], [10, 21, 22, 30, 41, 42, 50, 60]),
+        ([-1, 0, 1, 2, 3, -1, -1], [10, 21, 22, 23, 30]),
+    ],
+)
+def test_partial_image_routes_fail_before_replaying_text(vision_types, route_rows):
+    input_ids = torch.nested.as_nested_tensor([torch.arange(len(vision_types))], layout=torch.jagged)
+    routes = torch.nested.as_nested_tensor(
+        [torch.tensor(route_rows, dtype=torch.int16).reshape(-1, 1, 1)], layout=torch.jagged
+    )
+
+    with pytest.raises(RuntimeError, match="Expected one row per token"):
+        rr_utils.align_r3_router_replay_data(routes, input_ids, {"vision_token_types": torch.tensor([vision_types])})

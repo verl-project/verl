@@ -589,24 +589,28 @@ async def test_standard_agent_loop_expands_deepseek_images_before_padding(
 
 
 @pytest.mark.asyncio
-async def test_standard_agent_loop_keeps_response_rows_aligned_for_deepseek_tool_image(monkeypatch):
-    worker = _deepseek_v41_worker(monkeypatch, prompt_length=3, response_length=7)
+@pytest.mark.parametrize("prompt_has_image", [False, True])
+async def test_standard_agent_loop_keeps_response_rows_aligned_for_deepseek_tool_image(monkeypatch, prompt_has_image):
+    worker = _deepseek_v41_worker(monkeypatch, prompt_length=7, response_length=7)
+    prompt_ids = [101, 99, 99, 99, 99, 102] if prompt_has_image else [101, 102]
     output = AgentLoopOutput(
-        prompt_ids=[101, 102],
+        prompt_ids=prompt_ids,
         response_ids=[11, 99, 12],
         response_mask=[1, 0, 1],
         response_logprobs=[-0.2, 0.0, -0.3],
-        multi_modal_data={"images": [object()]},
+        multi_modal_data={"images": [object()] * (1 + prompt_has_image)},
         metrics=AgentLoopMetrics(),
     )
 
     internal = await worker._agent_loop_postprocess(output, validate=False, raw_prompt=[])
 
-    assert internal.prompt_ids.tolist() == [[0, 101, 102]]
+    assert internal.prompt_ids.tolist() == [[0] * (7 - len(prompt_ids)) + prompt_ids]
     assert internal.response_ids.tolist() == [[11, 99, 99, 99, 99, 12, 0]]
     assert internal.response_mask.tolist() == [[1, 0, 0, 0, 0, 1, 0]]
     torch.testing.assert_close(internal.response_logprobs, torch.tensor([[-0.2, 0, 0, 0, 0, -0.3, 0]]))
-    assert internal.multi_modal_inputs["vision_token_types"].tolist() == [[-1, -1, -1, 0, 1, 2, 3, -1]]
+    prompt_types = [-1, 0, 1, 2, 3, -1] if prompt_has_image else [-1, -1]
+    assert internal.multi_modal_inputs["vision_token_types"].tolist() == [prompt_types + [-1, 0, 1, 2, 3, -1]]
+    assert "_image_source_rows" not in internal.multi_modal_inputs
 
 
 class _FakeTokenizerCustomPad:

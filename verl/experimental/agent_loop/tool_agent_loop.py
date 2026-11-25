@@ -192,6 +192,16 @@ class ToolAgentLoop(AgentLoopBase):
         if agent_data.audio_data is not None:
             multi_modal_data["audios"] = agent_data.audio_data
 
+        routed_experts = agent_data.routed_experts
+        if routed_experts is not None:
+            model_type = getattr(getattr(self.processor, "config", None), "model_type", None)
+            if agent_data.image_data and model_type == "deepseek_v41":
+                # Route buffers can already include full image spans. Trim only the discarded response suffix.
+                dropped_tokens = max(0, len(response_ids) - self.response_length)
+                routed_experts = routed_experts[: max(0, len(routed_experts) - dropped_tokens)]
+            else:
+                routed_experts = routed_experts[: len(prompt_ids) + self.response_length]
+
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
@@ -204,11 +214,7 @@ class ToolAgentLoop(AgentLoopBase):
             else None,
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
-            routed_experts=(
-                agent_data.routed_experts[: len(prompt_ids) + self.response_length]
-                if agent_data.routed_experts is not None
-                else None
-            ),
+            routed_experts=routed_experts,
             extra_fields=agent_data.extra_fields,
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})

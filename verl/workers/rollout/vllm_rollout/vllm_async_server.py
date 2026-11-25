@@ -854,6 +854,16 @@ class vLLMHttpServer:
             ):
                 raise ValueError("Rollout routing replay requires identical actor and rollout prompt tokens")
             routed_experts = final_res.outputs[0].routed_experts
+            if is_deepseek_image_prompt and routed_experts is not None:
+                # vLLM reports routes in its own token order. Validate that length
+                # before the actor interprets a buffer as compact or expanded.
+                sequence_length = len(rollout_prompt_ids) + len(token_ids)
+                if routed_experts.shape[0] not in (sequence_length, sequence_length - 1):
+                    raise ValueError(
+                        "DeepSeek-V4.1 routing replay requires one route row per rollout token "
+                        f"(apart from the optional final row), got {routed_experts.shape[0]} "
+                        f"route rows for {sequence_length} tokens"
+                    )
 
         # Determine stop reason from finish_reason
         finish_reason = final_res.outputs[0].finish_reason

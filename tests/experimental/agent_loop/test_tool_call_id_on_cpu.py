@@ -16,6 +16,8 @@ import unittest
 from types import SimpleNamespace
 from typing import Any
 
+import torch
+
 from verl.experimental.agent_loop.tool_agent_loop import AgentState, ToolAgentLoop
 from verl.experimental.agent_loop.tool_parser import FunctionCall, KimiToolParser
 from verl.tools.schemas import OpenAIFunctionToolSchema, ToolResponse
@@ -177,3 +179,29 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    async def test_deepseek_tool_loop_keeps_image_expanded_routes(self) -> None:
+        async def process_multi_modal_info(messages):
+            return {"images": [object()]}
+
+        async def handle_pending(agent_data, sampling_params):
+            agent_data.prompt_ids = [101, 99, 102, 11, 12, 13]
+            agent_data.response_mask = [1, 1, 1]
+            # One row for each token in the expanded prompt and two generated
+            # tokens. The final autoregressive row was never routed.
+            agent_data.routed_experts = torch.arange(8).reshape(-1, 1, 1)
+            return AgentState.TERMINATED
+
+        loop = SimpleNamespace(
+            processor=SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v41")),
+            rollout_config=SimpleNamespace(full_determinism=True),
+            response_length=2,
+            process_multi_modal_info=process_multi_modal_info,
+            _get_mm_processor_kwargs=lambda audios: {},
+            _make_request_id=ToolAgentLoop._make_request_id,
+            _handle_pending_state=handle_pending,
+        )
+        output = await ToolAgentLoop.run(loop, {}, raw_prompt=[])
+
+        assert output.response_ids == [11, 12]
+        assert output.routed_experts.flatten().tolist() == list(range(7))

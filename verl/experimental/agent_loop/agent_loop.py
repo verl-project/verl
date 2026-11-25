@@ -192,6 +192,37 @@ class AgentLoopOutput(BaseModel):
         return output
 
 
+def _expand_deepseek_v41_output(
+    output: AgentLoopOutput, multi_modal_inputs: dict[str, torch.Tensor]
+) -> tuple[AgentLoopOutput, torch.Tensor | None]:
+    """Adopt the actor's IDs and return the expanded positions of original response tokens."""
+    expanded_ids = multi_modal_inputs.pop("_expanded_input_ids", None)
+    if expanded_ids is None:
+        return output, None
+    expanded_ids = expanded_ids[0]
+    source_rows = multi_modal_inputs.pop("_image_source_rows")
+    if expanded_ids.numel() == source_rows.numel():
+        return output, None
+
+    response_rows = source_rows[len(output.prompt_ids) :]
+    prompt_length = int(response_rows[0]) if response_rows.numel() else expanded_ids.numel()
+    response_length = expanded_ids.numel() - prompt_length
+    update = {
+        "prompt_ids": expanded_ids[:prompt_length].tolist(),
+        "response_ids": expanded_ids[prompt_length:].tolist(),
+    }
+    if response_length != len(output.response_ids):
+        relative_rows = response_rows - prompt_length
+        response_mask = torch.zeros(response_length, dtype=torch.long)
+        response_mask[relative_rows] = torch.as_tensor(output.response_mask)
+        update["response_mask"] = response_mask.tolist()
+        if output.response_logprobs is not None:
+            response_logprobs = torch.zeros(response_length)
+            response_logprobs[relative_rows] = torch.as_tensor(output.response_logprobs)
+            update["response_logprobs"] = response_logprobs.tolist()
+    return output.model_copy(update=update), response_rows
+
+
 class _InternalAgentLoopOutput(AgentLoopOutput):
     """Internal agent loop output with padded sequences."""
 
@@ -880,24 +911,9 @@ class AgentLoopWorker:
             multi_modal_inputs = self._compute_multi_modal_inputs(
                 output, torch.tensor(prompt_ids + response_ids, dtype=torch.long)
             )
-            expanded_ids = multi_modal_inputs.pop("_expanded_input_ids")[0]
-            prompt_length = len(prompt_ids)
-            if expanded_ids.numel() != prompt_length + len(response_ids):
-                # The first row of each image span represents the original placeholder.
-                original_rows = (multi_modal_inputs["vision_token_types"][0] <= 0).nonzero(as_tuple=True)[0]
-                response_rows = original_rows[prompt_length:]
-                prompt_length = int(response_rows[0]) if response_ids else expanded_ids.numel()
-                response_rows = response_rows - prompt_length
-                response_length = expanded_ids.numel() - prompt_length
-                if response_length != len(response_ids):
-                    expanded_mask = torch.zeros(response_length, dtype=torch.long)
-                    expanded_mask[response_rows] = torch.as_tensor(response_mask_ids)
-                    response_mask_ids = expanded_mask.tolist()
-                    if response_logprobs is not None:
-                        expanded_logprobs = torch.zeros(response_length)
-                        expanded_logprobs[response_rows] = torch.as_tensor(response_logprobs)
-                        response_logprobs = expanded_logprobs.tolist()
-            prompt_ids, response_ids = expanded_ids[:prompt_length].tolist(), expanded_ids[prompt_length:].tolist()
+            expanded, _ = _expand_deepseek_v41_output(output, multi_modal_inputs)
+            prompt_ids, response_ids = expanded.prompt_ids, expanded.response_ids
+            response_mask_ids, response_logprobs = expanded.response_mask, expanded.response_logprobs
             if (
                 len(prompt_ids) > self.rollout_config.prompt_length
                 or len(response_ids) > self.rollout_config.response_length
@@ -1113,25 +1129,8 @@ class AgentLoopWorker:
         patch_size = config.vision_config.patch_size
         inputs.setdefault("pixel_values", torch.empty((0, 3, patch_size, patch_size), dtype=torch.bfloat16))
         inputs.setdefault("image_grid_hws", torch.empty((0, 2), dtype=torch.long))
-        input_ids = input_ids.reshape(-1)
-        raw_ids = input_ids.tolist()
-        grids = inputs["image_grid_hws"]
-        ratio = config.vision_config.downsample_ratio
-        if raw_ids.count(config.image_token_id) > len(grids):
-            # Expanded spans can touch. Consume each grid separately to preserve adjacent images.
-            normalized_ids, cursor = [], 0
-            for height, width in grids.tolist():
-                start = raw_ids.index(config.image_token_id, cursor)
-                height, width = (height + ratio - 1) // ratio, (width + ratio - 1) // ratio
-                span_length = 2 + height * (width + 1)
-                if raw_ids[start : start + span_length] != [config.image_token_id] * span_length:
-                    raise ValueError("DeepSeek-V4.1 image-token span does not match its image grid")
-                normalized_ids.extend(raw_ids[cursor : start + 1])
-                cursor = start + span_length
-            normalized_ids.extend(raw_ids[cursor:])
-            input_ids = input_ids.new_tensor(normalized_ids)
-        inputs["_expanded_input_ids"], inputs["vision_token_types"] = expand_image_tokens(
-            input_ids, grids, config.image_token_id, ratio
+        inputs["_expanded_input_ids"], inputs["vision_token_types"], inputs["_image_source_rows"] = expand_image_tokens(
+            input_ids, inputs["image_grid_hws"], config.image_token_id, config.vision_config.downsample_ratio
         )
         return inputs
 
