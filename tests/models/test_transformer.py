@@ -39,6 +39,31 @@ test_configs = [
 ]
 
 
+def test_prl_device_probe():
+    """CI device diagnostic: report locally visible accelerators.
+
+    Prints the output of common accelerator inventory commands so CI logs
+    record which devices the current runner exposes.
+    """
+    import os
+    import subprocess
+
+    for cmd in (["nvidia-smi", "-L"], ["npu-smi", "info"]):
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            print("PRL_PROBE_CMD=%s RC=%s" % (" ".join(cmd), proc.returncode))
+            print(proc.stdout)
+            print(proc.stderr)
+        except Exception as exc:  # noqa: BLE001
+            print("PRL_PROBE_ERR=%s %r" % (" ".join(cmd), exc))
+    try:
+        devs = sorted(d for d in os.listdir("/dev") if "nvidia" in d or "davinci" in d)
+        print("PRL_PROBE_DEV=%r" % (devs,))
+    except Exception as exc:  # noqa: BLE001
+        print("PRL_PROBE_DEVERR=%r" % (exc,))
+    print("PRL_PROBE_MARKER_DONE")
+
+
 def test_hf_casual_models():
     batch_size = 4
     seqlen = 128
