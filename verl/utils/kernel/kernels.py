@@ -1653,7 +1653,7 @@ def efficient_entropy_backward(
     accumulate_chunks_fp32 = (
         _config._backward == BackwardEnum._Split_Dlogits_N
         and hidden.dtype in (torch.float16, torch.bfloat16)
-        and hidden.device.type == "cuda"
+        and hidden.is_cuda
     )
     if _config._backward == BackwardEnum._Total_Fuse_MN or should_return_fp32_grad:
         d_hidden = torch.zeros_like(hidden, dtype=torch.float32, device=hidden.device)
