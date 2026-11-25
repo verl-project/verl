@@ -29,6 +29,7 @@ from verl.plugin.platform import get_platform
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
 from verl.utils.device import get_device_name
+from verl.utils.profiler.nsight import _count_capture_ranges
 from verl.utils.py_functional import temp_env_var
 
 __all__ = ["Worker"]
@@ -472,7 +473,16 @@ class RayWorkerGroup(WorkerGroup):
         self.worker_nsight_options = kwargs.get("worker_nsight_options", None)
         self.customized_worker_env = kwargs.get("worker_env", {})
         if self.worker_nsight_options is not None and self.worker_nsight_options["capture-range-end"] is None:
-            self.worker_nsight_options["capture-range-end"] = f"repeat-shutdown:{6 * len(self.profile_steps)}"
+            # Preserve the upstream six-captures-per-step discrete default.
+            # Whole-step profiling emits one capture per step, or per group of
+            # adjacent steps when continuous windows are enabled. Match the
+            # actual count so nsys can finalize before the process exits.
+            capture_ranges = _count_capture_ranges(
+                self.profile_steps,
+                kwargs.get("profile_continuous_steps", False),
+                discrete=kwargs.get("profiler_discrete", True),
+            )
+            self.worker_nsight_options["capture-range-end"] = f"repeat-shutdown:{capture_ranges}"
 
         if worker_names is not None and (not self.fused_worker_used):
             assert self._is_init_with_detached_workers

@@ -1,6 +1,6 @@
 # NVIDIA Nsight Systems profiling in verl
 
-Last updated: 07/29/2026.
+Last updated: 10/19/2026.
 
 This guide explains how to use NVIDIA Nsight Systems for profiling verl training runs.
 
@@ -20,12 +20,14 @@ In `global_profiler`, three new config entries control the profiler behaviors:
 
 * **`global_profiler.steps`**. List of step numbers at which profiling should be performed. For example: [1, 2, 5] will profile steps 1, 2, and 5. And ``null`` means no profiling.
 
-* **`global_profiler.profile_continuous_steps`**. If true, and the following `global_profiler.discrete==False`, then the continuous steps in `global_profiler.steps` will be combined into one database. For example the above step 1 and 2 are in one database, and 5 in another. If false, every step occupies at least one database. The reason for this config is to observe the program behaviors between steps.
+* **`global_profiler.profile_continuous_steps`**. If true, and `global_profiler.global_tool_config.nsys.discrete` is `False`, then the continuous steps in `global_profiler.steps` will be combined into one database. For example the above step 1 and 2 are in one database, and 5 in another. If false, every step occupies at least one database. The reason for this config is to observe the program behaviors between steps.
 
 Nsys options in controller nodes and worker nodes are configured in `global_profiler.global_tool_config.nsys`:
 
 * **`global_profiler.global_tool_config.nsys.controller_nsight_options`**. This config group is for the single controller. All fields in this config group will be just sent to Nsight Systems when Ray starts the controller process. `ppo_trainer.yaml` provides a workable example. Users can reference [Nsight Systems manual](https://docs.nvidia.com/nsight-systems/UserGuide/index.html) and [Ray user guide](https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html) for more details.
 * **`global_profiler.global_tool_config.nsys.worker_nsight_options`**. This config group is for the worker processes. Similarly all fields in this config group will be just sent to Nsight Systems when Ray starts the controller process. Capture range is used to control the profiler when to start and stop. So `capture-range: "cudaProfilerApi"` is fixed and does not change it. Users can change `capture-range-end` with some accurate calculation or just leave it `null`.
+
+The standard PPO trainers already attach controller launch options. Connecting the controller CUDA profiler start/stop APIs to their profiling windows is follow-up work. Until that integration is added, callers using `controller_nsight_options` with `capture-range: cudaProfilerApi` must provide those calls to open and close captures.
 
 ### Worker process profiling
 
@@ -35,6 +37,64 @@ Verl manages mulitiple RL roles, _Actor_, _Ref_, _Rollout_, _Critic_, _Reward_, 
 * **`discrete`**. When set `False`, all the roles actions in one training step will be dumped in one database. When set `True`, the actions annotated by `DistProfiler.annotate` will be dumped into a discrete database. In this case, each role's action occupies one `<RID>`.
 * **Verl collocate mode**. Verl can combine two Worker sub classes to one Worker Actor. In this case, the user should take care that the combined Workers have consistent `discrete`. The Nsight Systems profiler uses a `torch.cuda.profiler.start()` and `stop()` pair to dump a `<step>` database anyway.
 
+### Worker capture counts
+
+Keep the role-level `tool_config.nsys.discrete` settings consistent with `global_profiler.global_tool_config.nsys.discrete` so worker profiling behavior matches the capture count.
+
+Leave `global_profiler.global_tool_config.nsys.worker_nsight_options.capture-range-end` as `null` to calculate `repeat-shutdown:N` automatically. With `discrete: False`, each selected step contributes one capture, or adjacent selected steps share one capture when `profile_continuous_steps` is true. For example, steps `[1, 2, 5]` produce counts of 3 and 2 respectively. Discrete mode retains the legacy estimate of six captures per selected step. Duplicate step entries are counted once. Set `capture-range-end` explicitly if your workload needs a different count; an explicit value is preserved. The count should match the captures produced by the workers so Nsight can finalize reports before worker teardown.
+
+### Independent Ray actors
+
+Reward-loop workers and rollout servers are created as independent Ray actors. Their role profiler must use `tool: nsys`, `enable: True`, and `tool_config.nsys.discrete: False`. `all_ranks` and `ranks` select ranks within the role: reward-loop ranks are worker indices; rollout ranks refer to GPU ranks and are mapped to the replicas that own them. A selected rollout replica starts its server and engine profiling together.
+
+The vLLM rollout server and engine Nsight support uses the standard PPO trainers' existing rollout start/stop calls. Reward-loop workers now have profiler initialization and manager start/stop methods, and generative reward-model servers receive launch configuration. Completing the reward profiling lifecycle in the standard PPO trainers is follow-up work. The reward settings below currently require an integration that drives that lifecycle to produce captures.
+
+For the standard V1 PPO trainer, enabled rollout Nsight capture using
+`capture-range: cudaProfilerApi` currently requires
+`global_profiler.profile_continuous_steps=False`. In `sync` and `colocate_async`
+modes, it also requires `parameter_sync_step=1`; `separate_async` retains its
+per-step rollout stop with multiple local updates. Unsupported combinations are
+rejected before worker setup, pending follow-up lifecycle support. These checks
+do not restrict training-worker-only profiling, other profiler backends, or
+rollout capture that does not use `cudaProfilerApi`.
+
+Reward-loop workers use `reward.profiler`; generative reward-model servers use `reward.reward_model.rollout.profiler`. These control separate processes. For an integration that drives the reward profiling lifecycle, with global Nsight profiling and a nonempty `global_profiler.steps`, select reward-loop worker 0 with:
+
+```yaml
+reward:
+  profiler:
+    tool: nsys
+    enable: True
+    ranks: [0]
+    tool_config:
+      nsys:
+        discrete: False
+```
+
+The role's `ray_actor_nsight_options` defaults to `global_profiler.global_tool_config.nsys.worker_nsight_options` and can be overridden with a role-specific option mapping. For `capture-range: cudaProfilerApi`, an unspecified `capture-range-end` is filled from the global step window: adjacent selected steps share one capture when `profile_continuous_steps` is true; otherwise each selected step has its own capture. An explicit `capture-range-end` is preserved. The trainer or integration must also call the manager's start/stop methods at those boundaries; launch options alone do not define the runtime windows.
+
+The `o` option is an output-name template. For independent actors, `{role}` and `{rank}` are replaced at launch, while `%q{RANK}` is replaced with the actor's profiling rank. Nsight resolves `%h` and `%p` to the hostname and process ID. An output name with no `{role}` or `{rank}` receives a `<role>_rank_<rank>_` prefix; an omitted output name defaults to `<role>_rank_<rank>_%h_pid%p`. Include `%p` when using automatic report relocation so each process can identify its own reports.
+
+### Dedicated GPU metrics collection
+
+`global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options` supplies Nsight options for a separate collection process. The creation and control APIs are available; automatic creation and lifecycle integration in the standard verl trainers are follow-up work. For current use, a trainer or downstream integration must call `create_gpu_metrics_profiler(config)` and control the returned manager through its synchronous `start_profile` and `stop_profile` methods. The helper returns `None` when collection is disabled.
+
+The helper creates one actor on the caller's Ray node when `global_profiler.tool` is `nsys`, `global_profiler.steps` is nonempty, and the metrics options are nonempty. The options must use `capture-range: cudaProfilerApi`. For example:
+
+```yaml
+global_profiler:
+  tool: nsys
+  steps: [1, 2, 5]
+  global_tool_config:
+    nsys:
+      gpu_metrics_nsight_options:
+        capture-range: cudaProfilerApi
+        gpu-metrics-devices: all
+        o: gpu_metrics_%h_pid%p
+```
+
+Only one process may collect GPU metrics for a device. Remove GPU metrics collection options from controller and worker sessions that cover the same devices. Create the metrics actor after other GPU workers have initialized, start it after their profiling sessions, and stop it before them. This actor uses profiling rank 0 independently of the training roles and inherits the global save path, report relocation, and finish hook settings.
+
 ### where to find the profiling data
 
 By default the `*.nsys-rep` files are saved in the directory `/tmp/ray/session_latest/logs/nsight/` at each node. According to the Ray manual, this default directory is not changeable. [&#34;however, Ray preserves the `--output` option of the default config&#34;](https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html).
@@ -43,13 +103,13 @@ Some users may think it is not convenient, but it is understandable that Ray may
 
 ### Finish hook: relocate results and run a custom command
 
-Because Ray hardcodes the Nsight output directory, verl provides a *finish hook*. It has two independent parts, configurable either once under `global_profiler` (every role inherits it) or per role under `profiler` (which overrides the global value):
+Because Ray hardcodes the Nsight output directory, verl provides a *finish hook*. It has two independent parts, configured under `global_profiler` where role configs inherit those values, or explicitly under a role's `profiler`:
 
-* **`relocate_results`** (bool, default `False`). When `True`, each profiled worker moves *its own* `worker_process_<pid>.*` reports out of `/tmp/ray/session_latest/logs/nsight/` into `save_path`, **on every profiled step**. Matching is by PID (nsys's `%p` token equals the worker process PID), so co-located ranks never touch each other's files and there is no race. Destination filenames are prefixed with the role and hostname (e.g. `actor_<host>_worker_process_<pid>.nsys-rep`) to stay unique across nodes. The move is best-effort: nsys only finalizes a report after the capture session shuts down, so files that are not present yet are simply skipped and nothing is ever deleted. The same flag also flattens rollout engine traces, which the engines write into `<save_path>/agent_loop_rollout_replica_<n>/`, into `save_path` — see [PyTorch profiling](torch_profiling.md).
+* **`relocate_results`** (bool, default `False`). When `True`, each profiled worker moves *its own* reports out of `/tmp/ray/session_latest/logs/nsight/` into `save_path`, **on every profiled step**. Matching is by PID (nsys's `%p` token equals the worker process PID), so co-located ranks never touch each other's files and there is no race. In addition to the default `worker_process_<pid>.*` names, matching covers configured output names containing `%p`, including role-prefixed independent actor names. Destination filenames are prefixed with the role and hostname (e.g. `actor_<host>_worker_process_<pid>.nsys-rep`) to stay unique across nodes. The move is best-effort: nsys only finalizes a report after the capture session shuts down, so files that are not present yet are simply skipped and nothing is ever deleted. The same flag also flattens rollout engine traces, which the engines write into `<save_path>/agent_loop_rollout_replica_<n>/`, into `save_path` — see [PyTorch profiling](torch_profiling.md).
 * **`finish_hook_cmd`** (str, default `null`). A shell command executed on the selected ranks **once, after the last profiled step** (not once per step). Use it for post-processing, compression, or uploading traces to remote storage. Backend stop and `relocate_results` still run every profiled step, so by the last step `save_path` holds every profiled step's reports; because the command runs a single time, a command that uploads the whole directory sends each report exactly once. It runs with these environment variables:
   * `VERL_PROFILE_SAVE_PATH` — the configured `save_path` (holds all profiled steps' reports by the time the command runs).
   * `VERL_PROFILE_TOOL` — the profiler tool (e.g. `nsys`).
-  * `VERL_PROFILE_RANK` — the global rank.
+  * `VERL_PROFILE_RANK` — the rank in the profiled role's rank system.
   * `VERL_PROFILE_PID` — the worker process PID (matches the `%p` in the report filename).
   * `VERL_PROFILE_ROLE` — the worker role, when known.
   * `VERL_PROFILE_RAY_NSIGHT_DIR` — Ray's fixed Nsight log dir (nsys only), handy for grabbing stragglers.
@@ -58,7 +118,7 @@ Running once is what keeps each report uploaded exactly once. If the command ins
 
 **Choosing which ranks run the command.** `finish_hook_cmd` runs on `finish_hook_all_ranks`/`finish_hook_ranks`. When both are unset it falls back to the profiled ranks (`all_ranks`/`ranks`), so by default the command runs wherever profiling happened. `finish_hook_ranks` may also select ranks that were *not* profiled (for example to run a single aggregation step on rank 0). `relocate_results` always runs on the profiled ranks, since that is where the artifacts live. `save_path` is usually node-local, so the command runs on every selected rank/node: with multi-node profiling keep one selected rank per node (do not narrow it to rank 0 only, or the other nodes' artifacts are never picked up), but avoid selecting several ranks that share one node's directory, or each would upload that directory.
 
-**Which role's config applies.** A worker reads exactly one role block, chosen by its own role: a collocated `actor_rollout_ref` worker reads `actor_rollout_ref.actor.profiler`, and `rollout.profiler` only applies to a standalone rollout worker. Setting the hook on `global_profiler` avoids having to guess.
+**Which role's config applies.** A worker reads exactly one role block, chosen by its own role: a collocated `actor_rollout_ref` worker reads `actor_rollout_ref.actor.profiler`, and `rollout.profiler` only applies to a standalone rollout worker. Independent reward-loop workers read `reward.profiler`, while generative reward-model servers read `reward.reward_model.rollout.profiler`. Set hook fields explicitly in these role configs where they do not inherit the global values.
 
 Example: relocate every rank's reports into `save_path` every step and, once profiling is done, upload each node's directory to HDFS in one shot:
 
@@ -91,7 +151,7 @@ To enable profiling for specific components and steps, modify your ppo_trainer.y
 ### Disable profiler
 
 ```yaml
-    profiler:
+    global_profiler:
         steps: null # disable profile
 ```
 
@@ -99,8 +159,11 @@ To enable profiling for specific components and steps, modify your ppo_trainer.y
 
 ```yaml
     global_profiler:
+        tool: nsys
         steps: [1, 2, 5]
-        discrete: False
+        global_tool_config:
+            nsys:
+                discrete: False
     actor_rollout_ref:
         actor:
             profiler:
@@ -119,10 +182,16 @@ To enable profiling for specific components and steps, modify your ppo_trainer.y
 
 ### Enable profiler and multiple databases for one training step
 
+Keep the role-level `enable: True` and rank settings from the preceding example,
+and change the global settings as follows:
+
 ```yaml
-    profiler:
+    global_profiler:
+        tool: nsys
         steps: [1, 2, 5]
-        discrete: True
+        global_tool_config:
+            nsys:
+                discrete: True
 ```
 
 ## Profiling Output
