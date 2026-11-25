@@ -444,6 +444,9 @@ actor_rollout_ref:
       transfer_backend: nixl
       bootstrap_port: null
       ib_device: null
+      mori_backend: xgmi
+      mori_mode: read
+      min_remote_prefill_tokens: 0
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat

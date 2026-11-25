@@ -18,6 +18,7 @@ import asyncio
 import logging
 import os
 import uuid
+import zlib
 from dataclasses import replace as _dc_replace
 from typing import Optional
 
@@ -31,6 +32,26 @@ from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+# MoRI-IO control ports: fixed blocks below the kernel ephemeral range (32768+), see _reserve_mori_ports.
+_MORI_PORT_BASE = 20000
+_MORI_PORT_END = 30000
+_MORI_PORTS_PER_SERVER = 32
+_MORI_SERVERS_PER_REPLICA = 16
+
+
+def _bind_port(host_ip: str, port: int):
+    """Bind ``port`` on ``host_ip`` and return the open socket (raises OSError if taken)."""
+    import socket
+
+    family = socket.AF_INET6 if is_valid_ipv6_address(host_ip) else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.bind((host_ip, port))
+    except OSError:
+        sock.close()
+        raise
+    return sock
 
 
 class vLLMPDReplica(vLLMReplica):
@@ -59,11 +80,17 @@ class vLLMPDReplica(vLLMReplica):
         disagg = self.config.disaggregation
         assert disagg.enabled, "vLLMPDReplica requires rollout.disaggregation.enabled=True"
 
-        if disagg.transfer_backend not in ("nixl", "mooncake"):
+        if disagg.transfer_backend not in ("nixl", "mooncake", "mori"):
             raise NotImplementedError(
-                f"vLLMPDReplica supports transfer_backend in ('nixl', 'mooncake') in this "
-                f"revision; got {disagg.transfer_backend!r}. mori/ascend/fake are reserved "
+                f"vLLMPDReplica supports transfer_backend in ('nixl', 'mooncake', 'mori') in this "
+                f"revision; got {disagg.transfer_backend!r}. ascend/fake are reserved "
                 f"in DisaggregationConfig and will land in follow-ups."
+            )
+        if disagg.transfer_backend == "mori" and self.config.enable_sleep_mode:
+            # vLLM sleep mode backs the KV cache with VMM (hipMemCreate) allocations, which
+            # MoRI-IO cannot export (hipIpcGetMemHandle / ibv_reg_mr fail).
+            raise ValueError(
+                "transfer_backend=mori requires rollout.enable_sleep_mode=False (and rollout.free_cache_engine=False)"
             )
         if disagg.prefill_replicas != 1:
             raise NotImplementedError(f"prefill_replicas=1 only (got {disagg.prefill_replicas})")
@@ -131,14 +158,19 @@ class vLLMPDReplica(vLLMReplica):
 
         # Keep side-channel sockets reserved until all actors bind.
         reserved_socks = []
+        # MoRI-IO binds its handshake/notify ports while the engine starts, so these
+        # reservations are released right before launch (not held like the side channel).
+        mori_socks = []
         prefill_side_channel_port, prefill_sock = get_free_port(prefill_host_ip, with_alive_sock=True)
         reserved_socks.append(prefill_sock)
         try:
+            prefill_mori = self._reserve_mori_ports(prefill_host_ip, self._prefill_tp, mori_socks, server_index=0)
             prefill_kv_cfg = self._build_kv_transfer_config(
                 role="prefill",
                 engine_id=prefill_engine_id,
                 transfer_backend=self.config.disaggregation.transfer_backend,
                 mooncake_protocol=self.config.disaggregation.mooncake_protocol,
+                mori_info=prefill_mori,
             )
             self._prefill_servers = [
                 self._spawn_pd_server(
@@ -156,6 +188,7 @@ class vLLMPDReplica(vLLMReplica):
                 )
             ]
 
+            decode_mori_infos: list[Optional[dict]] = []
             for i in range(self._n_decode):
                 start = self._prefill_tp + i * self._decode_tp
                 end = start + self._decode_tp
@@ -165,11 +198,15 @@ class vLLMPDReplica(vLLMReplica):
 
                 decode_side_channel_port, decode_sock = get_free_port(prefill_host_ip, with_alive_sock=True)
                 reserved_socks.append(decode_sock)
+                decode_host_ip = worker_infos[start][2]
+                decode_mori = self._reserve_mori_ports(decode_host_ip, self._decode_tp, mori_socks, server_index=1 + i)
+                decode_mori_infos.append(decode_mori)
                 decode_kv_cfg = self._build_kv_transfer_config(
                     role="decode",
                     engine_id=uuid.uuid4().hex,
                     transfer_backend=self.config.disaggregation.transfer_backend,
                     mooncake_protocol=self.config.disaggregation.mooncake_protocol,
+                    mori_info=decode_mori,
                 )
                 self._decode_servers.append(
                     self._spawn_pd_server(
@@ -187,6 +224,9 @@ class vLLMPDReplica(vLLMReplica):
                     )
                 )
 
+            for sock in mori_socks:
+                sock.close()
+            mori_socks.clear()
             await asyncio.gather(
                 *[
                     server.launch_server.remote(master_address=None, master_port=None, dp_rpc_port=None)
@@ -194,13 +234,16 @@ class vLLMPDReplica(vLLMReplica):
                 ]
             )
         finally:
-            for sock in reserved_socks:
+            for sock in reserved_socks + mori_socks:
                 sock.close()
 
         await self._prefill_servers[0].set_pd_peer.remote(
             self._decode_servers,
             prefill_side_channel_port,
             prefill_engine_id,
+            prefill_mori_info=prefill_mori,
+            decode_mori_infos=decode_mori_infos,
+            min_remote_prefill_tokens=self.config.disaggregation.min_remote_prefill_tokens,
         )
 
         self.servers = list(self._prefill_servers) + list(self._decode_servers)
@@ -232,6 +275,7 @@ class vLLMPDReplica(vLLMReplica):
         engine_id: str,
         transfer_backend: str,
         mooncake_protocol: Optional[str] = None,
+        mori_info: Optional[dict] = None,
     ) -> dict:
         """Assemble vLLM's ``--kv-transfer-config`` payload."""
         role_to_kv_role = {
@@ -241,6 +285,7 @@ class vLLMPDReplica(vLLMReplica):
         connector = {
             "nixl": "NixlConnector",
             "mooncake": "MooncakeConnector",
+            "mori": "MoRIIOConnector",
         }[transfer_backend]
         cfg: dict = {
             "kv_connector": connector,
@@ -250,7 +295,62 @@ class vLLMPDReplica(vLLMReplica):
         }
         if transfer_backend == "mooncake" and mooncake_protocol:
             cfg["kv_connector_extra_config"] = {"mooncake_protocol": mooncake_protocol}
+        if transfer_backend == "mori":
+            assert mori_info is not None, "mori transfer_backend needs reserved MoRI-IO ports"
+            # No proxy: verl dispatches both legs itself and passes the peer address in
+            # kv_transfer_params, so proxy_ip stays empty (disables the discovery heartbeat).
+            cfg["kv_connector_extra_config"] = {
+                "proxy_ip": "",
+                "http_port": "0",
+                "host_ip": mori_info["host"],
+                "handshake_port": str(mori_info["handshake_port"]),
+                "notify_port": str(mori_info["notify_port"]),
+                "backend": mori_info["backend"],
+                "read_mode": "true" if mori_info["mode"] == "read" else "false",
+            }
         return cfg
+
+    def _reserve_mori_ports(self, host_ip: str, tp: int, reserved_socks: list, server_index: int) -> Optional[dict]:
+        """Pick MoRI-IO handshake/notify ports for one PD server (None for other backends).
+
+        MoRI binds these ports (``tcp://*:port``) only after the engine has loaded the model, minutes
+        after this call, and its listener thread dies silently if the bind fails (requests then hang).
+        Ports from the kernel's ephemeral range can be taken by any outgoing connection in that window,
+        so use a fixed block below it instead, one per (replica, server). MoRI uses ``handshake_port +
+        tp_rank`` and ``notify_port + tp_rank`` (DP=1), so each gets its own half of the block.
+        """
+        if self.config.disaggregation.transfer_backend != "mori":
+            return None
+        half = _MORI_PORTS_PER_SERVER // 2
+        assert tp <= half, f"tp={tp} needs more than {_MORI_PORTS_PER_SERVER} MoRI-IO ports"
+        assert server_index < _MORI_SERVERS_PER_REPLICA, f"too many PD servers per replica: {server_index + 1}"
+        slots = (_MORI_PORT_END - _MORI_PORT_BASE) // (_MORI_PORTS_PER_SERVER * _MORI_SERVERS_PER_REPLICA)
+        first_slot = self.replica_rank + zlib.crc32(self.name_suffix.encode())
+        wildcard = "::" if is_valid_ipv6_address(host_ip) else "0.0.0.0"
+        for attempt in range(slots):
+            slot = (first_slot + attempt) % slots
+            base = _MORI_PORT_BASE + (slot * _MORI_SERVERS_PER_REPLICA + server_index) * _MORI_PORTS_PER_SERVER
+            socks = []
+            try:
+                for port in [*range(base, base + tp), *range(base + half, base + half + tp)]:
+                    socks.append(_bind_port(wildcard, port))
+            except OSError:
+                for sock in socks:
+                    sock.close()
+                continue
+            reserved_socks.extend(socks)
+            return {
+                "host": host_ip,
+                "handshake_port": base,
+                "notify_port": base + half,
+                "tp_size": tp,
+                "backend": self.config.disaggregation.mori_backend,
+                "mode": self.config.disaggregation.mori_mode,
+            }
+        raise RuntimeError(
+            f"no free MoRI-IO port block for PD server {server_index} of replica {self.replica_rank} "
+            f"in [{_MORI_PORT_BASE}, {_MORI_PORT_END})"
+        )
 
     def _spawn_pd_server(
         self,
@@ -270,6 +370,8 @@ class vLLMPDReplica(vLLMReplica):
         per_role_config = _dc_replace(self.config, tensor_model_parallel_size=tp)
 
         env_vars = {
+            # Platform noset/rollout env (e.g. ROCm HIP/ROCR_VISIBLE_DEVICES), same as non-PD replicas.
+            **self._get_server_env_vars([node_id]),
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
             "NCCL_CUMEM_ENABLE": "0",
