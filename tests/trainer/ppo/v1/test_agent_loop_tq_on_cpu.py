@@ -18,6 +18,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
+import verl.experimental.agent_loop.agent_loop as agent_loop_module
 import verl.trainer.ppo.v1.agent_loop_tq as agent_loop_tq_module
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput, AgentLoopWorker
 from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ, _settle_session_tasks, apply_greedy_sampling_params
@@ -190,9 +191,8 @@ def test_deepseek_processor_accepts_compact_and_expanded_images(monkeypatch, exp
             vision_config=SimpleNamespace(patch_size=14, downsample_ratio=3),
         )
     )
-    worker.tokenizer = SimpleNamespace(decode=lambda *args, **kwargs: "image prompt")
     monkeypatch.setattr(
-        agent_loop_tq_module,
+        agent_loop_module,
         "build_multimodal_processor_inputs",
         lambda *args, **kwargs: BatchFeature({"image_grid_hws": torch.tensor([[3, 3], [3, 6]])}),
     )

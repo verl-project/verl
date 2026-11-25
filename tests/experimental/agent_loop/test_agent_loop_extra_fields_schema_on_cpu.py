@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import warnings
 from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
+from transformers import BatchFeature
 
 import verl.experimental.agent_loop.agent_loop as agent_loop_module
 from verl.experimental.agent_loop.agent_loop import (
@@ -33,6 +35,7 @@ from verl.experimental.agent_loop.agent_loop import (
 )
 from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
 from verl.utils.dataset.rl_dataset import RLHFDataset
+from verl.utils.tokenizer.deepseek import IMAGE_PLACEHOLDER
 from verl.workers.rollout.replica import TokenOutput
 
 
@@ -518,6 +521,92 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
     torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
     assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0
     assert torch.count_nonzero(internal.routed_experts[:, 6:]) == 0
+
+
+def _deepseek_v41_worker(monkeypatch, *, prompt_length=8, response_length=3):
+    worker = object.__new__(AgentLoopWorker)
+    worker.tokenizer = _FakeTokenizer()
+    worker.mm_processor_kwargs = {}
+    worker.rollout_config = OmegaConf.create({"prompt_length": prompt_length, "response_length": response_length})
+    worker.processor = SimpleNamespace(
+        config=SimpleNamespace(
+            model_type="deepseek_v41",
+            image_token_id=99,
+            vision_config=SimpleNamespace(patch_size=2, downsample_ratio=1),
+        )
+    )
+    worker.distillation_enabled = False
+    worker.reward_loop_worker_handles = None
+
+    def processor_inputs(processor, *, text, images, **kwargs):
+        assert text == [IMAGE_PLACEHOLDER * len(images)]
+        return BatchFeature(
+            {
+                "input_ids": torch.tensor([[999]]),
+                "image_grid_hws": torch.tensor([[1, 1]] * len(images)),
+                "pixel_values": torch.ones(len(images), 3, 2, 2),
+            }
+        )
+
+    monkeypatch.setattr(agent_loop_module, "build_multimodal_processor_inputs", processor_inputs)
+    return worker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expanded_prompt", [False, True])
+@pytest.mark.parametrize("expanded_routes", [False, True])
+async def test_standard_agent_loop_expands_deepseek_images_before_padding(
+    monkeypatch, expanded_prompt, expanded_routes
+):
+    worker = _deepseek_v41_worker(monkeypatch)
+    prompt_ids = [101] + [99] * (4 if expanded_prompt else 1) + [102]
+    route_rows = [10, 21, 22, 23, 24, 30, 40] if expanded_routes else [10, 20, 30, 40]
+    output = AgentLoopOutput(
+        prompt_ids=prompt_ids,
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        response_logprobs=[-0.2, -0.3],
+        routed_experts=torch.tensor(route_rows).reshape(-1, 1, 1),
+        multi_modal_data={"images": [object()]},
+        metrics=AgentLoopMetrics(),
+    )
+
+    internal = await worker._agent_loop_postprocess(output, validate=False, raw_prompt=[])
+
+    assert internal.prompt_ids.tolist() == [[0, 0, 101, 99, 99, 99, 99, 102]]
+    assert internal.response_ids.tolist() == [[11, 12, 0]]
+    assert internal.input_ids.tolist() == [[0, 0, 101, 99, 99, 99, 99, 102, 11, 12, 0]]
+    assert internal.attention_mask.tolist() == [[0, 0] + [1] * 8 + [0]]
+    assert internal.position_ids[internal.attention_mask.bool()].tolist() == list(range(8))
+    assert internal.response_mask.tolist() == [[1, 1, 0]]
+    torch.testing.assert_close(internal.response_logprobs, torch.tensor([[-0.2, -0.3, 0.0]]))
+    visual_rows = [21, 22, 23, 24] if expanded_routes else [0, 0, 0, 0]
+    assert internal.routed_experts.flatten().tolist() == [0, 0, 10, *visual_rows, 30, 40, 0, 0]
+    assert internal.multi_modal_inputs["vision_token_types"].tolist() == [[-1, 0, 1, 2, 3, -1, -1, -1]]
+    assert internal.multi_modal_inputs["image_grid_hws"].tolist() == [[1, 1]]
+    assert internal.multi_modal_inputs["pixel_values"].shape == (1, 3, 2, 2)
+    assert "_expanded_input_ids" not in internal.multi_modal_inputs
+
+
+@pytest.mark.asyncio
+async def test_standard_agent_loop_keeps_response_rows_aligned_for_deepseek_tool_image(monkeypatch):
+    worker = _deepseek_v41_worker(monkeypatch, prompt_length=3, response_length=7)
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 99, 12],
+        response_mask=[1, 0, 1],
+        response_logprobs=[-0.2, 0.0, -0.3],
+        multi_modal_data={"images": [object()]},
+        metrics=AgentLoopMetrics(),
+    )
+
+    internal = await worker._agent_loop_postprocess(output, validate=False, raw_prompt=[])
+
+    assert internal.prompt_ids.tolist() == [[0, 101, 102]]
+    assert internal.response_ids.tolist() == [[11, 99, 99, 99, 99, 12, 0]]
+    assert internal.response_mask.tolist() == [[1, 0, 0, 0, 0, 1, 0]]
+    torch.testing.assert_close(internal.response_logprobs, torch.tensor([[-0.2, 0, 0, 0, 0, -0.3, 0]]))
+    assert internal.multi_modal_inputs["vision_token_types"].tolist() == [[-1, -1, -1, 0, 1, 2, 3, -1]]
 
 
 class _FakeTokenizerCustomPad:

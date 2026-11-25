@@ -33,7 +33,6 @@ from verl.experimental.agent_loop import (
 )
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
-from verl.utils.tokenizer import build_multimodal_processor_inputs
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -58,48 +57,6 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
-
-    def _compute_multi_modal_inputs(self, output, input_ids):
-        """Build processor inputs, expanding DeepSeek V4.1 image tokens and aligning their modality types."""
-        if getattr(getattr(self.processor, "config", None), "model_type", None) != "deepseek_v41":
-            return super()._compute_multi_modal_inputs(output, input_ids)
-
-        from verl.utils.tokenizer.deepseek import expand_image_tokens
-
-        config = self.processor.config
-        inputs = build_multimodal_processor_inputs(
-            self.processor,
-            text=[self.tokenizer.decode(input_ids.reshape(-1).tolist(), skip_special_tokens=True)],
-            images=(output.multi_modal_data or {}).get("images"),
-            mm_processor_kwargs=output.mm_processor_kwargs or {},
-        )
-        inputs = dict(inputs.convert_to_tensors("pt"))
-        inputs.pop("input_ids", None)
-        inputs.pop("attention_mask", None)
-        patch_size = config.vision_config.patch_size
-        inputs.setdefault("pixel_values", torch.empty((0, 3, patch_size, patch_size), dtype=torch.bfloat16))
-        inputs.setdefault("image_grid_hws", torch.empty((0, 2), dtype=torch.long))
-        raw_ids = input_ids.reshape(-1).tolist()
-        grids = inputs["image_grid_hws"]
-        ratio = config.vision_config.downsample_ratio
-        if raw_ids.count(config.image_token_id) > len(grids):
-            # Processor-expanded spans can touch. Consume each grid's full span
-            # separately so adjacent images retain one placeholder apiece.
-            normalized_ids, cursor = [], 0
-            for height, width in grids.tolist():
-                start = raw_ids.index(config.image_token_id, cursor)
-                height, width = (height + ratio - 1) // ratio, (width + ratio - 1) // ratio
-                span_length = 2 + height * (width + 1)
-                if raw_ids[start : start + span_length] != [config.image_token_id] * span_length:
-                    raise ValueError("DeepSeek-V4.1 image-token span does not match its image grid")
-                normalized_ids.extend(raw_ids[cursor : start + 1])
-                cursor = start + span_length
-            normalized_ids.extend(raw_ids[cursor:])
-            input_ids = input_ids.new_tensor(normalized_ids)
-        inputs["_expanded_input_ids"], inputs["vision_token_types"] = expand_image_tokens(
-            input_ids, grids, config.image_token_id, ratio
-        )
-        return inputs
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""

@@ -45,6 +45,7 @@ from verl.models.mcore.util import (
 )
 from verl.utils.device import get_device_name
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
+from verl.utils.tokenizer.deepseek import align_deepseek_v41_routes
 
 device_name = get_device_name()
 
@@ -456,90 +457,6 @@ def _get_vision_token_type_rows(
     ]
 
 
-def _align_r3_multimodal_routes(routes: torch.Tensor, vision_types: list[int]) -> torch.Tensor:
-    """Expand compact V4.1 routes into the actor's image-expanded sequence.
-
-    vLLM currently returns one route row for an image placeholder even though
-    the Megatron V4.1 actor executes one row for every image-span position.
-    The placeholder route cannot be reused for all visual positions because
-    V4.1 uses modality-specific router biases.  Consume that compact row and
-    leave the expanded visual rows as ignored placeholders; the replay mask
-    selects native Megatron routing for those rows.
-    """
-    expanded_len = len(vision_types)
-    route_len = routes.shape[0]
-    image_start_count = sum(kind == 0 for kind in vision_types)
-    image_position_count = sum(kind >= 0 for kind in vision_types)
-    text_count = sum(kind == -1 for kind in vision_types)
-    compact_len = text_count + image_start_count
-    zero = torch.zeros((1, *routes.shape[1:]), dtype=routes.dtype, device=routes.device)
-
-    # A complete expanded response (or its autoregressive final-row omission)
-    # is already position aligned. Keep the actual visual routes in this case;
-    # callers may still choose native visual routing through the replay mask.
-    if route_len in (expanded_len, expanded_len - 1):
-        rows = [routes[index : index + 1] if index < route_len else zero for index in range(expanded_len)]
-        return torch.cat(rows, dim=0)
-
-    # vLLM may emit a different number of rows for an image span than the
-    # actor's expanded sequence.  Text rows stay position-aligned; image rows
-    # are consumed inside the visual span and are ignored by the replay mask.
-    # This covers compact placeholders, partial visual expansion, and a missing
-    # final autoregressive row without reusing a visual route for text.
-    if text_count - 1 <= route_len <= expanded_len:
-        if route_len == compact_len:
-            text_route_count = text_count
-            image_route_count = image_start_count
-        elif route_len == compact_len - 1:
-            text_route_count = text_count - 1
-            image_route_count = image_start_count
-        else:
-            text_route_count = text_count if route_len >= text_count else text_count - 1
-            image_route_count = route_len - text_route_count
-        if image_route_count < 0 or image_route_count > image_position_count:
-            raise RuntimeError(
-                "R3 router replay cannot partition DeepSeek-V4.1 multimodal routes: "
-                f"{route_len} route rows for {expanded_len} expanded tokens, "
-                f"{text_count} text rows and {image_position_count} image rows"
-            )
-        rows = []
-        cursor = 0
-        text_cursor = 0
-        image_cursor = 0
-        for kind in vision_types:
-            if kind == -1:
-                if text_cursor < text_route_count:
-                    rows.append(routes[cursor : cursor + 1])
-                    cursor += 1
-                    text_cursor += 1
-                else:
-                    rows.append(zero)
-            elif image_cursor < image_route_count and (route_len > compact_len or kind == 0):
-                # Native V4.1 routing owns visual rows; these values are
-                # retained only to preserve the returned row count.
-                if cursor < route_len:
-                    rows.append(routes[cursor : cursor + 1] if route_len > compact_len else zero)
-                    cursor += 1
-                    image_cursor += 1
-                else:
-                    rows.append(zero)
-            else:
-                rows.append(zero)
-        if cursor != route_len or image_cursor != image_route_count:
-            raise RuntimeError(
-                "V4.1 multimodal router replay did not consume all route rows: "
-                f"consumed={cursor}, routes={route_len}, expanded={expanded_len}, "
-                f"compact={compact_len}, text_routes={text_cursor}, image_routes={image_cursor}"
-            )
-        return torch.cat(rows, dim=0)
-
-    raise RuntimeError(
-        "R3 router replay cannot align DeepSeek-V4.1 multimodal routes: "
-        f"{route_len} route rows for {expanded_len} expanded tokens, "
-        f"{compact_len} compact tokens ({image_start_count} image spans)"
-    )
-
-
 def build_r3_replay_mask(
     input_ids: torch.Tensor,
     response_mask: torch.Tensor,
@@ -608,7 +525,7 @@ def align_r3_router_replay_data(
     aligned_parts = []
     for sample_id, (routes, input_len) in enumerate(zip(route_parts, input_lens, strict=True)):
         if vision_rows is not None:
-            aligned_parts.append(_align_r3_multimodal_routes(routes, vision_rows[sample_id]))
+            aligned_parts.append(align_deepseek_v41_routes(routes, vision_rows[sample_id]))
             continue
         route_len = routes.shape[0]
         if route_len == input_len:
