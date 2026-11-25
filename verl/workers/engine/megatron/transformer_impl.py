@@ -27,6 +27,10 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 
 import verl.utils.torch_functional as verl_F
+from verl.models.mcore.response_only_lm_head import (
+    restore_response_only_outputs,
+    select_response_only_inputs,
+)
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
@@ -1233,8 +1237,13 @@ class MegatronEngineWithLMHead(MegatronEngine):
         pad_to_length_bucket: int | None = None,
         cp_layout: str = "zigzag",
         local_cp_size: int | None = None,
+        projection_mask: torch.Tensor | None = None,
     ):
-        assert logits.shape[:2] == label.shape[:2]
+        num_selected = None
+        if projection_mask is not None:
+            label, temperature, num_selected = select_response_only_inputs(label, temperature, projection_mask)
+        if logits.ndim != 3 or logits.shape[:2] != label.shape:
+            raise ValueError(f"logits and labels are misaligned: logits={logits.shape}, label={label.shape}")
         # avoid non-positive temperature such as padding
         temperature[temperature <= 0] = 1e-8
         assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
@@ -1286,6 +1295,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 logits_bak.clone() if score_centering else logits_bak, label
             )
 
+        if projection_mask is not None:
+            ret = restore_response_only_outputs(ret, projection_mask, num_selected)
         return ret
 
     def forward_step(
@@ -1307,6 +1318,15 @@ class MegatronEngineWithLMHead(MegatronEngine):
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
         score_centering = tu.get_non_tensor_data(batch, key="score_centering", default=False)
+
+        if self.engine_config.response_only_lm_head and (distillation_use_topk or score_centering):
+            raise NotImplementedError("response_only_lm_head does not support top-k distillation or score centering")
+        if (
+            self.engine_config.response_only_lm_head
+            and self.model_config.mtp.enable
+            and self.model_config.mtp.enable_train
+        ):
+            raise NotImplementedError("response_only_lm_head does not support MTP training")
         pad_to_length_bucket = (
             self.engine_config.pad_to_length_bucket
             if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
@@ -1388,6 +1408,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
             from verl.models.mcore.util import get_thd_quant_align_size
 
+            response_attention_mask = None
+            if self.engine_config.response_only_lm_head and attention_mask is not None and not loss_mask.is_nested:
+                response_attention_mask = attention_mask[:, -loss_mask.shape[-1] :]
             fused_forward_fn = get_mcore_forward_fused_model_engine_fn(self.model_config.hf_config)
             topk_labels = None
             auxiliary_logits_processor = None
@@ -1420,6 +1443,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 topk_labels=topk_labels,
                 auxiliary_logits_processor=auxiliary_logits_processor,
                 distillation_only=distillation_only,
+                loss_mask=loss_mask if self.engine_config.response_only_lm_head else None,
+                response_attention_mask=response_attention_mask,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1479,6 +1504,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
                 data_format=data_format,
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
+                response_only_lm_head=self.engine_config.response_only_lm_head,
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
                 mtp_loss_normalization_factor=mtp_loss_normalization_factor,
