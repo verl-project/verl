@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import torch
@@ -88,6 +90,16 @@ async def _postprocess(monkeypatch, worker: _DummyWorker, output: AgentLoopOutpu
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_tq_keeps_padded_text_routes(monkeypatch):
+    output = _output({})
+    output.routed_experts = torch.tensor([10, 20, 30], dtype=torch.int16).reshape(-1, 1, 1).numpy()
+
+    fields = await _postprocess(monkeypatch, _DummyWorker(topk_log_probs=0), output, validate=False)
+
+    assert fields["routed_experts"][0].flatten().tolist() == [10, 20, 30, 0, 0]
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_tq_postprocess_stores_unpadded_rollout_topk(monkeypatch):
     output = _output(
         {"response_topk_ids": [[11, 13], [12, 14]], "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]]}
@@ -151,6 +163,10 @@ async def test_tool_image_expansion_realigns_response_metadata_and_routes(monkey
         }
 
     worker._compute_multi_modal_inputs = compute_multimodal_inputs
+    teacher = AsyncMock(return_value=(torch.arange(12).unsqueeze(-1), torch.zeros(12, 1)))
+    worker.distillation_enabled = True
+    worker.teacher_key = "teacher"
+    worker.teacher_server_manager = SimpleNamespace(compute_teacher_logprobs_single=teacher)
     output = AgentLoopOutput(
         prompt_ids=[101, 99, 99, 99, 99, 102],
         response_ids=[11, 99, 12],
@@ -177,6 +193,9 @@ async def test_tool_image_expansion_realigns_response_metadata_and_routes(monkey
     assert fields["rollout_topk_ids"][0][[5, 6, 7, 10]].tolist() == [[11, 13], [99, 98], [0, 1], [12, 14]]
     assert fields["rollout_support_complete"][0].logical_not().nonzero().flatten().tolist() == [5, 10]
     assert fields["routed_experts"][0].flatten().tolist() == [10, 0, 0, 0, 0, 30, 40, 0, 0, 0, 0, 0]
+    assert teacher.call_args.kwargs["sequence_ids"] == output.prompt_ids + [11, 99, 99, 99, 99, 12]
+    assert teacher.call_args.kwargs["vision_token_types"] == [-1, 0, 1, 2, 3, -1, -1, 0, 1, 2, 3, -1]
+    assert fields["teacher_ids"][0].flatten().tolist() == list(range(12))
 
 
 @pytest.mark.asyncio
@@ -224,8 +243,6 @@ async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypa
 @pytest.mark.parametrize("first_span, second_span", [(1, 1), (4, 5), (4, 1), (1, 5)])
 def test_deepseek_processor_accepts_compact_and_expanded_images(monkeypatch, first_span, second_span):
     """DeepSeek-V4.1 prompts with one placeholder or a full span per image expand to the same tokens."""
-    from types import SimpleNamespace
-
     from transformers import BatchFeature
 
     worker = object.__new__(_WorkerTQ)

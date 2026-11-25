@@ -49,8 +49,8 @@ THINK_END_TOKEN = "</think>"
 DSML_TOKEN = "｜DSML｜"
 SYSTEM_TOKEN = "<｜System｜>"
 
-TOOL_CALLS_START_TOKEN = f"<{DSML_TOKEN}tool_calls>"
-TOOL_CALLS_END_TOKEN = f"</{DSML_TOKEN}tool_calls>"
+V4_TOOL_TAGS = ("tool_calls", "invoke", "parameter")
+V41_TOOL_TAGS = (" calls", " invoke", " parameter")
 
 # Quick instruction tokens, selected per message through the optional ``task`` field.
 TASK_TOKENS = {
@@ -198,22 +198,22 @@ def align_deepseek_v41_routes(routes: torch.Tensor, vision_types: list[int]) -> 
 REASONING_EFFORT_TEMPLATE = (
     "Reasoning Effort: {budget} (range 1-100, the higher the value, the more thorough the reasoning)\n\n"
 )
-REASONING_EFFORT_MAPPINGS = {"low": 25, "high": 50, "xhigh": 75, "max": 100}
+REASONING_EFFORT_MAPPINGS = {"low": 50, "high": 75, "xhigh": 75, "max": 100}
 
 TOOLS_TEMPLATE = """## Tools
 
 You have access to a set of tools to help answer the user's question. You can invoke tools by \
-writing a "<{dsml}tool_calls>" block like the following:
+writing a "<{dsml}{calls}>" block like the following:
 
-<{dsml}tool_calls>
-<{dsml}invoke name="$TOOL_NAME">
-<{dsml}parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{dsml}parameter>
+<{dsml}{calls}>
+<{dsml}{invoke} name="$TOOL_NAME">
+<{dsml}{parameter} name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{dsml}{parameter}>
 ...
-</{dsml}invoke>
-<{dsml}invoke name="$TOOL_NAME2">
+</{dsml}{invoke}>
+<{dsml}{invoke} name="$TOOL_NAME2">
 ...
-</{dsml}invoke>
-</{dsml}tool_calls>
+</{dsml}{invoke}>
+</{dsml}{calls}>
 
 String parameters should be specified as is and set `string="true"`. For all other types (numbers, \
 booleans, arrays, objects), pass the value in JSON format and set `string="false"`.
@@ -270,18 +270,22 @@ def _resolve_reasoning_effort(reasoning_effort: Optional[str]) -> Optional[str]:
     return resolved
 
 
-def render_tools(tools: list[dict[str, Any]]) -> str:
+def render_tools(tools: list[dict[str, Any]], *, tool_tags: tuple[str, str, str] = V4_TOOL_TAGS) -> str:
     """Render OpenAI-format tool schemas into the DSML tool prompt."""
     schemas = [_to_json(tool.get("function", tool)) for tool in tools]
+    calls, invoke, parameter = tool_tags
     return TOOLS_TEMPLATE.format(
         dsml=DSML_TOKEN,
+        calls=calls,
+        invoke=invoke,
+        parameter=parameter,
         think_start=THINK_START_TOKEN,
         think_end=THINK_END_TOKEN,
         schemas="\n".join(schemas),
     )
 
 
-def _render_tool_call(tool_call: dict[str, Any]) -> str:
+def _render_tool_call(tool_call: dict[str, Any], invoke: str, parameter: str) -> str:
     function = tool_call.get("function", tool_call)
     arguments = function.get("arguments")
     if isinstance(arguments, str):
@@ -294,11 +298,11 @@ def _render_tool_call(tool_call: dict[str, Any]) -> str:
         arguments = {"arguments": arguments}
 
     params = [
-        f'<{DSML_TOKEN}parameter name="{name}" string="{"true" if isinstance(value, str) else "false"}">'
-        f"{value if isinstance(value, str) else _to_json(value)}</{DSML_TOKEN}parameter>"
+        f'<{DSML_TOKEN}{parameter} name="{name}" string="{"true" if isinstance(value, str) else "false"}">'
+        f"{value if isinstance(value, str) else _to_json(value)}</{DSML_TOKEN}{parameter}>"
         for name, value in arguments.items()
     ]
-    return f'<{DSML_TOKEN}invoke name="{function.get("name")}">\n' + "\n".join(params) + f"\n</{DSML_TOKEN}invoke>"
+    return f'<{DSML_TOKEN}{invoke} name="{function.get("name")}">\n' + "\n".join(params) + f"\n</{DSML_TOKEN}{invoke}>"
 
 
 def encode_messages(
@@ -329,7 +333,7 @@ def encode_messages(
         reasoning_effort: Canonical ``"low"``/``"high"``/``"max"`` effort.
             Compatibility aliases are normalized for V4. V4.1 accepts its named
             effort levels or an integer budget in [1, 100]. ``"none"`` disables thinking.
-        v41_reasoning_effort: Use the V4.1 numeric budget protocol.
+        v41_reasoning_effort: Use the V4.1 prompt protocol, including numeric budgets and spaced DSML tags.
         previous_role: Role immediately preceding ``messages`` when rendering
             an incremental continuation. Consecutive user/tool messages share
             one DeepSeek-V4 user turn across request boundaries.
@@ -345,6 +349,7 @@ def encode_messages(
             raise ValueError(f"Invalid DeepSeek-V4 reasoning effort: {reasoning_effort!r}; expected a string")
         resolved_reasoning_effort = _resolve_reasoning_effort(reasoning_effort)
         think = enable_thinking and resolved_reasoning_effort is not None
+    tool_tags = V41_TOOL_TAGS if v41_reasoning_effort else V4_TOOL_TAGS
     has_tools = bool(tools) or any(message.get("tools") for message in messages)
     drop = drop_thinking and not has_tools
     last_user = max(
@@ -378,7 +383,9 @@ def encode_messages(
         None,
     )
     if tools and top_level_tools_target is None:
-        out.append("\n\n" + render_tools(tools))
+        if v41_reasoning_effort and not (add_bos_token and think):
+            out.append(SYSTEM_TOKEN)
+        out.append("\n\n" + render_tools(tools, tool_tags=tool_tags))
 
     for index, message in enumerate(messages):
         role = message["role"]
@@ -387,11 +394,13 @@ def encode_messages(
             # A developer message is a system prompt carried inside a user turn.
             if role == "developer":
                 out.append(USER_TOKEN)
+            elif v41_reasoning_effort and not (index == 0 and add_bos_token and think):
+                out.append(SYSTEM_TOKEN)
             out.append(_text_of(message.get("content")))
             if tools and index == top_level_tools_target:
-                out.append("\n\n" + render_tools(tools))
+                out.append("\n\n" + render_tools(tools, tool_tags=tool_tags))
             if message.get("tools"):
-                out.append("\n\n" + render_tools(message["tools"]))
+                out.append("\n\n" + render_tools(message["tools"], tool_tags=tool_tags))
             if message.get("response_format"):
                 out.append("\n\n" + RESPONSE_FORMAT_TEMPLATE.format(schema=_to_json(message["response_format"])))
 
@@ -420,8 +429,11 @@ def encode_messages(
                 out.append(THINK_END_TOKEN)
             out.append(_text_of(message.get("content")))
             if message.get("tool_calls"):
-                calls = "\n".join(_render_tool_call(tool_call) for tool_call in message["tool_calls"])
-                out.append(f"\n\n{TOOL_CALLS_START_TOKEN}\n{calls}\n{TOOL_CALLS_END_TOKEN}")
+                block, invoke, parameter = tool_tags
+                calls = "\n".join(
+                    _render_tool_call(tool_call, invoke, parameter) for tool_call in message["tool_calls"]
+                )
+                out.append(f"\n\n<{DSML_TOKEN}{block}>\n{calls}\n</{DSML_TOKEN}{block}>")
             out.append(EOS_TOKEN)
 
         else:

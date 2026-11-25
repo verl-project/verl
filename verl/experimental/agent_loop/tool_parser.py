@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from verl.tools.schemas import OpenAIFunctionToolSchema
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.tokenizer.deepseek import DSML_TOKEN, V4_TOOL_TAGS, V41_TOOL_TAGS
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -667,19 +668,22 @@ class DeepSeekV4ToolParser(ToolParser):
     Reference: the encoding README shipped with the DeepSeek-V4 series models.
     """
 
+    tool_tags = V4_TOOL_TAGS
+
     def __init__(self, tokenizer) -> None:
         super().__init__(tokenizer)
-        self.dsml_token = "｜DSML｜"
         self.eos_token = "<｜end▁of▁sentence｜>"
         self.think_end_token = "</think>"
-        self.tool_calls_start_token = f"<{self.dsml_token}tool_calls>"
-        self.tool_calls_end_token = f"</{self.dsml_token}tool_calls>"
+        calls, invoke, parameter = self.tool_tags
+        self.tool_calls_start_token = f"<{DSML_TOKEN}{calls}>"
+        self.tool_calls_end_token = f"</{DSML_TOKEN}{calls}>"
 
-        dsml = regex.escape(self.dsml_token)
-        self.tool_calls_regex = regex.compile(rf"<{dsml}tool_calls>(.*?)</{dsml}tool_calls>", regex.DOTALL)
-        self.invoke_regex = regex.compile(rf'<{dsml}invoke name="(.*?)">(.*?)</{dsml}invoke>', regex.DOTALL)
+        dsml = regex.escape(DSML_TOKEN)
+        calls, invoke, parameter = map(regex.escape, self.tool_tags)
+        self.tool_calls_regex = regex.compile(rf"<{dsml}{calls}>(.*?)</{dsml}{calls}>", regex.DOTALL)
+        self.invoke_regex = regex.compile(rf'<{dsml}{invoke} name="(.*?)">(.*?)</{dsml}{invoke}>', regex.DOTALL)
         self.parameter_regex = regex.compile(
-            rf'<{dsml}parameter name="(.*?)" string="(true|false)">(.*?)</{dsml}parameter>',
+            rf'<{dsml}{parameter} name="(.*?)" string="(true|false)">(.*?)</{dsml}{parameter}>',
             regex.DOTALL,
         )
 
@@ -737,6 +741,13 @@ class DeepSeekV4ToolParser(ToolParser):
         """
         _, _, content = text.rpartition(self.think_end_token)
         return content
+
+
+@ToolParser.register("deepseek_v41")
+class DeepSeekV41ToolParser(DeepSeekV4ToolParser):
+    """Parse the spaced DSML tags emitted by DeepSeek-V4.1."""
+
+    tool_tags = V41_TOOL_TAGS
 
 
 @ToolParser.register("gemma4")

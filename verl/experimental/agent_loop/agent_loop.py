@@ -115,9 +115,9 @@ class AgentLoopOutput(BaseModel):
     """SGLang video payload (see AgentLoopBase.build_sglang_video_payload); reused by the teacher
     (OPD) path so an SGLang teacher receives the video instead of raw frames. None otherwise."""
 
-    def as_dict(self) -> dict[str, Any]:
-        """Convert agent loop output to a dictionary."""
-        output = self.model_dump(exclude_unset=True)
+    def as_dict(self, *, aligned_routes: torch.Tensor | None = None) -> dict[str, Any]:
+        """Convert agent loop output to a dictionary, accepting routes already aligned by the caller."""
+        output = self.model_dump(exclude_unset=True, exclude={"routed_experts"})
 
         output["prompts"] = torch.tensor(output.pop("prompt_ids"), dtype=torch.int64)
         output["responses"] = torch.tensor(output.pop("response_ids"), dtype=torch.int64)
@@ -127,9 +127,10 @@ class AgentLoopOutput(BaseModel):
         if response_logprobs is not None:
             output["rollout_log_probs"] = torch.tensor(response_logprobs, dtype=torch.float32)
 
-        routed_experts = output.pop("routed_experts", None)
-        if routed_experts is not None:
-            routed_experts = torch.tensor(routed_experts, dtype=torch.int16)
+        if aligned_routes is not None:
+            output["routed_experts"] = aligned_routes
+        elif self.routed_experts is not None:
+            routed_experts = torch.tensor(self.routed_experts, dtype=torch.int16)
             # Router replay indexes this field by absolute token position, so it must
             # span the whole sequence. The rollout engine records fewer rows than that:
             # it only sees tokens fed through the model, and multi-turn loops stop
@@ -190,6 +191,19 @@ class AgentLoopOutput(BaseModel):
             complete[start : start + len(response_topk_ids)] = response_complete
             output["rollout_support_complete"] = complete
         return output
+
+
+def _deepseek_v41_processor_inputs(processor, images, videos, audios, mm_processor_kwargs):
+    """Process images using one placeholder per input so the returned grids match the actor."""
+    num_images = len(images) if isinstance(images, list) else int(images is not None)
+    return build_multimodal_processor_inputs(
+        processor,
+        text=[IMAGE_PLACEHOLDER * num_images],
+        images=images,
+        videos=videos,
+        audio=audios,
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
 
 
 def _expand_deepseek_v41_output(
@@ -1006,6 +1020,7 @@ class AgentLoopWorker:
             response_ids=response_ids,
             validate=validate,
             sample_kwargs=kwargs,
+            vision_token_types=multi_modal_inputs.get("vision_token_types") if deepseek_v41 else None,
         )
         teacher_ids, teacher_logprobs = (
             output.extra_fields.pop("teacher_ids", None),
@@ -1108,16 +1123,12 @@ class AgentLoopWorker:
         audios = multi_modal_data.get("audios")
         inputs = {}
         if images or videos or audios:
-            num_images = len(images) if isinstance(images, list) else int(images is not None)
-            # The processor needs one marker per image to produce its grids. Expand the actual
-            # trajectory IDs below, which preserves exact text tokens and adjacent image spans.
-            features = build_multimodal_processor_inputs(
+            features = _deepseek_v41_processor_inputs(
                 self.processor,
-                text=[IMAGE_PLACEHOLDER * num_images],
-                images=images,
-                videos=videos,
-                audio=audios,
-                mm_processor_kwargs=output.mm_processor_kwargs
+                images,
+                videos,
+                audios,
+                output.mm_processor_kwargs
                 if output.mm_processor_kwargs is not None
                 else self._get_mm_processor_kwargs(audios),
             )
@@ -1252,6 +1263,7 @@ class AgentLoopWorker:
         response_ids: list[int],
         validate: bool,
         sample_kwargs: Optional[dict[str, Any]] = None,
+        vision_token_types: torch.Tensor | None = None,
     ) -> None:
         """Compute teacher logprobs for single sample."""
         if self.distillation_enabled and not validate:
@@ -1267,6 +1279,7 @@ class AgentLoopWorker:
                 mm_processor_kwargs=output.mm_processor_kwargs,
                 mm_processor_output=getattr(output, "mm_processor_output", None),
                 routing_key=routing_key,
+                vision_token_types=vision_token_types[0].tolist() if vision_token_types is not None else None,
             )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs

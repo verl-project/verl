@@ -179,12 +179,22 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # - index: index of agent loop output
         keys, fields, tags = [], [], []
         for i, output in enumerate(outputs):
-            rollout_routed_experts = output.routed_experts
             prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
             responses = torch.tensor(output.response_ids, dtype=torch.int64)
             input_ids = torch.cat([prompts, responses], dim=0)
             multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
             expanded, response_rows = _expand_deepseek_v41_output(output, multi_modal_inputs)
+            vision_types = None
+            if "image_grid_hws" in multi_modal_inputs and multi_modal_inputs["image_grid_hws"].numel():
+                vision_types = multi_modal_inputs.get("vision_token_types")
+            aligned_routes = None
+            if output.routed_experts is not None and vision_types is not None:
+                experts = torch.as_tensor(output.routed_experts, dtype=torch.int16).detach().cpu()
+                if experts.ndim != 3:
+                    raise ValueError(
+                        f"routed_experts must have shape [sequence, layers, topk], got {tuple(experts.shape)}"
+                    )
+                aligned_routes = align_deepseek_v41_routes(experts, vision_types[0].tolist())
             if i == len(outputs) - 1:
                 await self._compute_teacher_logprobs(
                     output,
@@ -192,10 +202,11 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                     response_ids=expanded.response_ids,
                     validate=validate,
                     sample_kwargs=kwargs,
+                    vision_token_types=vision_types,
                 )
 
             keys.append(f"{uid}_{session_id}_{i}")
-            field = output.as_dict()
+            field = output.as_dict(aligned_routes=aligned_routes)
             field.update(kwargs)
             # do not store raw image/video
             field.pop("multi_modal_data", None)
@@ -225,20 +236,6 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                     expanded_scores = field["rm_scores"].new_zeros(len(expanded.response_ids))
                     expanded_scores[response_rows - field["prompts"].numel()] = field["rm_scores"]
                     field["rm_scores"] = expanded_scores
-
-            # Convert the contracted layouts to actor positions before storing the sample.
-            if rollout_routed_experts is not None:
-                experts = torch.as_tensor(rollout_routed_experts, dtype=torch.int16).detach().cpu()
-                if experts.ndim != 3:
-                    raise ValueError(
-                        f"routed_experts must have shape [sequence, layers, topk], got {tuple(experts.shape)}"
-                    )
-                vision_types = multi_modal_inputs.get("vision_token_types")
-                if vision_types is not None and multi_modal_inputs["image_grid_hws"].numel():
-                    experts = align_deepseek_v41_routes(experts, vision_types[0].tolist())
-                else:
-                    experts = experts[: input_ids.size(0)]
-                field["routed_experts"] = experts
 
             attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
             position_ids = self._compute_position_ids(

@@ -120,15 +120,24 @@ class AsyncTeacherLLMServerManager:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         mm_processor_output: Optional[list[dict[str, Any]]] = None,
         routing_key: Optional[str] = None,
+        vision_token_types: list[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute teacher log probabilities for a single unpadded sequence."""
         multi_modal_data = multi_modal_data or {}
         teacher_key = self._resolve_teacher_key(routing_key)
         teacher_model_config = self.teacher_model_configs[teacher_key]
         client = self.teacher_client[teacher_key]
+        prompt_ids = sequence_ids
+        if vision_token_types is not None and multi_modal_data.get("images"):
+            if len(vision_token_types) != len(sequence_ids):
+                raise ValueError("DeepSeek-V4.1 teacher vision types must cover the expanded actor sequence")
+            if teacher_model_config.inference.name == "vllm":
+                # The vLLM image processor consumes one marker per image. The score rows
+                # must still line up with all the actor's expanded positions.
+                prompt_ids = [token for token, kind in zip(sequence_ids, vision_token_types, strict=True) if kind <= 0]
         teacher_output = await client.generate(
             request_id=uuid4().hex,
-            prompt_ids=sequence_ids,
+            prompt_ids=prompt_ids,
             sampling_params=_get_teacher_sampling_params(teacher_model_config, self.distillation_loss_config),
             image_data=multi_modal_data.get("images"),
             video_data=multi_modal_data.get("videos"),
@@ -136,9 +145,13 @@ class AsyncTeacherLLMServerManager:
             mm_processor_output=mm_processor_output,
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        # Shapes: # S, (1 or K), where S is the response length, K is either 1 or topk depending on
+        # Shapes: (S, 1 or K), where S is the expanded actor sequence length and K depends on
         # the distillation loss settings.
         teacher_ids = torch.tensor(teacher_output.extra_fields["prompt_ids"], dtype=torch.int32)
         teacher_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
-        assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(sequence_ids)
+        if teacher_ids.shape[0] != len(sequence_ids) or teacher_logprobs.shape[0] != len(sequence_ids):
+            raise ValueError(
+                f"Teacher returned {teacher_ids.shape[0]} ID rows and {teacher_logprobs.shape[0]} logprob rows "
+                f"for {len(sequence_ids)} actor positions ({len(prompt_ids)} submitted tokens)"
+            )
         return teacher_ids, teacher_logprobs

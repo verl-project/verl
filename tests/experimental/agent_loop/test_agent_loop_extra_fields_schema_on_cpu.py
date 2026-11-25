@@ -18,6 +18,7 @@ import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, Optional
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
@@ -34,6 +35,7 @@ from verl.experimental.agent_loop.agent_loop import (
     _InternalAgentLoopOutput,
 )
 from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
+from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 from verl.utils.dataset.rl_dataset import RLHFDataset
 from verl.utils.tokenizer.deepseek import IMAGE_PLACEHOLDER
 from verl.workers.rollout.replica import TokenOutput
@@ -611,6 +613,47 @@ async def test_standard_agent_loop_keeps_response_rows_aligned_for_deepseek_tool
     prompt_types = [-1, 0, 1, 2, 3, -1] if prompt_has_image else [-1, -1]
     assert internal.multi_modal_inputs["vision_token_types"].tolist() == [prompt_types + [-1, 0, 1, 2, 3, -1]]
     assert "_image_source_rows" not in internal.multi_modal_inputs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returned_rows", [8, 5])
+async def test_deepseek_v41_teacher_uses_compact_request_and_expanded_target(monkeypatch, returned_rows):
+    worker = _deepseek_v41_worker(monkeypatch)
+    worker.distillation_enabled = True
+    worker.tokenizer.pad_token_id = 0
+    worker.teacher_key = "teacher"
+    manager = object.__new__(AsyncTeacherLLMServerManager)
+    manager.teacher_model_configs = {"teacher": SimpleNamespace(inference=SimpleNamespace(name="vllm", temperature=1))}
+    manager.distillation_loss_config = SimpleNamespace(loss_settings=SimpleNamespace(use_topk=False))
+    generate = AsyncMock(
+        return_value=TokenOutput(
+            token_ids=[],
+            extra_fields={
+                "prompt_ids": [[row] for row in range(returned_rows)],
+                "prompt_logprobs": [[0.0]] * returned_rows,
+            },
+        )
+    )
+    manager.teacher_client = {"teacher": SimpleNamespace(generate=generate)}
+    worker.teacher_server_manager = manager
+    images = [object()]
+    output = AgentLoopOutput(
+        prompt_ids=[101, 99, 99, 99, 99, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        multi_modal_data={"images": images},
+        metrics=AgentLoopMetrics(),
+    )
+
+    if returned_rows == 8:
+        internal = await worker._agent_loop_postprocess(output, validate=False, raw_prompt=[])
+        assert internal.teacher_ids.shape == (1, 11, 1)
+        assert internal.teacher_ids[0, 2:10, 0].tolist() == list(range(8))
+    else:
+        with pytest.raises(ValueError, match=r"for 8 actor positions \(5 submitted tokens\)"):
+            await worker._agent_loop_postprocess(output, validate=False, raw_prompt=[])
+    assert generate.call_args.kwargs["prompt_ids"] == [101, 99, 102, 11, 12]
+    assert generate.call_args.kwargs["image_data"] == images
 
 
 class _FakeTokenizerCustomPad:

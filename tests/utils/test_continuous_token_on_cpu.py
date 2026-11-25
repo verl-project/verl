@@ -44,6 +44,7 @@ from verl.utils.tokenizer.deepseek import (
     DeepSeekV4VLContinuousTokenBuilder,
     DeepSeekV41ContinuousTokenBuilder,
     DeepSeekV41VLContinuousTokenBuilder,
+    encode_messages,
 )
 
 
@@ -1742,7 +1743,7 @@ def test_deepseek_v4_does_not_duplicate_existing_assistant_eos():
 
 @pytest.mark.parametrize(
     "reasoning_effort, budget",
-    [(None, 50), ("low", 25), ("high", 50), ("xhigh", 75), ("max", 100), (1, 1), (37, 37), (100, 100)],
+    [(None, 75), ("low", 50), ("high", 75), ("xhigh", 75), ("max", 100), (1, 1), (37, 37), (100, 100)],
 )
 def test_deepseek_v41_thinking_adds_numeric_reasoning_effort_prefix(reasoning_effort, budget):
     tokenizer = _DeepSeekBoundaryTokenizer()
@@ -2678,3 +2679,19 @@ def test_vl_builder_preserves_explicit_sampling_rate_over_processor_default():
     )
 
     assert builder.mm_processor_kwargs["sampling_rate"] == 24000
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_deepseek_v41_system_delimiters(thinking):
+    messages = [
+        {"role": "system", "content": "first"},
+        {"role": "user", "content": "question"},
+        {"role": "system", "content": "later"},
+    ]
+    rendered = encode_messages(messages, v41_reasoning_effort=True, enable_thinking=thinking)
+    assert rendered.count("<｜System｜>") == 2
+    assert rendered.startswith("<｜begin▁of▁sentence｜><｜System｜>")
+    assert "<｜System｜>later<｜Assistant｜>" in rendered
+    rendered = encode_messages(messages[-1:], v41_reasoning_effort=True, add_bos_token=False, enable_thinking=thinking)
+    assert rendered.startswith("<｜System｜>later")
+    assert "Reasoning Effort:" not in rendered
