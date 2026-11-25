@@ -1,0 +1,35 @@
+# @package _global_
+# Default Mooncake Store KV cache offload configuration for vLLM rollouts.
+#
+# Usage:
+#   python3 -m verl.trainer.main_ppo +kv_offload=mooncake ...
+#
+# Override any field via CLI or a custom YAML overlay, e.g.:
+#   actor_rollout_ref.rollout.engine_kwargs.vllm.kv_transfer_config.kv_connector_extra_config.lookup_timeout_s=10.0
+
+actor_rollout_ref:
+  rollout:
+    # Salt KV block hashes by policy step so sleep() does not clear shared store entries.
+    external_kv_cache_invalidation: salt
+    engine_kwargs:
+      vllm:
+        kv_transfer_config:
+          kv_connector: MooncakeStoreConnector
+          kv_role: kv_both
+          kv_load_failure_policy: recompute
+          kv_connector_extra_config:
+            save_decode_cache: true
+            load_async: true
+            lookup_async: true
+            lookup_prefetch_limit: 64
+            lookup_prefetch_ttl_s: 30.0
+            lookup_timeout_s: 5.0
+
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      env_vars:
+        # Required for deterministic prefix block hashes across rollout workers.
+        PYTHONHASHSEED: "0"
+        # Route RDMA transfers to the HCA local to the destination memory region.
+        MC_ENABLE_DEST_DEVICE_AFFINITY: "1"
