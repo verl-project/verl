@@ -299,6 +299,9 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 mm_processor_kwargs=mm_processor_kwargs,
                 **kwargs,
             )
+            if "cache_salt" in output.extra_fields:
+                kwargs["cache_salt"] = output.extra_fields["cache_salt"]
+                final_output.extra_fields["cache_salt"] = output.extra_fields["cache_salt"]
 
             # 2. merge output into final_output
             final_output.token_ids.extend(output.token_ids)
@@ -340,9 +343,12 @@ class FullyAsyncLLMServerClient(LLMServerClient):
 
             # update model weights version
             global_steps = output.extra_fields.get("global_steps", None)
-            if min_global_steps is None:
-                min_global_steps = global_steps
-            max_global_steps = global_steps
+            segment_min = output.extra_fields.get("min_global_steps", global_steps)
+            segment_max = output.extra_fields.get("max_global_steps", global_steps)
+            if segment_min is not None:
+                min_global_steps = segment_min if min_global_steps is None else min(min_global_steps, segment_min)
+            if segment_max is not None:
+                max_global_steps = segment_max if max_global_steps is None else max(max_global_steps, segment_max)
 
             # 3. update max_new_tokens
             if original_max_tokens is not None:

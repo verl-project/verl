@@ -607,12 +607,14 @@ class vLLMHttpServer:
         priority: int = 0,
         kv_transfer_params: Optional[dict] = None,
         session_id: Optional[str] = None,
+        cache_salt: Optional[str] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out.
 
         Args:
             kv_transfer_params: vLLM KV-transfer payload for PD requests.
             session_id: Sticky caller id; turns of one session go to the same DP engine.
+            cache_salt: Namespace returned by the first turn, reused by later turns.
         """
         if self._disaggregation_role == "prefill" and self._pd_decode_peers and kv_transfer_params is None:
             return await self._pd_dispatch(
@@ -724,8 +726,12 @@ class vLLMHttpServer:
         if rejected is not None:
             return rejected
 
-        cache_salt = prefix_cache_salt(self.config, self.global_steps)
+        start_global_steps = self.global_steps
+        # A preserved task keeps the salt of the weights it started on across turns and retries.
+        carried_salt = cache_salt if self.config.preserve_kv_cache else None
+        cache_salt = prefix_cache_salt(self.config, start_global_steps)
         if cache_salt is not None:
+            cache_salt = carried_salt or cache_salt
             prompt["cache_salt"] = cache_salt
 
         with RLInsightLogger.trace_state(
@@ -743,6 +749,14 @@ class vLLMHttpServer:
             assert final_res is not None
 
         extra_fields = {"global_steps": self.global_steps}
+        if self.config.preserve_kv_cache:
+            versions = [step for step in (start_global_steps, self.global_steps) if step is not None]
+            extra_fields.update(
+                min_global_steps=min(versions) if versions else None,
+                max_global_steps=max(versions) if versions else None,
+            )
+        if self.config.preserve_kv_cache and cache_salt is not None:
+            extra_fields["cache_salt"] = cache_salt
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".
@@ -1195,11 +1209,8 @@ class vLLMHttpServer:
 
         try:
             # Close the gate first, then let admissions already past it land, so the pause
-            # below actually covers them. Closing the gate and declaring how late arrivals
-            # are handled happen together, so no request can observe one without the other.
-            self._submission_paused = True
-            self._rejecting = reject_request
-            self._resume_event.clear()
+            # below actually covers them.
+            await self.close_submission_gate(reject_request)
             deadline = time.monotonic() + _GATE_BARRIER_TIMEOUT_S
             while self._admitting > 0:
                 if time.monotonic() > deadline:
@@ -1252,10 +1263,26 @@ class vLLMHttpServer:
             logger.exception("Error aborting requests")
             raise
 
+    async def pause_generation(self):
+        """Close admission, then pause scheduling while retaining in-flight requests and their KV cache."""
+        await self.close_submission_gate()
+        if self.node_rank == 0:
+            await self.engine.pause_generation(mode="keep", clear_cache=False)
+
     async def resume_engine_generation(self):
         """Resume the DP engines while request admission remains closed."""
         if self.node_rank == 0:
             await self.engine.resume_generation()
+
+    async def close_submission_gate(self, reject_request: bool = False):
+        """Park (or reject) new requests until the replica reopens the gate.
+
+        Closing the gate and declaring how late arrivals are handled happen together,
+        so no request can observe one without the other.
+        """
+        self._submission_paused = True
+        self._rejecting = reject_request
+        self._resume_event.clear()
 
     async def open_submission_gate(self):
         """Admit requests after the replica has finished resuming its engines."""
@@ -1706,6 +1733,11 @@ class vLLMReplica(RolloutReplica):
             ]
         )
 
+        if self.config.preserve_kv_cache:
+            self.is_multimodal = await self.servers[0].__ray_call__.remote(
+                lambda server: server.engine.model_config.is_multimodal_model
+            )
+
         # get http server address from first server
         server_address, server_port = await self.servers[0].get_server_address.remote()
         self._server_handle = self.servers[0]
@@ -1754,6 +1786,10 @@ class vLLMReplica(RolloutReplica):
             "request_ids": all_request_ids,
             "server_results": results,
         }
+
+    async def pause_generation(self):
+        """Close every server's gate and pause the DP engines through the engine owner."""
+        await asyncio.gather(*[server.pause_generation.remote() for server in self.servers])
 
     async def resume_generation(self):
         """Resume the DP engines before admitting requests on any server."""

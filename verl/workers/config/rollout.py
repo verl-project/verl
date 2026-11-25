@@ -322,8 +322,14 @@ class RolloutConfig(BaseConfig):
     # "reset" or "salt"; see rollout.yaml.
     external_kv_cache_invalidation: str = "reset"
 
-    # Run-unique part of the cache salt under "salt", filled in by RolloutReplica. Internal.
+    # Run-unique part of the cache salt, filled in by RolloutReplica. Internal.
     prefix_cache_namespace: Optional[str] = None
+
+    # Retain standalone vLLM requests and KV across weight updates.
+    preserve_kv_cache: bool = False
+
+    # Prefix sharing when preserving KV: task's starting weight version, or across versions.
+    prefix_cache_mode: str = "versioned"
 
     load_format: str = "dummy"
 
@@ -368,6 +374,9 @@ class RolloutConfig(BaseConfig):
 
         if self.prompt_length <= 0:
             raise ValueError(f"rollout.prompt_length must be positive; got {self.prompt_length}.")
+
+        if self.prefix_cache_mode not in ("versioned", "shared"):
+            raise ValueError(f"prefix_cache_mode must be 'versioned' or 'shared', got {self.prefix_cache_mode!r}")
 
         if self.name != "trtllm" and self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (

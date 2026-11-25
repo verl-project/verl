@@ -212,6 +212,7 @@ class ServerAdapter(BaseRollout):
         weights: Generator[tuple[str, torch.Tensor], None, None],
         global_steps: int = None,
         wire_format: str = "named_tensors",
+        preserve_kv_cache: bool = False,
         **kwargs,
     ):
         """Update rollout weights from full tensors or DeltaFlush payloads.
@@ -220,7 +221,9 @@ class ServerAdapter(BaseRollout):
         require colocated CUDA IPC.
         """
         if wire_format == "delta_flush":
-            return await self._update_delta_weights(weights, global_steps=global_steps)
+            return await self._update_delta_weights(
+                weights, global_steps=global_steps, preserve_kv_cache=preserve_kv_cache
+            )
         assert wire_format == "named_tensors", (
             f"vLLM rollout supports wire_format='named_tensors' or 'delta_flush'; got {wire_format!r}"
         )
@@ -245,7 +248,8 @@ class ServerAdapter(BaseRollout):
 
         # reset caches after updating weights
         if self._has_server:
-            await self.server_handle.clear_kv_cache.remote()
+            if not preserve_kv_cache:
+                await self.server_handle.clear_kv_cache.remote()
             if global_steps is not None:
                 await self.server_handle.set_global_steps.remote(global_steps)
 
@@ -257,6 +261,7 @@ class ServerAdapter(BaseRollout):
         weights,
         *,
         global_steps: int | None,
+        preserve_kv_cache: bool = False,
     ) -> None:
         """Send one delta weight update as a stream of DeltaFlush payloads."""
 
@@ -314,7 +319,8 @@ class ServerAdapter(BaseRollout):
         await self._execute_method("finish_weight_update")
 
         if self._has_server:
-            await self.server_handle.clear_kv_cache.remote()
+            if not preserve_kv_cache:
+                await self.server_handle.clear_kv_cache.remote()
             if global_steps is not None:
                 await self.server_handle.set_global_steps.remote(global_steps)
 

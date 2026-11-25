@@ -29,6 +29,7 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
+from verl.workers.rollout.replica import RolloutMode
 from verl.workers.rollout.utils import ensure_async_iterator
 
 
@@ -359,12 +360,14 @@ class CheckpointEngineWorker(Worker):
         initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, *, preserve_kv_cache: bool = False):
         weights = self.checkpoint_engine.receive_weights(global_steps=global_steps)
+        kwargs = {"preserve_kv_cache": True} if preserve_kv_cache else {}
         await self.server_adapter.update_weights(
             weights,
             global_steps=global_steps,
             wire_format=getattr(self.checkpoint_engine, "wire_format", "named_tensors"),
+            **kwargs,
         )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
@@ -577,6 +580,14 @@ class CheckpointEngineManager:
         """
         await asyncio.gather(*[r.resume_kv_cache() for r in self.replicas])
 
+    async def _quiesce_replicas(self, preserve_kv_cache: bool):
+        """Stop generation before a weight update, keeping in-flight requests and their KV when preserving."""
+        if preserve_kv_cache:
+            await asyncio.gather(*[r.pause_generation() for r in self.replicas])
+        else:
+            await self.abort_replicas()
+            await self.release_kv_cache_replicas()
+
     @staticmethod
     def _merge_sync_metrics(results: list[Any]) -> dict[str, Any]:
         sync_metrics = {}
@@ -634,12 +645,24 @@ class CheckpointEngineManager:
             workers.extend(replica.workers)
         rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
 
+        preserve_kv_cache = all(
+            r.config.name == "vllm"
+            and r.config.preserve_kv_cache
+            and r.rollout_mode == RolloutMode.STANDALONE
+            and not r.config.disaggregation.enabled
+            and not r.is_multimodal
+            and not (
+                (r.model_config.lora_rank > 0 or r.model_config.lora.get("rank", 0) > 0)
+                and not r.model_config.lora.get("merge", False)
+            )
+            for r in self.replicas
+        )
+
         if not self.backend_cls.support_publish_weights:
             # Coupled transports allocate receive buffers and start collectives in
             # build_process_group(), so preserve the original ordering: quiesce
             # rollout and release its KV cache before either of those operations.
-            await self.abort_replicas()
-            await self.release_kv_cache_replicas()
+            await self._quiesce_replicas(preserve_kv_cache)
 
         # 2. build process group
         self.build_process_group(rollout)
@@ -653,6 +676,7 @@ class CheckpointEngineManager:
                 rollout=rollout,
                 trainer_published=trainer_published,
                 global_steps=global_steps,
+                preserve_kv_cache=preserve_kv_cache,
             ),
             self._background_loop,
         )
@@ -667,13 +691,14 @@ class CheckpointEngineManager:
         rollout: RayWorkerGroup,
         trainer_published: list[ray.ObjectRef],
         global_steps: int | None,
+        preserve_kv_cache: bool,
     ):
         """Install a published weight version on rollout workers."""
         if self.backend_cls.support_publish_weights:
-            await self.abort_replicas()
-            await self.release_kv_cache_replicas()
+            await self._quiesce_replicas(preserve_kv_cache)
 
-        rollout_committed = rollout.update_weights(global_steps=global_steps)
+        kwargs = {"preserve_kv_cache": True} if preserve_kv_cache else {}
+        rollout_committed = rollout.update_weights(global_steps=global_steps, **kwargs)
         results = await asyncio.gather(*trainer_published, *rollout_committed)
 
         await asyncio.gather(
@@ -681,7 +706,8 @@ class CheckpointEngineManager:
             *rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size),
         )
 
-        await self.resume_kv_cache_replicas()
+        if not preserve_kv_cache:
+            await self.resume_kv_cache_replicas()
         await self.resume_generation_replicas()
         return self._merge_sync_metrics(results[: self.actor_wg.world_size])
 

@@ -103,6 +103,12 @@ enable_prefix_caching: True
 # with "<run>:<global_steps>", so entries written under older weights are never matched.
 external_kv_cache_invalidation: reset
 
+# Retain standalone vLLM requests and KV across weight updates.
+preserve_kv_cache: False
+
+# Prefix sharing when preserving KV: versioned (task's starting weight version) or shared (across versions).
+prefix_cache_mode: versioned
+
 # logprobs mode for rollout logprobs
 logprobs_mode: processed_logprobs
 

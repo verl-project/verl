@@ -22,6 +22,7 @@ import torch
 from tests.checkpoint_engine.d2h_checkpoint_engine import TestD2HCheckpointEngine
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.checkpoint_engine import base as checkpoint_engine_base
+from verl.workers.config import RolloutConfig
 
 
 class _FakeTicket:
@@ -99,7 +100,7 @@ async def test_strong_sync_quiesces_rollout_before_build_and_publish(monkeypatch
     manager.backend = "nccl"
     manager.backend_cls = _StrongSyncBackend
     manager.actor_wg = FakeActorWorkerGroup()
-    manager.replicas = [type("Replica", (), {"workers": ["worker"]})()]
+    manager.replicas = [type("Replica", (), {"workers": ["worker"], "config": RolloutConfig(name="vllm")})()]
     manager._background_loop = object()
 
     async def abort_replicas():
