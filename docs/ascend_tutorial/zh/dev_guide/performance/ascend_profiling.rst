@@ -8,7 +8,7 @@ Last updated: 07/13/2026.
 配置
 ----
 
-使用两级profile设置来控制数据采集
+使用两级profile设置来控制数据采集。
 
 - 全局采集控制：使用verl/trainer/config/ppo_trainer.yaml(FSDP)，或verl/trainer/config/ppo_megatron_trainer.yaml(MindSpeed)中的配置项控制采集的模式和步数。
 - 角色profile控制：通过每个角色中的配置项控制采集等参数。
@@ -16,18 +16,18 @@ Last updated: 07/13/2026.
 全局采集控制
 ~~~~~~~~~~~~
 
-通过 ppo_trainer.yaml 中的参数控制采集步数和模式：
+通过ppo_trainer.yaml中的参数控制采集步数和模式：
 
 -  global_profiler: 控制采集的rank和模式
 
-   -  tool: 使用的采集工具，选项有 nsys、npu、torch、torch_memory。
+   -  tool: 使用的采集工具，选项有nsys、npu、torch、torch_memory。
 
-      -  nsys: NVIDIA 官方的系统级性能分析工具。
+      -  nsys: NVIDIA官方的系统级性能分析工具。
       -  npu: 华为昇腾（Ascend）芯片的原生性能分析工具。
-      -  torch: PyTorch 框架内置的性能分析器。
-      -  torch_memory: PyTorch 的显存轨迹分析器（基于显存历史快照功能）。
+      -  torch: PyTorch框架内置的性能分析器。
+      -  torch_memory: PyTorch的显存轨迹分析器（基于显存历史快照功能）。
 
-   -  steps: 此参数可以设置为包含采集步数的列表，例如 [2, 4]，表示将采集第2步和第4步。如果设置为 null，则不进行采集。
+   -  steps: 此参数可以设置为包含采集步数的列表，例如 [2, 4]，表示将采集第2步和第4步。如果设置为null，则不进行采集。
    -  save_path: 保存采集数据的路径。默认值为 "outputs/profile"。
 
 角色profiler控制
@@ -42,9 +42,9 @@ Last updated: 07/13/2026.
 
 通过每个角色的 ``profiler.tool_config.npu`` 中的参数控制具体采集行为：
 
--  level: 采集级别——选项有 level_none、level0、level1 和 level2
+-  level: 采集级别——选项有level_none、level0、level1和level2
 
-   -  level_none: 禁用所有基于级别的数据采集（关闭 profiler_level）。
+   -  level_none: 禁用所有基于级别的数据采集（关闭profiler_level）。
    -  level0: 采集高级应用数据、底层NPU数据和NPU上的算子执行详情。在权衡数据量和分析能力后，level0是推荐的默认配置。
    -  level1: 在level0基础上增加CANN层AscendCL数据和NPU上的AI Core性能指标。
    -  level2: 在level1基础上增加CANN层Runtime数据和AI CPU指标。
@@ -61,26 +61,26 @@ Last updated: 07/13/2026.
 
 -  analysis: 是否启用自动数据解析。
 -  discrete: 是否使用离散模式。
--  schedule: 配置采集窗口。verl 每完成一个 Actor/Critic update mini-batch，
-   调用一次 ``profiler.step()`` 推进 schedule，仅在 ``active > 0`` 时生效：
+-  schedule: 配置采集窗口。verl每完成一个Actor/Critic update mini-batch，
+   调用一次 ``profiler.step()`` 推进schedule，仅在 ``active > 0`` 时生效：
 
-   -  skip_first: 在第一个周期开始前忽略的初始 mini-batch 数。
-   -  wait: 每个周期开始时空闲（不采集）的 mini-batch 数。
-   -  warmup: 每个周期中先追踪但丢弃的 mini-batch 数，用于让 profiler 稳定。
-   -  active: 每个周期实际记录的 mini-batch 数。设为 ``0``（默认）则关闭调度，不支持负值。
-   -  repeat: 记录的周期数。``0``（默认）表示持续重复直到 profiling 结束。
+   -  skip_first: 在第一个周期开始前忽略的初始mini-batch数。
+   -  wait: 每个周期开始时空闲（不采集）的mini-batch数。
+   -  warmup: 每个周期中先追踪但丢弃的mini-batch数，用于让profiler稳定。
+   -  active: 每个周期实际记录的mini-batch数。设为 ``0``（默认）则关闭调度，不支持负值。
+   -  repeat: 记录的周期数。``0``（默认）表示持续重复直到profiling结束。
 
-   当 ``discrete=False`` 时，带 schedule 的 profiler 在计算 log-prob 之前启动，
-   因而 schedule 会影响该 profiler 覆盖的所有阶段，而不仅是 update mini-batch。
-   例如，设置 ``wait=1`` 时，最初的 log-prob 计算处于 wait 阶段，其 trace 不会被记录。
+   当 ``discrete=False`` 时，带schedule的profiler在计算log-prob之前启动，
+   因而schedule会影响该profiler覆盖的所有阶段，而不仅是update mini-batch。
+   例如，设置 ``wait=1`` 时，最初的log-prob计算处于wait阶段，其trace不会被记录。
    初始的 ``skip_first`` 或 ``warmup`` 阶段也可能使前面的阶段数据不被保留。
-   当 ``discrete=True`` 时，仅 Actor update 使用 schedule，log-prob 阶段全量采集。
+   当 ``discrete=True`` 时，仅Actor update使用schedule，log-prob阶段全量采集。
 
-   对于 Critic，仅在 ``discrete=False`` 时支持 schedule。当 ``discrete=True`` 时，
-   每个 Critic mini-batch 都会全量采集，即使 ``active > 0``，schedule 也不会生效。
+   对于Critic，仅在 ``discrete=False`` 时支持schedule。当 ``discrete=True`` 时，
+   每个Critic mini-batch都会全量采集，即使 ``active > 0``，schedule也不会生效。
 
--  profile_token_start：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集起始 response token；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
--  profile_token_end：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集结束 response token（右边界不包含）；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
+-  profile_token_start：仅在rollout role下生效，用于指定rollout解码阶段的采集起始response token；参数合法时生效（从0开始，满足 ``profile_token_end > profile_token_start``，且区间在response长度内）。
+-  profile_token_end：仅在rollout role下生效，用于指定rollout解码阶段的采集结束response token（右边界不包含）；参数合法时生效（从0开始，满足 ``profile_token_end > profile_token_start``，且区间在response长度内）。
 
 示例
 ----
@@ -207,18 +207,18 @@ Last updated: 07/13/2026.
       actor_rollout_ref.rollout.profiler.tool_config.npu.profile_token_end=60
       # ref follow actor settings
 
-**Agent Loop 模式说明**：
+**Agent Loop模式说明**：
 
-在 `Agent Loop <https://verl.readthedocs.io/en/latest/advance/agent_loop.html>`_ 模式下，Rollout 阶段的性能数据 **必须使用离散模式** 采集，此时 Profiler 由推理引擎后端触发。
+在 `Agent Loop <https://verl.readthedocs.io/en/latest/advance/agent_loop.html>`_ 模式下，Rollout阶段的性能数据 **必须使用离散模式** 采集，此时Profiler由推理引擎后端触发。
 
-1. Rank 定义：Rollout 配置中的 ranks 为全局 GPU rank（与训练角色一致）。由于每个 rollout 实例（replica）跨越 ``world_size = tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size`` 个 GPU，每个指定的 rank 会被映射到拥有它的实例（``replica = rank // world_size``），并对整个实例进行采集；例如 ``tp=8`` 时，``ranks: [0, 8]`` 会采集持有全局 rank 0 和 8 的实例（即 replica 0 和 replica 1）。
+1. Rank定义：Rollout配置中的ranks为全局GPU rank（与训练角色一致）。由于每个rollout实例（replica）跨越 ``world_size = tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size`` 个GPU，每个指定的rank会被映射到拥有它的实例（``replica = rank // world_size``），并对整个实例进行采集；例如 ``tp=8`` 时，``ranks: [0, 8]`` 会采集持有全局rank 0和8的实例（即replica 0和replica 1）。
 
 2. 推理引擎支持：当前支持vLLM和SGLang引擎，无需额外设置。具体说明如下：
 
-   - vLLM 引擎：自动采集 AsyncLLM 调度栈及推理进程性能数据。不支持设置 analysis（默认不解析，需离线解析）和 profiler_level（默认 level1）。
-   - SGLang 引擎：自动采集推理进程性能数据。不支持 contents 中的 memory 配置项。不支持设置 analysis（默认解析）和 profiler_level（默认 level0）。
+   - vLLM引擎：自动采集AsyncLLM调度栈及推理进程性能数据。不支持设置analysis（默认不解析，需离线解析）和profiler_level（默认level1）。
+   - SGLang引擎：自动采集推理进程性能数据。不支持contents中的memory配置项。不支持设置analysis（默认解析）和profiler_level（默认level0）。
 
-**Fully Async Policy 模式说明**：
+**Fully Async Policy模式说明**：
 
 1. 在 `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ 模式下，`global_profiler.steps` 代表每一轮`update_weights`后的`step`，这点和同步模式下保持同步，而非单轮的`mini-batch step`。
 
@@ -254,28 +254,28 @@ Last updated: 07/13/2026.
 上述基于配置文件的采集方式虽然便捷，但在 **长序列 (Long Context)** 或 **大全局批量 (Large Global Batch Size)** 的训练场景中面临挑战。
 在一个完整的训练步 (Step) 内，模型计算呈现出高频次、重复性的特征：
 
-1. Rollout 阶段：序列生成 (Generate Sequence) 是一个自回归过程，涉及成千上万次 Decoder 模型的前向计算。
-2. Training 阶段：为了控制显存峰值，verl 通常采用 Micro-Batch 策略，将庞大的数据流切分为多个微批次进行计算。
+1. Rollout阶段：序列生成 (Generate Sequence) 是一个自回归过程，涉及成千上万次Decoder模型的前向计算。
+2. Training阶段：为了控制显存峰值，verl通常采用Micro-Batch策略，将庞大的数据流切分为多个微批次进行计算。
 
    - compute_log_prob (Actor/Ref)：涉及多轮纯前向传播。
    - update_policy (Actor/Critic)：涉及多轮前向与反向传播。
 
-这种特性会导致全量 Profiling 产生海量且重复的算子记录。如下图所示：
+这种特性会导致全量Profiling产生海量且重复的算子记录。如下图所示：
 
 .. image:: https://raw.githubusercontent.com/mengchengTang/verl-data/master/verl_ascend_profiler.png
-   :alt: 全量 Profiling 产生海量重复算子记录示意图
+   :alt: 全量Profiling产生海量重复算子记录示意图
 
-即使使用了 ``discrete`` 模式，单个阶段的性能数据文件仍可能达到数 TB，导致 **解析失败** 或 **可视化工具卡顿**。
+即使使用了 ``discrete`` 模式，单个阶段的性能数据文件仍可能达到数TB，导致 **解析失败** 或 **可视化工具卡顿**。
 
 解决方案：关键路径采样
 ~~~~~~~~~~~~~~~~~~~~~~
 
-为了解决上述问题，我们可以采用 **关键路径采样** 策略：基于 `torch_npu.profiler <https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu-profiler/torch_npu-profiler-profile.md>`_ 提供的API接口，直接修改 Python 源码，仅采集具有代表性的数据片段（如特定 Decode Step 或首个 Micro-Batch）。
+为了解决上述问题，我们可以采用 **关键路径采样** 策略：基于 `torch_npu.profiler <https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu-profiler/torch_npu-profiler-profile.md>`_ 提供的API接口，直接修改Python源码，仅采集具有代表性的数据片段（如特定Decode Step或首个Micro-Batch）。
 
     **重要提示**
 
     1. 本章节涉及直接修改源码。建议修改前备份文件，调试完成后恢复。
-    2. 使用代码插桩采集时，请务必在 ``ppo_trainer.yaml`` 或 ``ppo_megatron_trainer.yaml`` 中**禁用全局采集** (``global_profiler: steps: null``)，以避免 Profiler 冲突。
+    2. 使用代码插桩采集时，请务必在 ``ppo_trainer.yaml`` 或 ``ppo_megatron_trainer.yaml`` 中**禁用全局采集** (``global_profiler: steps: null``)，以避免Profiler冲突。
 
 1. 添加脚本控制采集粒度
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -293,12 +293,12 @@ Last updated: 07/13/2026.
     export UPDATE_PROFILE_PATH="./outputs/update_profile"
     export ROLLOUT_PROFILE_PATH="./outputs/rollout_profile"
 
-2. Rollout 阶段精细化采集
+2. Rollout阶段精细化采集
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-对于 vLLM 或 SGLang 推理引擎，我们可以通过控制 ``schedule`` 参数来控制采集模型在特定token的前向传播性能数据。
+对于vLLM或SGLang推理引擎，我们可以通过控制 ``schedule`` 参数来控制采集模型在特定token的前向传播性能数据。
 
-**vLLM 引擎**
+**vLLM引擎**
 
 - **参考版本**：vLLM v0.18.0, vLLM-Ascend v0.18.1
 - **修改文件**：``vllm-ascend/vllm_ascend/worker/worker.py``
@@ -345,9 +345,9 @@ Last updated: 07/13/2026.
               
               # ... existing code ...
 
-**SGLang 引擎**
+**SGLang引擎**
 
-- **参考版本**：SGLang master 分支
+- **参考版本**：SGLang master分支
 - **修改文件**：``sglang/python/sglang/srt/model_executor/model_runner.py``
 
 .. code-block:: diff
@@ -394,21 +394,21 @@ Last updated: 07/13/2026.
 3. update_policy (Actor & Critic) 阶段精细化采集
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Update 阶段包含前向和反向传播。统一模型引擎下，mini-batch 循环由
+Update阶段包含前向和反向传播。统一模型引擎下，mini-batch循环由
 ``verl/workers/engine_workers.py`` 中的 ``TrainingWorker.train_mini_batch``
-驱动，它会对每个 mini-batch 调用 ``train_batch``。
+驱动，它会对每个mini-batch调用 ``train_batch``。
 
-**FSDP 后端**
+**FSDP后端**
 
-FSDP 后端支持设置对 Mini-Batch 和 Micro-Batch 的粒度进行采集。
-Mini-Batch 级别请插桩 ``TrainingWorker.train_mini_batch``；
-Micro-Batch 级别请插桩 FSDP 引擎的 ``forward_backward_batch`` 中的
-micro-batch 循环。
+FSDP后端支持设置对Mini-Batch和Micro-Batch的粒度进行采集。
+Mini-Batch级别请插桩 ``TrainingWorker.train_mini_batch``；
+Micro-Batch级别请插桩FSDP引擎的 ``forward_backward_batch`` 中的
+micro-batch循环。
 
 - **修改文件**：``verl/workers/engine_workers.py``
-  （``TrainingWorker.train_mini_batch``，Mini-Batch 粒度）或
+  （``TrainingWorker.train_mini_batch``，Mini-Batch粒度）或
   ``verl/workers/engine/fsdp/transformer_impl.py``
-  （``FSDPEngineWithLMHead.forward_backward_batch``，Micro-Batch 粒度）
+  （``FSDPEngineWithLMHead.forward_backward_batch``，Micro-Batch粒度）
 
 .. code-block:: diff
 
@@ -455,28 +455,28 @@ micro-batch 循环。
   +          self.step += 1
 
 
-**Megatron 后端**
+**Megatron后端**
 
-Megatron 后端支持以 Mini-Batch 的粒度进行采集，入口同样是
-``TrainingWorker.train_mini_batch``：Megatron 引擎内部会调用 Megatron 的
-流水并行 forward/backward 调度并执行一次优化器 step。
+Megatron后端支持以Mini-Batch的粒度进行采集，入口同样是
+``TrainingWorker.train_mini_batch``：Megatron引擎内部会调用Megatron的
+流水线并行forward/backward调度并执行一次优化器step。
 
 - **修改文件**：``verl/workers/engine_workers.py``
-  （``TrainingWorker.train_mini_batch``）—— 与上方 FSDP 代码片段完全一致，
+  （``TrainingWorker.train_mini_batch``）—— 与上方FSDP代码片段完全一致，
   建议将输出目录改名（例如 ``./outputs/megatron_actor_update_profile``）
-  以区分不同后端的 trace。
+  以区分不同后端的trace。
 
 4. compute_log_prob (Actor & Ref) 阶段精细化采集
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-该阶段计算新旧策略的概率分布。统一模型引擎下，actor 和 ref 的 log-prob
+该阶段计算新旧策略的概率分布。统一模型引擎下，actor和ref的log-prob
 计算都走 ``TrainingWorker.infer_batch``，最终分发到对应后端引擎的
 ``BaseEngine.infer_batch`` 上。
 
-**FSDP 后端**
+**FSDP后端**
 
-FSDP 后端允许在 Micro-Batch 级别进行精细控制，可在 FSDP 引擎 forward 过程
-的 micro-batch 循环内插桩。
+FSDP后端允许在Micro-Batch级别进行精细控制，可在FSDP引擎forward过程
+的micro-batch循环内插桩。
 
 - **修改文件**：``verl/workers/engine/fsdp/transformer_impl.py``
   （``FSDPEngineWithLMHead.forward_backward_batch`` / ``forward_step``）
@@ -518,8 +518,7 @@ FSDP 后端允许在 Micro-Batch 级别进行精细控制，可在 FSDP 引擎 f
                   # ...
 
 
-**Megatron 后端**
+**Megatron后端**
 
-Megatron 后端的 Micro-Batch 调度由 Megatron 的流水并行
-``forward_backward_func`` 内部管理，暂不支持通过简单的代码插桩进行
-Micro-Batch 级别的精细化采集。建议使用全局 profiler 配置进行采集。
+Megatron后端的Micro-Batch调度由Megatron的流水并行 ``forward_backward_func`` 内部管理，暂不支持通过简单的代码插桩进行
+Micro-Batch级别的精细化采集。建议使用全局profiler配置进行采集。
