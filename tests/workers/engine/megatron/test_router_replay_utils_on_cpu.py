@@ -495,6 +495,24 @@ def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
         )
 
 
+def test_cp_preshard_params_declines_padding_a_sample_cannot_reveal():
+    """A CP rank's rows follow from the sequence alone only while nothing pads the micro-batch's last one."""
+    assert rr_utils.cp_preshard_params(_config(), 1, 4, 2) == (2, 4, 8)
+    assert rr_utils.cp_preshard_params(_config(), 2, 4, 2) == (2, 4, 16)
+    assert rr_utils.cp_preshard_params(_config(), 1, 1, 0) is None
+
+    # A static THD bucket grows the last sequence by an amount that depends on the whole micro-batch.
+    assert rr_utils.cp_preshard_params(_config(), 1, 4, 2, pad_to_length_bucket=512) is None
+
+    quantised = _config()
+    quantised.fp8 = "e4m3"
+    assert rr_utils.cp_preshard_params(quantised, 1, 4, 2) is None
+
+    hybrid = _config()
+    hybrid.experimental_attention_variant = "dsv4_hybrid"
+    assert rr_utils.cp_preshard_params(hybrid, 1, 4, 2) is None
+
+
 def test_set_router_replay_data_maps_routes_of_local_layers(monkeypatch):
     """Routes fetched for this pipeline rank's layers only are matched by their absolute layer index."""
     routers = [_FakeRouter(), _FakeRouter()]

@@ -234,7 +234,9 @@ def _context_parallel_layout(tf_config) -> str:
     return "zigzag"
 
 
-def cp_preshard_params(tf_config, tp_size: int, cp_size: int, cp_rank: int) -> tuple[int, int, int] | None:
+def cp_preshard_params(
+    tf_config, tp_size: int, cp_size: int, cp_rank: int, pad_to_length_bucket: int | None = None
+) -> tuple[int, int, int] | None:
     """``(cp_rank, cp_size, align_size)`` for slicing routes per CP rank, None where that is unsafe.
 
     Unsafe means the rows a rank owns do not follow from the sequence alone: a non-zigzag layout, or
@@ -245,6 +247,8 @@ def cp_preshard_params(tf_config, tp_size: int, cp_size: int, cp_rank: int) -> t
     if get_thd_quant_align_size(tf_config) is not None:
         return None
     if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid":
+        return None
+    if pad_to_length_bucket is not None:
         return None
     return cp_rank, cp_size, tp_size * cp_size * 2
 

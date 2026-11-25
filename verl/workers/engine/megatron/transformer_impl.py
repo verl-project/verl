@@ -185,6 +185,12 @@ class MegatronEngine(BaseEngine):
             return "contiguous"
         return "zigzag"
 
+    def _static_pad_to_length_bucket(self) -> int | None:
+        """The THD bucket the forward aligns to, which also decides whether routes can be presharded."""
+        if self.engine_config.pad_to_length and self.engine_config.use_remove_padding:
+            return self.engine_config.pad_to_length_bucket
+        return None
+
     def __init__(
         self,
         model_config: HFModelConfig,
@@ -795,6 +801,7 @@ class MegatronEngine(BaseEngine):
                     mpu.get_tensor_model_parallel_world_size(),
                     mpu.get_context_parallel_world_size(),
                     mpu.get_context_parallel_rank(),
+                    pad_to_length_bucket=self._static_pad_to_length_bucket(),
                 )
 
         if route_layers is None and cp_rows is None:
@@ -1355,11 +1362,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
         score_centering = tu.get_non_tensor_data(batch, key="score_centering", default=False)
-        pad_to_length_bucket = (
-            self.engine_config.pad_to_length_bucket
-            if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
-            else None
-        )
+        pad_to_length_bucket = self._static_pad_to_length_bucket()
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1653,11 +1656,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
-            pad_to_length_bucket=(
-                self.engine_config.pad_to_length_bucket
-                if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
-                else None
-            ),
+            pad_to_length_bucket=self._static_pad_to_length_bucket(),
             cp_layout=cp_layout,
             position_ids=batch.get("position_ids", None),
         )
