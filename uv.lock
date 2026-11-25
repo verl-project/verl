@@ -42,11 +42,11 @@ version = "1.2.1"
 
 [[manifest.dependency-metadata]]
 name = "megatron-bridge"
-version = "0.6.2"
+version = "0.7.1"
 
 [[manifest.dependency-metadata]]
 name = "megatron-core"
-version = "0.19.2"
+version = "0.20.1"
 requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
 
 [[manifest.dependency-metadata]]
@@ -2166,16 +2166,17 @@ wheels = [
 
 [[package]]
 name = "megatron-bridge"
-version = "0.6.2"
-source = { registry = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" }
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fa/5e/5416e979b948431dfddaa79542d85ffd5eae74bcedfdc6a3b3b275ddc215/megatron_bridge-0.7.1.tar.gz", hash = "sha256:d31e734330ccae7c18d5ef828beb56524529759ec12e80d26ce872a7198ac4ab", size = 1851014, upload-time = "2026-11-20T00:46:09.133Z" }
 wheels = [
-    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/megatron-bridge-v0.6.2-py3.12-torch2.13.0-cu132/megatron_bridge-0.6.2-py3-none-any.whl" },
+    { url = "https://files.pythonhosted.org/packages/56/29/88f1265abac4d3ff642048de29d30a1192ff95c63be57fcbae1750a9a95c/megatron_bridge-0.7.1-py3-none-any.whl", hash = "sha256:4830d6ff2470875aac73ab5dfbc855542a5153e21190aaf07edf5e975747f64a", size = 2569155, upload-time = "2026-11-20T00:46:07.68Z" },
 ]
 
 [[package]]
 name = "megatron-core"
-version = "0.19.2"
-source = { git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.19.2#4b4acac9a1d28ea6829c8d4f566d75698a21249d" }
+version = "0.20.1"
+source = { git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.20.1#f7aa73b2d9cdda75421be7067d221a5cb90e0f43" }
 dependencies = [
     { name = "numpy", marker = "(python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-veomni') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-veomni') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-veomni') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-veomni') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "packaging", marker = "(python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-veomni') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-veomni') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-veomni') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-veomni') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
@@ -5893,9 +5894,9 @@ requires-dist = [
     { name = "math-verify", marker = "extra == 'math'" },
     { name = "mathruler", marker = "extra == 'verl-core'" },
     { name = "matplotlib", marker = "extra == 'megatron'" },
-    { name = "megatron-bridge", marker = "extra == 'megatron'", specifier = "==0.6.2", index = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" },
-    { name = "megatron-core", marker = "extra == 'cpu'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.19.2" },
-    { name = "megatron-core", marker = "extra == 'megatron'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.19.2" },
+    { name = "megatron-bridge", marker = "extra == 'megatron'", specifier = "==0.7.1" },
+    { name = "megatron-core", marker = "extra == 'cpu'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.20.1" },
+    { name = "megatron-core", marker = "extra == 'megatron'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.20.1" },
     { name = "megatron-energon", marker = "extra == 'megatron'", specifier = "==7.4.1" },
     { name = "msgspec", marker = "extra == 'verl-core'" },
     { name = "numpy", specifier = ">=2.0.0" },

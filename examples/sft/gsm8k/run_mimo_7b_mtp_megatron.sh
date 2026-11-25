@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # MiMo-7B MTP SFT with the CUDA dependencies pinned in uv.lock:
-#   Python 3.12, Megatron-Core 0.19.2, Megatron-Bridge 0.6.2.
-# Bridge 0.6.2 includes MiMoForCausalLM registration and MTP weight mappings.
+#   Python 3.12, Megatron-Core 0.20.1, Megatron-Bridge 0.7.1.
+# Bridge 0.7.1 includes MiMoForCausalLM registration and MTP weight mappings.
 #   uv sync --frozen --extra megatron
 #   source .venv/bin/activate
 # Prepare data with examples/data_preprocess/gsm8k_multiturn_sft.py.

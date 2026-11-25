@@ -25,6 +25,7 @@ import torch
 import torch.distributed
 from megatron.core import dist_checkpointing, mpu, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
+from megatron.core.optimizer import distrib_optimizer
 from packaging import version
 
 from verl.utils.device import get_device_name, get_torch_device, is_device_available
@@ -57,6 +58,29 @@ if not mcore_ge_014:
 
 
 _SKIP_CONFIG_VALUE = object()
+
+
+def _optimizer_load_metadata(metadata: dict, checkpoint_dir: str) -> dict:
+    """Recover the dtype keys of older, unversioned dp_reshardable checkpoints."""
+    get_legacy_grad_dtypes = getattr(distrib_optimizer, "get_legacy_grad_dtypes", None)
+    if get_legacy_grad_dtypes is None or metadata.get("distrib_optim_sharding_type") != "dp_reshardable":
+        return metadata
+    checkpoint_version = metadata.get("checkpoint_version")
+    if checkpoint_version is not None and (checkpoint_version >= 3.1 or "legacy_grad_dtypes" in metadata):
+        return metadata
+
+    # Checkpoint format 3.0 stored both parameter and gradient dtypes in bucket tensor keys.
+    # Read only the index, from the optimizer subtree even for a model + optimizer load.
+    keys = dist_checkpointing.load_tensors_metadata(checkpoint_dir).keys()
+    bucket_keys = [key for key in keys if ".gbuf_idx_" in key]
+    grad_dtypes = get_legacy_grad_dtypes(bucket_keys)
+    if checkpoint_version is not None:
+        return {**metadata, "legacy_grad_dtypes": grad_dtypes}
+    if grad_dtypes:
+        legacy_keys = [f".dtype_({param}, {grad}).bucket_idx_" for param, grad in grad_dtypes.items()]
+        if all(any(dtype in key for dtype in legacy_keys) for key in bucket_keys):
+            return {**metadata, "checkpoint_version": 3.0, "legacy_grad_dtypes": grad_dtypes}
+    return metadata
 
 
 def _to_json_safe_config_value(value, seen):
@@ -934,7 +958,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
         # ── Load optimizer / LR scheduler ───────────────────────────────────
         if self.should_load_optimizer:
-            optim_sd = self._build_optimizer_state_dict(model_sharded_state_dict, metadata, is_loading=True)
+            optim_metadata = _optimizer_load_metadata(metadata, optim_dist_path)
+            optim_sd = self._build_optimizer_state_dict(model_sharded_state_dict, optim_metadata, is_loading=True)
             loaded_optim = load_dist_checkpointing(
                 sharded_state_dict=optim_sd,
                 ckpt_dir=optim_dist_path,

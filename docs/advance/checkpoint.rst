@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 08/24/2026.
+Last updated: 11/24/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -146,6 +146,16 @@ While **Megatron** current checkpoint structure (layout schema v2) is:
     │   │       └── dist_ckpt            # rng_state shards (written when ``extra`` is in save_contents)
     │   └── critic                       # same layout as actor
     └── latest_checkpointed_iteration.txt
+
+.. note::
+
+    **Full optimizer CPU offload on Megatron-Core 0.20.1.** Resuming training
+    from a v2 checkpoint with ``optimizer_cpu_offload=True``,
+    ``optimizer_offload_fraction=1.0``, and ``optimizer`` in
+    ``checkpoint.load_contents`` is unsupported. Loading optimizer state can
+    silently change the restored model weights before the first training step.
+    To start a new run from the checkpoint weights, load only the model and
+    initialize a fresh optimizer. See `issue #8765 <https://github.com/verl-project/verl/issues/8765>`_.
 
 .. note::
 

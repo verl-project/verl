@@ -41,7 +41,7 @@
 # - Megatron-Bridge 0.6.2 (https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/c0e164ed)
 # - Megatron-LM from https://github.com/linmuchuiyang/Megatron-LM/tree/dsv4-pro-optimizer-fixes:
 #   https://github.com/NVIDIA/Megatron-LM/commit/43e45e13 (the commit Megatron-Bridge 0.6.2 pins; the
-#   uv.lock's core_v0.19.2 has no DeepSeek-V4, see https://github.com/verl-project/verl/issues/6864)
+#   core_v0.19.2 release pinned when this recipe was validated had no DeepSeek-V4, see https://github.com/verl-project/verl/issues/6864)
 #   plus the pending upstream fixes this example needs, one commit each: #7279 and #8245 (above),
 #   #4046 and #7785 (resuming the offloaded HybridDeviceOptimizer), the native-fp32-param detach for
 #   optimizer_cpu_offload (as Megatron-LM main) and the FlashAttention-4 import guard (#6545).

@@ -33,7 +33,7 @@ graphs and no speculative decoding.
 ## Installation
 
 The runtime uses PyTorch 2.13.0/CUDA 13, Transformer Engine 2.20.2,
-Megatron-Core 0.19.2, Megatron-Bridge 0.6.2 and vLLM 0.32.0:
+Megatron-Core 0.20.1, Megatron-Bridge 0.7.1 and vLLM 0.32.0:
 
 ```bash
 uv sync --frozen --extra megatron --extra vllm

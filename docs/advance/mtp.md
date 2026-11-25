@@ -14,11 +14,11 @@ Currently, RL training can be performed on mimo-7B-RL, Qwen-next, and Deepseek s
 
 - **Dependency Versions**:
 
-    - The CUDA environment in this checkout's `uv.lock` pins Megatron-Bridge **0.6.2** and Megatron-Core **0.19.2**.
+    - The CUDA environment in this checkout's `uv.lock` pins Megatron-Bridge **0.7.1** and Megatron-Core **0.20.1**.
 
-    - Megatron-Bridge v0.6.2 includes the `MiMoForCausalLM` provider and MTP weight mappings, including the input-projection layout conversion. The MiMo changes from [#2387](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/2387) are merged; no separate MiMo bridge patch is required.
+    - Megatron-Bridge v0.7.1 includes the `MiMoForCausalLM` provider and MTP weight mappings, including the input-projection layout conversion. The MiMo changes from [#2387](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/2387) are merged; no separate MiMo bridge patch is required.
 
-    - Megatron-Core 0.19.2 includes `padding_mask` in `MultiTokenPredictionLayer._checkpointed_forward`, required when using MTP with `recompute_granularity=full`. Older 0.18.0/0.18.2 environments need the compatibility fix tracked in [#4933](https://github.com/NVIDIA/Megatron-LM/issues/4933); the CUDA version pair above does not apply to the separate Ascend/MindSpeed environment.
+    - Megatron-Core 0.20.1 includes `padding_mask` in `MultiTokenPredictionLayer._checkpointed_forward`, required when using MTP with `recompute_granularity=full`. Older 0.18.0/0.18.2 environments need the compatibility fix tracked in [#4933](https://github.com/NVIDIA/Megatron-LM/issues/4933); the CUDA version pair above does not apply to the separate Ascend/MindSpeed environment.
 
     - sglang: Use the specified branch: [https://github.com/ArronHZG/sglang/tree/fix_mtp_update_weights_from_tensor](https://github.com/ArronHZG/sglang/tree/fix_mtp_update_weights_from_tensor), [PR](https://github.com/sgl-project/sglang/pull/17870) , which fix the MTP update weights from tensor OOM issue.
 
