@@ -218,4 +218,7 @@ def get_ppo_ray_runtime_env(config=None):
         val = os.environ.get(key)
         if val is not None:
             runtime_env["env_vars"][key] = val
+    for key, val in os.environ.items():
+        if val and key.startswith(("MOONCAKE_", "MC_", "VLLM_MOONCAKE_")):
+            runtime_env["env_vars"][key] = val
     return runtime_env
