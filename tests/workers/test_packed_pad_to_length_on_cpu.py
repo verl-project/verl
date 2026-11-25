@@ -46,12 +46,11 @@ for _mod in (
     "veomni.distributed.torch_parallelize",
     "veomni.models",
     "veomni.models.auto",
+    "veomni.models.checkpoint",
     "veomni.optim",
     "veomni.utils",
     "veomni.utils.moe_router_replay",
     "veomni.utils.seqlen_pos_transform_utils",
-    "veomni.models.checkpoint_tensor_loading",
-    "veomni.models.checkpoint_tensor_loading.get_checkpoint_tensor_converter",
 ):
     sys.modules.setdefault(_mod, MagicMock())
 

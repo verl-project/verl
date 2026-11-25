@@ -106,7 +106,7 @@ def _validate_score_centering_config(config: DictConfig) -> None:
                 f"algorithm.rollout_correction.{key}."
             )
     if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2", "veomni", "megatron"):
-        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2 or megatron.")
+        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2, veomni or megatron.")
     if config.actor_rollout_ref.rollout.get("name") != "vllm":
         raise ValueError("score centering requires actor_rollout_ref.rollout.name=vllm.")
     if not config.actor_rollout_ref.rollout.get("topk_log_probs", 0):
