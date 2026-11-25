@@ -2,9 +2,9 @@
 
 Last updated: 07/14/2026.
 
-不同模型步骤一致，仅以Qwen3-30B为例列举
+不同模型步骤一致，仅以Qwen3-30B为例列举。
 
-我们通过 AISBench 评估模型，该工具支持vllm/sglang多种推理后端的评估
+我们通过AISBench评估模型，该工具支持vLLM/SGLang多种推理后端的评估。
 
 ## 1.安装方法
 
@@ -13,7 +13,6 @@ git clone https://gitee.com/aisbench/benchmark.git
 cd benchmark
 pip install -e .
 ~~~
-
 
 ## 2.下载评估数据集
 
@@ -32,19 +31,19 @@ rm math.zip
 
 此处参照verl原生[转换方法](../../../../../docs/advance/checkpoint.rst)
 
-## 4.vllm推理评测
+## 4.vLLM推理评测
 
 **启动vllm_server服务**
 
 通过以下命令拉起推理服务端，需要修改的参数：model和tensor-parallel-size。
 
-model：保存训练后权重转换完的huggingface模型地址；
+model：保存训练后权重转换完的huggingface模型地址。
 
-tensor-parallel-size：张量并行副本数，TP建议和训练时infer的配置保持一致；
+tensor-parallel-size：张量并行副本数，TP建议和训练时infer的配置保持一致。
 
-data-parallel-size：数据并行副本数，DP建议和训练时infer的配置保持一致，默认为1；
+data-parallel-size：数据并行副本数，DP建议和训练时infer的配置保持一致，默认为1。
 
-port：可任意设置空闲端口；
+port：可任意设置空闲端口。
 
 ~~~bash
 vllm serve /path/to/Qwen3-30B/ \
@@ -64,10 +63,11 @@ vllm serve /path/to/Qwen3-30B/ \
 
 **修改AISBench推理配置启动vllm_client评测**
 
-打开推理配置文件 benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py 
+打开推理配置文件benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py 
 
-host_port需与服务端的port一致，根据模型配置修改max_seq_len和max_out_len
-~~~bash
+host_port需与服务端的port一致，根据模型配置修改model（设为auto）、path（填写模型路径）和max_out_len，如需设置max_seq_len请手动添加。
+
+~~~python
 from ais_bench.benchmark.models import VLLMCustomAPIChatStream
 from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
 
@@ -82,6 +82,7 @@ models = [
         retry = 2,
         host_ip = "localhost",
         host_port = 8080,
+        max_seq_len = 2048,
         max_out_len = 512,
         batch_size=1,
         trust_remote_code=False,
@@ -97,9 +98,12 @@ models = [
 ]
 ~~~
 
-另起一个窗口进行评测，开启评测命令：
+另起一个窗口进行评测，执行评测命令：
+
 ~~~bash
     ais_bench --models vllm_api_stream_chat --datasets math500_gen_0_shot_cot_chat_prompt
 ~~~
-## 5.sglang推理评测
-参照 [昇腾 SGLang 最佳实践](../../model_support/examples/ascend_sglang_best_practices.rst)中评测进行
+
+## 5.SGLang推理评测
+
+参照 [昇腾SGLang最佳实践](../../model_support/examples/ascend_sglang_best_practices.rst)中的评测进行。
