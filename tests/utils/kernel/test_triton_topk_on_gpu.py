@@ -68,9 +68,10 @@ def test_topk(k, grad_mode):
 def test_single_label_reductions(reduction):
     torch.manual_seed(11)
     hidden = (0.1 * torch.randn(2, 9, 128, device="cuda", dtype=torch.bfloat16)).requires_grad_()
-    weight = (0.1 * torch.randn(1536, 128, device="cuda", dtype=torch.bfloat16)).requires_grad_()
+    vocab_size = 19200  # Exercise multiple backward vocabulary chunks for each reduction.
+    weight = (0.1 * torch.randn(vocab_size, 128, device="cuda", dtype=torch.bfloat16)).requires_grad_()
     # A policy-label column sliced from a combined query tensor is strided.
-    labels = torch.randint(1536, (2, 9, 2), device="cuda")[..., 0]
+    labels = torch.randint(vocab_size, (2, 9, 2), device="cuda")[..., 0]
     actual, _ = linear_cross_entropy(hidden, weight, labels, reduction=reduction)
     logits = hidden.float().reshape(-1, 128) @ weight.float().T
     reference = -torch.nn.functional.cross_entropy(logits, labels.flatten(), reduction=reduction)

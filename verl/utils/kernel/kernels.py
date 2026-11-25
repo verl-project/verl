@@ -1649,10 +1649,9 @@ def efficient_entropy_backward(
     assert dlogprobs.device == hidden.device and dlogprobs.device == dentropy.device
     assert dentropy.shape == (num_tokens,)
 
-    # BF16 partial sums lose precision when many selected logits contribute across vocabulary chunks.
+    # Accumulate vocabulary-chunk contributions before rounding dHidden to the input dtype.
     accumulate_chunks_fp32 = (
-        topk > 1
-        and _config._backward == BackwardEnum._Split_Dlogits_N
+        _config._backward == BackwardEnum._Split_Dlogits_N
         and hidden.dtype in (torch.float16, torch.bfloat16)
         and hidden.device.type == "cuda"
     )
