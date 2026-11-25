@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-# Routed-expert capture requires V2; use it for both baseline and R3 runs.
+# R3 routed-expert capture requires the V2 model runner.
 export VLLM_USE_V2_MODEL_RUNNER=1
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}

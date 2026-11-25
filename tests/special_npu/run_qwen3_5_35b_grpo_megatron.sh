@@ -29,7 +29,7 @@ export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export CPU_AFFINITY_CONF=1
 
-# Routed-expert capture requires V2; use it for both baseline and R3 runs.
+# R3 routed-expert capture requires the V2 model runner.
 export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
 
