@@ -15,8 +15,8 @@
 
 They run on the SimpleStorage units, which unpickle them by reference, so they must stay
 importable without heavy dependencies and must not modify the stored values they receive.
-Importing one still runs ``verl/__init__.py`` and through it ``transformers``, ~30 s that a
-storage unit pays once, on the first get that carries a parser.
+Importing one still runs ``verl/__init__.py`` and through it ``transformers``, a few seconds
+that a storage unit pays once, on the first get that carries a parser.
 """
 
 from typing import Any
