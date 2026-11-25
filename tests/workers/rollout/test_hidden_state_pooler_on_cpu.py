@@ -86,7 +86,7 @@ def test_teacher_swap_localizes_checkpoint_for_each_worker(monkeypatch, tmp_path
     monkeypatch.setattr(fs, "copy", copy)
     monkeypatch.setattr(fs.tempfile, "gettempdir", lambda: str(tmp_path))
     for _ in range(2):
-        worker = Mock()
+        worker = Mock(_hidden_teacher_reload_interrupted=False)
         vLLMColocateWorkerExtension.reload_hidden_teacher_weights(worker, uri, use_shm=False)
         path = Path(worker.reload_weights.call_args.kwargs["weights_path"])
         assert path.is_relative_to(tmp_path) and (path / "model.safetensors").is_file()
@@ -94,6 +94,28 @@ def test_teacher_swap_localizes_checkpoint_for_each_worker(monkeypatch, tmp_path
     worker.reload_weights.side_effect = ValueError("invalid weights")
     result = vLLMColocateWorkerExtension.reload_hidden_teacher_weights(worker, uri, use_shm=False)
     assert result == "ValueError: invalid weights"
+
+
+def test_interrupted_teacher_reload_stops_later_reloads_on_the_worker(monkeypatch):
+    pytest.importorskip("vllm")
+    from verl.utils import fs
+    from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
+
+    copies = ["/local/a", OSError("copy failed"), "/local/b", "/local/a"]
+    monkeypatch.setattr(fs, "copy_to_local", Mock(side_effect=copies))
+    worker = Mock(_hidden_teacher_reload_interrupted=False)
+    reload = vLLMColocateWorkerExtension.reload_hidden_teacher_weights
+
+    # A completed reload, or a checkpoint that never reached the model, leaves no layer progress.
+    assert reload(worker, "/model/a", use_shm=False) is None
+    assert reload(worker, "/model/b", use_shm=False) == "OSError: copy failed"
+    assert worker.reload_weights.call_count == 1
+    worker.reload_weights.side_effect = OSError("unreadable shard")
+    assert reload(worker, "/model/b", use_shm=False) == "OSError: unreadable shard"
+    # vLLM would finish the interrupted layers early, so this worker must not load again.
+    worker.reload_weights.side_effect = None
+    assert "stopped partway" in reload(worker, "/model/a", use_shm=False)
+    assert [call.kwargs["weights_path"] for call in worker.reload_weights.call_args_list] == ["/local/a", "/local/b"]
 
 
 def test_teacher_reload_distinguishes_rank_error_from_incomplete_rpc():
