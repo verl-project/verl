@@ -83,6 +83,10 @@ PRECISION_MODE=real_nvfp4 EXP_NAME=qwen3-nvfp4 NNODES=8 \
   bash examples/real_nvfp4/run_qwen3_30b_megatron.sh
 ```
 
+[`examples/real_nvfp4/run_qwen3_5_35b_megatron.sh`](https://github.com/verl-project/verl/blob/main/examples/real_nvfp4/run_qwen3_5_35b_megatron.sh)
+runs the same recipe on Qwen3.5-35B-A3B-Base, keeping the first two and last four of its 40 layers in BF16.
+It takes the same variables and also accepts `PRECISION_MODE=nvfp4_qat` for [NVFP4 QAT](qat.md#nvfp4-qat).
+
 See the [example README](https://github.com/verl-project/verl/blob/main/examples/real_nvfp4/README.md) for the
 dataset format, runtime environment and tests.
 
