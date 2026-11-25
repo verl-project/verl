@@ -1,0 +1,120 @@
+name: e2e_qwen3_30b_full_r3_ascend
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - ".github/workflows/e2e_qwen3_30b_full_r3_ascend.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  qwen3_30b_r3:
+    if: github.repository_owner == 'verl-project'
+    name: Full pretrained Qwen3-30B MindSpeed baseline and R3
+    runs-on: linux-aarch64-a3-800i-16
+    timeout-minutes: 180
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      options: --shm-size 60g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
+      MEGATRON_CONFIG_LOCK_DIR: /root/.cache/temp/megatron-config-locks
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: error
+      MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B-Instruct-2507
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      HYDRA_FULL_ERROR: "1"
+    steps:
+      - name: Checkout verl
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the current repository
+        run: |
+          pip install --no-deps -e .
+          pip install --no-deps TransferQueue==0.1.12
+          pip uninstall -y nvidia-resiliency-ext
+      - name: Record NPU and dependency versions
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          pip list
+          for source_dir in /vllm /vllm-ascend /MindSpeed /Megatron-LM /Megatron-Bridge; do
+            if [[ -d "$source_dir/.git" ]]; then
+              echo "$source_dir"
+              git -C "$source_dir" rev-parse HEAD
+            fi
+          done
+        shell: bash
+      - name: Verify full pretrained checkpoint
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          model_path = Path(os.environ["MODEL_PATH"])
+          config = json.loads((model_path / "config.json").read_text())
+          layers = config["num_hidden_layers"]
+          if layers <= 2:
+              raise RuntimeError(f"Expected full pretrained model, got {layers} layers")
+          index = model_path / "model.safetensors.index.json"
+          if index.is_file():
+              shards = set(json.loads(index.read_text())["weight_map"].values())
+              if not shards or any(not (model_path / shard).is_file() for shard in shards):
+                  raise RuntimeError("Pretrained checkpoint shards are missing")
+          elif not (model_path / "model.safetensors").is_file():
+              raise RuntimeError("Pretrained safetensors checkpoint is missing")
+          print(f"Pretrained checkpoint: {model_path}; layers={layers}")
+          print(json.dumps(config, indent=2))
+          PY
+      - name: Preprocess gsm8k
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k
+      - name: Compare Qwen3-30B baseline and R3 without preceding training jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qwen3-30b-full-r3"
+          trap 'ray stop --force' EXIT
+          status=0
+          for mode in disabled R3; do
+            ray stop --force
+            npu-smi info
+            replay=False
+            if [[ "$mode" == R3 ]]; then replay=True; fi
+            if USE_DIST_CKPT=False USE_DUMMY_MODEL=False \
+              PYTHONUNBUFFERED=1 bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh \
+                trainer.n_gpus_per_node=16 trainer.total_training_steps=6 \
+                trainer.val_before_train=False \
+                trainer.experiment_name="qwen3-30b-full-pretrained-$mode" \
+                '++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V2_MODEL_RUNNER="1"' \
+                actor_rollout_ref.actor.megatron.router_replay.mode="$mode" \
+                actor_rollout_ref.rollout.enable_rollout_routing_replay="$replay" \
+                2>&1 | tee "$RUNNER_TEMP/qwen3-30b-full-r3/$mode.log"; then
+              echo "$mode completed"
+            else
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Upload comparison logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen3-30b-full-pretrained-r3-comparison
+          path: ${{ runner.temp }}/qwen3-30b-full-r3/*.log
+          if-no-files-found: warn
