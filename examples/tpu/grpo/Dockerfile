@@ -5,12 +5,10 @@ FROM rayproject/ray:2.56.0-py312
 
 ARG TORCH_TPU_VERSION=0.2.0
 ARG TPU_SYNC_VERSION=0.0.1.dev20261103081657
-# 11/22/2026 HEAD of torchtitan.
-# - Qwen3.5 with expert parallelism (EP > 1): --build-arg TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4
-#   (google-pytorch/torchtitan#142).
-# - Qwen3.5 with both EP > 1 and context parallelism (CP > 1, e.g. 64k Qwen3.5-397B-A17B):
-#   --build-arg TORCHTITAN_COMMIT=6037e897f83153eaf9024707aeda5c8e9c3cb379 (google-pytorch/torchtitan#201 + #210).
-ARG TORCHTITAN_COMMIT=6037e897f83153eaf9024707aeda5c8e9c3cb379
+# 11/25/2026 HEAD of torchtitan main.
+# For optimized 64K Qwen3.5 TpuGraphTrainer kernels (google-pytorch/torchtitan#244), build with:
+#   --build-arg TORCHTITAN_COMMIT=2a7f1c18211b99caf5ae15fad0f52bab97850f14
+ARG TORCHTITAN_COMMIT=34a0d8b49e0d154a9b84a10718f1de8248ec65a4
 
 # 11/22/2026 HEAD of vllm-torchtpu (includes on-load MoE FP8 quantization via QUANTIZE_ON_LOAD_PREFIXES=experts
 # and configurable TPU_MOE_REQUANT_CHUNK_BYTES; built against vLLM v0.33.0).

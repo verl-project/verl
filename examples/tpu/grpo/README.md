@@ -19,8 +19,8 @@ You need `gcloud`, `kubectl`, Docker with Buildx, the Ray CLI (`pip install "ray
 ```bash
 git clone https://github.com/verl-project/verl.git
 git clone https://github.com/verl-project/verl-hardware-plugin.git
-# 11/20/2026 HEAD of verl-hardware-plugin
-git -C verl-hardware-plugin checkout ffe8860e367308eabee259fe2f34420f200e5cc4
+# 11/25/2026 HEAD of verl-hardware-plugin
+git -C verl-hardware-plugin checkout f64394fd06f7fa7d43e65c84d95d156152b69f14
 cd verl
 ```
 
@@ -176,14 +176,13 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   env MODEL_NAME=Qwen3.5-35B-A3B bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
 ```
 
-### Qwen3.5-397B-A17B (expert parallelism)
+### Qwen3.5-397B-A17B (expert parallelism) & optimized 64K Qwen3.5
 
-Expert parallelism (`EXPERT_PARALLEL_SIZE > 1`) needs torchtitan from [google-pytorch/torchtitan#142](https://github.com/google-pytorch/torchtitan/pull/142), or [google-pytorch/torchtitan#201](https://github.com/google-pytorch/torchtitan/pull/201) + [#210](https://github.com/google-pytorch/torchtitan/pull/210) when combining EP with context parallelism (`CONTEXT_PARALLEL_SIZE > 1`, e.g. 64K DeepSWE):
+Expert parallelism (`EXPERT_PARALLEL_SIZE > 1`) and context parallelism (`CONTEXT_PARALLEL_SIZE > 1`) are supported out of the box by the default `torchtitan` `main` image (`34a0d8b49`). For the optimized 64K Qwen3.5 `TpuGraphTrainer` kernels ([google-pytorch/torchtitan#244](https://github.com/google-pytorch/torchtitan/pull/244)), build with:
 
 ```bash
-# EP + CP (recommended for Qwen3.5-397B-A17B up to 64K context):
 docker buildx build -t <IMAGE> --push \
-  --build-arg TORCHTITAN_COMMIT=6037e897f83153eaf9024707aeda5c8e9c3cb379 examples/tpu/grpo
+  --build-arg TORCHTITAN_COMMIT=2a7f1c18211b99caf5ae15fad0f52bab97850f14 examples/tpu/grpo
 ```
 
 Full-parameter 8K GRPO on 64 TPU v7x chips (a `2x4x4` trainer slice and four `2x2x2` rollout slices):
