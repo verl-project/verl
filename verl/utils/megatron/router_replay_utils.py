@@ -461,6 +461,7 @@ def build_r3_replay_mask(
     input_ids: torch.Tensor,
     response_mask: torch.Tensor,
     multi_modal_inputs=None,
+    routed_experts_available: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build a full-sequence replay mask for rollout-captured routes.
 
@@ -468,15 +469,18 @@ def build_r3_replay_mask(
     earlier hidden states whose MoE routing also affects the result. Replay every
     causal row that can influence response logprobs and skip only the final
     response row, whose logits are not used by ``no_padding_2_padding``.
+    Trajectories without captured routes use native routing for every row.
     """
     total_lens = input_ids.offsets().diff()
+    has_response = (response_mask.sum(dim=-1) > 0).to(device=total_lens.device)
+    if routed_experts_available is not None:
+        has_response &= routed_experts_available.to(device=total_lens.device, dtype=torch.bool)
     input_lens = [int(length) for length in total_lens.tolist()]
     vision_rows = _get_vision_token_type_rows(multi_modal_inputs, input_lens)
     if vision_rows is not None:
-        response_lens = response_mask.sum(dim=-1).to(device=total_lens.device, dtype=total_lens.dtype)
         mask_parts = []
-        for sample, (total_len, response_len) in enumerate(zip(input_lens, response_lens.tolist(), strict=True)):
-            replay_len = total_len - 1 if response_len > 0 else 0
+        for sample, (total_len, replay) in enumerate(zip(input_lens, has_response.tolist(), strict=True)):
+            replay_len = total_len - 1 if replay else 0
             part = torch.zeros(total_len, dtype=torch.bool, device=total_lens.device)
             if replay_len:
                 part[:replay_len] = True
@@ -489,10 +493,9 @@ def build_r3_replay_mask(
             mask_parts.append(part)
         return torch.nested.as_nested_tensor(mask_parts, layout=torch.jagged)
 
-    response_lens = response_mask.sum(dim=-1).to(device=total_lens.device, dtype=total_lens.dtype)
     bs = total_lens.size(0)
     values = torch.tensor([True, False], dtype=torch.bool, device=total_lens.device).repeat(bs)
-    replay_lens = torch.where(response_lens > 0, total_lens - 1, torch.zeros_like(total_lens))
+    replay_lens = torch.where(has_response, total_lens - 1, torch.zeros_like(total_lens))
     suffix_lens = total_lens - replay_lens
     counts = torch.stack([replay_lens, suffix_lens], dim=1).flatten()
     mask_values = torch.repeat_interleave(values, counts)

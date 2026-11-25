@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import pickle
 from typing import Any, Iterator, Optional
 
@@ -21,9 +22,58 @@ import torch
 import torch.distributed as dist
 
 from verl.utils.device import get_device_capability, get_device_name
-from verl.workers.rollout.utils import ensure_async_iterator
+from verl.workers.rollout.utils import ensure_async_iterator, validate_deepseek_v41_route_count
+
+logger = logging.getLogger(__name__)
 
 SGLANG_LORA_NAME = "verl_actor_lora_name"
+
+
+def extract_sglang_generation_output(
+    output: dict,
+    *,
+    return_logprob: bool,
+    enable_routing_replay: bool,
+    hf_config,
+    has_images: bool,
+    request_id: str,
+) -> tuple[list[int], list[float] | None, np.ndarray | None]:
+    """Validate routes against the engine output before discarding tokens with missing log-probs."""
+    meta_info = output.get("meta_info", {})
+    token_ids = list(output.get("output_ids", [])) if return_logprob else output["output_ids"]
+    log_probs = None
+    routed_experts = None
+    if enable_routing_replay and meta_info.get("routed_experts") is not None:
+        from sglang.srt.state_capturer.routed_experts import extract_routed_experts_from_meta_info
+
+        text_config = getattr(hf_config, "text_config", hf_config)
+        if not hasattr(text_config, "num_hidden_layers") or not hasattr(text_config, "num_experts_per_tok"):
+            raise AttributeError(
+                "enable_rollout_routing_replay requires an MoE model config with "
+                "`num_hidden_layers` and `num_experts_per_tok`"
+            )
+        routed_experts = extract_routed_experts_from_meta_info(output).reshape(
+            -1, text_config.num_hidden_layers, text_config.num_experts_per_tok
+        )
+        if getattr(hf_config, "model_type", None) == "deepseek_v41" and has_images:
+            validate_deepseek_v41_route_count(routed_experts.shape[0], meta_info.get("prompt_tokens"), len(token_ids))
+
+    if return_logprob:
+        output_token_logprobs = meta_info.get("output_token_logprobs") or []
+        if len(output_token_logprobs) != len(token_ids):
+            # Aborts can return tokens without log-probs. Routes for discarded
+            # tokens cannot be passed along as if they covered the retained IDs.
+            logger.error(
+                "output_token_logprobs length (%s) != output_ids length (%s) for request %s",
+                len(output_token_logprobs),
+                len(token_ids),
+                request_id,
+            )
+            return [], [], None
+        log_probs = [float(log_prob) for log_prob, _, _ in output_token_logprobs]
+
+    return token_ids, log_probs, routed_experts
+
 
 _DEEPSEEK_V4_FUSION_MEMBERS = (
     ("wo_a.weight", "wo_a.scale"),

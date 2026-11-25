@@ -66,12 +66,13 @@ from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
     default_moe_runner_backend,
     default_stop_token_ids,
+    extract_sglang_generation_output,
     lora_base_kept_on_sleep,
     lora_rank_of,
     lora_served_as_adapter,
     sglang_lora_target_modules,
 )
-from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn, validate_deepseek_v41_route_count
+from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -693,48 +694,14 @@ class SGLangHttpServer:
         meta_info = output.get("meta_info", {})
         finish_reason = meta_info.get("finish_reason")
         finish_reason = finish_reason["type"] if finish_reason else None
-        if return_logprob:
-            token_ids = list(output.get("output_ids", []))
-            output_token_logprobs = meta_info.get("output_token_logprobs") or []
-            if output_token_logprobs and len(output_token_logprobs) == len(token_ids):
-                log_probs = [float(log_prob) for log_prob, _, _ in output_token_logprobs]
-            else:
-                # SGLang may return mismatched lengths (e.g. max_new_tokens=0
-                # produces a phantom logprob entry with empty output_ids), or
-                # an abort may leave an empty logprob payload.
-                if len(output_token_logprobs) != len(token_ids):
-                    logger.error(
-                        f"output_token_logprobs length ({len(output_token_logprobs)}) != "
-                        f"output_ids length ({len(token_ids)}) for request {request_id}"
-                    )
-                token_ids = []
-                log_probs = []
-        else:
-            token_ids = output["output_ids"]
-            log_probs = None
-
-        routed_experts = None
-        if self.config.enable_rollout_routing_replay:
-            captured = output.get("meta_info", {}).get("routed_experts", None)
-            if captured is not None:
-                from sglang.srt.state_capturer.routed_experts import extract_routed_experts_from_meta_info
-
-                routed_experts = extract_routed_experts_from_meta_info(output)
-
-                hf_config = self.model_config.hf_config
-                text_config = getattr(hf_config, "text_config", hf_config)
-                if not hasattr(text_config, "num_hidden_layers") or not hasattr(text_config, "num_experts_per_tok"):
-                    raise AttributeError(
-                        "enable_rollout_routing_replay requires an MoE model config with "
-                        "`num_hidden_layers` and `num_experts_per_tok`"
-                    )
-                routed_experts = routed_experts.reshape(
-                    -1, text_config.num_hidden_layers, text_config.num_experts_per_tok
-                )
-                if getattr(hf_config, "model_type", None) == "deepseek_v41" and image_data:
-                    validate_deepseek_v41_route_count(
-                        routed_experts.shape[0], meta_info.get("prompt_tokens"), len(token_ids)
-                    )
+        token_ids, log_probs, routed_experts = extract_sglang_generation_output(
+            output,
+            return_logprob=return_logprob,
+            enable_routing_replay=self.config.enable_rollout_routing_replay,
+            hf_config=self.model_config.hf_config,
+            has_images=bool(image_data),
+            request_id=request_id,
+        )
 
         extra_fields = {"global_steps": self.global_steps}
         if prompt_logprobs is not None:

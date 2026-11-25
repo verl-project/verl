@@ -960,6 +960,14 @@ class AgentLoopWorker:
         )
 
         padded_logprobs = None
+        # An abort with no sampled tokens can omit log-probs entirely. Keep
+        # the output schema consistent with completed samples in the batch.
+        if (
+            response_logprobs is None
+            and getattr(self.rollout_config, "calculate_log_probs", False)
+            and not any(response_mask_ids)
+        ):
+            response_logprobs = []
         if response_logprobs is not None:
             pad_size = self.rollout_config.response_length - len(response_logprobs)
             padded_logprobs = torch.tensor(response_logprobs + [0.0] * pad_size).unsqueeze(0)
@@ -1301,8 +1309,17 @@ class AgentLoopWorker:
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
-        if inputs[0].routed_experts is not None:
-            optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
+        routes = [sample.routed_experts for sample in inputs]
+        route_template = next((route for route in routes if route is not None), None)
+        replay_enabled = getattr(getattr(self, "rollout_config", None), "enable_rollout_routing_replay", False)
+        if route_template is not None or replay_enabled:
+            optional_outputs["routed_experts_available"] = torch.tensor(
+                [route is not None for route in routes], dtype=torch.bool
+            )
+        if route_template is not None:
+            optional_outputs["routed_experts"] = torch.cat(
+                [route if route is not None else torch.zeros_like(route_template) for route in routes], dim=0
+            )
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
             optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)
@@ -1400,6 +1417,17 @@ async def get_trajectory_info(step, index, validate):
     return trajectory_info
 
 
+def _concat_rollout_outputs(outputs: list[DataProto]) -> DataProto:
+    """Give worker chunks without routes the same tensor schema as chunks with routes."""
+    template = next((out.batch["routed_experts"] for out in outputs if "routed_experts" in out.batch), None)
+    if template is not None:
+        for output in outputs:
+            if "routed_experts" not in output.batch:
+                output.batch["routed_experts"] = template.new_zeros((len(output), *template.shape[1:]))
+                output.batch["routed_experts_available"] = torch.zeros(len(output), dtype=torch.bool)
+    return DataProto.concat(outputs)
+
+
 class AgentLoopManager:
     """Agent loop manager that manages a group of agent loop workers.
 
@@ -1480,7 +1508,7 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        output = DataProto.concat(outputs)
+        output = _concat_rollout_outputs(outputs)
 
         # calculate performance metrics
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]

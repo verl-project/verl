@@ -1364,13 +1364,23 @@ class MegatronEngineWithLMHead(MegatronEngine):
             self.tf_config, vp_rank, model=unwrapped_model
         ):
             layers_topk_idx = model_inputs["routed_experts"]
+            routes_available = batch.get("routed_experts_available")
+            r3 = self.engine_config.router_replay.mode == "R3"
+            if layers_topk_idx is None and r3 and routes_available is not None and not routes_available.any():
+                # An all-missing rollout batch has no route template. Install masked
+                # placeholders to keep replay's forward and backward queues in sync.
+                empty_routes = input_ids.values().new_zeros(
+                    (input_ids.values().numel(), self.tf_config.num_layers, self.tf_config.moe_router_topk),
+                    dtype=torch.int16,
+                )
+                layers_topk_idx = torch.nested.nested_tensor_from_jagged(empty_routes, offsets=input_ids.offsets())
             if layers_topk_idx is None:
                 raise RuntimeError(
                     "router_replay REPLAY: micro_batch has no routed_experts. "
                     "R2 compute_log_prob must record and preserve routes before actor update."
                 )
             replay_mask = None
-            if self.engine_config.router_replay.mode == "R3":
+            if r3:
                 layers_topk_idx = align_r3_router_replay_data(
                     layers_topk_idx,
                     input_ids,
@@ -1380,6 +1390,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     input_ids,
                     batch["response_mask"],
                     multi_modal_inputs=multi_modal_inputs,
+                    routed_experts_available=routes_available,
                 )
             set_router_replay_data(
                 layers_topk_idx,

@@ -232,3 +232,21 @@ def test_reorder_and_merge_vpp_layers_keeps_dense_chunk_placeholder(monkeypatch)
 
     assert routes.shape == moe_chunk.shape
     torch.testing.assert_close(routes, moe_chunk)
+
+
+@pytest.mark.parametrize("has_vision", [False, True])
+@pytest.mark.parametrize("routes_available", [[True, False], [False, True], [False, False]])
+def test_r3_mask_routes_missing_samples_natively(has_vision, routes_available):
+    input_ids = _nested([torch.arange(7), torch.arange(7)])
+    multimodal = {"vision_token_types": torch.tensor([[-1, 0, 1, 2, 3, -1, -1]] * 2)} if has_vision else None
+    replay_mask = router_utils.build_r3_replay_mask(
+        input_ids,
+        torch.ones((2, 2), dtype=torch.bool),
+        multi_modal_inputs=multimodal,
+        routed_experts_available=torch.tensor(routes_available),
+    )
+
+    replayable = [True, False, False, False, False, True, False] if has_vision else [True] * 6 + [False]
+    assert [row.tolist() for row in replay_mask.unbind()] == [
+        replayable if available else [False] * 7 for available in routes_available
+    ]

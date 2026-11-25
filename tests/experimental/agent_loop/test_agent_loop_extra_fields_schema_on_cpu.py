@@ -32,6 +32,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AgentLoopOutput,
     AgentLoopWorker,
     DictConfigWrap,
+    _concat_rollout_outputs,
     _InternalAgentLoopOutput,
 )
 from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
@@ -710,3 +711,67 @@ async def test_agent_loop_pad_token_ids_empty_with_non_zero_pad_id():
     # attention_mask should be all zeros
     expected_attention_mask = torch.zeros((1, 8), dtype=torch.long)
     torch.testing.assert_close(result["attention_mask"], expected_attention_mask)
+
+
+@pytest.mark.parametrize("available", [(True, False), (False, True), (False, False)])
+@pytest.mark.parametrize("worker_chunks", [False, True])
+def test_standard_agent_loop_batches_mixed_route_availability(available, worker_chunks):
+    worker = SimpleNamespace(
+        reward_loop_worker_handles=None,
+        rollout_config=SimpleNamespace(enable_rollout_routing_replay=True),
+    )
+    routes = torch.full((1, 4, 2, 1), 17, dtype=torch.int16)
+    samples = [
+        _to_internal(
+            output_prompt_ids=[101, 102],
+            output_response_ids=[11, 12],
+            output_response_mask=[1, 1],
+            prompt_len=2,
+            response_len=2,
+            num_turns=2,
+            metrics=AgentLoopMetrics(),
+            extra_fields={},
+        )
+        for _ in available
+    ]
+    for sample, has_routes in zip(samples, available, strict=True):
+        sample.routed_experts = routes if has_routes else None
+
+    if worker_chunks:
+        chunks = [AgentLoopWorker._postprocess(worker, [sample]) for sample in samples]
+        batch = _concat_rollout_outputs(chunks).batch
+    else:
+        batch = AgentLoopWorker._postprocess(worker, samples).batch
+
+    assert batch["routed_experts_available"].tolist() == list(available)
+    assert batch["response_mask"].tolist() == [[1, 1], [1, 1]]
+    if any(available):
+        expected_routes = torch.cat([routes if found else torch.zeros_like(routes) for found in available], dim=0)
+        torch.testing.assert_close(batch["routed_experts"], expected_routes)
+    else:
+        assert "routed_experts" not in batch
+
+
+@pytest.mark.asyncio
+async def test_standard_agent_loop_batches_empty_abort_with_scored_response(monkeypatch):
+    worker = _deepseek_v41_worker(monkeypatch)
+    worker.tokenizer.pad_token_id = 0
+    worker.rollout_config.calculate_log_probs = True
+    worker.rollout_config.enable_rollout_routing_replay = True
+    aborted = AgentLoopOutput(prompt_ids=[101, 102], response_ids=[], response_mask=[], metrics=AgentLoopMetrics())
+    completed = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11],
+        response_mask=[1],
+        response_logprobs=[-0.2],
+        routed_experts=torch.ones((2, 1, 1), dtype=torch.int16),
+        metrics=AgentLoopMetrics(),
+    )
+    outputs = [
+        await worker._agent_loop_postprocess(sample, validate=False, raw_prompt=[]) for sample in (aborted, completed)
+    ]
+    batch = worker._postprocess(outputs).batch
+
+    assert batch["routed_experts_available"].tolist() == [False, True]
+    assert batch["response_mask"].tolist() == [[0, 0, 0], [1, 0, 0]]
+    torch.testing.assert_close(batch["rollout_log_probs"], torch.tensor([[0.0, 0.0, 0.0], [-0.2, 0.0, 0.0]]))

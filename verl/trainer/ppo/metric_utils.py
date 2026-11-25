@@ -320,9 +320,13 @@ def compute_moe_lb_metrics(
     if moe_lb_metrics_interval <= 0:
         return {}
 
+    response_mask = metrics_batch.batch.get("response_mask", None)
+    routes_available = metrics_batch.batch.get("routed_experts_available", None)
+    if response_mask is not None and routes_available is not None:
+        response_mask = response_mask.bool() & routes_available.to(response_mask.device).unsqueeze(-1)
     updated_moe_lb_metrics = accumulator.update(
         routed_experts=metrics_batch.batch.get("routed_experts", None),
-        response_mask=metrics_batch.batch.get("response_mask", None),
+        response_mask=response_mask,
     )
     if global_steps % moe_lb_metrics_interval != 0:
         return {}
