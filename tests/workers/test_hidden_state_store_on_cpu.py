@@ -15,6 +15,7 @@
 import json
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -163,6 +164,67 @@ def test_partial_write_cleanup_preserves_other_steps(storage):
     assert [k for _, k in storage] == ["other_step"]
 
 
+def test_only_synthetic_rows_get_one_token_prefill(storage):
+    rows = list_of_dict_to_tensordict(
+        [
+            {"uid": "pad", "input_ids": torch.full((128,), 2), "response_mask": torch.zeros(1)},
+            {"uid": "real", "input_ids": torch.arange(96), "response_mask": torch.zeros(32)},
+        ]
+    )
+
+    def compute(requests):
+        pad, real = requests
+        assert pad["seq_len"] == 128 and pad["sequence_ids"] == [2] and pad["positions"] == []
+        assert real["sequence_ids"] == list(range(96))
+        return [produce(r) for r in requests]
+
+    manager = SimpleNamespace(compute_hidden_states=compute)
+    with step_hidden_handles(manager, rows, "route", padding_indices={0}) as handles:
+        rows.update(list_of_dict_to_tensordict([{"teacher_hidden_handle": h} for h in handles]))
+        assert all(hidden.shape == (0, 4) for _, hidden in read_hidden_records(rows))
+    assert not storage
+
+
+@pytest.mark.parametrize("drain", ["finished", "timed_out", "failed"])
+def test_actor_failure_keeps_records_until_peer_refs_are_drained(storage, monkeypatch, caplog, drain):
+    import ray
+
+    from verl.experimental.teacher_loop import hidden_state_store
+    from verl.single_controller.ray.base import RayWorkerGroup, track_worker_submissions
+
+    rows = list_of_dict_to_tensordict(
+        [
+            {"uid": "real", "input_ids": torch.arange(3), "response_mask": torch.ones(1)},
+        ]
+    )
+    manager = SimpleNamespace(compute_hidden_states=lambda rs: list(map(produce, rs)))
+    refs = []
+    worker = Mock()
+    worker.update_actor.remote.side_effect = ["first", "second", RuntimeError("actor submission failed")]
+    group = SimpleNamespace(fused_worker_used=False)
+
+    def wait(submitted, *, num_returns, timeout, fetch_local):
+        assert storage and submitted == ["first", "second"] and num_returns == 2 and not fetch_local
+        # A peer blocked in a collective never returns, so the drain must be bounded.
+        assert timeout == hidden_state_store._READER_DRAIN_TIMEOUT_S and 0 < timeout < float("inf")
+        if drain == "failed":
+            raise RuntimeError("Ray unavailable")
+        return (submitted[:1], submitted[1:]) if drain == "timed_out" else (submitted, [])
+
+    wait = Mock(side_effect=wait)
+    monkeypatch.setattr(ray, "wait", wait)
+    with caplog.at_level("WARNING", logger=hidden_state_store.__name__):
+        with pytest.raises(RuntimeError, match="actor submission failed"):
+            with step_hidden_handles(manager, rows, "route", reader_refs=refs):
+                with track_worker_submissions(refs):
+                    for _ in range(3):
+                        RayWorkerGroup._execute_remote_single_worker(group, worker, "update_actor")
+    wait.assert_called_once()
+    # Records outlive the step only when the drain itself could not be confirmed.
+    assert bool(storage) == (drain == "failed")
+    assert ("1 actor call(s) still running" in caplog.text) == (drain == "timed_out")
+
+
 def test_mixed_width_records_keep_actor_row_order(storage):
     widths = [2560, 4096, 2560]
     rows = list_of_dict_to_tensordict(
@@ -177,10 +239,12 @@ def test_mixed_width_records_keep_actor_row_order(storage):
         for i, request in enumerate(requests):
             teacher = i % 2
             hidden = torch.full((len(request["positions"]), widths[i]), i, dtype=torch.bfloat16)
-            handles.append(put_hidden_record(
-                dict(request, teacher_key=str(teacher), teacher_index=teacher, teacher_weight_version=1),
-                hidden,
-            ))
+            handles.append(
+                put_hidden_record(
+                    dict(request, teacher_key=str(teacher), teacher_index=teacher, teacher_weight_version=1),
+                    hidden,
+                )
+            )
         return handles
 
     with step_hidden_handles(SimpleNamespace(compute_hidden_states=produce_group), rows, "route") as handles:

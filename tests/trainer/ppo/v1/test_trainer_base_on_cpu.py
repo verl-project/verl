@@ -288,6 +288,7 @@ def test_update_actor_passes_score_centering_flag(score_centering):
 
 def test_hidden_actor_token_count_matches_requested_teacher_rows(monkeypatch):
     from verl.experimental.teacher_loop.hidden_state_store import put_hidden_record
+    from verl.single_controller.ray.base import _submitted_worker_refs
     from verl.trainer.ppo.v1 import trainer_base
     from verl.utils.tensordict_utils import list_of_dict_to_tensordict
     from verl.workers.config import DistillationLossConfig
@@ -302,21 +303,36 @@ def test_hidden_actor_token_count_matches_requested_teacher_rows(monkeypatch):
     )
     # First rollout has an independently masked assistant token and an environment
     # token. The second rollout was rejected after its original loss mask was set.
-    rows = list_of_dict_to_tensordict([
-        {
-            "uid": "selected",
-            "input_ids": torch.arange(6),
-            "response_mask": torch.tensor([1, 1, 0, 1]),
-            "loss_mask": torch.tensor([1, 0, 1, 1]),
-        },
-        {
-            "uid": "rejected",
-            "input_ids": torch.arange(5),
-            "response_mask": torch.tensor([0, 0, 0]),
-            "loss_mask": torch.tensor([1, 1, 0]),
-        },
-    ])
-    batch = SimpleNamespace(keys=["a", "b"], partition_id="train", extra_info={}, fields=list(rows.keys()))
+    rows = list_of_dict_to_tensordict(
+        [
+            {
+                "uid": "selected",
+                "input_ids": torch.arange(6),
+                "response_mask": torch.tensor([1, 1, 0, 1]),
+                "loss_mask": torch.tensor([1, 0, 1, 1]),
+            },
+            {
+                "uid": "rejected",
+                "input_ids": torch.arange(5),
+                "response_mask": torch.tensor([0, 0, 0]),
+                "loss_mask": torch.tensor([1, 1, 0]),
+            },
+            # Batch alignment appends a synthetic row that only needs a typed empty record.
+            {
+                "uid": "pad",
+                "input_ids": torch.full((128,), 9),
+                "response_mask": torch.tensor([0]),
+                "loss_mask": torch.tensor([0]),
+            },
+        ]
+    )
+    batch = SimpleNamespace(
+        keys=["a", "b", "c"],
+        tags=[{}, {}, {"is_padding": True}],
+        partition_id="train",
+        extra_info={},
+        fields=list(rows.keys()),
+    )
 
     def read_batch(*, keys, partition_id, select_fields):
         return rows.select(*select_fields)
@@ -325,7 +341,8 @@ def test_hidden_actor_token_count_matches_requested_teacher_rows(monkeypatch):
         rows.update(fields)
 
     def teacher(requests):
-        assert [r["positions"] for r in requests] == [[1, 4], []]
+        assert [r["positions"] for r in requests] == [[1, 4], [], []]
+        assert [(len(r["sequence_ids"]), r["seq_len"]) for r in requests] == [(6, 6), (5, 5), (1, 128)]
         return [
             put_hidden_record(
                 dict(r, teacher_key="teacher", teacher_index=0, teacher_weight_version=1),
@@ -336,10 +353,12 @@ def test_hidden_actor_token_count_matches_requested_teacher_rows(monkeypatch):
 
     def update_actor(actor_batch):
         assert {"response_mask", "loss_mask", "teacher_hidden_handle"} <= set(actor_batch.fields)
-        assert [mask.tolist() for mask in rows["response_mask"].unbind()] == [[1, 1, 0, 1], [0, 0, 0]]
+        assert [mask.tolist() for mask in rows["response_mask"].unbind()] == [[1, 1, 0, 1], [0, 0, 0], [0]]
         masks = rows["loss_mask"].unbind()
-        assert [mask.tolist() for mask in masks] == [[1, 0, 0, 1], [0, 0, 0]]
+        assert [mask.tolist() for mask in masks] == [[1, 0, 0, 1], [0, 0, 0], [0]]
         assert sum(mask.sum().item() for mask in masks) == 2
+        # Each actor submission is recorded so a failed step can drain its readers.
+        assert _submitted_worker_refs.get() == []
         return {"metrics": {"mfu": 0.0}}
 
     trainer.teacher_model_manager = SimpleNamespace(compute_hidden_states=teacher)

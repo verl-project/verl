@@ -148,12 +148,14 @@ class _TeacherTokens:
 
 
 def _project(hidden, weight, softcap, scale):
-    logits = F.linear(hidden.to(device=weight.device, dtype=weight.dtype), weight)
-    if softcap:
-        logits = (logits / softcap).tanh() * softcap
-    if scale != 1.0:
-        logits *= scale
-    return logits
+    # Forward and backward must reconstruct identical logits from the checkpoint head.
+    with torch.autocast(device_type=weight.device.type, enabled=False):
+        logits = F.linear(hidden.to(device=weight.device, dtype=weight.dtype), weight)
+        if softcap:
+            logits = (logits / softcap).tanh() * softcap
+        if scale != 1.0:
+            logits *= scale
+        return logits
 
 
 @torch.no_grad()

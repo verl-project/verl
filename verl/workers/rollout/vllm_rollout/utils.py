@@ -318,7 +318,13 @@ class vLLMColocateWorkerExtension:
         from verl.utils.fs import copy_to_local
 
         # Each node has its own checkpoint cache. The filesystem helper locks copies across TP ranks.
-        self.reload_weights(weights_path=copy_to_local(model_path, use_shm=use_shm))
+        try:
+            self.reload_weights(weights_path=copy_to_local(model_path, use_shm=use_shm))
+        except Exception as exc:
+            # Return an ordinary RPC result so vLLM consumes every rank's reply.
+            logger.exception("Teacher checkpoint reload failed for %s", model_path)
+            return f"{type(exc).__name__}: {exc}"
+        return None
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""

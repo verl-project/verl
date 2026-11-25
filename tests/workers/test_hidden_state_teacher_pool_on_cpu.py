@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -64,6 +64,35 @@ def test_failed_weight_swap_requires_reload_of_previous_teacher():
     assert [call.args[0] for call in server.switch_teacher_weights.remote.call_args_list] == ["/model/b", "/model/a"]
 
 
+def test_failed_reload_after_submission_drains_both_replicas_before_retry():
+    shared, first = pool()
+    second = Mock()
+    shared.servers_by_key = dict.fromkeys(shared.teacher_models, [first, second])
+    failed_refs = [object(), object()]
+    retry_refs = [object(), object()]
+    for i, server in enumerate([first, second]):
+        server.switch_teacher_weights.remote.side_effect = [failed_refs[i], retry_refs[i]]
+
+    with patch("ray.wait") as wait:
+
+        def get(refs):
+            wait.assert_called_with(refs, num_returns=2, fetch_local=False)
+            assert shared.resident_key is None and shared.weight_version == 1
+            if refs == failed_refs:
+                raise RuntimeError("rank 1 reload failed")
+            assert refs == retry_refs
+            return [None, None]
+
+        with patch("ray.get", side_effect=get):
+            with pytest.raises(RuntimeError, match="rank 1 reload failed"):
+                shared._switch_to("b")
+            shared._switch_to("a")
+
+    for server in [first, second]:
+        assert server.switch_teacher_weights.remote.call_args_list == [call("/model/b"), call("/model/a")]
+    assert shared.resident_key == "a" and shared.weight_version == 2
+
+
 def test_reject_unknown_teacher_before_submitting_any_requests():
     shared, server = pool()
     with pytest.raises(ValueError, match="Unknown teacher"):
@@ -72,14 +101,19 @@ def test_reject_unknown_teacher_before_submitting_any_requests():
 
 
 @pytest.mark.parametrize(
-    "rollout_options",
+    "rollout_options,error",
     [
-        {"quantization": {"linear": "FP8_BLOCK"}},
-        {"quantization": {"config_file": "/teacher/quantization.json"}},
-        {"engine_kwargs": {"vllm": {"hf_overrides": {"quantization_config": {"quant_method": "awq"}}}}},
+        ({"quantization": {"linear": "FP8_BLOCK"}}, "unquantized"),
+        ({"quantization": {"config_file": "/teacher/quantization.json"}}, "unquantized"),
+        (
+            {"engine_kwargs": {"vllm": {"hf_overrides": {"quantization_config": {"quant_method": "awq"}}}}},
+            "unquantized",
+        ),
+        ({"engine_kwargs": {"vllm": {"hf_overrides": {"final_logit_softcapping": 0}}}}, "final_logit_softcapping"),
+        ({"engine_kwargs": {"vllm": {"hf_overrides": {"text_config": {"logit_scale": 1}}}}}, "logit_scale"),
     ],
 )
-def test_hidden_opd_rejects_quantized_serving(rollout_options):
+def test_hidden_opd_rejects_incompatible_serving(rollout_options, error):
     from verl.workers.config import (
         DistillationConfig,
         DistillationLossConfig,
@@ -87,7 +121,6 @@ def test_hidden_opd_rejects_quantized_serving(rollout_options):
         RolloutConfig,
         TeacherExecutionConfig,
     )
-
     from verl.workers.config.rollout import RolloutQuantizationConfig
 
     if "quantization" in rollout_options:
@@ -95,7 +128,7 @@ def test_hidden_opd_rejects_quantized_serving(rollout_options):
     teacher = DistillationTeacherModelConfig(
         model_path="/teacher", inference=RolloutConfig(name="vllm", **rollout_options)
     )
-    with pytest.raises(ValueError, match="unquantized"):
+    with pytest.raises(ValueError, match=error):
         DistillationConfig(
             enabled=True,
             nnodes=1,

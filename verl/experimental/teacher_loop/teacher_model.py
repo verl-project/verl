@@ -227,7 +227,9 @@ def validate_hidden_state_checkpoints(config: DictConfig, teacher_models: dict, 
 class HiddenStateTeacherPool:
     """Route requests to their resident teachers and scatter returned handles into the input order."""
 
-    def __init__(self, teacher_models, servers_by_key, *, weight_swapped, transfer_signal="hidden_states", chunk_size=32):
+    def __init__(
+        self, teacher_models, servers_by_key, *, weight_swapped, transfer_signal="hidden_states", chunk_size=32
+    ):
         self.teacher_models = teacher_models
         self.servers_by_key = servers_by_key
         self.weight_swapped = weight_swapped

@@ -51,6 +51,7 @@ from verl.single_controller.ray import (
     ResourcePoolManager,
     create_colocated_worker_cls,
 )
+from verl.single_controller.ray.base import track_worker_submissions
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.checkpoint_callback import build_checkpoint_callback
@@ -2023,7 +2024,11 @@ class PPOTrainer(ABC):
             if self.distillation_config.teacher_execution.mode == "dedicated_hidden_state":
                 teacher_fields = [*fields, "teacher_prefill"]
             rows = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=teacher_fields)
-            with step_hidden_handles(self.teacher_model_manager, rows, routing) as handles:
+            padding_indices = {i for i, tag in enumerate(batch.tags) if tag.get("is_padding", False)}
+            reader_refs = []
+            with step_hidden_handles(
+                self.teacher_model_manager, rows, routing, padding_indices=padding_indices, reader_refs=reader_refs
+            ) as handles:
                 tq.kv_batch_put(
                     keys=batch.keys,
                     partition_id=batch.partition_id,
@@ -2042,7 +2047,8 @@ class PPOTrainer(ABC):
                 )
                 if batch.fields is not None:
                     batch.fields = list(dict.fromkeys([*batch.fields, *fields, "teacher_hidden_handle"]))
-                output = self.actor_rollout_wg.update_actor(batch)
+                with track_worker_submissions(reader_refs):
+                    output = self.actor_rollout_wg.update_actor(batch)
         else:
             output = self.actor_rollout_wg.update_actor(batch)
         output = rename_dict(output["metrics"], "actor/")

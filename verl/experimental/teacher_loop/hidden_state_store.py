@@ -25,6 +25,8 @@ import torch
 logger = logging.getLogger(__name__)
 _PARTITION = "opd_hidden_states"
 _IDENTITY = ("hidden_partition", "hidden_key", "uid", "batch_index", "sequence_hash")
+# Grace period for peer actor calls to stop reading a failed step's records.
+_READER_DRAIN_TIMEOUT_S = 30.0
 
 
 def hidden_state_enabled(config):
@@ -122,7 +124,7 @@ def read_hidden_records(data):
 
 
 @contextmanager
-def step_hidden_handles(manager, rows, teacher_key, *, padded=False):
+def step_hidden_handles(manager, rows, teacher_key, *, padded=False, padding_indices=(), reader_refs=None):
     """Schedule teachers in groups, verify the scatter, then release after all actor reads."""
     import transfer_queue as tq
 
@@ -141,13 +143,20 @@ def step_hidden_handles(manager, rows, teacher_key, *, padded=False):
             raise ValueError("Hidden-state distillation requires a nonempty prompt.")
         # The hidden row immediately before a target predicts that token.
         positions = target_mask.nonzero().flatten() + prompt_len - 1
+        prefill_ids = ids
+        if i in padding_indices:
+            if positions.numel():
+                raise ValueError("Synthetic padding has active distillation targets.")
+            # The pooler only needs one EOS to produce a typed empty record.
+            # Keep the full actor sequence in the record identity below.
+            prefill_ids = ids[:1]
         requests.append(
             {
                 **(row["teacher_prefill"] if "teacher_prefill" in row.keys() else {}),
                 "uid": str(row["uid"]),
                 "routing_key": row[teacher_key] if teacher_key in row.keys() else None,
                 "batch_index": i,
-                "sequence_ids": ids.tolist(),
+                "sequence_ids": prefill_ids.tolist(),
                 "seq_len": ids.numel(),
                 "response_len": target_mask.numel(),
                 "positions": positions.tolist(),
@@ -158,6 +167,7 @@ def step_hidden_handles(manager, rows, teacher_key, *, padded=False):
         )
     keys = [r["hidden_key"] for r in requests]
     all_written = False
+    failed = True
     try:
         handles = manager.compute_hidden_states(requests)
         for handle, request in zip(handles, requests, strict=True):
@@ -185,10 +195,27 @@ def step_hidden_handles(manager, rows, teacher_key, *, padded=False):
             digest,
         )
         yield [json.dumps(h, sort_keys=True) for h in handles]
+        failed = False
     finally:
-        if not all_written:
-            existing = (tq.kv_list(partition_id=_PARTITION) or {}).get(_PARTITION, {})
-            keys = [key for key in keys if key in existing]
-        if keys:
-            tq.kv_clear(keys=keys, partition_id=_PARTITION)
-            logger.info("Hidden-state OPD cleared %d records", len(keys))
+        try:
+            if failed and reader_refs:
+                import ray
+
+                # A peer of the failed rank can block in a collective and never return.
+                _, running = ray.wait(
+                    reader_refs, num_returns=len(reader_refs), timeout=_READER_DRAIN_TIMEOUT_S, fetch_local=False
+                )
+                if running:
+                    logger.warning(
+                        "Hidden-state OPD clears step %s with %d actor call(s) still running", step_id, len(running)
+                    )
+            if not all_written:
+                existing = (tq.kv_list(partition_id=_PARTITION) or {}).get(_PARTITION, {})
+                keys = [key for key in keys if key in existing]
+            if keys:
+                tq.kv_clear(keys=keys, partition_id=_PARTITION)
+                logger.info("Hidden-state OPD cleared %d records", len(keys))
+        except Exception:
+            if not failed:
+                raise
+            logger.exception("Hidden-state OPD cleanup failed for step %s", step_id)

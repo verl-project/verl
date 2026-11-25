@@ -44,7 +44,7 @@ def _make_checkpoints(directory):
         )
 
 
-def _compare(rank, size, layout, directory):
+def _compare(rank, size, layout, directory, autocast=False):
     if size > 1:
         dist.init_process_group("gloo", init_method=f"file://{directory}/init", rank=rank, world_size=size)
     try:
@@ -75,7 +75,8 @@ def _compare(rank, size, layout, directory):
                 full_logit_rows.append((indices, full_logits))
             groups.append(_TeacherTokens(head, rows))
             full_logit_groups.append(_TeacherTokens(head, full_logit_rows, signal_kind="full_logits"))
-        actual = _HiddenStateKL.apply(local.unsqueeze(0), groups, 2, group if tp else None).squeeze(0)
+        with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
+            actual = _HiddenStateKL.apply(local.unsqueeze(0), groups, 2, group if tp else None).squeeze(0)
         factors = torch.randn(7, generator=rng)
         expected.backward(factors)
         actual.backward(factors)
@@ -103,6 +104,11 @@ def test_hidden_state_kl_matches_dense_with_masked_rows_and_padded_vocab(tmp_pat
         _compare(0, world, layout, tmp_path)
     else:
         mp.spawn(_compare, args=(world, layout, tmp_path), nprocs=world)
+
+
+def test_hidden_state_kl_bf16_autocast_matches_dense_gradient(tmp_path):
+    _make_checkpoints(tmp_path)
+    _compare(0, 1, "tp", tmp_path, autocast=True)
 
 
 def test_hidden_state_kl_selects_unpadded_causal_rows(tmp_path, monkeypatch):

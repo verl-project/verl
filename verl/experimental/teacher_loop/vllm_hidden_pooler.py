@@ -16,6 +16,7 @@
 
 import json
 from bisect import bisect_left
+from itertools import accumulate
 
 import torch
 
@@ -37,13 +38,21 @@ class HiddenStatePooler(torch.nn.Module):
 
     def forward(self, hidden_states, pooling_metadata):
         cursor = pooling_metadata.get_pooling_cursor()
-        offsets = cursor.first_token_indices_gpu.tolist()
         ends = cursor.seq_lens_cpu.tolist()
         counts = cursor.num_scheduled_tokens_cpu.tolist()
+        offsets = list(accumulate(counts, initial=0))
+        # Older dispatch poolers pass the full hidden tensor with a sliced cursor.
+        if offsets[-1] != hidden_states.size(0):
+            offsets = None
         finished = cursor.is_finished().tolist()
         outputs = []
         for i, params in enumerate(pooling_metadata.pooling_params):
             request = (params.extra_kwargs or {}).get("opd_record")
+            if request is not None and not self.producer:
+                outputs.append(torch.empty(0, dtype=torch.uint8) if finished[i] else None)
+                continue
+            if offsets is None:
+                offsets = cursor.first_token_indices_gpu.tolist()
             if request is None:
                 # Native token poolers use either cursor offsets (0.20) or
                 # split the tensor by per-request token counts (0.32).
@@ -53,10 +62,6 @@ class HiddenStatePooler(torch.nn.Module):
                 row_cursor.last_token_indices_gpu = row_cursor.last_token_indices_gpu - offsets[i]
                 chunk = hidden_states.narrow(0, offsets[i], counts[i])
                 outputs.extend(self.token_pooler(chunk, row_metadata))
-                continue
-            if not self.producer:
-                # The executor only consumes output from rank zero of the last TP group.
-                outputs.append(torch.empty(0, dtype=torch.uint8) if finished[i] else None)
                 continue
             if hidden_states.ndim != 2 or hidden_states.size(1) != self.hidden_size:
                 raise ValueError(f"Expected full teacher hidden width {self.hidden_size}, got {hidden_states.shape}")

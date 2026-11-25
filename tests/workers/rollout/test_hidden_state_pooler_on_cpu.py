@@ -49,6 +49,7 @@ def test_image_prefill_checks_causal_alignment_before_encode():
 
     server = SimpleNamespace(
         _hidden_state_opd=True,
+        _teacher_reload_state="ready",
         model_config=SimpleNamespace(processor=processor),
         engine=SimpleNamespace(renderer=SimpleNamespace(render_cmpl_async=renderer), encode=encode),
     )
@@ -90,6 +91,37 @@ def test_teacher_swap_localizes_checkpoint_for_each_worker(monkeypatch, tmp_path
         path = Path(worker.reload_weights.call_args.kwargs["weights_path"])
         assert path.is_relative_to(tmp_path) and (path / "model.safetensors").is_file()
     assert copied == [uri]
+    worker.reload_weights.side_effect = ValueError("invalid weights")
+    result = vLLMColocateWorkerExtension.reload_hidden_teacher_weights(worker, uri, use_shm=False)
+    assert result == "ValueError: invalid weights"
+
+
+def test_teacher_reload_distinguishes_rank_error_from_incomplete_rpc():
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+
+    rpc = AsyncMock(side_effect=[[None, "ValueError: bad weights"], [None, None], RuntimeError("connection lost")])
+    server = SimpleNamespace(
+        _hidden_state_opd=True,
+        _teacher_reload_state="ready",
+        model_config=SimpleNamespace(use_shm=False),
+        engine=SimpleNamespace(collective_rpc=rpc),
+        clear_kv_cache=AsyncMock(),
+    )
+    swap = vLLMHttpServer.switch_teacher_weights
+    with pytest.raises(RuntimeError, match="rank 1: ValueError: bad weights"):
+        asyncio.run(swap(server, "/model/b"))
+    with pytest.raises(RuntimeError, match="reload_required"):
+        asyncio.run(vLLMHttpServer.compute_teacher_hidden_states(server, "r", [1], queue_request={}))
+    asyncio.run(swap(server, "/model/a"))
+    with pytest.raises(RuntimeError, match="connection lost"):
+        asyncio.run(swap(server, "/model/b"))
+    with pytest.raises(RuntimeError, match="Recreate the teacher replica"):
+        asyncio.run(swap(server, "/model/a"))
+    with pytest.raises(RuntimeError, match="unusable"):
+        asyncio.run(vLLMHttpServer.compute_teacher_hidden_states(server, "r", [1], queue_request={}))
+    assert rpc.await_count == 3
+    server.clear_kv_cache.assert_awaited_once()
 
 
 @pytest.mark.parametrize("signal_kind", ["hidden_states", "full_logits"])
@@ -133,6 +165,8 @@ def test_chunked_prefill_export(monkeypatch, signal_kind):
             pooling_states=states,
         )
         meta.build_pooling_cursor(np.array(counts), torch.tensor(ends), torch.device("cpu"))
+        # A batch of prefill requests alone needs no device read for its row offsets.
+        meta.get_pooling_cursor().first_token_indices_gpu = None
         peer(hidden, meta)
         return pooler(hidden, meta)
 
@@ -150,7 +184,8 @@ def test_chunked_prefill_export(monkeypatch, signal_kind):
     assert not states[0].hidden_states_cache
 
 
-def test_native_token_embed_request_keeps_its_rows_in_mixed_pooling_batch():
+@pytest.mark.parametrize("prefix", [0, 3])
+def test_native_token_embed_request_keeps_its_rows_in_mixed_pooling_batch(prefix):
     pytest.importorskip("vllm")
     from vllm.pooling_params import PoolingParams
     from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
@@ -172,7 +207,12 @@ def test_native_token_embed_request_keeps_its_rows_in_mixed_pooling_batch():
         pooling_states=[PoolingStates(), PoolingStates()],
     )
     meta.build_pooling_cursor(np.array([2, 3]), torch.tensor([2, 3]), torch.device("cpu"))
-    hidden = torch.arange(10).reshape(5, 2)
+    # vLLM 0.20 may slice only the metadata for a task group following a different task.
+    if prefix:
+        cursor = meta.get_pooling_cursor()
+        cursor.first_token_indices_gpu += prefix
+        cursor.last_token_indices_gpu += prefix
+    hidden = torch.arange((prefix + 5) * 2).reshape(prefix + 5, 2)
     peer = vllm_hidden_pooler.HiddenStatePooler(native_pooler, producer=False, hidden_size=2)
     _, native = peer(hidden, meta)
-    torch.testing.assert_close(native, hidden[2:])
+    torch.testing.assert_close(native, hidden[prefix + 2 :])

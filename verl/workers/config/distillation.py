@@ -14,6 +14,7 @@
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -198,7 +199,9 @@ class DistillationTeacherModelConfig(BaseConfig):
         if self.num_replicas is None:
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
-    def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int], prefill_only: bool = False) -> None:
+    def validate_and_prepare_for_distillation(
+        self, use_topk: bool, topk: Optional[int], prefill_only: bool = False
+    ) -> None:
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.inference.max_model_len
         student_prompt_length = self.inference.prompt_length
@@ -367,6 +370,23 @@ class DistillationConfig(BaseConfig):
                     teacher_model.num_replicas = 1
                 engine = inference.engine_kwargs.get("vllm", {})
                 hf_overrides = engine.get("hf_overrides") or {}
+                head_fields = {
+                    "final_logit_softcapping",
+                    "logit_scale",
+                    "logits_scaling",
+                    "output_multiplier_scale",
+                    "logits_scale",
+                    "vocab_size",
+                    "tie_word_embeddings",
+                    "model_type",
+                    "architectures",
+                }
+                text_overrides = hf_overrides.get("text_config") or {}
+                if not isinstance(text_overrides, Mapping):
+                    raise ValueError("Hidden-state OPD requires text_config overrides to be a mapping.")
+                overridden = head_fields.intersection(hf_overrides) | head_fields.intersection(text_overrides)
+                if overridden:
+                    raise ValueError(f"Hidden-state OPD cannot reconstruct output-head overrides: {sorted(overridden)}")
                 if (
                     inference.quantization.enabled
                     or engine.get("quantization")

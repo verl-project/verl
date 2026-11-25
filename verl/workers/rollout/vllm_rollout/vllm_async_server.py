@@ -306,6 +306,7 @@ class vLLMHttpServer:
         engine_kwargs = self.config.get("engine_kwargs", {}).get(self._get_engine_kwargs_key(), {}) or {}
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
         self._hidden_state_opd = engine_kwargs.pop("hidden_state_opd", False)
+        self._teacher_reload_state = "ready"
         if self._hidden_state_opd:
             if self.config.data_parallel_size != 1:
                 raise ValueError("Use separate teacher replicas for data parallel hidden-state OPD.")
@@ -595,6 +596,8 @@ class vLLMHttpServer:
 
         if not self._hidden_state_opd:
             raise ValueError("Teacher server requires hidden_state_opd for hidden-state export.")
+        if self._teacher_reload_state != "ready":
+            raise RuntimeError(f"Teacher prefill is unavailable: {self._teacher_reload_state}")
         if prompt_ids != queue_request["sequence_ids"]:
             raise ValueError("Teacher token IDs differ from the hidden-state record.")
         positions = queue_request["positions"]
@@ -638,11 +641,20 @@ class vLLMHttpServer:
         """Reload every TP shard after the manager has drained the preceding teacher group."""
         if not self._hidden_state_opd:
             raise ValueError("Teacher server requires hidden_state_opd for weight swapping.")
-        await self.engine.collective_rpc(
+        if self._teacher_reload_state == "unusable":
+            raise RuntimeError("Recreate the teacher replica after a failed collective RPC.")
+        # Restore service only after the executor confirms it consumed every reply.
+        self._teacher_reload_state = "unusable"
+        replies = await self.engine.collective_rpc(
             method="reload_hidden_teacher_weights",
             kwargs={"model_path": model_path, "use_shm": self.model_config.use_shm},
         )
+        failures = [f"rank {i}: {error}" for i, error in enumerate(replies) if error is not None]
+        if failures:
+            self._teacher_reload_state = "reload_required"
+            raise RuntimeError(f"Teacher reload failed for {model_path}: {', '.join(failures)}")
         await self.clear_kv_cache()
+        self._teacher_reload_state = "ready"
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
