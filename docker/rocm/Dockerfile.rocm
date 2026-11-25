@@ -9,6 +9,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # image's inherited WORKDIR being /workspace.
 WORKDIR /workspace
 ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
+ENV GPU_ARCHS="${PYTORCH_ROCM_ARCH}"
 
 # Install Causal-Conv1d and its dependencies
 ARG CAUSAL_CONV1D_REPO=https://github.com/Dao-AILab/causal-conv1d
@@ -101,7 +102,7 @@ FROM install_verl AS install_sglang
 
 ENV SGLANG_USE_AITER=0
 ENV SGLANG_ATTENTION_BACKEND=triton
-ARG SGLANG_TAG="0801cc05ed202544e2e5c67d6b0a1d454de54fca"
+ARG SGLANG_TAG="97c6978369ac1e04c91fcc01c98acc25129a6000"
 
 RUN cd /workspace && git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && git checkout ${SGLANG_TAG} && \
@@ -117,13 +118,13 @@ RUN cd /workspace && git clone https://github.com/sgl-project/sglang.git && \
     # scheduler. Build the sequence locally so both transformers APIs work.
     sed -zi 's|        max_grid_size = grid_thw\[:, 1:\]\.max()\n        rotary_pos_emb_full = self\.rotary_pos_emb(max_grid_size)|        max_grid_size = int(grid_thw[:, 1:].max())\n        # transformers >5.8 changed forward(seqlen) to forward(position_ids); build\n        # the sequence here so both APIs work. inv_freq stays on CPU like pos_ids.\n        inv_freq = self.rotary_pos_emb.inv_freq\n        seq = torch.arange(max_grid_size, device=inv_freq.device, dtype=inv_freq.dtype)\n        rotary_pos_emb_full = torch.outer(seq, inv_freq)|' \
       python/sglang/srt/models/qwen2_5_vl.py && \
-    sed -i 's|^\[\[tool.setuptools-rust.ext-modules\]\]|# [[tool.setuptools-rust.ext-modules]]|; s|^target = "sglang.srt.grpc._core"|# target = "sglang.srt.grpc._core"|; s|^path = "../rust/sglang-grpc/Cargo.toml"|# path = "../rust/sglang-grpc/Cargo.toml"|; s|^binding = "PyO3"|# binding = "PyO3"|' python/pyproject.toml && \
-    pip install --no-cache-dir --no-build-isolation --no-deps \
+    cp python/pyproject_other.toml python/pyproject.toml && \
+    SGLANG_BUILD_RUST_EXTS=none pip install --no-cache-dir --no-build-isolation --no-deps \
       -e ./python \
       soundfile==0.13.1 \
       "git+https://github.com/fzyzcjy/torch_memory_saver.git" && \
     pip install --no-cache-dir IPython==9.15.0 && \
-    cd sgl-kernel && cp pyproject_rocm.toml pyproject.toml && rm -rf build && \
+    cd python/sglang/kernels/aot && cp pyproject_rocm.toml pyproject.toml && rm -rf build && \
     sed -i 's|f"--amdgpu-target={amdgpu_target}"|"--offload-arch=gfx942", "--offload-arch=gfx950"|' setup_rocm.py && \
     sed -i '/amdgpu_target not in \["gfx942", "gfx950"\]/,/sys.exit(1)/d' setup_rocm.py && \
     sed -zi 's/#if HIP_FP8_TYPE_FNUZ\n#include <c10\/util\/Float8_e4m3fnuz.h>\nusing FP8_TYPE = c10::Float8_e4m3fnuz;\nconstexpr auto FP8_E4M3_MAX = 224.0f;\n#else\n#if HIP_FP8_TYPE_E4M3\n#include <c10\/util\/Float8_e4m3fn.h>\nusing FP8_TYPE = c10::Float8_e4m3fn;\nC10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();\n#else\n#error "fp8 is not supported in this processor (arch < gfx942)."\n#endif  \/\/ HIP_FP8_TYPE_E4M3\n#endif  \/\/ HIP_FP8_TYPE_FNUZ/#if defined(__gfx942__)\n#include <c10\/util\/Float8_e4m3fnuz.h>\nusing FP8_TYPE = c10::Float8_e4m3fnuz;\nconstexpr auto FP8_E4M3_MAX = 224.0f;\n#else\n#include <c10\/util\/Float8_e4m3fn.h>\nusing FP8_TYPE = c10::Float8_e4m3fn;\nC10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();\n#endif  \/\/ __gfx942__/' include/utils.h && \
