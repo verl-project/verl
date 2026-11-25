@@ -27,7 +27,7 @@ vLLM-engine tests behind ``@pytest.mark.skipif(not CUDA_AVAILABLE)``.
 from __future__ import annotations
 
 from collections import Counter
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -320,6 +320,32 @@ def patched_replica_cls():
 
     with patch.object(mod.vLLMReplica, "__init__", _stub_super_init):
         yield mod.vLLMPDReplica
+
+
+def test_pd_server_gets_devices_only_through_runtime_env(patched_replica_cls):
+    from verl.workers.rollout.replica import RolloutMode
+    from verl.workers.rollout.vllm_rollout import vllm_pd_replica as module
+
+    replica = patched_replica_cls(0, _make_pd_config(), None)
+    replica.rollout_mode = RolloutMode.STANDALONE
+    replica.server_class = Mock()
+    with (
+        patch.object(module, "get_visible_devices_keyword", return_value="VISIBLE_DEVICES"),
+        patch.object(module.ray, "get_runtime_context", return_value=Mock(get_job_id=lambda: "test")),
+    ):
+        replica._spawn_pd_server(
+            role="prefill",
+            workers=[],
+            node_id=module.ray.NodeID.from_random().hex(),
+            cuda_visible_devices="2,3",
+            tp=2,
+            kv_transfer_config={},
+            side_channel_host="127.0.0.1",
+            side_channel_port=10000,
+            mooncake_bootstrap_port=10001,
+            actor_name="test",
+        )
+    assert replica.server_class.options.call_args.kwargs["runtime_env"]["env_vars"]["VISIBLE_DEVICES"] == "2,3"
 
 
 def test_pd_replica_init_happy_path_1p1d(patched_replica_cls):

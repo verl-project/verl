@@ -17,6 +17,13 @@ ranks: []
 # profile results saving path
 save_path: "outputs/profile"
 
+# Nsight launch options used when this role is a standalone Ray actor.
+# The output name is a shared template; role/rank placeholders are rendered for each actor at launch.
+# Keep this as a plain option mapping: copying the complete global tool config
+# here would recursively instantiate its Hydra targets with launch-only fields.
+ray_actor_nsight_options: ${oc.select:global_profiler.global_tool_config.nsys.worker_nsight_options,null}
+
+
 # When profiling finishes, move backend artifacts written to a framework-fixed location into
 # save_path. Two backends write outside the flat layout: nsys, because Ray hardcodes the Nsight
 # output directory (/tmp/ray/session_latest/logs/nsight), and the rollout engines, which only

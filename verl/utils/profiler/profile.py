@@ -22,6 +22,7 @@ from typing import Callable, Optional
 
 from ..tracking import RLInsightLogger
 from .config import ProfilerConfig
+from .nsight import _profile_rank_selected, _rollout_replica_ranks
 
 logger = logging.getLogger(__name__)
 
@@ -123,15 +124,7 @@ class DistProfiler:
         self._enable = config.enable
         self._this_step = False
 
-        # Normalize rank selection
-        self._this_rank = False
-        if config.all_ranks:
-            self._this_rank = True
-        elif config.ranks:
-            self._this_rank = rank in config.ranks
-        else:
-            # default rank 0 if enabled but ranks unspecified
-            self._this_rank = (rank == 0) if self._enable else False
+        self._this_rank = _profile_rank_selected(config, rank)
 
         # precision_debugger delegates rank filtering to msprobe config.json.
         # Keep verl-side rank gate open when profiler is enabled.
@@ -404,7 +397,7 @@ def build_rollout_dist_profiler(
     if config is not None and not getattr(config, "all_ranks", False):
         ranks = list(getattr(config, "ranks", None) or [])
         if ranks and replica_world_size and replica_world_size > 0:
-            replica_ranks = sorted({int(rank) // replica_world_size for rank in ranks})
+            replica_ranks = _rollout_replica_ranks(ranks, replica_world_size)
             if dataclasses.is_dataclass(config) and not isinstance(config, type):
                 config = dataclasses.replace(config, ranks=replica_ranks)
             else:

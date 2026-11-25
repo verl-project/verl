@@ -17,6 +17,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
+import pytest
 from omegaconf import OmegaConf
 
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
@@ -232,3 +233,102 @@ def test_rollout_stops_before_the_first_training_stage():
 
     trainer._stop_profiling()
     manager.stop_profile.assert_called_once()
+
+
+@pytest.fixture
+def rollout_init_trainer():
+    trainer = _trainer(_StubTrainer)
+    trainer.trainer_mode = "sync"
+    trainer.parameter_sync_step = 1
+    trainer.config.actor_rollout_ref = {"rollout": {"profiler": {"tool": "nsys", "enable": True}}}
+    trainer.config.global_profiler.global_tool_config = {
+        "nsys": {"worker_nsight_options": {"capture-range": "cudaProfilerApi"}}
+    }
+    trainer._setup = MagicMock()
+    trainer.on_init_end = MagicMock()
+    trainer.close_dataloaders = MagicMock()
+    return trainer
+
+
+@pytest.mark.parametrize(
+    "mode, sync_steps, continuous, message",
+    [
+        ("sync", 1, True, "profile_continuous_steps=False"),
+        ("colocate_async", 1, True, "profile_continuous_steps=False"),
+        ("separate_async", 4, True, "profile_continuous_steps=False"),
+        ("sync", 3, False, "parameter_sync_step=1"),
+        ("colocate_async", 3, False, "parameter_sync_step=1"),
+    ],
+)
+def test_init_rejects_unsupported_rollout_nsight_api_windows(
+    rollout_init_trainer, mode, sync_steps, continuous, message
+):
+    trainer = rollout_init_trainer
+    trainer.trainer_mode = mode
+    trainer.parameter_sync_step = sync_steps
+    trainer.config.global_profiler.profile_continuous_steps = continuous
+
+    with pytest.raises(ValueError, match=message):
+        trainer.init()
+
+    # Reject before creating workers or starting a profiler session.
+    trainer._setup.assert_not_called()
+
+
+@pytest.mark.parametrize("mode, sync_steps", [("sync", 1), ("colocate_async", 1), ("separate_async", 4)])
+def test_init_accepts_phase_scoped_rollout_nsight(rollout_init_trainer, mode, sync_steps):
+    trainer = rollout_init_trainer
+    trainer.trainer_mode = mode
+    trainer.parameter_sync_step = sync_steps
+
+    trainer.init()
+
+    trainer._setup.assert_called_once()
+    trainer.on_init_end.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"actor_rollout_ref": {"rollout": {"profiler": None}}},
+        {"actor_rollout_ref": {"rollout": {"profiler": {"enable": False}}}},
+        {"global_profiler": {"steps": None}},
+        {"global_profiler": {"steps": []}},
+        {"actor_rollout_ref": {"rollout": {"profiler": {"tool": "torch"}}}},
+        {"actor_rollout_ref": {"rollout": {"profiler": {"tool": "npu"}}}},
+        {"global_profiler": {"global_tool_config": {"nsys": {"worker_nsight_options": {"capture-range": "none"}}}}},
+        {"actor_rollout_ref": {"rollout": {"profiler": {"ray_actor_nsight_options": {"capture-range": "none"}}}}},
+        {"actor_rollout_ref": {"rollout": {"profiler": {"ray_actor_nsight_options": {}}}}},
+    ],
+    ids=[
+        "unconfigured",
+        "disabled",
+        "no-steps",
+        "empty-steps",
+        "torch",
+        "npu",
+        "global-whole-process",
+        "role-whole-process",
+        "role-default-options",
+    ],
+)
+def test_init_keeps_other_profiling_paths_available(rollout_init_trainer, overrides):
+    trainer = rollout_init_trainer
+    trainer.config.global_profiler.profile_continuous_steps = True
+    trainer.parameter_sync_step = 3
+    trainer.config = OmegaConf.merge(trainer.config, overrides)
+
+    trainer.init()
+
+    trainer._setup.assert_called_once()
+    trainer.on_init_end.assert_called_once()
+
+
+def test_init_checks_role_api_options_even_with_global_whole_process_capture(rollout_init_trainer):
+    trainer = rollout_init_trainer
+    trainer.config.global_profiler.profile_continuous_steps = True
+    trainer.config.global_profiler.global_tool_config.nsys.worker_nsight_options = {"capture-range": "none"}
+    trainer.config.actor_rollout_ref.rollout.profiler.ray_actor_nsight_options = {"capture-range": "cudaProfilerApi"}
+
+    with pytest.raises(ValueError, match="profile_continuous_steps=False"):
+        trainer.init()
