@@ -275,6 +275,7 @@ _CHUNK_CONFIGS = (
     _ChunkConfig(128, 256, 32, 1),
     _ChunkConfig(128, 128, 32, 1),
     _ChunkConfig(128, 128, 64, 1),
+    _ChunkConfig(128, 128, 64, 2),
     _ChunkConfig(256, 256, 64, 1, 2),
     _ChunkConfig(256, 256, 64, 1, 4),
     _ChunkConfig(64, 128, 64, 1),
@@ -418,7 +419,8 @@ def efficient_entropy_backward(
     g = g.reshape_as(labels) if labels.ndim == 2 else g.reshape(-1)
     args = (hidden, weight, labels, maximum, total, mean, g, h)
     offset = 0 if group is None else dist.get_rank(group) * v
-    params = (offset, 1.0 / temperature, reduction)
+    inv_temp = 1.0 / temperature
+    params = (offset, inv_temp, reduction)
     method = _config._backward
     if method == BackwardEnum._Total_Fuse_MN:
         dx = torch.zeros_like(hidden, dtype=torch.float32)
@@ -454,7 +456,7 @@ def efficient_entropy_backward(
                 h,
                 grad,
                 offset + first,
-                1.0 / temperature,
+                inv_temp,
                 reduction,
             )
             beta = int(first != 0)
