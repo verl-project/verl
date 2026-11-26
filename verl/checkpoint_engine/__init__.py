@@ -98,6 +98,14 @@ except ImportError as e:
     HCCLDeltaShardedCheckpointEngine = None
 
 try:
+    from .vllm_weight_transfer import VLLMWeightTransferCheckpointEngine
+
+    __all__ += ["VLLMWeightTransferCheckpointEngine"]
+except ImportError as e:
+    CheckpointEngineRegistry.record_import_error("vllm_weight_transfer", e)
+    VLLMWeightTransferCheckpointEngine = None
+
+try:
     from .sharded_nixl_checkpoint_engine import ShardedNixlCheckpointEngine
 
     __all__ += ["ShardedNixlCheckpointEngine"]

@@ -60,8 +60,14 @@ PRECISION_MODE=real_nvfp4 EXP_NAME=my-run NNODES=8 \
   bash examples/real_nvfp4/run_qwen3_30b_megatron.sh
 ```
 
-Use `PRECISION_MODE=bf16` for a control with the same example settings. The
-launcher uses verl's standard PPO entry point with the built-in DAPO reward
+Use `PRECISION_MODE=bf16` for a control with the same example settings.
+
+`run_qwen3_5_35b_megatron.sh` runs the same recipe on Qwen3.5-35B-A3B-Base,
+keeping the first two and last four of its 40 layers in BF16, with 16384-token
+responses. It also accepts `PRECISION_MODE=nvfp4_qat`, which trains in BF16 with
+[NVFP4 QAT](../../docs/low_precision/qat.md#nvfp4-qat) on the same routed experts.
+
+The launchers use verl's standard PPO entry point with the built-in DAPO reward
 manager and the default rule-based scorer for each `data_source`. The default
 configuration is 8 nodes × 4 GPUs, EP=4, DAPO (GRPO advantages, clip-higher,
 token-level loss, dynamic sampling on accuracy and a 512-token overlong

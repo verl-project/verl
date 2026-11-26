@@ -42,6 +42,7 @@ on:
       - "verl/trainer/config/**"
       # Entrypoints and fixtures used by the jobs below.
       - ".github/workflows/e2e_ascend.yml"
+      - ".github/scripts/run_with_hccl_diagnostics.sh"
       - "examples/data_preprocess/gsm8k.py"
       - "examples/data_preprocess/geo3k.py"
       - "scripts/converter_hf_to_mcore.py"
@@ -129,12 +130,14 @@ jobs:
       - name: Running gsm8k e2e training tests with PPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
-          bash tests/special_npu/run_qwen3_06b_ppo.sh trainer.n_gpus_per_node=16
+          bash .github/scripts/run_with_hccl_diagnostics.sh \
+            bash tests/special_npu/run_qwen3_06b_ppo.sh trainer.n_gpus_per_node=16
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
-          PROFILE_RANKS='[2,4,10,12]' bash tests/special_npu/run_qwen3_8b_grpo_profiling.sh trainer.n_gpus_per_node=16
+          PROFILE_RANKS='[2,4,10,12]' bash .github/scripts/run_with_hccl_diagnostics.sh \
+            bash tests/special_npu/run_qwen3_8b_grpo_profiling.sh trainer.n_gpus_per_node=16
           python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="./profiler_data-dis" --device="npu" \
             --stage actor_update actor_compute_log_prob '*_rollout_*'
           rm -rf ./profiler_data-dis
@@ -142,12 +145,21 @@ jobs:
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
         run: |
           ray stop --force
-          USE_DIST_CKPT=False bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh trainer.n_gpus_per_node=16
+          USE_DIST_CKPT=False bash .github/scripts/run_with_hccl_diagnostics.sh \
+            bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh trainer.n_gpus_per_node=16
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend, MoE Model)
         run: |
           ray stop --force
-          USE_DIST_CKPT=False USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh trainer.n_gpus_per_node=16
+          USE_DIST_CKPT=False USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash .github/scripts/run_with_hccl_diagnostics.sh \
+            bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh trainer.n_gpus_per_node=16
+
+      - name: Upload native HCCL diagnostics
+        if: ${{ !cancelled() && env.HCCL_DIAGNOSTIC_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hccl-diagnostics-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/${{ env.HCCL_DIAGNOSTIC_DIR }}
 
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
@@ -196,7 +208,8 @@ jobs:
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
         run: |
           ray stop --force
-          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash .github/scripts/run_with_hccl_diagnostics.sh \
+            bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
           rm -rf $HOME/ckpts
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU (FSDP-Turbo backend)
         run: |
@@ -205,4 +218,11 @@ jobs:
           export PYTHONPATH=/FSDPTurbo:$PYTHONPATH
           pip install transformers==5.21.0
           ray stop --force
-          bash tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh
+          bash .github/scripts/run_with_hccl_diagnostics.sh \
+            bash tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh
+      - name: Upload native HCCL diagnostics
+        if: ${{ !cancelled() && env.HCCL_DIAGNOSTIC_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hccl-diagnostics-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/${{ env.HCCL_DIAGNOSTIC_DIR }}
