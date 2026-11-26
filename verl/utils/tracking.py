@@ -26,6 +26,7 @@ from functools import partial, wraps
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
+from urllib.parse import quote, urlparse
 
 import orjson
 from packaging.version import Version
@@ -251,6 +252,38 @@ class RLInsightLogger:
         return os.getenv(cls.ENABLE_ENV) == "1"
 
     @classmethod
+    def discover_otlp_traces_endpoint(cls) -> str | None:
+        """Discover the RL-Insight Tempo OTLP/HTTP traces endpoint from the server.
+
+        Returns ``None`` when RL-Insight is disabled, the server is unreachable,
+        or the installed RL-Insight version lacks the service-discovery helpers.
+        """
+        if not cls.enabled():
+            return None
+
+        try:
+            from rl_insight.server.http_api import get_server_services, server_url
+            from rl_insight.server.network import service_url_from_server_url
+        except ImportError as exc:
+            logger.warning(
+                "RL-Insight OTLP endpoint discovery is unavailable; engine tracing stays disabled: %s",
+                exc,
+            )
+            return None
+
+        try:
+            otlp_port = get_server_services().get("otlp_port")
+            if not otlp_port:
+                return None
+            return service_url_from_server_url(server_url(), otlp_port, "/v1/traces") or None
+        except Exception as exc:
+            logger.warning(
+                "RL-Insight OTLP endpoint discovery failed; engine tracing stays disabled: %s",
+                exc,
+            )
+            return None
+
+    @classmethod
     def _warn_unsupported_rl_insight(cls, feature: str) -> None:
         """Warn once when an optional RL-Insight feature is unavailable."""
         if feature in cls._warned_unsupported_features:
@@ -266,6 +299,56 @@ class RLInsightLogger:
     def _rl_insight_version(cls) -> Version:
         module = cls._get_rl_insight()
         return Version(getattr(module, "__version__", "0"))
+
+    @classmethod
+    def configure_vllm_tracing(cls, args: dict[str, Any], replica_rank: int, trace_config: Any) -> None:
+        """Configure vLLM request tracing from ``rollout.trace``.
+
+        Mutates ``args`` and the process OTel env; no-op unless ``trace_config.enable_otel``.
+        """
+        if not trace_config.enable_otel:
+            return
+
+        endpoint = args.get("otlp_traces_endpoint") or args.get("otlp-traces-endpoint")
+        if endpoint:
+            # An explicit engine_kwargs endpoint wins over RL-Insight discovery.
+            logger.info(
+                "rollout.trace.enable_otel=True with an explicit engine tracing endpoint; "
+                "keeping the user-provided endpoint"
+            )
+            # vLLM defaults to gRPC. Infer OTLP/HTTP only from a standard traces path.
+            endpoint_path = urlparse(endpoint).path.rstrip("/")
+            if endpoint_path.endswith("/v1/traces"):
+                os.environ.setdefault("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
+        else:
+            endpoint = cls.discover_otlp_traces_endpoint()
+            if not endpoint:
+                logger.warning(
+                    "rollout.trace.enable_otel=True but the RL-Insight OTLP endpoint is unavailable; "
+                    "engine request traces are disabled. Check that `rl_insight` is in trainer.logger, "
+                    "that RL_INSIGHT_SERVER_URL points to the RL-Insight server, and that Tempo is enabled."
+                )
+                return
+            # vLLM defaults to gRPC. RL-Insight's Tempo receiver speaks HTTP.
+            os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "http/protobuf"
+            args["otlp_traces_endpoint"] = endpoint
+
+        cls._set_otel_resource_attributes(replica_rank)
+
+    @classmethod
+    def _set_otel_resource_attributes(cls, replica_rank: int) -> None:
+        """Add replica metadata to ``OTEL_RESOURCE_ATTRIBUTES``.
+
+        Run identity is intentionally omitted: the engine cannot see the Hub's
+        execution-suffixed experiment name, so request spans are scoped by the
+        dashboard time range instead. Appended attributes take precedence over
+        launcher-provided values with the same key.
+        """
+        attributes = f"replica={quote(str(replica_rank), safe='')}"
+        existing_attributes = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "").strip()
+        os.environ["OTEL_RESOURCE_ATTRIBUTES"] = (
+            f"{existing_attributes},{attributes}" if existing_attributes else attributes
+        )
 
     @classmethod
     def init(cls, project_name=None, experiment_name=None, config=None):
