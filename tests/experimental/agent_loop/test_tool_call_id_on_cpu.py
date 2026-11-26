@@ -77,6 +77,39 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
         assert tool_calls[0].arguments == '{"city": "Seattle", "unit": "celsius"}'
         assert tool_calls[0].tool_call_id == raw_tool_call_id
 
+    async def test_kimi_tool_parser_resolves_tool_names_that_contain_each_other(self) -> None:
+        # ``search`` is a substring of ``web_search``, and both accept the same required argument.
+        tools = [
+            _make_tool_schema("search", required=["city"]),
+            _make_tool_schema("web_search", required=["city", "unit"]),
+        ]
+        cases = [
+            # Kimi's own id format, calling the longer tool with only one of its required arguments.
+            ("functions.web_search:0", '{"city":"Seattle"}', "web_search"),
+            ("functions.web_search:0", '{"city":"Seattle","unit":"celsius"}', "web_search"),
+            ("functions.search:1", '{"city":"Seattle"}', "search"),
+            # Other id spellings still fall back to the name found inside the id.
+            ("call-web_search-0", '{"city":"Seattle"}', "web_search"),
+            ("call-search-0", '{"city":"Seattle","unit":"celsius"}', "search"),
+        ]
+        for raw_tool_call_id, arguments, expected_name in cases:
+            with self.subTest(raw_tool_call_id=raw_tool_call_id, arguments=arguments):
+                response_text = (
+                    "<|tool_calls_section_begin|>"
+                    f"<|tool_call_begin|>{raw_tool_call_id}"
+                    f"<|tool_call_argument_begin|>{arguments}"
+                    "<|tool_call_end|>"
+                    "<|tool_calls_section_end|>"
+                    "<|im_end|>"
+                )
+                parser = KimiToolParser(_FakeTokenizer(response_text))
+
+                _, tool_calls = await parser.extract_tool_calls([1, 2, 3], tools=tools)
+
+                assert len(tool_calls) == 1
+                assert tool_calls[0].name == expected_name
+                assert tool_calls[0].tool_call_id == raw_tool_call_id
+
     def test_build_assistant_message_preserves_tool_call_id(self) -> None:
         loop = SimpleNamespace(max_parallel_calls=2)
         agent_data = SimpleNamespace(
