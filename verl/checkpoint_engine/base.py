@@ -648,14 +648,18 @@ class CheckpointEngineManager:
 
     async def _update_weights_vllm_native(self, global_steps: int | None = None) -> dict[str, Any]:
         """Drive vLLM's native WeightTransferEngine directly from trainer to vLLM servers."""
-        if global_steps is None and any(r.config.external_kv_cache_invalidation == "salt" for r in self.replicas):
+        is_colocated = bool(getattr(self.backend_cls, "is_colocated", False))
+        if (
+            not is_colocated
+            and global_steps is None
+            and any(r.config.external_kv_cache_invalidation == "salt" for r in self.replicas)
+        ):
             raise ValueError("external_kv_cache_invalidation='salt' requires global_steps on every weight update")
 
         server_handles, replica_world_sizes, wake_servers = self._collect_vllm_targets()
         if not server_handles:
             return {}
 
-        is_colocated = bool(getattr(self.backend_cls, "is_colocated", False))
         if is_colocated:
             if wake_servers:
                 await asyncio.gather(*[h.wake_up.remote(tags=["weights"]) for h in wake_servers])

@@ -122,7 +122,7 @@ works when run by hand, and drive the Ray workers through it via
 | script | extras it picks |
 | --- | --- |
 | `run_ppo_trainer_megatron.sh` | `$ENGINE` + `megatron` + `math` |
-| `run_ppo_trainer_veomni.sh` | `vllm` + `veomni` + `math`, with Transformers 5.16.1 |
+| `run_ppo_trainer_veomni.sh` | `vllm` + `veomni` + `math` |
 | `run_ppo_trainer_torchtitan.sh` | `vllm` + `fsdp` + `torchtitan` + `math` |
 | `ppo_trainer/run_function_reward.sh` | `$ENGINE` + `fsdp`\|`megatron` (from `STRATEGY`) |
 | `run_v1_colocate_async_disrm.sh` | `$ROLLOUT_NAME` + `fsdp` |
@@ -166,13 +166,11 @@ Two cases the lock cannot express, and how they are handled:
   uv backend. The SFT LLM/VLM jobs combine `veomni`, `megatron`, and the
   trainer-only native stack (alongside `torchtitan`) so one env hosts every
   engine the cross-engine result comparison in `test_sft_engine_all.sh` needs.
-  Both use the git
-  revision pinned in `uv.lock` and `--with transformers==5.16.1` for its generated
-  models; keep that overlay in each job's `UV_RUN` so all engines in the comparison
-  use the same version.
+  Both use the git revision and project-wide Transformers version pinned in
+  `uv.lock`.
   The SFT scripts launch workers with `python -m torch.distributed.run` so the
-  overlay's interpreter is used rather than the base venv's `torchrun` shebang.
-  The PPO launch script passes the same extras and overlay to Ray through
+  synced env's interpreter is used rather than any ambient `torchrun` shebang.
+  The PPO launch script passes the same extras to Ray through
   `runtime_env.py_executable`, including when launched directly outside CI.
 - **A package that would poison the resolution.** `mlflow` caps `pandas<3` and
   `cryptography<49`, and `ci` shares one resolution fork with every backend, so

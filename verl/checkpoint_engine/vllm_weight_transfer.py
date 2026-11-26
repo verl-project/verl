@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import time
 from collections.abc import Iterator, Mapping
 from functools import cached_property
@@ -25,6 +27,8 @@ import torch
 
 from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry
 from verl.utils.net_utils import get_free_port
+
+logger = logging.getLogger(__name__)
 
 try:
     from vllm.distributed.weight_transfer.base import WeightSource as _WeightSourceBase
@@ -104,10 +108,22 @@ class VerlRayVLLMWeightSyncClient:
         ray.get([h.init_weight_transfer_engine.remote(p) for h, p in zip(self.server_handles, payloads, strict=True)])
 
     def shutdown_weight_transfer_engine(self) -> None:
-        self._fanout("shutdown_weight_transfer_engine")
+        refs = [h.shutdown_weight_transfer_engine.remote() for h in self.server_handles]
+        first_err: Exception | None = None
+        for ref in refs:
+            try:
+                ray.get([ref])
+            except ray.exceptions.RayActorError as exc:
+                if first_err is None:
+                    first_err = exc
+        if first_err is not None:
+            raise first_err
 
     def start_weight_update(self) -> None:
         self._fanout("start_weight_update")
+
+    def start_draft_weight_update(self) -> None:
+        self._fanout("start_draft_weight_update")
 
     def update_weights(self, update_info: dict[str, Any] | list[dict[str, Any]]) -> None:
         self._fanout("update_weights", update_info)
@@ -130,12 +146,29 @@ def _iter_engine_params(engine: Any, *, shards: bool = False, layered_summon: bo
     return iter(params)
 
 
-def _shard_spec_layout(spec: Any, trainer_world_size: int) -> tuple[dict[str, Any], tuple[int, ...]]:
+def _shard_spec_layout(
+    spec: Any, trainer_world_size: int, local_numel: int | None = None
+) -> tuple[dict[str, Any], tuple[int, ...]]:
     """Map a verl ShardSpec to vLLM ParamMeta layout kwargs and this rank's local tensor shape."""
     from vllm.distributed.weight_transfer.base import Replicate, Shard
 
+    if getattr(spec, "place", None) is not None:
+        raise NotImplementedError(f"vllm_nccl_m2n does not support ShardSpec.place={spec.place!r}")
+    if getattr(spec, "to_hf_chunk", None) is not None or getattr(spec, "hf_slots", None) is not None:
+        raise NotImplementedError(
+            "vllm_nccl_m2n does not support ShardSpec converter/slot exports (to_hf_chunk/hf_slots)"
+        )
+    if not getattr(spec, "contributes", True):
+        raise NotImplementedError("vllm_nccl_m2n does not support ShardSpec with contributes=False")
+
     full_shape = tuple(int(d) for d in spec.full_shape)
     if spec.mesh is None or not spec.placements:
+        full_numel = math.prod(full_shape)
+        if local_numel is not None and local_numel != full_numel:
+            raise NotImplementedError(
+                f"vllm_nccl_m2n does not support unmeshed local shards with size {local_numel} != "
+                f"full_shape {full_shape} ({full_numel} elements)"
+            )
         return {"owners": tuple(range(trainer_world_size))}, full_shape
 
     from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
@@ -146,12 +179,14 @@ def _shard_spec_layout(spec: Any, trainer_world_size: int) -> tuple[dict[str, An
     mesh_shape = tuple(int(d) for d in spec.mesh.shape)
     vllm_placements = []
     for p in spec.placements:
-        if isinstance(p, TorchShard):
+        # Exact type checks: _StridedShard subclasses TorchShard and carries split_factor semantics
+        # that vLLM's plain Shard(dim) cannot represent without corrupting weights.
+        if type(p) is TorchShard:
             vllm_placements.append(Shard(p.dim))
-        elif isinstance(p, TorchReplicate):
+        elif type(p) is TorchReplicate:
             vllm_placements.append(Replicate())
         else:
-            raise TypeError(f"Unsupported DTensor placement for vllm_nccl_m2n: {p!r}")
+            raise NotImplementedError(f"Unsupported DTensor placement for vllm_nccl_m2n: {p!r}")
     local_shape, _ = compute_local_shape_and_global_offset(full_shape, spec.mesh, spec.placements)
     extra: dict[str, Any] = {
         "owners": owners,
@@ -186,7 +221,7 @@ class VerlEngineWeightSource(_WeightSourceBase):
         for entry in _iter_engine_params(self._engine, shards=True):
             if len(entry) == 3:
                 name, local_tensor, spec = entry
-                extra, _ = _shard_spec_layout(spec, self._trainer_world_size)
+                extra, _ = _shard_spec_layout(spec, self._trainer_world_size, local_numel=int(local_tensor.numel()))
                 metas.append(ParamMeta(name, local_tensor.dtype, tuple(int(d) for d in spec.full_shape), **extra))
             else:
                 name, p = entry
@@ -206,7 +241,9 @@ class VerlEngineWeightSource(_WeightSourceBase):
         for entry in _iter_engine_params(self._engine, shards=True):
             if len(entry) == 3:
                 name, local_tensor, spec = entry
-                _, local_shape = _shard_spec_layout(spec, self._trainer_world_size)
+                _, local_shape = _shard_spec_layout(
+                    spec, self._trainer_world_size, local_numel=int(local_tensor.numel())
+                )
                 yield name, local_tensor.reshape(local_shape).contiguous()
             else:
                 name, p = entry
@@ -257,7 +294,7 @@ def _build_trainer_init_info(
 
         addr, port = _broadcast_rendezvous_endpoint(rank)
         return SparseNCCLTrainerInitInfo(
-            master_address=addr, master_port=port, world_size=1 + client.total_workers, rank=rank
+            master_address=addr, master_port=port, world_size=1 + client.total_workers, rank=rank, **kw
         )
     if backend == "sharded_rdt":
         from vllm.distributed.weight_transfer.sharded_rdt_trainer import ShardedRDTTrainerInitInfo
@@ -338,17 +375,23 @@ class VLLMWeightTransferCheckpointEngine(CheckpointEngine):
         self._shutdown_trainer_engine()
         self._client = VerlRayVLLMWeightSyncClient(server_handles, replica_world_sizes)
         self._target_sig = sig
+        self._shard_seeded = False
 
     def _shutdown_trainer_engine(self) -> None:
         if self._trainer_engine is None:
             return
         rank, _ = _dist_rank_world()
+        trainer_engine = self._trainer_engine
+        self._trainer_engine = None
         try:
-            self._trainer_engine.shutdown()
-        finally:
-            self._trainer_engine = None
+            trainer_engine.shutdown()
+        except Exception as exc:
+            logger.warning("Failed to shut down vLLM trainer weight transfer engine cleanly: %s", exc)
         if rank == 0 and self._client is not None:
-            self._client.shutdown_weight_transfer_engine()
+            try:
+                self._client.shutdown_weight_transfer_engine()
+            except ray.exceptions.RayActorError as exc:
+                logger.warning("Ignoring dead vLLM server actor during weight transfer shutdown: %s", exc)
 
     def finalize(self) -> None:
         if self.rebuild_group:
@@ -419,46 +462,55 @@ class VLLMWeightTransferCheckpointEngine(CheckpointEngine):
                 pending.append(SparseWeightPatch(name=name, indices=indices[s:e], values=values[s:e], full_shape=shape))
                 pending_bytes += pb
 
-        if not self._shard_seeded:
-            if not self.skip_seed:
-                for name, tensor in _iter_engine_params(engine, layered_summon=self.layered_summon):
-                    tensor = tensor.detach()
-                    if not tensor.is_floating_point():
-                        continue
-                    if tensor.dtype != self.rollout_dtype:
-                        tensor = tensor.to(self.rollout_dtype)
-                    if not is_sender:
-                        del tensor
-                        continue
-                    flat = tensor.contiguous().reshape(-1)
-                    numel, shape = int(flat.numel()), tuple(tensor.shape)
-                    total_elems += numel
-                    for s in range(0, numel, _SPARSE_MAX_ENTRY_ELEMS):
-                        e = min(s + _SPARSE_MAX_ENTRY_ELEMS, numel)
-                        _push(name, shape, torch.arange(s, e, dtype=torch.int32, device=flat.device), flat[s:e])
-            engine.prime_delta_snapshots()
-            self._shard_seeded = True
-        else:
-            weights, _ = engine.get_per_tensor_param_delta_shard()
+        def _flush_pending() -> None:
+            nonlocal pending_bytes, flushes
+            if is_sender and pending:
+                trainer_engine.send_weight_chunk(pending)
+                pending.clear()
+                pending_bytes = 0
+                flushes += 1
 
-            def _consume(name, _dtype_str, full_shape, full_numel, aidx, aval):
-                nonlocal total_elems
-                total_elems += int(full_numel)
-                if aidx is not None and aval is not None and aidx.numel() > 0:
-                    _push(name, tuple(full_shape), aidx.contiguous().to(dtype=torch.int32), aval.contiguous())
+        try:
+            if not self._shard_seeded:
+                if not self.skip_seed:
+                    for name, tensor in _iter_engine_params(engine, layered_summon=self.layered_summon):
+                        tensor = tensor.detach()
+                        if not tensor.is_floating_point():
+                            continue
+                        if tensor.dtype != self.rollout_dtype:
+                            tensor = tensor.to(self.rollout_dtype)
+                        if not is_sender:
+                            del tensor
+                            continue
+                        flat = tensor.contiguous().reshape(-1)
+                        numel, shape = int(flat.numel()), tuple(tensor.shape)
+                        total_elems += numel
+                        for s in range(0, numel, _SPARSE_MAX_ENTRY_ELEMS):
+                            e = min(s + _SPARSE_MAX_ENTRY_ELEMS, numel)
+                            _push(name, shape, torch.arange(s, e, dtype=torch.int32, device=flat.device), flat[s:e])
+                _flush_pending()
+                engine.prime_delta_snapshots()
+                self._shard_seeded = True
+            else:
+                weights, _ = engine.get_per_tensor_param_delta_shard()
 
-            gq = _GatherQueue(self.batch_gather, self.bucket_size, is_sender, _consume)
-            for slots, dtype_str, counts, hf_idx, hf_val, pg in weights:
-                gq.put(pg, slots, dtype_str, counts, hf_idx, hf_val)
-            gq.flush_all()
+                def _consume(name, _dtype_str, full_shape, full_numel, aidx, aval):
+                    nonlocal total_elems
+                    total_elems += int(full_numel)
+                    if aidx is not None and aval is not None and aidx.numel() > 0:
+                        _push(name, tuple(full_shape), aidx.contiguous().to(dtype=torch.int32), aval.contiguous())
+
+                gq = _GatherQueue(self.batch_gather, self.bucket_size, is_sender, _consume)
+                for slots, dtype_str, counts, hf_idx, hf_val, pg in weights:
+                    gq.put(pg, slots, dtype_str, counts, hf_idx, hf_val)
+                gq.flush_all()
+                _flush_pending()
+        finally:
+            if is_sender and started:
+                self._client.finish_weight_update()
 
         if not is_sender:
             return None
-        if pending:
-            trainer_engine.send_weight_chunk(pending)
-            flushes += 1
-        if started:
-            self._client.finish_weight_update()
         if not total_elems:
             return None
         return {

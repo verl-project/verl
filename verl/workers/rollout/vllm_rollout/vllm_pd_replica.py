@@ -290,10 +290,13 @@ class vLLMPDReplica(vLLMReplica):
         """Construct one PD ``vLLMHttpServer`` actor."""
         per_role_config = _dc_replace(self.config, tensor_model_parallel_size=tp)
 
+        wt_env_vars, placement_group = self._resolve_weight_transfer_launch_config(
+            bundle_offset=zmq_base_trainer_rank, bundle_count=tp
+        )
         env_vars = {
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-            "NCCL_CUMEM_ENABLE": "1" if self.config.checkpoint_engine.backend == "vllm_nccl_m2n" else "0",
+            "NCCL_CUMEM_ENABLE": "0",
             "VLLM_NIXL_SIDE_CHANNEL_HOST": side_channel_host,
             "VLLM_NIXL_SIDE_CHANNEL_PORT": str(side_channel_port),
             "VLLM_MOONCAKE_BOOTSTRAP_PORT": str(mooncake_bootstrap_port),
@@ -301,6 +304,7 @@ class vLLMPDReplica(vLLMReplica):
             "MC_TCP_ENABLE_CONNECTION_POOL": os.environ.get("MC_TCP_ENABLE_CONNECTION_POOL", "1"),
             "VERL_ZMQ_BASE_TRAINER_RANK": str(zmq_base_trainer_rank),
             "VERL_RAY_JOB_ID": ray.get_runtime_context().get_job_id(),
+            **wt_env_vars,
         }
 
         return self.server_class.options(
@@ -321,6 +325,7 @@ class vLLMPDReplica(vLLMReplica):
             gpus_per_node=self.gpus_per_replica_node,
             nnodes=1,
             cuda_visible_devices=cuda_visible_devices,
+            placement_group=placement_group,
             disaggregation_role=role,
             disaggregation_kv_transfer_config=kv_transfer_config,
         )

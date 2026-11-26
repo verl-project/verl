@@ -116,9 +116,8 @@ jobs:
       # Match the launch script and Ray workers. The standalone `veomni`
       # training backend bundles the fsdp stack plus the deps-free veomni package,
       # so this exercises veomni as a first-class uv backend (no separate fsdp
-      # extra). The Transformers overlay is required by the generated models in the
-      # VeOmni revision pinned in uv.lock.
-      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra veomni --extra math --with transformers==5.16.1"
+      # extra), using the project-wide Transformers version pinned in uv.lock.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra veomni --extra math"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
