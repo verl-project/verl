@@ -61,15 +61,28 @@ def main():
         ["git", "diff", "--name-only", "--no-renames", "-z", f"{os.environ['BASE_SHA']}...{os.environ['HEAD_SHA']}"]
     )
     paths = os.fsdecode(diff).split("\0")[:-1]
-    selection = select_workflows(paths, json.loads(os.environ.get("COVERAGE_WORKFLOWS") or "[]"))
+    exported = os.environ.get("COVERAGE_WORKFLOWS")
+    recommended = json.loads(exported) if exported else []
+    selection = select_workflows(paths, recommended)
     outcome = os.environ["SELECTOR_OUTCOME"]
     selected = selection.selected
+    comparison = {
+        "base_sha": os.environ["BASE_SHA"],
+        "head_sha": os.environ["HEAD_SHA"],
+        "baseline_run": os.environ["BASELINE_RUN"] or None,
+        "selector_outcome": outcome,
+        "precision_test": sorted(set(recommended)) if exported else None,
+        "path_filters": sorted(selection.by_path),
+        "running": selected,
+    }
+    print(f"ascend_workflow_selection={json.dumps(comparison)}")
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
         print(f"workflows={json.dumps(selected)}", file=output)
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
         print("### Ascend test selection", file=summary)
         print(f"\nCoverage run: {os.environ['BASELINE_RUN'] or 'unavailable'} (selector: {outcome}).", file=summary)
-        print(f"\nRecommended: {', '.join(sorted(selection.by_coverage)) or 'none'}.", file=summary)
+        coverage_choices = ", ".join(sorted(selection.by_coverage)) or ("none" if exported else "unavailable")
+        print(f"\nRecommended: {coverage_choices}.", file=summary)
         print(f"\nSelected by path: {', '.join(sorted(selection.by_path)) or 'none'}.", file=summary)
         print(f"\nRunning: {', '.join(selected) or 'none'}.", file=summary)
 
