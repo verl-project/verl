@@ -236,7 +236,7 @@ rm aime2025.zip
 
 ### 5.3 修改AISBench配置代码使能vllm/sglang推理评测
 
-打开 benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py 文件，这是推理评测配置文件，输出长度`max_out_len`建议与训练的`max_response_len`保持一致。
+打开 benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py 文件，这是推理评测配置文件，输出长度`max_out_len`建议与训练的`data.max_response_length`保持一致。
 
 ```shell
 from ais_bench.benchmark.models import VLLMCustomAPIChat
@@ -271,7 +271,7 @@ models = [
 
 ### 5.4 多机拉起推理服务端
 
-参考[vllm_ascend GLM5指南](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/GLM5.md)拉起双机A3推理服务，`host_port`与上一小节配置保持一致，`max_model_len`设置为训练时的`max_prompt_length`与`max_response`之和。
+参考[vllm_ascend GLM5指南](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/GLM5.md)拉起双机A3推理服务，`host_port`与上一小节配置保持一致，`max_model_len`设置为训练时的`data.max_prompt_length`与`data.max_response_length`之和。
 
 ### 5.5 启动vllm评测任务
 
