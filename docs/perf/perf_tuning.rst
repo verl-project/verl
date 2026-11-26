@@ -367,3 +367,13 @@ This processes the tensor in chunks of shape ``[chunk_size, voc]`` (e.g., 2048) 
 Additionally, during training, standard gradient checkpointing (``enable_gradient_checkpointing=True``) does not apply to entropy calculations. To reduce memory peaks in this context, set:
 ``actor_rollout_ref.actor.entropy_checkpointing = True``
 This enables entropy recomputation specifically for the entropy calculation, lowering memory usage during training.
+
+Chunked temperature scaling for dense FSDP log-probabilities
+-----------------------------------------------------------
+
+For a single-sequence training micro-batch with ``use_remove_padding=false``,
+set ``actor_rollout_ref.actor.fsdp_config.log_prob_temperature_chunk_size=64``
+to apply temperature in blocks of 64 tokens. This bounds the memory of the
+scaled logits temporary and can trade throughput for lower memory use. The
+option defaults to zero and applies to the eager log-probability path when
+no other output needs the scaled logits.

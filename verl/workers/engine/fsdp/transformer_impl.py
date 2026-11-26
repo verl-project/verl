@@ -112,6 +112,17 @@ def _slice_topk_labels_for_ulysses(topk_labels: torch.Tensor, pad_size: int) -> 
     return slice_input_tensor(topk_labels, dim=1, padding=False)
 
 
+def _logprobs_with_chunked_temperature(logits, labels, temperature, chunk_size):
+    """Apply temperature to a bounded number of rows before computing log-probs."""
+    divisor = temperature.reshape(1, 1).clamp(min=1e-8).to(logits.dtype)
+    return torch.cat(
+        [
+            logprobs_from_logits(logits=rows / divisor, labels=targets)
+            for rows, targets in zip(logits.split(chunk_size), labels.split(chunk_size), strict=True)
+        ]
+    )
+
+
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -1491,11 +1502,28 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 if isinstance(logits, DTensor):
                     logits = logits.full_tensor()
                 unscaled_logits = logits
-                logits = _scale_logits_by_temperature(
-                    logits,
-                    temperature,
-                    is_unit_temperature=temperature_is_one,
+                chunk_size = self.engine_config.log_prob_temperature_chunk_size
+                chunk_temperature = (
+                    chunk_size > 0
+                    and torch.is_grad_enabled()
+                    and not temperature_is_one
+                    and logits.shape[0] == 1
+                    and pad_mode == DatasetPadMode.NO_PADDING
+                    and not (
+                        calculate_entropy
+                        or calculate_sum_pi_squared
+                        or distillation_use_topk
+                        or distillation_only
+                        or score_centering
+                        or batch_invariant
+                    )
                 )
+                if not chunk_temperature:
+                    logits = _scale_logits_by_temperature(
+                        logits,
+                        temperature,
+                        is_unit_temperature=temperature_is_one,
+                    )
 
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
@@ -1539,7 +1567,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
 
                     log_probs = None
-                    if not distillation_only:
+                    if chunk_temperature:
+                        log_probs = _logprobs_with_chunked_temperature(
+                            logits_rmpad, input_ids_rmpad_rolled, temperature, chunk_size
+                        )
+                    elif not distillation_only:
                         log_probs = logprobs_from_logits(
                             logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
                             labels=input_ids_rmpad_rolled,

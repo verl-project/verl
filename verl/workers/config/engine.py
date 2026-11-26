@@ -293,6 +293,7 @@ class FSDPEngineConfig(EngineConfig):
     ulysses_sequence_parallel_size: int = 1
     entropy_from_logits_with_chunking: bool = False
     entropy_from_logits_chunk_size: int = 2048
+    log_prob_temperature_chunk_size: int = 0
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
     use_no_sync_for_gradient_accumulation: bool = True

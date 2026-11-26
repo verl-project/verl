@@ -42,6 +42,7 @@ actor_rollout_ref:
       ulysses_sequence_parallel_size: 1
       entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
       entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
+      log_prob_temperature_chunk_size: 0
       use_torch_compile: true
       entropy_checkpointing: ${oc.select:actor_rollout_ref.actor.entropy_checkpointing,False}
       use_no_sync_for_gradient_accumulation: false
@@ -237,6 +238,7 @@ actor_rollout_ref:
       ulysses_sequence_parallel_size: 1
       entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.ref.entropy_from_logits_with_chunking,False}
       entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.ref.entropy_from_logits_chunk_size,2048}
+      log_prob_temperature_chunk_size: 0
       use_torch_compile: true
       entropy_checkpointing: ${oc.select:actor_rollout_ref.ref.entropy_checkpointing,False}
       use_no_sync_for_gradient_accumulation: false
@@ -561,6 +563,7 @@ critic:
     ulysses_sequence_parallel_size: 1
     entropy_from_logits_with_chunking: false
     entropy_from_logits_chunk_size: 2048
+    log_prob_temperature_chunk_size: 0
     use_torch_compile: true
     entropy_checkpointing: false
     use_no_sync_for_gradient_accumulation: false
