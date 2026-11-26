@@ -65,6 +65,7 @@ from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_con
 from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
     default_moe_runner_backend,
+    default_stop_token_ids,
     lora_base_kept_on_sleep,
     lora_rank_of,
     lora_served_as_adapter,
@@ -171,6 +172,7 @@ class SGLangHttpServer:
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+        self._default_stop_token_ids = default_stop_token_ids(self.model_config)
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
         if self.config.max_model_len is None:
             self.config.max_model_len = max_position_embeddings
@@ -623,6 +625,11 @@ class SGLangHttpServer:
             f"max_new_tokens {max_new_tokens} exceeds available context space {max_possible_tokens}"
         )
         sampling_params["max_new_tokens"] = max_new_tokens
+        # Forward rollout.ignore_eos and default EOS IDs (SGLang skips tokenizer init by default).
+        sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
+        if not sampling_params.get("ignore_eos") and self._default_stop_token_ids:
+            caller_stops = sampling_params.get("stop_token_ids") or ()
+            sampling_params["stop_token_ids"] = list(dict.fromkeys((*caller_stops, *self._default_stop_token_ids)))
         return_logprob = sampling_params.pop("logprobs", False)
 
         # vLLM-style "prompt_logprobs=K" from the distillation teacher: request

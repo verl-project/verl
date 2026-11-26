@@ -135,6 +135,35 @@ def default_moe_runner_backend(quantization: Optional[str], engine_kwargs: Any, 
     return "triton" if major == 10 else None
 
 
+def default_stop_token_ids(model_config: Any) -> tuple[int, ...]:
+    """Collect default EOS token IDs from ``HFModelConfig`` for SGLang rollout.
+
+    ``SGLangHttpServer`` defaults to ``skip_tokenizer_init=True``, so SGLang's scheduler runs
+    with ``tokenizer=None`` and reads ``hf_eos_token_id`` only from top-level ``config.json``
+    and ``generation_config.json`` on disk. Collecting from ``model_config`` preserves
+    ``tokenizer.eos_token_id``, nested VLM ``text_config.eos_token_id``, and in-memory
+    ``model.override_config`` / ``tokenizer_path`` / ``hf_config_path`` overrides.
+    """
+    hf_config = getattr(model_config, "hf_config", None)
+    sources = (
+        getattr(hf_config, "eos_token_id", None),
+        getattr(getattr(hf_config, "text_config", None), "eos_token_id", None),
+        getattr(getattr(model_config, "generation_config", None), "eos_token_id", None),
+        getattr(getattr(model_config, "tokenizer", None), "eos_token_id", None),
+    )
+    stop_ids: list[int] = []
+    for src in sources:
+        if src is None or isinstance(src, bool):
+            continue
+        items = (src,) if isinstance(src, int | np.integer) else src
+        for item in items:
+            if isinstance(item, int | np.integer) and not isinstance(item, bool):
+                token_id = int(item)
+                if token_id not in stop_ids:
+                    stop_ids.append(token_id)
+    return tuple(stop_ids)
+
+
 def broadcast_pyobj(
     data: list[Any],
     rank: int,
