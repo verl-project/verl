@@ -27,9 +27,9 @@ SGLang是当前主流的高性能开源推理引擎，昇腾已经全面原生�
 
 环境构建
 -----------------------------------
-我们在 `昇腾安装指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/install_guidance.html>`_ 中提供了两种构建环境的方法，1.从Dockerfile镜像文件进行构建2.从自定义Conda环境进行构建
+我们在 `昇腾安装指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/install_guidance.html>`_ 中提供了两种构建环境的方法，1.从Dockerfile镜像文件进行构建2.从自定义Conda环境进行构建。
 
-在本实践中，我们额外指定verl的commit id以避免引入其他问题
+在本实践中，我们额外指定verl的commit id以避免引入其他问题。
 
 .. code-block:: bash
 
@@ -73,7 +73,7 @@ SGLang是当前主流的高性能开源推理引擎，昇腾已经全面原生�
 
 2.训练
 ^^^^^^^^^^^
-根据开发者实际路径配置情况修改模型训练脚本中的以下参数
+根据开发者实际路径配置情况修改模型训练脚本中的以下参数。
 
 .. code-block:: bash 
 
@@ -90,12 +90,12 @@ SGLang是当前主流的高性能开源推理引擎，昇腾已经全面原生�
     #保存频率，-1默认不保存，如需评测请修改此参数
     trainer.save_freq=-1
 
-对于单机任务 `Qwen3-30B`_，可以直接bash执行verl仓库上的示例脚本
+对于单机任务 `Qwen3-30B`_，可以直接bash执行verl仓库上的示例脚本。
 
 .. code-block:: bash 
 
   bash examples/grpo_trainer/run_qwen3moe-30b_sglang_megatron_npu.sh
-如果您想扩展至多节点，我们推荐使用以下脚本进行大规模多节点训练拉起
+如果您想扩展至多节点，我们推荐使用以下脚本进行大规模多节点训练拉起。
 
 .. code-block:: bash
 
@@ -187,9 +187,9 @@ SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网�
 3.模型评估
 ^^^^^^^^^^^
 
-不同模型步骤一致，仅以Qwen3-30B为例列举
+不同模型步骤一致，仅以Qwen3-30B为例列举。
 
-评估环节，我们通过AISBenchmark评估模型，该工具支持vLLM/SGLang多种推理后端的评估
+评估环节，我们通过AISBenchmark评估模型，该工具支持vLLM/SGLang多种推理后端的评估。
 
 **安装方法**
 
@@ -205,13 +205,13 @@ SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网�
 .. code-block:: bash
 
   cd path/to/benchmark/ais_bench/datasets
-  wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
+  wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
   unzip math.zip
   rm math.zip
 
 **修改AISBench配置代码使能SGLang推理评测**
 
-打开benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py文件，这是推理配置文件
+打开benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py文件，这是推理配置文件。
 
 .. code-block:: python
 
@@ -258,7 +258,7 @@ SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网�
 
 **评测结果**
 
-经过训练，模型在Math-500上的评分显著上升
+经过训练，模型在Math-500上的评分显著上升。
 
 +------+----------------------+---------+----------+------+----------------------+
 | iter | dataset              | version | metric   | mode | sgl-api-stream-chat  |
@@ -272,8 +272,8 @@ SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网�
 -----------------------------------
 关于NPU profiling的详细文档请参考 `Profiling采集指导 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/dev_guide/performance/ascend_profiling.html>`_
 
-在 `Qwen3-30B`_ 的脚本中提供了基本的性能采集选项PROF_CONFIG，默认设置global_profiler.steps=null关闭采集，开发者可根据实际需要进行参数修改
+在 `Qwen3-30B`_ 的脚本中提供了基本的性能采集选项PROF_CONFIG，默认设置global_profiler.steps=null关闭采集，开发者可根据实际需要进行参数修改。
 
-采集完成后，开发者可以使用 `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ 进行数据解析
+采集完成后，开发者可以使用 `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ 进行数据解析。
 
-注：verl框架侧进行采集全量Profiling产生海量且重复的算子记录，可以根据文档修改代码仅采集关键阶段
+注：verl框架侧进行采集全量Profiling产生海量且重复的算子记录，可以根据文档修改代码仅采集关键阶段。
