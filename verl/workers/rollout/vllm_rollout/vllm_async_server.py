@@ -1100,7 +1100,8 @@ class vLLMHttpServer:
         return (
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
-            and (self.profiler_controller._tool == "nsys" or self.profiler_controller.is_discrete_mode())
+            and self.profiler_controller._tool != "nsys"
+            and self.profiler_controller.is_discrete_mode()
         )
 
     async def start_profile(self, **kwargs):

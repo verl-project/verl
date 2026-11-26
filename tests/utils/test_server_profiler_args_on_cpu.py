@@ -80,13 +80,12 @@ class TestServerProfilerArgs:
         assert profiler_config["delay_iterations"] == 12
         assert profiler_config["max_iterations"] == 34
 
-    def test_build_vllm_nsight_profiler_args(self):
+    def test_build_vllm_nsight_does_not_configure_engine_profiler(self):
         config = ProfilerConfig(tool="nsys")
         with patch.dict(os.environ, {}, clear=True):
             args = build_vllm_profiler_args(config, NsightToolConfig(), rank=0)
             assert dict(os.environ) == {}
-        assert set(args) == {"profiler_config"}
-        assert json.loads(args["profiler_config"]) == {"profiler": "cuda"}
+        assert args == {}
 
     def test_build_vllm_profiler_args_without_tool_config(self):
         assert build_vllm_profiler_args(ProfilerConfig(tool="nsys"), None, rank=0) == {}

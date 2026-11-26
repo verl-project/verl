@@ -371,6 +371,15 @@ class TestVllmProfiler:
         server.engine = SimpleNamespace(start_profile=create_autospec(start_profile), stop_profile=AsyncMock())
         return server
 
+    @pytest.mark.parametrize(
+        "tool, discrete, expected",
+        [("nsys", False, False), ("nsys", True, False), ("torch", True, True), ("torch", False, False)],
+    )
+    def test_should_profile_selects_only_engine_profilers(self, server, tool, discrete, expected):
+        server.profiler_controller._tool = tool
+        server.profiler_controller.is_discrete_mode.return_value = discrete
+        assert server._should_profile() is expected
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "tool, discrete, kwargs, expected_calls, collect_traces",
