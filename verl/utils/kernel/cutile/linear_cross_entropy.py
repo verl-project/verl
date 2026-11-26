@@ -398,14 +398,15 @@ def efficient_entropy_backward(
     if method == BackwardEnum._Split_Dlogits_M:
         raise NotImplementedError("BackwardEnum._Split_Dlogits_M is not implemented yet")
     dtype = torch.float32 if fp32_grad else hidden.dtype
-    dx = torch.empty_like(hidden, dtype=dtype)
     dw = torch.empty_like(weight, dtype=dtype)
     if method == BackwardEnum._Total_Separate:
+        dx = torch.empty_like(hidden, dtype=dtype)
         grad = hidden.new_empty((m, v))
         ct.launch(stream, (_blocks(m), _blocks(v)), _dlogits, (*args, grad, *params))
         torch.matmul(grad, weight, out=dx)
         torch.matmul(grad.T, hidden, out=dw)
     else:
+        dx = torch.empty_like(hidden, dtype=torch.float32)
         workspace = hidden.new_empty((m, min(_CHUNK, v)))
         for first in range(0, v, _CHUNK):
             end = min(first + _CHUNK, v)
@@ -426,9 +427,14 @@ def efficient_entropy_backward(
                 1.0 / temperature,
                 reduction,
             )
-            if first == 0:
-                torch.matmul(grad, weight[first:end], out=dx)
+            beta = int(first != 0)
+            if grad.dtype == dx.dtype:
+                dx.addmm_(grad, weight[first:end], beta=beta)
             else:
-                dx.add_(torch.matmul(grad, weight[first:end]))
+                torch.addmm(dx, grad, weight[first:end], beta=beta, out_dtype=torch.float32, out=dx)
             torch.matmul(grad.T, hidden, out=dw[first:end])
+            del grad
+        # Release the chunk buffer before allocating the returned low-precision gradient.
+        del workspace
+        dx = dx.to(dtype)
     return dx, dw

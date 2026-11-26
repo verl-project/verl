@@ -192,3 +192,20 @@ def test_forward_tuning_caches_by_local_vocab(monkeypatch):
         for a, b in zip(actual, _reference(x, w, labels, "none"), strict=True):
             torch.testing.assert_close(a, b, atol=2e-4, rtol=1e-5)
     assert widths == [1025, 1057]
+
+
+def test_chunked_dhidden_rounds_only_after_final_chunk(monkeypatch):
+    from verl.utils.kernel.cutile import linear_cross_entropy as kernels
+
+    monkeypatch.setattr(_config, "_backward", BackwardEnum._Split_Dlogits_N)
+    monkeypatch.setattr(kernels, "_CHUNK", 32)
+    x = torch.zeros(1, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    w = torch.zeros(256, 128, device="cuda", dtype=x.dtype)
+    w[0] = 1
+    w[32:] = -1 / 128
+    labels = torch.zeros(1, device=x.device, dtype=torch.long)
+    logprob, _ = linear_cross_entropy(x, w, labels, impl_backend="cutile")
+    (dx,) = torch.autograd.grad(logprob.sum(), x)
+    # Uniform softmax: the seven trailing chunks each add 1/1024, less than a BF16 half-ulp.
+    expected = w[0].float() - w.float().mean(dim=0)
+    torch.testing.assert_close(dx, expected.to(x.dtype).view_as(x), atol=0, rtol=0)
