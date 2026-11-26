@@ -500,8 +500,6 @@ class VeOmniEngineConfig(EngineConfig):
                 "ep_sharded_stream_load=True."
             )
         if self.frozen_ple_dtype is not None:
-            if not self.freeze_ple_embeddings:
-                raise ValueError("frozen_ple_dtype requires freeze_ple_embeddings=True.")
             if self.frozen_ple_dtype not in {"bfloat16", "float32"}:
                 raise ValueError(
                     f"frozen_ple_dtype must be one of None, 'bfloat16', 'float32'; got {self.frozen_ple_dtype!r}."
