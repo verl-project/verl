@@ -35,6 +35,17 @@ def test_mcore_gpt_forward_has_native_output_processor_contract():
     assert {"output_processor", "output_processor_context"}.issubset(parameters)
 
 
+def test_patch_fused_forward_rejects_cut_cross_entropy_backend():
+    model = _new_uninitialized_model()
+    model_config = SimpleNamespace(
+        fused_kernel_options={"impl_backend": "cut_cross_entropy"},
+        use_liger=False,
+    )
+
+    with pytest.raises(ValueError, match="apple/ml-cross-entropy"):
+        mff.patch_fused_forward(model, model_config=model_config)
+
+
 def test_native_hook_selection_preserves_forward_and_is_idempotent(monkeypatch):
     model = _new_uninitialized_model()
     original_forward = model.forward.__func__

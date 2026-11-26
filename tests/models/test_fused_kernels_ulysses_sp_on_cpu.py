@@ -408,3 +408,81 @@ def test_veomni_adapter_promotes_unified_topk_log_probs(backend):
     assert captured["impl_backend"] == backend
     assert torch.equal(captured["input_ids"], expected_labels)
     assert output.topk_log_probs.shape == topk_labels.shape
+
+
+@pytest.mark.parametrize("forward_fn", TRITON_ADAPTERS, ids=_adapter_id)
+@pytest.mark.parametrize("backend", ["cut_cross_entropy", "ml_cross_entropy"])
+def test_cut_cross_entropy_adapter_propagates_backend(forward_fn, backend):
+    """The dense-model adapters must forward the CCE backend to the unified kernel.
+
+    They are wired through the triton adapter because both share the
+    ``(hidden, weight, labels) -> (log_probs, entropy)`` kernel signature.
+    """
+    model = _make_fake_lm()
+    model._verl_fused_kernels_backend = backend
+    input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
+    shift_labels = torch.tensor([[20, 30, 40, 50]], dtype=torch.long)
+
+    with _patch_fused_kernels() as captured:
+        output = forward_fn(
+            model,
+            input_ids=input_ids,
+            shift_labels=shift_labels,
+            temperature=1.0,
+            return_dict=True,
+        )
+
+    assert captured["impl_backend"] == backend
+    assert torch.equal(captured["input_ids"], shift_labels)
+    assert output.log_probs.shape == shift_labels.shape
+    assert output.entropy.shape == shift_labels.shape
+
+
+def test_veomni_adapter_routes_cut_cross_entropy_single_label():
+    model = _make_fake_lm()
+    input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
+    shift_labels = torch.tensor([[20, 30, 40, 50]], dtype=torch.long)
+
+    def unused_loss_function(**_kwargs):
+        raise AssertionError("VeOmni's original fused-linear loss path must not run")
+
+    def veomni_forward(input_ids, **kwargs):
+        hidden_states = model.model(input_ids)[0]
+        _, _, auxiliary_output = model.loss_function(
+            logits=None,
+            labels=kwargs.pop("labels", None),
+            hidden_states=hidden_states,
+            weights=model.lm_head.weight,
+            **kwargs,
+        )
+        return SimpleNamespace(fused_linear_aux=auxiliary_output)
+
+    model.loss_function = unused_loss_function
+    model.forward = veomni_forward
+    patch_veomni_forward_with_backends(model, use_fused_kernels=True, fused_kernels_backend="cut_cross_entropy")
+
+    with _patch_fused_kernels() as captured:
+        forward_output = model(
+            input_ids,
+            labels=input_ids,
+            shift_labels=shift_labels,
+            temperature=1.0,
+            return_log_probs=True,
+        )
+
+    assert captured["impl_backend"] == "cut_cross_entropy"
+    assert torch.equal(captured["input_ids"], shift_labels)
+    assert getattr(forward_output, "topk_log_probs", None) is None
+
+
+@pytest.mark.parametrize("backend", ["cut_cross_entropy", "ml_cross_entropy"])
+def test_patch_forward_with_backends_installs_triton_adapter(backend):
+    from verl.models.transformers.monkey_patch import patch_forward_with_backends
+
+    model = _make_fake_lm()
+    model.config.model_type = "llama"
+
+    patch_forward_with_backends(model, use_fused_kernels=True, fused_kernels_backend=backend)
+
+    assert model._verl_fused_kernels_backend == backend
+    assert model.__class__.forward is dense_common.forward_with_triton_backend

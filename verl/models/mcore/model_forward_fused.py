@@ -35,7 +35,7 @@ from packaging import version
 from torch import Tensor
 
 from verl.models.mcore.util import get_thd_quant_align_size, preprocess_thd_engine, preprocess_vlm_thd_engine
-from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy, validate_backend_for_vocab_parallel
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
@@ -274,13 +274,7 @@ def patch_fused_forward(
         return
     if model_config is not None:
         configured_backend = (model_config.fused_kernel_options or {}).get("impl_backend")
-        if configured_backend in ("cut_cross_entropy", "ml_cross_entropy"):
-            raise ValueError(
-                f"fused_kernel_options.impl_backend={configured_backend!r} is not supported by the "
-                "Megatron engine: apple/ml-cross-entropy requires the full vocabulary on each device, "
-                "but Megatron shards the output head across tensor-parallel ranks. Use 'triton' "
-                "(optionally with use_liger) or disable use_fused_kernels."
-            )
+        validate_backend_for_vocab_parallel(configured_backend)
         impl_backend = (
             "liger" if model_config.use_liger else ("tilelang" if configured_backend == "tilelang" else "triton")
         )

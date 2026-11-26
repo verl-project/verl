@@ -63,8 +63,12 @@ use_fused_kernels: False
 # fused kernel options.
 fused_kernel_options:
 
-  # the implementation backend for fused kernels: torch, triton, liger, or tilelang.
+  # the implementation backend for fused kernels: torch, triton, liger,
+  # tilelang, or cut_cross_entropy (alias ml_cross_entropy).
   # On CUDA, triton and tilelang support auxiliary multi-label log-prob queries.
+  # cut_cross_entropy (apple/ml-cross-entropy) is CUDA-only, needs the optional
+  # `cut-cross-entropy` package, requires the full vocabulary per device, and
+  # supports single-label queries only.
   # Megatron supports triton, liger (through use_liger), and tilelang.
   impl_backend: torch
 

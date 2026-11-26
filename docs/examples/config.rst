@@ -286,11 +286,17 @@ Actor/Rollout/Reference Policy
 
   - ``actor_rollout_ref.model.fused_kernel_options.impl_backend``: The
     implementation backend for fused kernels. Options: "triton", "torch",
-    "liger", or "tilelang". The "torch" backend always uses verl's native
-    output-head implementation; select "liger" explicitly to use Liger's fused
-    output-head kernel. On CUDA, both ``triton`` and ``tilelang`` support
-    querying multiple token log probabilities for top-k distillation and score
-    centering without materializing logits. Default is "torch".
+    "liger", "tilelang", or "cut_cross_entropy" (alias "ml_cross_entropy").
+    The "torch" backend always uses verl's native output-head implementation;
+    select "liger" explicitly to use Liger's fused output-head kernel. On CUDA,
+    both ``triton`` and ``tilelang`` support querying multiple token log
+    probabilities for top-k distillation and score centering without
+    materializing logits. Default is "torch".
+    ``cut_cross_entropy`` uses apple/ml-cross-entropy and requires the optional
+    ``cut-cross-entropy`` package (``uv sync --extra cut-cross-entropy``). It is
+    CUDA-only, needs an Ampere or newer GPU, keeps the full vocabulary on each
+    device (no Megatron TP output sharding), and supports a single label per
+    token only. Missing hardware or package fails fast instead of falling back.
     With Megatron fused kernels enabled, ``impl_backend=tilelang`` selects the
     TileLang tensor-parallel output head; otherwise ``use_liger=False`` keeps
     Verl's Triton head and ``use_liger=True`` calls Liger's public

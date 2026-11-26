@@ -137,6 +137,25 @@ def _linear_cross_entropy_liger(
     return -nll, entropy
 
 
+_FULL_VOCAB_BACKENDS = ("cut_cross_entropy", "ml_cross_entropy")
+
+
+def validate_backend_for_vocab_parallel(configured_backend):
+    """Reject full-vocabulary backends for vocab-sharded engines such as Megatron TP.
+
+    apple/ml-cross-entropy needs every vocabulary row on each device, so a
+    tensor-parallel output head (which shards the vocabulary) cannot use it.
+    Callers pass the configured ``fused_kernel_options.impl_backend`` value.
+    """
+    if isinstance(configured_backend, str) and configured_backend.lower() in _FULL_VOCAB_BACKENDS:
+        raise ValueError(
+            f"fused_kernel_options.impl_backend={configured_backend!r} is not supported by the "
+            "Megatron engine: apple/ml-cross-entropy requires the full vocabulary on each device, "
+            "but Megatron shards the output head across tensor-parallel ranks. Use 'triton' "
+            "(optionally with use_liger) or disable use_fused_kernels."
+        )
+
+
 _CUT_CROSS_ENTROPY = None
 _CUT_CROSS_ENTROPY_INSTALL_COMMAND = (
     'pip install "cut-cross-entropy @ git+https://github.com/apple/ml-cross-entropy.git"'
@@ -196,7 +215,9 @@ class _ExpectedLogit(torch.autograd.Function):
 
         for start in range(0, weight.shape[0], chunk):
             stop = min(start + chunk, weight.shape[0])
-            logits = (hidden @ weight[start:stop].t()).float()
+            logits = hidden @ weight[start:stop].t()
+            if logits.dtype in (torch.bfloat16, torch.float16):
+                logits = logits.float()
             probs = torch.exp(logits - safe_lse[:, None])
             expected += (probs * logits).sum(dim=-1)
 
@@ -214,7 +235,9 @@ class _ExpectedLogit(torch.autograd.Function):
 
         for start in range(0, weight.shape[0], chunk):
             stop = min(start + chunk, weight.shape[0])
-            logits = (hidden @ weight[start:stop].t()).float()
+            logits = hidden @ weight[start:stop].t()
+            if logits.dtype in (torch.bfloat16, torch.float16):
+                logits = logits.float()
             probs = torch.exp(logits - safe_lse[:, None])
             # d/dz_j sum_i p_i z_i = p_j * (1 + z_j - sum_i p_i z_i)
             grad_logits = grad_expected[:, None] * probs * (1.0 + logits - expected[:, None])
@@ -265,7 +288,7 @@ def _linear_cross_entropy_cut_cross_entropy(
         scaled_hidden,
         weight,
         labels,
-        None,
+        bias=None,
         reduction="none",
         return_lse=True,
         ignore_index=-100,
@@ -273,7 +296,9 @@ def _linear_cross_entropy_cut_cross_entropy(
 
     valid = labels != -100
     expected_logit = _ExpectedLogit.apply(scaled_hidden, weight, lse, valid)
-    return -nll, lse - expected_logit
+    log_probs = torch.where(valid, -nll, torch.zeros_like(nll))
+    entropy = torch.where(valid, lse - expected_logit, torch.zeros_like(lse))
+    return log_probs, entropy
 
 
 class LinearCrossEntropy(torch.autograd.Function):

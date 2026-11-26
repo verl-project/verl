@@ -168,6 +168,15 @@ fsdp = [
     # override below settles the version (5.12.1). See override-dependencies.
 ]
 
+# Optional fused output head: apple/ml-cross-entropy (Cut Cross Entropy).
+# Unlike the default Triton head it avoids materializing logits entirely, so it
+# pays off for large vocabularies. CUDA (Ampere or newer) only; requires the
+# full vocabulary on each device. Layer it on top of a training backend, e.g.
+# `uv sync --extra fsdp --extra vllm --extra cut-cross-entropy`.
+cut-cross-entropy = [
+    "cut-cross-entropy @ git+https://github.com/apple/ml-cross-entropy.git@3de376c106a1916bc5e1b619f9c77c87a461ee1c",
+]
+
 # ABI-bound apex / TE / flash-attn / deep-ep / megatron-bridge come from the
 # selected inference backend's native stack. megatron-core is git-sourced
 # (built at sync time). onnxscript works around an undeclared TE import.

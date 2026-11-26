@@ -283,6 +283,61 @@ LigerKernel provides fused Triton kernels (RMSNorm, SwiGLU, RoPE) that can impro
    has finished, and the loaded NVSHMEM host runtime must be compatible with
    the device library used to build the native wheel.
 
+Cut Cross Entropy for large vocabularies
+-----------------------------------------
+
+The optional `apple/ml-cross-entropy <https://github.com/apple/ml-cross-entropy>`_
+backend (Cut Cross Entropy, CCE) computes the output-head log-probabilities
+without ever materializing the ``[tokens, vocab]`` logits matrix. It computes
+only the correct-token logits and the log-sum-exp on the fly, so peak memory for
+the loss is roughly independent of the vocabulary size. This is most useful for
+models with very large vocabularies (e.g. Qwen's 151936 entries) where the
+output head dominates activation memory.
+
+1. Install the optional package (CUDA, Ampere or newer). The package is not a
+   hard dependency of verl:
+
+   .. code-block:: bash
+
+      uv sync --extra fsdp --extra vllm --extra cut-cross-entropy
+      # or, without the extra:
+      pip install "cut-cross-entropy @ git+https://github.com/apple/ml-cross-entropy.git"
+
+2. Enable the fused output head and select the backend:
+
+   .. code-block:: yaml
+
+      actor_rollout_ref:
+        model:
+          use_fused_kernels: true
+          fused_kernel_options:
+            impl_backend: cut_cross_entropy  # or ml_cross_entropy
+
+   The backend is available on the FSDP and VeOmni dense-model paths
+   (Qwen/Llama-style models routed through ``verl/models/transformers``).
+
+3. Differences from the other fused output heads:
+
+   - ``torch`` uses verl's chunked native implementation; ``triton`` and
+     ``tilelang`` provide CUDA kernels that also return token entropy and
+     support multi-label/top-k queries; ``liger`` wraps Liger's fused scaled
+     cross entropy.
+   - ``cut_cross_entropy`` uses CCE for the log-probability path and a
+     vocabulary-chunked estimator for token entropy, whose chunk size is capped
+     at a few MiB. It therefore keeps the large-vocabulary memory advantage but
+     is intended for single-label queries: top-k distillation / score centering
+     raise a clear ``ValueError`` instead of silently falling back.
+   - CCE needs the full vocabulary on each device. Megatron tensor-parallel
+     output heads (which shard the vocabulary) and any tensor-parallel process
+     group are rejected with an explicit error. Use ``triton`` or ``tilelang``
+     there.
+   - It is CUDA-only. NPU/CPU devices, missing CUDA support, or a missing
+     ``cut-cross-entropy`` package raise an explicit ``RuntimeError`` with the
+     install command; verl never silently falls back to another backend.
+   - ``reduction`` must be ``"none"``, which is what the verl output-head path
+     uses. Labels equal to ``-100`` are excluded and get zero log-probability
+     and entropy.
+
 Forward prefetch in FSDP training backend
 ----------------------
 
