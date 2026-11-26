@@ -30,9 +30,9 @@ Other architectures (e.g. `gfx90a` for MI200/MI250) are not validated here.
 | Python | 3.12 |
 | PyTorch | 2.12.0+rocm7.14 |
 | Triton | 3.7.0 |
-| vLLM | v0.32.0 source @ `5df63a720` + [vllm#61872](https://github.com/vllm-project/vllm/pull/61872) |
-| SGLang | 0.5.23 source @ `0801cc05ed` |
-| transformers | 5.16.1 |
+| vLLM | v0.34.0 source @ `62d4bc3c7` + [vllm#61872](https://github.com/vllm-project/vllm/pull/61872) |
+| SGLang | 0.5.23 source @ `97c6978369` |
+| transformers | 5.18.0 |
 | TileLang | 0.1.10 |
 | Flash Attention | ROCm fork (CK backend) @ `v2.8.3` |
 | TransformerEngine |2.14.0 ROCm fork @ `e6ede467` |
