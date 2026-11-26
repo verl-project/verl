@@ -55,6 +55,7 @@ for _mod in (
     sys.modules.setdefault(_mod, MagicMock())
 
 
+from verl.utils.dataset.dataset_utils import DatasetPadMode  # noqa: E402
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead  # noqa: E402
 from verl.workers.engine.utils import pad_packed_inputs  # noqa: E402
 from verl.workers.engine.veomni.transformer_impl import VeOmniEngineWithLMHead  # noqa: E402
@@ -162,6 +163,39 @@ class TestDistillationGuard:
 
         with pytest.raises(RuntimeError, match="not supported with top-K distillation"):
             engine.prepare_model_inputs(micro_batch)
+
+
+def test_score_centering_topk_labels_follow_static_padding():
+    engine = _make_engine(FSDPEngineWithLMHead, pad_to_length=True, bucket=8)
+    engine.use_ulysses_sp = False
+    engine.pass_packed_cu_seqlens = False
+
+    offsets = torch.tensor([0, 3, 5])
+    input_ids = torch.nested.nested_tensor_from_jagged(torch.arange(5), offsets=offsets)
+    position_ids = torch.nested.nested_tensor_from_jagged(torch.tensor([0, 1, 2, 0, 1]), offsets=offsets)
+    topk_values = torch.arange(20).reshape(5, 4)
+    topk_ids = torch.nested.nested_tensor_from_jagged(topk_values, offsets=offsets)
+    micro_batch = TensorDict(
+        {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "rollout_topk_ids": topk_ids,
+        },
+        batch_size=[],
+    )
+    micro_batch.set_non_tensor("temperature", 1.0)
+    micro_batch.set_non_tensor("use_remove_padding", True)
+    micro_batch.set_non_tensor("pad_mode", DatasetPadMode.NO_PADDING)
+    micro_batch.set_non_tensor("use_fused_kernels", True)
+    micro_batch.set_non_tensor("score_centering", True)
+
+    model_inputs, output_args = engine.prepare_model_inputs(micro_batch)
+
+    assert model_inputs["input_ids"].shape == (1, 8)
+    assert model_inputs["topk_labels"].shape == (1, 8, 4)
+    torch.testing.assert_close(model_inputs["topk_labels"][:, :5], topk_values.unsqueeze(0))
+    torch.testing.assert_close(model_inputs["topk_labels"][:, 5:], torch.zeros(1, 3, 4, dtype=torch.long))
+    assert output_args["pad_size"] == 3
 
 
 class TestGatherAndUnpadPacked:

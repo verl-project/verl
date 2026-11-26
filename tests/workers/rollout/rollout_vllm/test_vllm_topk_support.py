@@ -96,11 +96,19 @@ def test_sampled_and_prompt_logprobs_from_flat_rows_match_dict_rows(llm):
         dict_completion, flat_completion = dict_output.outputs[0], flat_output.outputs[0]
         assert flat_completion.token_ids == dict_completion.token_ids
         rows = zip(dict_completion.logprobs, dict_completion.token_ids, strict=True)
-        assert extract_sampled_logprobs(flat_completion.logprobs) == [row[token].logprob for row, token in rows]
+        # These values come from two independent GPU generations. Greedy token IDs must match,
+        # while reduced-precision kernels can introduce small log-prob differences.
+        np.testing.assert_allclose(
+            extract_sampled_logprobs(flat_completion.logprobs),
+            [row[token].logprob for row, token in rows],
+            atol=1e-2,
+            rtol=0,
+        )
         dict_prompt, flat_prompt = {}, {}
         extract_prompt_logprobs(dict_output, 0, dict_prompt)
         extract_prompt_logprobs(flat_output, 0, flat_prompt)
-        assert flat_prompt == dict_prompt
+        assert flat_prompt["prompt_ids"] == dict_prompt["prompt_ids"]
+        np.testing.assert_allclose(flat_prompt["prompt_logprobs"], dict_prompt["prompt_logprobs"], atol=1e-2, rtol=0)
 
 
 @pytest.mark.parametrize("k,expected_complete", [(2, False), (4, True)])

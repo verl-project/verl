@@ -335,3 +335,385 @@ def _install_fake_reload(monkeypatch, events):
     reload.start_reload = lambda model: events.append("start_reload")
     reload.finish_reload = lambda model, model_config, device: events.append("finish_reload")
     monkeypatch.setitem(sys.modules, reload.__name__, reload)
+
+
+def test_engram_key_matching():
+    from verl.utils.engram import is_engram_safetensors_key, is_engram_table_param
+
+    # Qwen4-Exp PLE n-gram shards & buffers
+    assert is_engram_table_param("model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight")
+    assert is_engram_table_param("language_model.model.layers.1.ple.ple_embedding.ngram_embedding.weight")
+    assert is_engram_table_param("language_model.model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale")
+    assert is_engram_safetensors_key("model.language_model.layers.1.ple.ple_embedding.layer_multipliers")
+    assert is_engram_safetensors_key("model.language_model.layers.1.ple.ple_embedding.ngram_heads_offsets")
+    assert is_engram_safetensors_key("model.language_model.layers.1.ple.ple_embedding.ngram_heads_vocab_sizes")
+
+    # DeepSeek-V4.1 Engram lookup table & companion scale
+    assert is_engram_table_param("layers.1.engram.embed.weight")
+    assert is_engram_table_param("layers.1.engram.embed.scale")
+    assert is_engram_table_param("language_model.model.layers.14.engram.embed_tokens.weight")
+    assert is_engram_table_param("language_model.model.layers.14.engram.embed_tokens.weight_scale_inv")
+
+    # Trainable PLE / Engram projections & ordinary token embeddings must NEVER match
+    for non_table_key in (
+        "model.language_model.layers.1.ple.key_proj.weight",
+        "model.language_model.layers.1.ple.value_proj.weight",
+        "model.language_model.layers.1.ple.kv_proj.weight",
+        "model.language_model.layers.1.ple.norm_key.weight",
+        "model.language_model.layers.1.ple.conv1d.weight",
+        "layers.1.engram.q_weight",
+        "layers.1.engram.k_weight",
+        "layers.1.engram.wkv.weight",
+        "layers.1.engram.wkv.scale",
+        "embed.weight",
+        "model.embed_tokens.weight",
+    ):
+        assert not is_engram_table_param(non_table_key), non_table_key
+        assert not is_engram_safetensors_key(non_table_key), non_table_key
+
+
+def _write_sharded_engram_checkpoint(ckpt_dir: Path) -> tuple[Path, Path]:
+    import json
+
+    from safetensors.torch import save_file
+
+    # Shard 1 holds layer 1 Engram FP8 weight + ue8m0 scale; Shard 2 holds Qwen4-Exp PLE shard + hash buffer.
+    # Shard 0 is listed in index.json for non-Engram weights and intentionally NOT created on disk to prove
+    # rollout streaming never opens non-Engram safetensors shards.
+    shard1 = ckpt_dir / "model-00001-of-00002.safetensors"
+    shard2 = ckpt_dir / "model-00002-of-00002.safetensors"
+
+    save_file(
+        {
+            "layers.1.engram.embed.weight": torch.full((4, 8), 2.0, dtype=torch.float8_e4m3fn),
+            "layers.1.engram.embed.scale": torch.full((4, 1), 127, dtype=torch.uint8).view(torch.float8_e8m0fnu),
+            "layers.1.engram.q_weight": torch.full((4, 8), 9.0, dtype=torch.bfloat16),
+        },
+        str(shard1),
+    )
+    save_file(
+        {
+            "model.language_model.layers.2.ple.ple_embedding.ngram_embedding.shard_0.weight": torch.full(
+                (4, 8), 3.0, dtype=torch.bfloat16
+            ),
+            "model.language_model.layers.2.ple.ple_embedding.layer_multipliers": torch.tensor(
+                [3, 5, 7, 11], dtype=torch.int64
+            ),
+        },
+        str(shard2),
+    )
+    index = {
+        "weight_map": {
+            "layers.0.attn.wq.weight": "model-00000-of-00002.safetensors",
+            "layers.1.engram.embed.weight": shard1.name,
+            "layers.1.engram.embed.scale": shard1.name,
+            "layers.1.engram.q_weight": shard1.name,
+            "model.language_model.layers.2.ple.ple_embedding.ngram_embedding.shard_0.weight": shard2.name,
+            "model.language_model.layers.2.ple.ple_embedding.layer_multipliers": shard2.name,
+        }
+    }
+    (ckpt_dir / "model.safetensors.index.json").write_text(json.dumps(index))
+    return shard1, shard2
+
+
+class _FakeEngramRolloutModel(torch.nn.Module):
+    def __init__(self, *, include_layer1: bool = True, include_layer2: bool = True):
+        super().__init__()
+        self.loaded_batches: list[list[tuple[str, torch.Tensor]]] = []
+        self.layers = torch.nn.ModuleDict()
+        if include_layer1:
+            l1 = torch.nn.Module()
+            l1.engram = torch.nn.Module()
+            l1.engram.embed_tokens = torch.nn.Module()
+            l1.engram.embed_tokens.weight = torch.nn.Parameter(
+                torch.zeros((4, 8), dtype=torch.float8_e4m3fn), requires_grad=False
+            )
+            l1.engram.embed_tokens.weight_scale_inv = torch.nn.Parameter(
+                torch.zeros((4, 1), dtype=torch.uint8), requires_grad=False
+            )
+            l1.engram.q_weight = torch.nn.Parameter(torch.zeros((4, 8), dtype=torch.bfloat16), requires_grad=False)
+            self.layers["1"] = l1
+        if include_layer2:
+            l2 = torch.nn.Module()
+            l2.ple = torch.nn.Module()
+            l2.ple.ple_embedding = torch.nn.Module()
+            l2.ple.ple_embedding.ngram_embedding = torch.nn.Module()
+            l2.ple.ple_embedding.ngram_embedding.weight = torch.nn.Parameter(
+                torch.zeros((4, 8), dtype=torch.bfloat16), requires_grad=False
+            )
+            l2.ple.ple_embedding.register_buffer("layer_multipliers", torch.zeros(4, dtype=torch.int64))
+            self.layers["2"] = l2
+
+    def load_weights(self, weights):
+        batch = list(weights)
+        self.loaded_batches.append(batch)
+        for name, tensor in batch:
+            if name == "layers.1.engram.embed.weight" and "1" in self.layers:
+                self.layers["1"].engram.embed_tokens.weight.data.copy_(tensor)
+            elif name == "layers.1.engram.embed.scale" and "1" in self.layers:
+                self.layers["1"].engram.embed_tokens.weight_scale_inv.data.copy_(tensor.view(torch.uint8))
+            elif name == "layers.1.engram.q_weight" and "1" in self.layers:
+                self.layers["1"].engram.q_weight.data.copy_(tensor)
+            elif name.endswith("ngram_embedding.shard_0.weight") and "2" in self.layers:
+                self.layers["2"].ple.ple_embedding.ngram_embedding.weight.data.copy_(tensor)
+            elif name.endswith("ple_embedding.layer_multipliers") and "2" in self.layers:
+                self.layers["2"].ple.ple_embedding.layer_multipliers.copy_(tensor)
+
+
+def _make_engram_worker(
+    model: torch.nn.Module,
+    ckpt_dir: Path,
+    *,
+    load_format: str = "dummy",
+    architecture: str = "Qwen4ExpForConditionalGeneration",
+):
+    class _BaseWorker:
+        def sleep(self, level: int = 1):
+            self.sleep_levels.append(level)
+            return level
+
+    class _ComposedWorker(_BaseWorker, vLLMColocateWorkerExtension):
+        pass
+
+    model_cfg = types.SimpleNamespace(
+        model=str(ckpt_dir),
+        model_weights=None,
+        revision=None,
+        architectures=(architecture,),
+        enable_sleep_mode=True,
+        sleep_preserve_parameter_names=(),
+    )
+    load_cfg = types.SimpleNamespace(load_format=load_format, download_dir=None)
+    vllm_cfg = types.SimpleNamespace(
+        model_config=model_cfg,
+        load_config=load_cfg,
+        speculative_config=None,
+        weight_transfer_config=None,
+    )
+    worker = _ComposedWorker.__new__(_ComposedWorker, vllm_config=vllm_cfg)
+    assert getattr(_ComposedWorker.sleep, "_verl_engram_sleep_hooked", False)
+    worker.sleep_levels = []
+    worker.device = torch.device("cpu")
+    worker.local_rank = 0
+    worker.model_runner = types.SimpleNamespace(model=model, vllm_config=vllm_cfg)
+    worker._get_zmq_handle = lambda: "unused"
+    return worker
+
+
+@pytest.mark.parametrize(
+    "architecture",
+    ["DeepseekV41ForCausalLM", "Qwen4ExpForConditionalGeneration"],
+)
+def test_engram_model_architectures_enable_weight_tracking(tmp_path, architecture):
+    worker = _make_engram_worker(
+        _FakeEngramRolloutModel(),
+        tmp_path,
+        architecture=architecture,
+    )
+    assert worker._is_engram_model is True
+
+
+def test_non_engram_model_skips_name_matching_and_parameter_scan(monkeypatch, tmp_path):
+    _install_fake_reload(monkeypatch, [])
+
+    class _Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([], True)
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", _Receiver)
+    worker = _make_engram_worker(
+        _FakeEngramRolloutModel(),
+        tmp_path,
+        architecture="LlamaForCausalLM",
+    )
+    assert worker._is_engram_model is False
+
+    def _unexpected(*args, **kwargs):
+        raise AssertionError("non-Engram models must not enter Engram matching")
+
+    monkeypatch.setattr(_vllm_rollout_utils, "is_engram_table_param", _unexpected)
+    monkeypatch.setattr(_vllm_rollout_utils, "find_model_engram_parameters", _unexpected)
+    worker.sleep(level=2)
+    worker.update_weights_from_ipc()
+
+
+def test_rollout_streams_engram_once_for_cpu_offload_and_skips_non_engram_shards(monkeypatch, tmp_path):
+    _write_sharded_engram_checkpoint(tmp_path)
+    reload_events: list[str] = []
+    _install_fake_reload(monkeypatch, reload_events)
+
+    ipc_payload: list[tuple[str, torch.Tensor]] = [
+        ("layers.1.engram.q_weight", torch.full((4, 8), 5.0, dtype=torch.bfloat16))
+    ]
+
+    class _Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received(ipc_payload, True)
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", _Receiver)
+
+    model = _FakeEngramRolloutModel()
+    worker = _make_engram_worker(model, tmp_path, load_format="dummy")
+    assert worker._engram_weights_loaded is False
+
+    # Initial sync under dummy format loads IPC trainable weights + streams Engram/PLE from safetensors.
+    worker.update_weights_from_ipc()
+    assert worker._engram_weights_loaded is True
+    loaded_names = [name for batch in model.loaded_batches for name, _ in batch]
+    assert loaded_names == [
+        "layers.1.engram.q_weight",
+        "layers.1.engram.embed.weight",
+        "layers.1.engram.embed.scale",
+        "model.language_model.layers.2.ple.ple_embedding.ngram_embedding.shard_0.weight",
+        "model.language_model.layers.2.ple.ple_embedding.layer_multipliers",
+    ]
+    assert torch.all(model.layers["1"].engram.embed_tokens.weight_scale_inv == 127)
+    assert torch.all(model.layers["2"].ple.ple_embedding.ngram_embedding.weight == 3.0)
+    assert model.layers["2"].ple.ple_embedding.layer_multipliers.tolist() == [3, 5, 7, 11]
+    assert reload_events == ["start_reload", "finish_reload"]
+
+    # CPU-offloaded Engram/PLE (param.is_cpu == True) is not cleared by sleep(level=2):
+    # subsequent weight syncs must NOT re-read safetensors.
+    model.loaded_batches.clear()
+    worker.sleep(level=2)
+    assert worker._engram_weights_loaded is True
+    worker.update_weights_from_ipc()
+    assert [name for batch in model.loaded_batches for name, _ in batch] == ["layers.1.engram.q_weight"]
+
+
+def test_rollout_reloads_device_resident_engram_only_when_level2_sleep_clears(monkeypatch, tmp_path):
+    _write_sharded_engram_checkpoint(tmp_path)
+    _install_fake_reload(monkeypatch, [])
+
+    class _Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([], True)
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", _Receiver)
+
+    # Simulate device-resident Engram/PLE parameters on CPU CI by overriding Tensor.is_cpu -> False on the PLE weight.
+    class _DeviceResidentFakeParam(torch.nn.Parameter):
+        @property
+        def is_cpu(self):
+            return False
+
+    model = _FakeEngramRolloutModel(include_layer1=False, include_layer2=True)
+    model.layers["2"].ple.ple_embedding.ngram_embedding.weight = _DeviceResidentFakeParam(
+        torch.zeros((4, 8), dtype=torch.bfloat16), requires_grad=False
+    )
+
+    # With load_format="safetensors", no sleep and level-1 sleep preserve device weights.
+    worker = _make_engram_worker(model, tmp_path, load_format="safetensors")
+    assert worker._engram_weights_loaded is True
+    # Even if vLLM later mutates load_config.load_format at runtime, initial load_format stays "safetensors".
+    worker.model_runner.vllm_config.load_config.load_format = "dummy"
+    worker.update_weights_from_ipc()
+    assert model.loaded_batches == []
+
+    worker.sleep(level=1)
+    assert worker._engram_weights_loaded is True
+    worker.update_weights_from_ipc()
+    assert model.loaded_batches == []
+
+    # Level-2 sleep clears unpreserved device weights -> the next sync reloads local layer 2.
+    # (Also verifies PP layer filtering: shard 1 for missing layer 1 is NOT opened.)
+    (tmp_path / "model-00001-of-00002.safetensors").unlink()
+    worker.sleep(level=2)
+    assert worker._engram_weights_loaded is False
+    worker.update_weights_from_ipc()
+    expected_layer2 = [
+        "model.language_model.layers.2.ple.ple_embedding.ngram_embedding.shard_0.weight",
+        "model.language_model.layers.2.ple.ple_embedding.layer_multipliers",
+    ]
+    assert [name for batch in model.loaded_batches for name, _ in batch] == expected_layer2
+    assert worker._engram_weights_loaded is True
+
+    model.loaded_batches.clear()
+    worker.sleep(level=2)
+    worker.update_weights_from_ipc()
+    assert [name for batch in model.loaded_batches for name, _ in batch] == expected_layer2
+
+    # When sleep_preserve_parameter_names preserves the Engram/PLE parameter across level-2 sleep,
+    # the loaded state remains true and no safetensors reload occurs.
+    model.loaded_batches.clear()
+    worker.model_runner.vllm_config.model_config.sleep_preserve_parameter_names = ("*ngram_embedding.weight",)
+    worker.sleep(level=2)
+    assert worker._engram_weights_loaded is True
+    worker.update_weights_from_ipc()
+    assert model.loaded_batches == []
+
+    # Under load_format="dummy" with sleep_preserve_parameter_names set, safetensors loads once on initial sync
+    # and skips subsequent syncs.
+    dummy_worker = _make_engram_worker(model, tmp_path, load_format="dummy")
+    dummy_worker.model_runner.vllm_config.model_config.sleep_preserve_parameter_names = ("*ngram_embedding.weight",)
+    dummy_worker.update_weights_from_ipc()
+    assert [name for batch in model.loaded_batches for name, _ in batch] == expected_layer2
+    model.loaded_batches.clear()
+    dummy_worker.sleep(level=2)
+    dummy_worker.update_weights_from_ipc()
+    assert model.loaded_batches == []
+
+
+def test_rollout_does_not_overwrite_trainable_engram_sent_over_ipc(monkeypatch, tmp_path):
+    shard1, shard2 = _write_sharded_engram_checkpoint(tmp_path)
+    # Remove checkpoint shards to prove safetensors is never opened when received_engram_from_ipc is True.
+    shard1.unlink()
+    shard2.unlink()
+    _install_fake_reload(monkeypatch, [])
+
+    trained_ple = torch.full((4, 8), 42.0, dtype=torch.bfloat16)
+
+    class _Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received(
+                [("model.language_model.layers.2.ple.ple_embedding.ngram_embedding.shard_0.weight", trained_ple)],
+                True,
+            )
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", _Receiver)
+
+    class _DeviceResidentFakeParam(torch.nn.Parameter):
+        @property
+        def is_cpu(self):
+            return False
+
+    model = _FakeEngramRolloutModel(include_layer1=False, include_layer2=True)
+    model.layers["2"].ple.ple_embedding.ngram_embedding.weight = _DeviceResidentFakeParam(
+        torch.zeros((4, 8), dtype=torch.bfloat16), requires_grad=False
+    )
+    worker = _make_engram_worker(model, tmp_path, load_format="dummy")
+    assert worker._engram_weights_loaded is False
+    worker.update_weights_from_ipc()
+
+    assert worker._engram_weights_loaded is True
+    assert torch.all(model.layers["2"].ple.ple_embedding.ngram_embedding.weight == 42.0)
+
+
+def test_engram_safetensors_requires_local_index_json(tmp_path):
+    from safetensors.torch import save_file
+
+    from verl.utils.engram import iter_engram_safetensors_batches
+
+    # Remote repo ID or missing local directory must fail explicitly without downloading from HuggingFace Hub.
+    with pytest.raises(FileNotFoundError, match="local checkpoint directory"):
+        list(iter_engram_safetensors_batches("org/nonexistent-engram-repo"))
+
+    # Local directory with .safetensors shard(s) but missing model.safetensors.index.json must fail explicitly.
+    save_file(
+        {"layers.1.engram.embed.weight": torch.ones((4, 8), dtype=torch.bfloat16)},
+        str(tmp_path / "model.safetensors"),
+    )
+    with pytest.raises(FileNotFoundError, match="model.safetensors.index.json"):
+        list(iter_engram_safetensors_batches(str(tmp_path)))
