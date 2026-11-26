@@ -230,11 +230,14 @@ def test_multi_trajectory_rloo_vectorized_matches_rloo_for_single_session():
         batch_keys=["p_0_1"],
         adv_estimator=AdvantageEstimator.RLOO,
     )
+    # Both calls mutate and return the same DataProto; snapshot the scalar result
+    # before the vectorized call, otherwise the comparison is against itself.
+    scalar_advantages = scalar.batch["advantages"].clone()
     vectorized = compute_advantage_for_multi_trajectories(
         data=data,
         batch_keys=["p_0_1"],
         adv_estimator=AdvantageEstimator.RLOO_VECTORIZED,
     )
 
-    assert torch.equal(vectorized.batch["advantages"], scalar.batch["advantages"])
+    assert torch.equal(vectorized.batch["advantages"], scalar_advantages)
     assert scalar.batch["advantages"].tolist() == [[4.0, 4.0, 4.0, 4.0]]
