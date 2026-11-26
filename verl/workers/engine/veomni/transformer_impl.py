@@ -932,8 +932,12 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             rr.begin_microbatch()
             return
 
+        available = micro_batch.get("routed_experts_available") if self._router_replay_mode == "R3" else None
         routed = micro_batch.get("routed_experts", None)
         if routed is None:
+            if available is not None and not available.any():
+                rr.begin_microbatch(native_only=True)
+                return
             raise RuntimeError(
                 "router_replay REPLAY: micro_batch missing 'routed_experts'. "
                 "Verify that compute_log_prob (R2) or the rollout path (R3) "
@@ -942,7 +946,15 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             )
 
         # Nested-jagged [bs, seq, L, topk] -> rmpad [total_nnz, L, topk].
-        targets = (routed.values() if routed.is_nested else routed).to(torch.int64)
+        targets = routed.values() if routed.is_nested else routed
+        targets = targets.to(torch.int64, copy=available is not None)
+        if available is not None:
+            lengths = micro_batch["input_ids"].offsets().diff().to(targets.device)
+            available_rows = torch.repeat_interleave(
+                available.to(device=targets.device, dtype=torch.bool), lengths, output_size=targets.size(0)
+            )
+            # All-zero top-k rows use native routing in the replay controller.
+            targets.masked_fill_(~available_rows[:, None, None], 0)
         pad_size = int(output_args.get("pad_size", 0))
         if pad_size:
             targets = torch.cat([targets, targets.new_zeros((pad_size, *targets.shape[1:]))])
