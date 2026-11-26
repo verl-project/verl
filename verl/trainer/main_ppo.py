@@ -153,7 +153,6 @@ class TaskRunnerV1:
         import transfer_queue as tq
 
         from verl.trainer.ppo.v1 import get_trainer_cls
-        from verl.utils.tracking import RLInsightLogger
 
         trainer_cls = get_trainer_cls(config.trainer.v1.trainer_mode)
 
@@ -167,11 +166,6 @@ class TaskRunnerV1:
         succeeded = False
         try:
             self.trainer = trainer_cls(config=config)
-            RLInsightLogger.init(
-                project_name=config.trainer.project_name,
-                experiment_name=config.trainer.experiment_name,
-                config=config,
-            )
             self.trainer.init()
             self.init_agent_loop_manager()
             self.trainer.fit(self.agent_loop_manager)
@@ -185,8 +179,6 @@ class TaskRunnerV1:
                     tracking = getattr(self.trainer, "logger", None)
                     if tracking is not None:
                         tracking.finish(exit_code=0 if succeeded else 1)
-                    else:
-                        RLInsightLogger.finish()
                 finally:
                     tq.close()
 

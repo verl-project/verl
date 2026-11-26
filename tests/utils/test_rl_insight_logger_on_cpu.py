@@ -94,14 +94,14 @@ def test_init_registers_transfer_queue_after_client_init(monkeypatch, mock_rl_in
     assert RLInsightLogger._init_done is True
 
 
-def test_log_lazy_inits_and_writes_gauge(monkeypatch, mock_rl_insight):
+def test_log_uses_gauge_without_initializing_sdk(monkeypatch, mock_rl_insight):
     monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
 
     RLInsightLogger.log({"reward/mean": 1.25, "bad": object()}, step=3)
 
-    mock_rl_insight.init.assert_called_once_with()
+    mock_rl_insight.init.assert_not_called()
     mock_rl_insight.metric_gauge.assert_called_once_with("reward_mean", 1.25)
-    assert RLInsightLogger._init_done is True
+    assert RLInsightLogger._init_done is False
 
 
 def test_log_uses_metric_log_with_step_when_available(monkeypatch, mock_rl_insight):
@@ -209,6 +209,16 @@ def test_register_metrics_dedups_and_finish_resets(monkeypatch, mock_rl_insight)
     mock_rl_insight.finish.assert_called_once_with()
     assert RLInsightLogger._init_done is False
     assert not RLInsightLogger._registered_metrics
+
+
+def test_trace_span_forwards_without_initializing_sdk(monkeypatch, mock_rl_insight):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    mock_rl_insight.__version__ = "0.4.0"
+
+    RLInsightLogger.trace_span("agent_task", start_time_ns=1, end_time_ns=2)
+
+    mock_rl_insight.trace_span.assert_called_once_with(name="agent_task", start_time_ns=1, end_time_ns=2, attributes={})
+    mock_rl_insight.init.assert_not_called()
 
 
 def test_trace_span_warns_and_noops_with_old_rl_insight(monkeypatch, mock_rl_insight, caplog):

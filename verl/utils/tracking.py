@@ -287,7 +287,6 @@ class RLInsightLogger:
     def log(cls, data, step):
         if not cls.enabled():
             return
-        cls._ensure_rl_insight_init()
         module = cls._get_rl_insight()
         # Present on current main, but not in the released 0.3.0 package.
         metric_log = getattr(module, "metric_log", None)
@@ -375,19 +374,12 @@ class RLInsightLogger:
         ):
             cls._warn_unsupported_rl_insight("trace_span")
             return
-        cls._ensure_rl_insight_init()
-        cls._get_rl_insight().trace_span(
+        module.trace_span(
             name=name,
             start_time_ns=start_time_ns,
             end_time_ns=end_time_ns,
             attributes=dict(attributes or {}),
         )
-
-    @classmethod
-    def _ensure_rl_insight_init(cls) -> None:
-        if not cls._init_done:
-            cls._get_rl_insight().init()
-            cls._init_done = True
 
     @classmethod
     def agent_loop_session(

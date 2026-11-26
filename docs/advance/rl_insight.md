@@ -82,7 +82,7 @@ env_vars:
 
 If your launch script passes another file through `ray job submit --runtime-env`, add the variable to that file instead.
 
-Add `rl_insight` to `trainer.logger`. When `rl_insight` is enabled, verl sets `VERL_RL_INSIGHT_ENABLE=1` and initializes the RL-Insight client in each process that uses it.
+Add `rl_insight` to `trainer.logger`. verl sets `VERL_RL_INSIGHT_ENABLE=1` and passes the project and experiment names to RL-Insight when creating the training logger. Workers send state traces directly through the SDK.
 
 ```bash
 python3 -m verl.trainer.main_ppo \
