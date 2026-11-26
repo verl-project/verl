@@ -162,6 +162,22 @@ def _effective_tool(config: DictConfig, enable_key: str) -> Any:
     return _select_profiler_field(config, enable_key.removesuffix(".enable") + ".tool", None)
 
 
+def _rollout_profiler_discrete(config: DictConfig) -> bool:
+    """Whether the rollout's profiler block runs in discrete mode.
+
+    The vLLM and SGLang servers forward a scheduled ``start_profile`` only when
+    ``DistProfiler.is_discrete_mode()`` is true, so a continuous-mode rollout profiler never starts
+    during the trainer's profiled steps.
+    """
+    tool = _effective_tool(config, "actor_rollout_ref.rollout.profiler.enable")
+    if tool is None:
+        # The null-tool warning below reports this case.
+        return True
+    return bool(
+        _select_profiler_field(config, f"actor_rollout_ref.rollout.profiler.tool_config.{tool}.discrete", False)
+    )
+
+
 def _reference_shares_actor_group(config: DictConfig) -> bool:
     """Whether the reference worker is colocated with the actor/rollout group.
 
@@ -233,29 +249,40 @@ def _validate_profiler_config(
                 key,
             )
             continue
+        if key == "actor_rollout_ref.rollout.profiler.enable" and not _rollout_profiler_discrete(config):
+            # The rollout servers only forward the scheduled call in discrete mode.
+            logger.warning(
+                "%s is set, but the rollout profiler only starts for the trainer's scheduled "
+                "start_profile calls in discrete mode; set "
+                "actor_rollout_ref.rollout.profiler.tool_config.%s.discrete=true to collect.",
+                key,
+                _effective_tool(config, key),
+            )
+            continue
         enabled_roles.append(key)
 
     if not enabled_roles:
         names = ", ".join(key for key, _ in _PROFILER_ROLES)
         warnings.warn(
-            f"global_profiler.steps={list(steps)} schedules profiling but no active role enables it: "
-            f"{names} are all False, so every worker skips the trainer's start/stop_profile calls and "
-            "no trace is written. Set actor_rollout_ref.actor.profiler.enable=True (rollout and ref "
-            "follow the actor) to collect.",
+            f"global_profiler.steps={list(steps)} schedules profiling but no active role collects it: "
+            f"{names} are all False, or the enabled role cannot receive the scheduled calls. Every "
+            "worker then skips the trainer's start/stop_profile calls and no trace is written. Set "
+            "actor_rollout_ref.actor.profiler.enable=True (rollout and ref follow the actor) to collect.",
             stacklevel=2,
         )
         return
 
-    # Warn when every enabled role's *effective* tool is null. The role block interpolates
+    # Warn when any enabled role's *effective* tool is null. The role block interpolates
     # `global_profiler.tool` as its default but overrides it with its own value -- including an
-    # explicit null -- so the global setting alone does not decide what the worker gets.
-    effective_tools = {_effective_tool(config, key) for key in enabled_roles}
-    if all(tool is None for tool in effective_tools):
+    # explicit null -- so the global setting alone does not decide what the worker gets. Check each
+    # role: one role with a working tool must not hide another role that falls back to no-op.
+    null_tool_roles = [key for key in enabled_roles if _effective_tool(config, key) is None]
+    if null_tool_roles:
         warnings.warn(
-            "Profiling is enabled and steps are configured, but the effective profiler tool is null for "
-            "every enabled role. DistProfiler falls back to a no-op backend for an unknown tool, so those "
-            "steps produce no trace. Set global_profiler.tool to one of: nsys, npu, torch, torch_memory, "
-            "precision_debugger.",
+            "Profiling is enabled and steps are configured, but the effective profiler tool is null for: "
+            f"{', '.join(null_tool_roles)}. DistProfiler falls back to a no-op backend for an unknown "
+            "tool, so those steps produce no trace. Set global_profiler.tool to one of: nsys, npu, "
+            "torch, torch_memory, precision_debugger.",
             stacklevel=2,
         )
 

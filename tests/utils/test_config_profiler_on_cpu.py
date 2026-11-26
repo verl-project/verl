@@ -34,19 +34,24 @@ _CRITIC = "critic.profiler.enable"
 _ALL_ROLES = (_ACTOR, _REF, _ROLLOUT, _CRITIC)
 
 
-def _config(*, tool="npu", steps=(1,), enabled=(), role_tools=None, actor_use_kl_loss=False):
+def _config(*, tool="npu", steps=(1,), enabled=(), role_tools=None, role_discrete=None, actor_use_kl_loss=False):
     """Build a config where every role is off unless its key is listed in ``enabled``.
 
     Each role's `tool` interpolates `global_profiler.tool` as its default, exactly like
     `verl/trainer/config/{actor,ref,rollout,critic}/*.yaml`
     (`tool: ${oc.select:global_profiler.tool,null}`), so a role only overrides it by naming one.
+    ``role_discrete`` sets each role's ``tool_config.<tool>.discrete``; the shipped default is False.
     """
     state = dict.fromkeys(_ALL_ROLES, False)
     state.update(dict.fromkeys(enabled, True))
     role_tools = role_tools or {}
+    role_discrete = role_discrete or {}
 
     def block(key):
-        profiler = {"enable": state[key]}
+        profiler = {
+            "enable": state[key],
+            "tool_config": {name: {"discrete": role_discrete.get(key, False)} for name in ("npu", "torch")},
+        }
         if key in role_tools:
             profiler["tool"] = role_tools[key]
         else:
@@ -87,7 +92,7 @@ def test_steps_without_any_enabled_role_names_the_missing_half():
     messages = _run(_config())
 
     assert len(messages) == 1
-    assert "global_profiler.steps=[1] schedules profiling but no active role enables it" in messages[0]
+    assert "global_profiler.steps=[1] schedules profiling but no active role collects it" in messages[0]
     assert f"{_ACTOR}, {_REF}, {_ROLLOUT}, {_CRITIC} are all False" in messages[0]
     assert "actor_rollout_ref.actor.profiler.enable=True" in messages[0]
 
@@ -135,7 +140,7 @@ def test_colocated_reference_alone_is_not_a_trigger():
     messages = _run(_config(enabled=(_REF,)), use_reference_policy=True)
 
     assert len(messages) == 1
-    assert "no active role enables it" in messages[0]
+    assert "no active role collects it" in messages[0]
 
 
 def test_standalone_reference_alone_is_a_trigger():
@@ -186,7 +191,7 @@ def test_profiler_enable_on_an_inactive_critic_is_not_a_trigger():
     messages = _run(config, use_critic=False)
 
     assert len(messages) == 1
-    assert "no active role enables it" in messages[0]
+    assert "no active role collects it" in messages[0]
 
 
 def test_inactive_role_is_named_in_the_driver_log(caplog):
@@ -216,8 +221,40 @@ def test_any_single_active_role_satisfies_the_trigger(role):
         return
     if role == _CRITIC:
         assert _run(_config(enabled=(role,)), use_critic=True) == []
+    elif role == _ROLLOUT:
+        # The rollout server forwards scheduled start/stop only in discrete mode.
+        assert _run(_config(enabled=(role,), role_discrete={role: True})) == []
     else:
         assert _run(_config(enabled=(role,))) == []
+
+
+def test_rollout_outside_discrete_mode_is_not_a_trigger(caplog):
+    # Both vLLM and SGLang gate start_profile on is_discrete_mode(); continuous mode never starts a
+    # profiler for the trainer's scheduled steps, so the rollout must not count as a collector.
+    with caplog.at_level(logging.WARNING, logger="verl.utils.config"):
+        messages = _run(_config(enabled=(_ROLLOUT,)))
+
+    assert len(messages) == 1
+    assert "no active role collects it" in messages[0]
+    assert (
+        "rollout profiler only starts for the trainer's scheduled start_profile calls in discrete mode" in caplog.text
+    )
+
+
+def test_rollout_in_discrete_mode_counts_as_a_trigger():
+    assert _run(_config(enabled=(_ROLLOUT,), role_discrete={_ROLLOUT: True})) == []
+
+
+def test_null_tool_warns_even_when_another_role_can_collect():
+    # The actor explicitly nulls its tool while the critic inherits npu. A working critic must not
+    # hide the actor's no-op backend.
+    config = _config(enabled=(_ACTOR, _CRITIC), role_tools={_ACTOR: None})
+    config.critic.enable = True
+
+    messages = _run(config, use_critic=True)
+
+    assert len(messages) == 1
+    assert f"effective profiler tool is null for: {_ACTOR}" in messages[0]
 
 
 def test_fully_configured_profiler_is_silent():
@@ -235,7 +272,7 @@ def test_schema_without_profiler_blocks_is_read_as_disabled():
     messages = _run(OmegaConf.create({"global_profiler": {"tool": "npu", "steps": [1]}}))
 
     assert len(messages) == 1
-    assert "no active role enables it" in messages[0]
+    assert "no active role collects it" in messages[0]
 
 
 def test_unresolvable_interpolation_is_read_as_disabled():
