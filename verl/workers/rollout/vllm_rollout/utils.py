@@ -563,6 +563,7 @@ class vLLMColocateWorkerExtension:
         logger.info(f"Loaded {loaded_count} Engram/PLE tensor(s) from safetensors under {model_path!r}")
         return loaded_count
 
+
 class SuppressSignalInThread:
     def __enter__(self):
         self.original_signal = signal.signal
