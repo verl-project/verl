@@ -72,7 +72,6 @@ RUN cd /workspace && git clone https://github.com/verl-project/verl.git && \
     
 # for qwen3.5 — versions pinned for reproducibility. mcore_bridge 1.7.0: 1.5.x/1.6.x cap
 # transformers<5.13, which would downgrade below vLLM 0.34.0's transformers>=5.16.1.
-# pip does not use verl's uv lockfile; pin shared versions compatible with vLLM 0.34.
 RUN pip install --no-cache-dir \
     "git+https://github.com/ISEEKYAN/mbridge.git@a61943d7fcb34a190471cfeb0a0eb8bbda621ddf" \
     mcore_bridge==1.7.0 \
@@ -116,12 +115,6 @@ RUN cd /workspace && git clone https://github.com/sgl-project/sglang.git && \
       python/sglang/srt/layers/layernorm.py && \
     sed -zi 's/                out = torch.empty_like(x)\n                residual_out = torch.empty_like(x)\n                if post_residual_addition is not None:\n                    residual = residual + post_residual_addition\n                fused_add_rms_norm(\n                    out, x, residual_out, residual, w, self.variance_epsilon\n                )\n                return out, residual_out/                if post_residual_addition is not None:\n                    residual = residual + post_residual_addition\n                residual = residual.contiguous()\n                fused_add_rms_norm(x, residual, w, self.variance_epsilon)\n                return x, residual/' \
       python/sglang/srt/layers/layernorm.py && \
-    # [Bugfix][VLM] Qwen2.5-VL vision rotary embedding vs transformers >5.8:
-    # forward(seqlen) became forward(position_ids), so the GPU scalar sglang passes
-    # in hit "cuda:0 and cpu" against the CPU inv_freq buffer and killed the
-    # scheduler. Build the sequence locally so both transformers APIs work.
-    sed -zi 's|        max_grid_size = grid_thw\[:, 1:\]\.max()\n        rotary_pos_emb_full = self\.rotary_pos_emb(max_grid_size)|        max_grid_size = int(grid_thw[:, 1:].max())\n        # transformers >5.8 changed forward(seqlen) to forward(position_ids); build\n        # the sequence here so both APIs work. inv_freq stays on CPU like pos_ids.\n        inv_freq = self.rotary_pos_emb.inv_freq\n        seq = torch.arange(max_grid_size, device=inv_freq.device, dtype=inv_freq.dtype)\n        rotary_pos_emb_full = torch.outer(seq, inv_freq)|' \
-      python/sglang/srt/models/qwen2_5_vl.py && \
     cp python/pyproject_other.toml python/pyproject.toml && \
     SGLANG_BUILD_RUST_EXTS=none pip install --no-cache-dir --no-build-isolation --no-deps \
       -e ./python \
@@ -131,7 +124,6 @@ RUN cd /workspace && git clone https://github.com/sgl-project/sglang.git && \
     pip install --no-cache-dir IPython==9.15.0 && \
     cd python/sglang/kernels/aot && cp pyproject_rocm.toml pyproject.toml && rm -rf build && \
     sed -i 's|f"--amdgpu-target={amdgpu_target}"|"--offload-arch=gfx942", "--offload-arch=gfx950"|' setup_rocm.py && \
-    sed -i '/amdgpu_target not in \["gfx942", "gfx950"\]/,/sys.exit(1)/d' setup_rocm.py && \
     sed -zi 's/#if HIP_FP8_TYPE_FNUZ\n#include <c10\/util\/Float8_e4m3fnuz.h>\nusing FP8_TYPE = c10::Float8_e4m3fnuz;\nconstexpr auto FP8_E4M3_MAX = 224.0f;\n#else\n#if HIP_FP8_TYPE_E4M3\n#include <c10\/util\/Float8_e4m3fn.h>\nusing FP8_TYPE = c10::Float8_e4m3fn;\nC10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();\n#else\n#error "fp8 is not supported in this processor (arch < gfx942)."\n#endif  \/\/ HIP_FP8_TYPE_E4M3\n#endif  \/\/ HIP_FP8_TYPE_FNUZ/#if defined(__gfx942__)\n#include <c10\/util\/Float8_e4m3fnuz.h>\nusing FP8_TYPE = c10::Float8_e4m3fnuz;\nconstexpr auto FP8_E4M3_MAX = 224.0f;\n#else\n#include <c10\/util\/Float8_e4m3fn.h>\nusing FP8_TYPE = c10::Float8_e4m3fn;\nC10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();\n#endif  \/\/ __gfx942__/' include/utils.h && \
     python setup_rocm.py install
 
