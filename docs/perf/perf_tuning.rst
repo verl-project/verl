@@ -323,9 +323,12 @@ output head dominates activation memory.
      support multi-label/top-k queries; ``liger`` wraps Liger's fused scaled
      cross entropy.
    - ``cut_cross_entropy`` uses CCE for the log-probability path and a
-     vocabulary-chunked estimator for token entropy, whose chunk size is capped
-     at a few MiB. It therefore keeps the large-vocabulary memory advantage but
-     is intended for single-label queries: top-k distillation / score centering
+     vocabulary-chunked estimator for token entropy. The estimator upcasts its
+     logits to fp32 (matching the ``triton`` kernel's fp32 accumulation) so the
+     entropy stays within ``~1e-3`` of the other backends in bf16; its scratch
+     is capped at a few MiB. It therefore keeps the large-vocabulary memory
+     advantage at the cost of one extra fp32 pass over the vocabulary, and is
+     intended for single-label queries: top-k distillation / score centering
      raise a clear ``ValueError`` instead of silently falling back.
    - CCE needs the full vocabulary on each device. Megatron tensor-parallel
      output heads (which shard the vocabulary) and any tensor-parallel process
