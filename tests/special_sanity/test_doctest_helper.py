@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from packaging.specifiers import SpecifierSet
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCTEST_PATH = Path("tests/e2e/doctests")
@@ -76,6 +77,47 @@ def test_repository_documents(helper):
         assert (REPO_ROOT / script).is_file()
 
 
+def installation_version_table(helper, backend):
+    guide = (REPO_ROOT / helper.INSTALL_DOC).read_text(encoding="utf-8")
+    tables = [block for block in guide.split("\n\n") if re.search(rf"^{backend}[ \t]+``", block, re.MULTILINE)]
+    assert len(tables) == 1, f"Expected one {backend} version table"
+    return dict(re.findall(r"^([\w-]+)[ \t]+``([^`]+)``", tables[0], re.MULTILINE))
+
+
+@pytest.mark.parametrize("backend", ["vLLM", "SGLang"])
+def test_documented_versions_match_installer(helper, backend):
+    table = installation_version_table(helper, backend)
+    installer = (REPO_ROOT / f"scripts/install_{backend.lower()}_mcore_npu.sh").read_text(encoding="utf-8")
+    requirements = (REPO_ROOT / "requirements-npu.txt").read_text(encoding="utf-8")
+    # Expand the shared requirements in order: vLLM restores its own Triton pin afterwards.
+    commands = "\n".join(line for line in installer.splitlines() if line.lstrip().startswith("pip install "))
+    commands = commands.replace("-r requirements-npu.txt", "\n" + requirements + "\n")
+    commands = re.sub(r"(?m)#.*$", "", commands)
+    pins = dict(re.findall(r"""(?:^|[\s"'])([\w-]+)([=<>!~][^"'\s]+)""", commands))
+    packages = ["torch", "torch_npu", "transformers", "triton-ascend"]
+    repositories = [backend, "Megatron-LM"]
+    if backend == "vLLM":
+        packages.extend(("torchvision", "torchaudio", "xgrammar"))
+        repositories.append("vLLM-Ascend")
+    for name in packages:
+        expected = table[name]
+        if expected[0].isdigit():
+            expected = "==" + expected
+        assert name in pins, f"{backend} installer must specify {name}"
+        assert SpecifierSet(pins[name]) == SpecifierSet(expected), f"{name}: script {pins[name]}, guide {expected}"
+
+    refs = {}
+    for clone in re.findall(r"(?m)^[ \t]*git clone[ \t]+([^#\n]+)", installer):
+        repo = re.search(r"/([^/\s]+)\.git\b", clone)
+        branch = re.search(r"(?:^|\s)(?:--branch[=\s]+|-b\s*)(\S+)", clone)
+        if repo and branch:
+            refs[repo[1].lower()] = branch[1].strip("'\"").removeprefix("releases/").removeprefix("v")
+    for name in repositories:
+        actual = refs.get(name.lower())
+        assert actual == table[name].removeprefix("v"), f"{name}: installer ref {actual}, guide {table[name]}"
+    assert re.findall(r"(?m)^[ \t]*cd MindSpeed && git checkout (\S+)", installer) == [table["MindSpeed"]]
+
+
 def test_sglang_python_matches_kernel_archive(helper):
     """Reject a documented Python version that cannot install the script's kernel wheels."""
     installer = (REPO_ROOT / "scripts/install_sglang_mcore_npu.sh").read_text(encoding="utf-8")
@@ -85,10 +127,7 @@ def test_sglang_python_matches_kernel_archive(helper):
     block = helper.require_doctest_block("installation-sglang")
     conda_versions = re.findall(r"^conda create\b[^\n]*\bpython=(\d+\.\d+)\b", block, re.MULTILINE)
     assert conda_versions == [expected], f"SGLang kernel wheels require Python {expected}; found {conda_versions}"
-    document = (REPO_ROOT / helper.INSTALL_DOC).read_text(encoding="utf-8")
-    sglang_section = document.partition("3. 自定义安装-SGLang + FSDP/Megatron")[2]
-    table_python = re.search(r"^Python\s+``([^`]+)``", sglang_section, re.MULTILINE)
-    assert table_python and table_python[1] == expected, f"SGLang's version table must specify Python {expected}"
+    assert installation_version_table(helper, "SGLang")["Python"] == expected
 
 
 @pytest.mark.parametrize("name", ["installation-vllm", "quickstart-fsdp2_vllm"])

@@ -7,7 +7,7 @@ These tests execute commands from the public [source installation](../../../docs
 
 | CI job | What it verifies |
 | --- | --- |
-| CPU documentation checks | Extract the documented commands, check Bash syntax, and test the workers with pytest. |
+| CPU documentation checks | Check the documented commands, Bash syntax, installer pins against the version tables, and SGLang's Python ABI. Exercise the workers with pytest. |
 | A3 vLLM Docker build (ARM64 CPU) | Build the PR checkout with its submodules and read package metadata inside the new image. The image stays on the build runner. |
 | Published A3 vLLM image (8 NPUs) | Run one GRPO step from the installed source at `/verl` with FSDP2 and Megatron. |
 | CANN source installation (8 NPUs) | Create the documented Conda environment, install the PR commit, check imports and run one GRPO step for each FSDP2/Megatron × vLLM/SGLang combination. |
