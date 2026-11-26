@@ -445,6 +445,8 @@ class VeOmniEngineConfig(EngineConfig):
     full_determinism: bool = False
     mixed_precision: bool = False
     low_precision_reduce_scatter_comm: bool = False
+    # Outer AMP is separate from FSDP parameter mixed precision.
+    enable_autocast: bool = True
     init_device: str = "meta"
     enable_full_shard: bool = False
     ckpt_manager: Literal["dcp"] = "dcp"
@@ -753,3 +755,4 @@ class TrainingWorkerConfig(BaseConfig):
     # Users can pass in a higher-order function to take more parameters
     auto_select_engine_optim_fn: Callable[["HFModelConfig", str], tuple["EngineConfig", "OptimizerConfig"]] = None
     extra_context: dict = field(default_factory=dict)
+

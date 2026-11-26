@@ -21,6 +21,8 @@ freeze_ple_embeddings: false
 frozen_ple_dtype: null
 
 mixed_precision: true
+# Outer AMP only. Set false for Qwen4-Exp NPU checkpointing; FSDP stays BF16.
+enable_autocast: true
 
 # Opt in to node-local BF16 gradient transport with FP32 accumulation and output.
 # Requires CUDA FSDP2 with mixed_precision; affects backward gradient communication only.
@@ -144,3 +146,4 @@ router_replay:
   #       ``rollout.enable_rollout_routing_replay=True`` and rollout backend
   #       support for returning the selected indices.
   mode: disabled
+
