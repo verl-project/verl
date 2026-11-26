@@ -278,6 +278,7 @@ def patch_fused_forward(
         impl_backend = (
             "liger" if model_config.use_liger else ("tilelang" if configured_backend == "tilelang" else "triton")
         )
+    validate_backend_for_vocab_parallel(impl_backend)
     if impl_backend == "liger" and engine_config is not None and model.config.params_dtype == torch.bfloat16:
         _configure_liger_runtime(model, engine_config)
     setattr(model, _FUSED_IMPL_BACKEND_ATTR, impl_backend)

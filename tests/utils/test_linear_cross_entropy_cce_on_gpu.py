@@ -140,6 +140,44 @@ def test_single_optimizer_step():
     assert not torch.equal(hidden.detach(), hidden_before)
 
 
+def test_dense_model_use_fused_kernels_training_step():
+    """The FSDP dense-model path must train one step with the CCE backend."""
+    pytest.importorskip("transformers")
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from verl.models.transformers.monkey_patch import patch_forward_with_backends
+
+    _clear()
+    torch.manual_seed(0)
+    config = LlamaConfig(
+        vocab_size=VOCAB_SIZE,
+        hidden_size=HIDDEN_SIZE,
+        intermediate_size=1024,
+        num_hidden_layers=1,
+        num_attention_heads=32,
+        num_key_value_heads=32,
+        max_position_embeddings=32,
+    )
+    model = LlamaForCausalLM(config).to(device="cuda", dtype=DTYPE)
+    patch_forward_with_backends(model, use_fused_kernels=True, fused_kernels_backend="cut_cross_entropy")
+    assert model._verl_fused_kernels_backend == "cut_cross_entropy"
+
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    input_ids = torch.randint(0, VOCAB_SIZE, (1, 16), device="cuda")
+    output = model(input_ids=input_ids, labels=input_ids, temperature=1.0, return_dict=True)
+    loss = -(output.log_probs.mean() + output.entropy.mean())
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    assert torch.isfinite(loss)
+    assert model.lm_head.weight.grad is not None
+    assert torch.isfinite(model.lm_head.weight).all()
+
+    del model, optimizer
+    _clear()
+
+
 def test_peak_memory_below_unfused_and_not_above_triton():
     num_tokens = 1024
     hidden, weight, labels = _make_inputs(num_tokens, requires_grad=False)
