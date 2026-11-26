@@ -180,6 +180,8 @@ class FSDPEngine(BaseEngine):
         self._is_lora = self.model_config.lora_rank > 0
         # Set in _build_fsdp_module when FSDP2 CPUOffloadPolicy is configured (see #5995).
         self._uses_fsdp2_cpu_offload_policy = False
+        # Set by set_rollout_weight_quantizer when the rollout is quantized.
+        self._rollout_weight_quantizer = None
 
         # Defaults for mixed-precision state. _build_fsdp_module overrides these when it
         # runs; subclasses that bypass _build_fsdp_module (e.g. VeOmniEngine) keep the
@@ -928,6 +930,24 @@ class FSDPEngine(BaseEngine):
         return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+        per_tensor_param, peft_config = self._get_per_tensor_param(
+            layered_summon=layered_summon, base_sync_done=base_sync_done, **kwargs
+        )
+        if self._rollout_weight_quantizer is not None:
+            if peft_config is not None:
+                # vLLM applies the adapter on top of the base weights, so they would have to stay unquantized.
+                raise NotImplementedError(
+                    "A quantized rollout needs full weights: set actor_rollout_ref.model.lora.merge=True "
+                    "to sync merged LoRA weights"
+                )
+            per_tensor_param = self._rollout_weight_quantizer(per_tensor_param)
+        return per_tensor_param, peft_config
+
+    def set_rollout_weight_quantizer(self, quantizer) -> None:
+        self._rollout_weight_quantizer = quantizer
+
+    def _get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+        """Full HF-keyed weights in training precision, before any rollout quantization."""
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
@@ -1031,7 +1051,8 @@ class FSDPEngine(BaseEngine):
         """Full HF-format weights for the checkpoint 'hf_model' export, with LoRA adapters merged."""
         if self._is_lora:
             return self._merged_lora_per_tensor_param(), None
-        return self.get_per_tensor_param()
+        # the checkpoint keeps training precision even when the rollout is quantized
+        return self._get_per_tensor_param()
 
     def disable_adapter(self) -> ContextManager:
         return self.module.disable_adapter()
