@@ -20,6 +20,8 @@ import torch
 import torch.distributed as dist
 from cuda.tile.tune import exhaustive_search
 
+from verl.utils.device import get_torch_device
+
 from ..linear_cross_entropy_config import BackwardEnum, _config
 
 # 32 divides both the forward split and the backward chunk width.
@@ -118,8 +120,9 @@ def _launch_forward(stream, x, w, labels, maxima, sums, moments, targets, offset
             return ((m + tile[0] - 1) // tile[0], splits)
 
         tile = _FORWARD_TILES[0]
-        with torch.cuda.device(x.device):
-            capturing = torch.cuda.is_current_stream_capturing()
+        device_module = get_torch_device()
+        with device_module.device(x.device):
+            capturing = device_module.is_current_stream_capturing()
             if not capturing:
                 # Each trial overwrites the statistics and the same owned label
                 # slots. Unowned TP targets retain their initial zeros.
@@ -296,14 +299,15 @@ def _launch_chunk(stream, x, w, labels, maximum, total, mean, g, h, dst, offset,
         cfg = _CHUNK_CONFIGS[-1]
         # Tuning synchronizes the device. A cold graph capture can use a static
         # launch; the next eager invocation will still tune this shape.
-        with torch.cuda.device(x.device):
-            capturing = torch.cuda.is_current_stream_capturing()
+        device_module = get_torch_device()
+        with device_module.device(x.device):
+            capturing = device_module.is_current_stream_capturing()
             if not capturing:
                 configs = [
                     cfg
                     for cfg in _CHUNK_CONFIGS
                     if cfg.num_ctas == 1
-                    or (m >= cfg.tm and n >= cfg.tn and torch.cuda.get_device_capability(x.device)[0] >= 9)
+                    or (m >= cfg.tm and n >= cfg.tn and device_module.get_device_capability(x.device)[0] >= 9)
                 ]
                 result = exhaustive_search(
                     configs,
@@ -383,7 +387,8 @@ def efficient_entropy_forward(hidden, weight, labels, reduction, temperature, gr
     entropy = torch.empty_like(maximum)
     out = targets if reduction == 0 else torch.zeros(1, **options)
     rank = 0 if group is None else dist.get_rank(group)
-    stream = torch.cuda.current_stream(hidden.device)
+    device_module = get_torch_device()
+    stream = device_module.current_stream(hidden.device)
     _launch_forward(stream, hidden, weight, labels, maxima, sums, moments, targets, rank * v, 1.0 / temperature)
     grid = (_blocks(m),)
     if group is None:
@@ -393,9 +398,9 @@ def efficient_entropy_forward(hidden, weight, labels, reduction, temperature, gr
     else:
         local_maxima = maxima.clone()
         dist.all_reduce(maxima, op=dist.ReduceOp.MAX, group=group)
-        aux = torch.cuda.Stream(device=hidden.device)
+        aux = device_module.Stream(device=hidden.device)
         aux.wait_stream(stream)
-        with torch.cuda.stream(aux):
+        with device_module.stream(aux):
             dist.all_reduce(targets, group=group)
         ct.launch(stream, grid, _epilogue_tp, (maxima, local_maxima, sums, moments, maximum, total, mean))
         stream.wait_stream(aux)
@@ -409,7 +414,7 @@ def efficient_entropy_backward(
 ):
     m, d = hidden.shape
     v = weight.shape[0]
-    stream = torch.cuda.current_stream(hidden.device)
+    stream = get_torch_device().current_stream(hidden.device)
     g = g.reshape_as(labels) if labels.ndim == 2 else g.reshape(-1)
     args = (hidden, weight, labels, maximum, total, mean, g, h)
     offset = 0 if group is None else dist.get_rank(group) * v
