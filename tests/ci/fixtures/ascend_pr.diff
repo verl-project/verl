@@ -1,0 +1,12 @@
+diff --git a/requirements-npu.txt b/requirements-npu.txt
+new file mode 100644
+--- /dev/null
++++ b/requirements-npu.txt
+@@ -0,0 +1 @@
++# Updated NPU dependencies
+diff --git a/examples/data_preprocess/gsm8k_multiturn_sft.py b/examples/data_preprocess/gsm8k_multiturn_sft.py
+new file mode 100644
+--- /dev/null
++++ b/examples/data_preprocess/gsm8k_multiturn_sft.py
+@@ -0,0 +1 @@
++# Updated SFT preprocessing

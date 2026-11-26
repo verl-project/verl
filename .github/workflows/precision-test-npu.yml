@@ -1,0 +1,138 @@
+name: Precision tests (Ascend)
+on:
+  pull_request:
+    branches: [main, 'v0.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: precision-npu-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  coverage_recommendation:
+    if: github.repository_owner == 'verl-project'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      workflows: ${{ steps.export.outputs.workflows }}
+      baseline_run: ${{ steps.baseline.outputs.run }}
+      selector_outcome: ${{ steps.precision.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci-config
+          persist-credentials: false
+          sparse-checkout: |
+            .github/workflows
+            scripts/ci/coverage
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install PyYAML==6.0.2
+      - name: Select a usable base-branch workflow map
+        id: baseline
+        continue-on-error: true
+        working-directory: ci-config
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+        run: python scripts/ci/coverage/baseline.py select ../baseline
+      - name: Recommend workflows from the saved map
+        id: precision
+        if: steps.baseline.outputs.run != ''
+        continue-on-error: true
+        uses: lb-actions/precision-test@12d365c0b437992142782f0b50c7581cbcc52d89
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          repo: verl
+          source-dir: baseline/covstub
+          map-file: baseline/test_case_map.json
+          github-pr: '${{ github.repository }}#${{ github.event.pull_request.number }}'
+      - name: Export recommended workflows
+        id: export
+        if: steps.precision.outcome == 'success'
+        run: |
+          if [[ -f recommended_pytest_paths.txt ]]; then
+            workflows=$(jq -Rsc 'split("\n") | map(select(length > 0))' recommended_pytest_paths.txt)
+            echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
+          fi
+
+  recommend:
+    needs: coverage_recommendation
+    if: ${{ !cancelled() && github.repository_owner == 'verl-project' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      workflows: ${{ steps.route.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select runnable Ascend workflows
+        id: route
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASELINE_RUN: ${{ needs.coverage_recommendation.outputs.baseline_run }}
+          SELECTOR_OUTCOME: ${{ needs.coverage_recommendation.outputs.selector_outcome || needs.coverage_recommendation.result }}
+          COVERAGE_WORKFLOWS: ${{ needs.coverage_recommendation.outputs.workflows }}
+        run: python scripts/ci/coverage/route_pr.py
+
+  e2e_ascend:
+    needs: recommend
+    if: ${{ !cancelled() && needs.recommend.result == 'success' && contains(fromJSON(needs.recommend.outputs.workflows), 'e2e_ascend.yml') }}
+    uses: ./.github/workflows/e2e_ascend.yml
+
+  e2e_ppo_trainer_megatron_vllm_2_ascend:
+    needs: recommend
+    if: ${{ !cancelled() && needs.recommend.result == 'success' && contains(fromJSON(needs.recommend.outputs.workflows), 'e2e_ppo_trainer_megatron_vllm_2_ascend.yml') }}
+    uses: ./.github/workflows/e2e_ppo_trainer_megatron_vllm_2_ascend.yml
+
+  e2e_ppo_trainer_megatron_vllm_ascend:
+    needs: recommend
+    if: ${{ !cancelled() && needs.recommend.result == 'success' && contains(fromJSON(needs.recommend.outputs.workflows), 'e2e_ppo_trainer_megatron_vllm_ascend.yml') }}
+    uses: ./.github/workflows/e2e_ppo_trainer_megatron_vllm_ascend.yml
+
+  e2e_ppo_trainer_veomni_vllm_ascend:
+    needs: recommend
+    if: ${{ !cancelled() && needs.recommend.result == 'success' && contains(fromJSON(needs.recommend.outputs.workflows), 'e2e_ppo_trainer_veomni_vllm_ascend.yml') }}
+    uses: ./.github/workflows/e2e_ppo_trainer_veomni_vllm_ascend.yml
+
+  e2e_sft_llm_ascend:
+    needs: recommend
+    if: ${{ !cancelled() && needs.recommend.result == 'success' && contains(fromJSON(needs.recommend.outputs.workflows), 'e2e_sft_llm_ascend.yml') }}
+    uses: ./.github/workflows/e2e_sft_llm_ascend.yml
+
+  e2e_v1_separate_async_ascend:
+    needs: recommend
+    if: ${{ !cancelled() && needs.recommend.result == 'success' && contains(fromJSON(needs.recommend.outputs.workflows), 'e2e_v1_separate_async_ascend.yml') }}
+    uses: ./.github/workflows/e2e_v1_separate_async_ascend.yml
+
+  model_ascend:
+    needs: recommend
+    if: ${{ !cancelled() && needs.recommend.result == 'success' && contains(fromJSON(needs.recommend.outputs.workflows), 'model_ascend.yml') }}
+    uses: ./.github/workflows/model_ascend.yml
+
+  npu_unit_tests:
+    needs: recommend
+    if: ${{ !cancelled() && needs.recommend.result == 'success' && contains(fromJSON(needs.recommend.outputs.workflows), 'npu_unit_tests.yml') }}
+    uses: ./.github/workflows/npu_unit_tests.yml
+
+  reward_model_vllm_ascend:
+    needs: recommend
+    if: ${{ !cancelled() && needs.recommend.result == 'success' && contains(fromJSON(needs.recommend.outputs.workflows), 'reward_model_vllm_ascend.yml') }}
+    uses: ./.github/workflows/reward_model_vllm_ascend.yml
+
+  vllm_ascend:
+    needs: recommend
+    if: ${{ !cancelled() && needs.recommend.result == 'success' && contains(fromJSON(needs.recommend.outputs.workflows), 'vllm_ascend.yml') }}
+    uses: ./.github/workflows/vllm_ascend.yml
