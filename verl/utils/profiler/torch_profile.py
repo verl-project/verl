@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import logging
 import os
 import re
 from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -25,7 +25,7 @@ import torch
 from verl.plugin.platform import get_platform
 
 from .config import DEVICE_ACTIVITIES, DEVICE_CONTENTS, ProfilerConfig, TorchProfilerToolConfig
-from .profile import DistProfiler
+from .profile import DistProfiler, _wrap_with_profile_context
 
 logger = logging.getLogger(__name__)
 
@@ -470,8 +470,8 @@ class Profiler(DistProfiler):
         scheduled = bool(kwargs_outer.get("scheduled", False))
 
         def decorator(func):
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs_inner):
+            @contextmanager
+            def profile_context(*args, **kwargs_inner):
                 # Prefer the stage label (`role`, e.g. "actor_compute_log_prob"), which names both
                 # the role and the function it ran: in a colocated worker the method name alone
                 # cannot say whether a log-prob forward belongs to the actor or the reference
@@ -481,7 +481,9 @@ class Profiler(DistProfiler):
                 if not self.discrete:
                     # In continuous mode, we just record function, profiler started globally
                     with torch.profiler.record_function(profile_name):
-                        return func(*args, **kwargs_inner)
+                        yield func
+
+                    return
 
                 # In discrete mode, we start/stop profiler around the function.
                 # Only the update stage is scheduled (its mini-batches drive step()); every other
@@ -511,13 +513,13 @@ class Profiler(DistProfiler):
                     Profiler._active_prof = prof
                 try:
                     with torch.profiler.record_function(profile_name):
-                        return func(*args, **kwargs_inner)
+                        yield func
                 finally:
                     if schedule_kwargs is not None:
                         self._flush_partial_window(prof)
                         Profiler._active_prof = None
                     prof.stop()
 
-            return wrapper
+            return _wrap_with_profile_context(func, profile_context)
 
         return decorator
