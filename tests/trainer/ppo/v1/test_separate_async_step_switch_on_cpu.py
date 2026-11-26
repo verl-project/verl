@@ -633,3 +633,47 @@ def test_setup_standalone_memory_from_hydra_override(monkeypatch, model_engine, 
     assert created_configs[0][0].actor_rollout_ref.rollout.gpu_memory_utilization == expected
     assert trainer.config.actor_rollout_ref.rollout.gpu_memory_utilization == 0.45
     assert OmegaConf.to_container(trainer.config, resolve=False) == original
+
+
+def test_compute_old_log_prob_skips_save_model_to_cpu_when_sync_step_is_one(monkeypatch):
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        trainer_module.PPOTrainer,
+        "_compute_old_log_prob",
+        lambda self, batch, metrics: calls.append(("super", self.local_trigger_step)) or batch,
+    )
+
+    def make_stub(parameter_sync_step: int, *, bypass_mode: bool = False) -> PPOTrainerSeparateAsync:
+        trainer = object.__new__(PPOTrainerSeparateAsync)
+        trainer.config = OmegaConf.create({"algorithm": {"rollout_correction": {"bypass_mode": bypass_mode}}})
+        trainer.parameter_sync_step = parameter_sync_step
+        trainer.actor_rollout_wg = SimpleNamespace(
+            save_model_to_cpu=lambda slot: calls.append(("save", slot)),
+            restore_model_from_cpu=lambda slot: calls.append(("restore", slot)),
+            clear_cpu_model=lambda slot: calls.append(("clear", slot)),
+        )
+        return trainer
+
+    # parameter_sync_step == 1: local_trigger_step is always 0, so snapshot 0 is never restored and must be skipped.
+    calls.clear()
+    t1 = make_stub(parameter_sync_step=1)
+    t1.local_trigger_step = 0
+    t1._compute_old_log_prob("b0", {})
+    assert calls == [("super", 0)]
+
+    # parameter_sync_step > 1: snapshot 0 is saved at trigger 0 and restored at trigger 1.
+    calls.clear()
+    t2 = make_stub(parameter_sync_step=2)
+    t2.local_trigger_step = 0
+    t2._compute_old_log_prob("b0", {})
+    t2.local_trigger_step = 1
+    t2._compute_old_log_prob("b1", {})
+    assert calls == [
+        ("save", 0),
+        ("super", 0),
+        ("save", 1),
+        ("restore", 0),
+        ("super", 1),
+        ("restore", 1),
+        ("clear", 1),
+    ]

@@ -55,13 +55,14 @@ from verl.utils.profiler import (
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, prefix_cache_salt
 from verl.workers.rollout.utils import (
+    dedup_image_tokens,
     extract_response_topk_logprobs_with_coverage,
+    extract_sampled_logprobs,
     get_max_position_embeddings,
     get_node_visible_devices,
     get_vision_placeholder_token_ids,
-    qwen2_5_vl_dedup_image_tokens,
     run_uvicorn,
     validate_topk_logprob_request,
     warn_topk_logprob_budget,
@@ -87,6 +88,7 @@ _VERL_MANAGED_VLLM_ARGS = {
     "enable_expert_parallel": "rollout.expert_parallel_size (= tensor_model_parallel_size * data_parallel_size)",
     "enable_lora": "actor_rollout_ref.model.lora",
     "max_lora_rank": "actor_rollout_ref.model.lora",
+    "enable_tower_connector_lora": "actor_rollout_ref.model.lora",
     "enable_return_routed_experts": "rollout.enable_rollout_routing_replay",
 }
 
@@ -466,6 +468,8 @@ class vLLMHttpServer:
                 "max_loras": 1,
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
+            if self.model_config.lora.get("enable_tower_connector_lora", False):
+                lora_args["enable_tower_connector_lora"] = True
             if self.model_config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
             args.update(lora_args)
@@ -660,8 +664,8 @@ class vLLMHttpServer:
         )
         topk_log_probs = sampling_params.pop("topk_log_probs", 0)
         sampling_params["logprobs"] = (topk_log_probs or 0) if sampling_params.pop("logprobs", False) else None
-        if sampling_params["logprobs"]:
-            # the top-k head is read from flat lists, see extract_response_topk_logprobs
+        if sampling_params["logprobs"] is not None:
+            # log-probs are read from flat lists, see extract_sampled_logprobs and extract_response_topk_logprobs
             sampling_params["flat_logprobs"] = True
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
@@ -689,7 +693,7 @@ class vLLMHttpServer:
         budget_warnings = getattr(self, "_topk_budget_warnings", set())
         warn_topk_logprob_budget(sampling_params, budget_warnings)
         self._topk_budget_warnings = budget_warnings
-        prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        prompt_ids = dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
@@ -719,6 +723,10 @@ class vLLMHttpServer:
         rejected = await self._park_until_admitted(request_id)
         if rejected is not None:
             return rejected
+
+        cache_salt = prefix_cache_salt(self.config, self.global_steps)
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
 
         with RLInsightLogger.trace_state(
             "vllm_generate",
@@ -792,7 +800,7 @@ class vLLMHttpServer:
                     warned.add(signature)
                     self._topk_coverage_warnings = warned
         elif sampling_params.logprobs is not None:
-            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
+            log_probs = extract_sampled_logprobs(final_res.outputs[0].logprobs)
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
@@ -934,15 +942,11 @@ class vLLMHttpServer:
             # processes across all DP shards (unlike collective_rpc which only reaches
             # TP workers within a single shard).
             await self.engine.wake_up(tags=tags or self._get_wake_up_tags())
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
-            # reset_connector=True drops any attached external KV store
-            # (e.g. MooncakeStoreConnector) whose entries were computed
-            # against the previous weights. No-op success when no connector
-            # is configured (vLLM scheduler treats it as such).
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
@@ -956,20 +960,39 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            # A colocated teacher or reward server can wake without an actor weight upload.
+            await self._engine_sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
+
+    async def _engine_sleep(self, level: int):
+        # Sleep discards the KV cache and, by default, resets the KV connector, which for a shared store
+        # (e.g. MooncakeStoreConnector) deletes entries other replicas still use. Under "salt" that is never
+        # needed: unchanged weights keep the current salt, and new weights get a new one.
+        if self.config.external_kv_cache_invalidation == "salt":
+            if "reset_connector" in inspect.signature(self.engine.sleep).parameters:
+                await self.engine.sleep(level=level, reset_connector=False)
+                return
+            logger.warning(
+                "external_kv_cache_invalidation='salt': this vLLM's sleep() cannot keep the KV connector's cache "
+                "(needs vllm-project/vllm#57810), so the external KV store is reset on sleep."
+            )
+        await self.engine.sleep(level=level)
+
+    async def _reset_prefix_cache(self):
+        # Under "reset", reset_connector=True also drops any attached external KV store
+        # (e.g. MooncakeStoreConnector) whose entries were computed against the previous
+        # weights; with no connector it is a no-op success. Under "salt" those entries
+        # are unreachable through their old salt, so the store, which other replicas may
+        # still be reading and writing, is left intact.
+        await self.engine.reset_prefix_cache(reset_connector=self.config.external_kv_cache_invalidation == "reset")
 
     @RLInsightLogger.trace_state_decorator(
         "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
     )
     async def clear_kv_cache(self):
         if self.node_rank == 0:
-            # reset_connector=True drops any attached external KV store
-            # (e.g. MooncakeStoreConnector) whose entries were computed
-            # against the previous model weights. With no connector it
-            # is a no-op success, so we can pass it unconditionally.
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
 
             await self.engine.reset_mm_cache()
             await self.engine.reset_encoder_cache()
@@ -984,7 +1007,8 @@ class vLLMHttpServer:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        # This sync path never re-sends LoRA adapters, so keep adapter-mode weights even with lora.resync_base.
+        await self._engine_sleep(level=1 if self.lora_as_adapter else self._resolve_sleep_level())
         await self.engine.wake_up(tags=["weights"])
 
     @RLInsightLogger.trace_state_decorator(
@@ -997,7 +1021,7 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
         await self.engine.wake_up(tags=["kv_cache"])
-        await self.engine.reset_prefix_cache(reset_connector=True)
+        await self._reset_prefix_cache()
 
     async def snapshot(self) -> dict[str, Any]:
         """Return live KV-cache and scheduler queue observations.
@@ -1179,6 +1203,12 @@ class vLLMHttpServer:
             deadline = time.monotonic() + _GATE_BARRIER_TIMEOUT_S
             while self._admitting > 0:
                 if time.monotonic() > deadline:
+                    if self.config.external_kv_cache_invalidation == "salt":
+                        # A straggler would run on the new weights under its old salt and write
+                        # into the kept KV store, so do not proceed with the weight update.
+                        raise RuntimeError(
+                            f"Submission gate barrier timed out with {self._admitting} admission(s) in flight"
+                        )
                     logger.warning(
                         "Submission gate barrier timed out with %d admission(s) in flight, proceeding",
                         self._admitting,
@@ -1198,14 +1228,20 @@ class vLLMHttpServer:
             #    on this path, so any attached external KV store (e.g.
             #    MooncakeStoreConnector) is invalidated along with the
             #    local prefix cache — RL-correct hard-reset at every
-            #    weight update boundary, no extra kwargs needed.
+            #    weight update boundary. pause_generation cannot keep the
+            #    connector, so "salt" pauses without clearing and then
+            #    clears only the local caches via clear_kv_cache().
+            reset_connector = self.config.external_kv_cache_invalidation == "reset"
+            clear_cache = reset_prefix_cache and reset_connector
             if _VLLM_VERSION >= version.parse("0.32.0"):
-                await self.engine.pause_generation(mode="abort", clear_cache=reset_prefix_cache)
+                await self.engine.pause_generation(mode="abort", clear_cache=clear_cache)
             else:
                 await self.engine.pause_generation(
                     wait_for_inflight_requests=False,
-                    clear_cache=reset_prefix_cache,
+                    clear_cache=clear_cache,
                 )
+            if reset_prefix_cache and not reset_connector:
+                await self.clear_kv_cache()
 
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
@@ -1525,8 +1561,10 @@ class vLLMHttpServer:
 
         MTP drafter-only weights are initialized by vLLM and are not guaranteed
         to be restored by actor weight sync after level 2 sleep discards them.
-        lora only update adapter weights, so set sleep level to 1.
-        vllm-ascend < 0.30.0 requires sleep level 1 to avoid EP precision issues.
+        LoRA normally updates only adapter weights, so it requires level 1.
+        With resync_base, hybrid mode restores discarded base weights on every
+        update and can use level 2. vllm-ascend < 0.30.0 requires level 1 to
+        avoid EP precision issues.
         """
         mtp_config = getattr(self.config, "mtp", None)
         mtp_rollout_enabled = (
@@ -1534,10 +1572,12 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        if mtp_rollout_enabled or self.lora_as_adapter:
+        if mtp_rollout_enabled:
             return 1
         if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
             return 1
+        if self.lora_as_adapter:
+            return 2 if self.model_config.lora.get("resync_base", False) else 1
         return 2
 
     def _preprocess_sampling_params(self, sampling_params: dict[str, Any]) -> None:
@@ -1558,7 +1598,7 @@ class vLLMHttpServer:
         return output
 
     async def _sleep_hybrid(self):
-        """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
+        """Sleep before the hybrid trainer restores weights and adapters.
 
         Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
         that sleep is properly propagated to all data-parallel worker processes.
@@ -1566,7 +1606,7 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self._engine_sleep(level=self._resolve_sleep_level())
         await self.engine.reset_encoder_cache()
 
 

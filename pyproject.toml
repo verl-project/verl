@@ -31,7 +31,7 @@ math          = ["math-verify"]
 
 # Shared runtime deps, included by every backend via `verl[verl-core]`.
 verl-core = [
-    "TransferQueue>=0.1.11",
+    "TransferQueue>=0.1.12",
     "pyzmq",
     "msgspec",
     "accelerate",
@@ -482,7 +482,7 @@ requires-dist = []
 # `ray[default]` and a `tensordict>=0.10.0` that sits right on verl's `<=0.10.0`
 # cap, and its optional storage backends drag in extras we never use. verl-core
 # supplies what it actually imports (see the pyzmq / msgspec note there). No
-# `version` key on purpose — the requirement is an open-ended `>=0.1.11`, so this
+# `version` key on purpose — the requirement is an open-ended `>=0.1.12`, so this
 # has to apply to every release it may resolve to, not one pinned version.
 [[tool.uv.dependency-metadata]]
 name = "TransferQueue"
@@ -514,7 +514,7 @@ apex                 = { index = "verl-wheelhouse" }
 flash-attn           = { index = "verl-wheelhouse" }
 transformer-engine   = { index = "verl-wheelhouse" }
 megatron-bridge      = { index = "verl-wheelhouse" }
-veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "10a26aca258f91a7af3e698cc0db8c6c51705989" }
+veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "9f533f4613e8b3470fcc6b9b409c539e2391e6c1" }
 
 # megatron-core isn't in the wheelhouse; git-sourced (built at sync
 # time). The wheelhouse megatron-bridge 0.6.2 (v0.6.2 tag) pairs with
