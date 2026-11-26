@@ -999,6 +999,18 @@ def test_strict_root_keeps_top_level_base_layer_suffix(monkeypatch):
     assert _resolve(_make_worker(model), model, name) == name
 
 
+def test_strict_drafter_keeps_unqualified_main_model_weight_names(monkeypatch):
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+
+    class StrictDrafter(_FakeStrictInner, _FakeModel):
+        pass
+
+    model = StrictDrafter({"model.layers.0.mtp_block.weight": torch.empty(0)})
+    worker = _make_worker(model)
+    for name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
+        assert _resolve(worker, model, name) == name
+
+
 def test_strict_loader_non_lora_param_on_wrapped_module_re_suffixed(monkeypatch):
     """DSV4 router params (``gate.tid2eid``) move under ``.base_layer.`` once the router is wrapped."""
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", False)
@@ -1029,6 +1041,22 @@ def test_per_expert_leaf_routed_through_base_layer(monkeypatch):
     suffixed = "model.layers.0.mlp.experts.0.gate_proj.base_layer.weight"
     assert _resolve(worker, model, suffixed) == suffixed
     assert _resolve(worker, model, "model.layers.0.mlp.experts.0.gate_proj.weight") == suffixed
+
+
+def test_lora_base_normalizer_preserves_unqualified_deepseek_head_names():
+    names = ("hc_head_fn", "hc_head_base", "hc_head_scale")
+    weights = [(name, torch.ones(2, dtype=torch.float32)) for name in names]
+    model = _FakeModel(
+        {f"model.{name}": torch.empty_like(tensor) for name, tensor in weights},
+        mapper=_FakeMapper({"hc_head": "model.hc_head"}),
+    )
+    normalizer = _vllm_utils_real.LoRABaseWeightNormalizer(model, (32, 32))
+
+    normalized = normalizer.normalize(weights)
+
+    normalizer.validate_complete()
+    assert [name for name, _ in normalized] == list(names)
+    assert all(actual is original for (_, actual), (_, original) in zip(normalized, weights, strict=True))
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])

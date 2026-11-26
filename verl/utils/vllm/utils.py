@@ -388,7 +388,7 @@ def resolve_weight_name(
     # ``gate.tid2eid``). Only strict loaders and released vLLM need it; the
     # ``_exists`` gate keeps it from firing when the live key isn't suffixed.
     _needs_suffix = (not _HAS_LORA_LOAD_WEIGHTS) or _name_reaches_strict_loader(model, name)
-    if _needs_suffix and ".base_layer." not in name:
+    if _needs_suffix and "." in name and ".base_layer." not in name:
         prefix, last = name.rsplit(".", 1)
         alt = f"{prefix}.base_layer.{last}"
         if alt != name and _exists(alt):
@@ -475,8 +475,8 @@ class LoRABaseWeightNormalizer:
             resolved = resolve_weight_name(
                 self.model, name, self.live_names, routed_expert_prefixes=self.routed_expert_prefixes
             )
-            prefix, leaf = resolved.rsplit(".", 1)
-            if (leaf == "weight" and tensor.dtype in fp8_dtypes) or leaf in self.scale_leaves:
+            prefix, separator, leaf = resolved.rpartition(".")
+            if separator and ((leaf == "weight" and tensor.dtype in fp8_dtypes) or leaf in self.scale_leaves):
                 weight_name = f"{prefix}.weight"
                 dtype = self._live_weight_dtype(weight_name)
                 if dtype in float_dtypes:
