@@ -36,21 +36,21 @@ def staging_calls(monkeypatch):
 
 def _lora_engine():
     peft_config = SimpleNamespace(to_dict=lambda: {})
-    return SimpleNamespace(
-        module=SimpleNamespace(peft_config={"default": peft_config}),
-        model_config=SimpleNamespace(lora={"merge": False}, hf_config=SimpleNamespace(model_type="llama")),
-        _uses_fsdp2_cpu_offload_policy=False,
-        _is_offload_param=True,
-        _qat_enabled=False,
-    )
+    engine = object.__new__(FSDPEngine)
+    engine.module = SimpleNamespace(peft_config={"default": peft_config})
+    engine.model_config = SimpleNamespace(lora={"merge": False}, hf_config=SimpleNamespace(model_type="llama"))
+    engine._uses_fsdp2_cpu_offload_policy = False
+    engine._is_offload_param = True
+    engine.set_rollout_weight_quantizer(None)
+    return engine
 
 
 def test_lora_base_export_streams_shards_without_staging(staging_calls):
     # Staging would leave the streamed DTensor refs holding the GPU copy of the shard after the offload.
-    FSDPEngine.get_per_tensor_param(_lora_engine(), layered_summon=False, base_sync_done=False)
+    _lora_engine().get_per_tensor_param(layered_summon=False, base_sync_done=False)
     assert staging_calls == []
 
 
 def test_lora_adapter_export_still_stages(staging_calls):
-    FSDPEngine.get_per_tensor_param(_lora_engine(), layered_summon=False, base_sync_done=True)
+    _lora_engine().get_per_tensor_param(layered_summon=False, base_sync_done=True)
     assert staging_calls == ["load", "offload"]
