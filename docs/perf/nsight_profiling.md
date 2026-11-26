@@ -1,6 +1,6 @@
 # NVIDIA Nsight Systems profiling in verl
 
-Last updated: 11/24/2026.
+Last updated: 11/26/2026.
 
 This guide explains how to use NVIDIA Nsight Systems for profiling verl training runs.
 
@@ -40,6 +40,8 @@ Verl manages mulitiple RL roles, _Actor_, _Ref_, _Rollout_, _Critic_, _Reward_, 
 ### Independent Ray actors
 
 Reward-loop workers and rollout servers are created as independent Ray actors. Their role profiler must use `tool: nsys`, `enable: True`, and `tool_config.nsys.discrete: False`. `all_ranks` and `ranks` select ranks within the role: reward-loop ranks are worker indices; rollout ranks refer to GPU ranks and are mapped to the replicas that own them. A selected rollout replica starts its server and engine profiling together.
+
+Nsight profiling for vLLM prefill/decode disaggregation (PD) is follow-up work. PD replicas reject enabled rollout Nsight profiling; set the rollout role's `profiler.enable` to `False` when using PD. Other roles can still be profiled.
 
 The vLLM rollout server and engine Nsight support uses the standard PPO trainers' existing rollout start/stop calls. Reward-loop workers now have profiler initialization and manager start/stop methods, and generative reward-model servers receive launch configuration. Completing the reward profiling lifecycle in the standard PPO trainers is follow-up work. The reward settings below currently require an integration that drives that lifecycle to produce captures.
 

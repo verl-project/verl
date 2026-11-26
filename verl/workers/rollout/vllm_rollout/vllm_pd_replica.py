@@ -59,6 +59,10 @@ class vLLMPDReplica(vLLMReplica):
         disagg = self.config.disaggregation
         assert disagg.enabled, "vLLMPDReplica requires rollout.disaggregation.enabled=True"
 
+        profiler = self.config.profiler
+        if profiler is not None and profiler.enable and profiler.tool == "nsys":
+            raise ValueError("vLLM PD does not support rollout Nsight profiling; disable rollout.profiler.enable.")
+
         if disagg.transfer_backend not in ("nixl", "mooncake"):
             raise NotImplementedError(
                 f"vLLMPDReplica supports transfer_backend in ('nixl', 'mooncake') in this "
