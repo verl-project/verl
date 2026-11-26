@@ -29,15 +29,17 @@ import torch
 import torch.distributed as dist
 from megatron.core import parallel_state as mpu
 from megatron.core.distributed import DistributedDataParallel as McoreDDP
-from megatron.core.distributed import DistributedDataParallelConfig
+from megatron.core.distributed import DistributedDataParallelConfig, finalize_model_grads
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
+from omegaconf import OmegaConf
 
 from verl.trainer.config import CheckpointConfig
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
+from verl.utils.megatron.optimizer import init_megatron_optim_config
 from verl.utils.megatron_utils import (
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
@@ -339,5 +341,135 @@ def test_hf_bridge_model_only_resume_preserves_loaded_weights_after_step(tmp_pat
         bridge.load_hf_weights.assert_called_once()
 
         _run_one_step(model_chunks, optimizer)
+        after_weights = _snapshot_params(model_chunks)
+        _assert_step_continued_from_checkpoint(init_weights, ckpt_weights, after_weights, shift=shift, lr=lr)
+
+
+@pytest.mark.parametrize(
+    ("fp16", "bf16", "store_param_remainders"),
+    [
+        (True, False, False),
+        (False, True, False),
+        (False, True, True),
+    ],
+)
+def test_precision_aware_cold_start_model_only_resume_preserves_loaded_weights_after_step(
+    tmp_path, fp16, bf16, store_param_remainders
+):
+    """Cold-start model-only resume with use_precision_aware_optimizer=True preserves loaded weights on first step."""
+    shift = 0.25
+    lr = 5e-3
+    dtype = torch.float16 if fp16 else torch.bfloat16
+    ckpt_dir = tmp_path / "global_step_1"
+    ckpt_dir.mkdir()
+
+    with _megatron_single_gpu_env(tmp_path):
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        model_parallel_cuda_manual_seed(42)
+        tf_cfg = TransformerConfig(
+            num_layers=2,
+            hidden_size=256,
+            num_attention_heads=4,
+            fp16=fp16,
+            bf16=bf16,
+            params_dtype=dtype,
+            pipeline_dtype=dtype,
+        )
+        gpt_model = (
+            GPTModel(
+                config=tf_cfg,
+                transformer_layer_spec=get_gpt_layer_local_spec(),
+                vocab_size=VOCAB_SIZE,
+                max_sequence_length=SEQUENCE_LENGTH,
+            )
+            .cuda()
+            .to(dtype)
+        )
+        ddp_cfg = DistributedDataParallelConfig(
+            use_distributed_optimizer=True,
+            grad_reduce_in_fp32=fp16,
+        )
+        model_chunks = [McoreDDP(tf_cfg, ddp_cfg, gpt_model)]
+
+        raw_opt: dict = {
+            "optimizer": "adam",
+            "lr": lr,
+            "min_lr": lr,
+            "clip_grad": 1.0,
+            "weight_decay": 0.0,
+        }
+        if fp16:
+            raw_opt["override_optimizer_config"] = {"initial_loss_scale": 16.0}
+        else:
+            raw_opt.update(
+                {
+                    "use_precision_aware_optimizer": True,
+                    "main_grads_dtype": "bf16",
+                    "exp_avg_dtype": "bf16",
+                    "exp_avg_sq_dtype": "bf16",
+                    "override_optimizer_config": {"store_param_remainders": store_param_remainders},
+                }
+            )
+        opt_cfg = init_megatron_optim_config(OmegaConf.create(raw_opt), fp16=fp16, bf16=bf16)
+        optimizer = get_megatron_optimizer(opt_cfg, model_chunks)
+
+        init_weights = _snapshot_params(model_chunks)
+        # Keep shifted weights well inside FP16 dynamic range while separated from init_weights by >= shift.
+        ckpt_weights = {
+            name: (-w + torch.where(w >= 0, shift, -shift)).to(dtype).float() for name, w in init_weights.items()
+        }
+
+        bridge = MagicMock()
+
+        def _fake_load_hf_weights(models, _hf_model_path):
+            with torch.no_grad():
+                for name, p in models[0].named_parameters():
+                    if p.requires_grad:
+                        p.copy_(ckpt_weights[name].to(device=p.device, dtype=p.dtype))
+
+        bridge.load_hf_weights.side_effect = _fake_load_hf_weights
+
+        load_mgr = MegatronCheckpointManager(
+            config=_MinimalConfig(),
+            checkpoint_config=CheckpointConfig(
+                save_contents=["model"],
+                load_contents=["model"],
+                async_save=False,
+            ),
+            model_config=MagicMock(),
+            transformer_config=tf_cfg,
+            role="actor",
+            model=model_chunks,
+            arch="GPTForCausalLM",
+            hf_config=MagicMock(),
+            param_dtype=dtype,
+            share_embeddings_and_output_weights=False,
+            processing_class=None,
+            optimizer=optimizer,
+            optimizer_scheduler=None,
+            use_distributed_optimizer=True,
+            use_dist_checkpointing=False,
+            bridge=bridge,
+        )
+        load_mgr.load_checkpoint(str(ckpt_dir))
+        bridge.load_hf_weights.assert_called_once()
+
+        optimizer.zero_grad()
+        for chunk in model_chunks:
+            chunk.zero_grad_buffer()
+        input_ids = torch.randint(0, VOCAB_SIZE, (2, SEQUENCE_LENGTH), device="cuda")
+        position_ids = torch.arange(SEQUENCE_LENGTH, device="cuda").unsqueeze(0).expand(2, -1)
+        attention_mask = torch.triu(
+            torch.ones((1, 1, SEQUENCE_LENGTH, SEQUENCE_LENGTH), dtype=torch.bool, device="cuda"),
+            diagonal=1,
+        )
+        output = model_chunks[0](input_ids=input_ids, position_ids=position_ids, attention_mask=attention_mask)
+        loss = output.float().pow(2).mean() * 1e-2
+        optimizer.scale_loss(loss).backward()
+        finalize_model_grads(model_chunks)
+        update_successful, _, _ = optimizer.step()
+        assert update_successful
+
         after_weights = _snapshot_params(model_chunks)
         _assert_step_continued_from_checkpoint(init_weights, ckpt_weights, after_weights, shift=shift, lr=lr)
