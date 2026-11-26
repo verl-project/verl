@@ -147,19 +147,15 @@ def _runner(llm):
 
 
 def _refit(llm, weights):
-    """The rollout worker's quantized refit, in buckets of 32 tensors."""
-    from verl.utils.vllm.vllm_quant_utils import (
-        load_quanted_weights,
-        prepare_quanted_weights_for_loading,
-        process_quanted_weights_after_loading,
-    )
+    """The rollout worker's refit through vLLM's reload, in buckets of 32 tensors."""
+    from vllm.model_executor.model_loader.reload import finish_reload, start_reload
 
     runner = _runner(llm)
     model = runner.get_model()
-    reload_state = prepare_quanted_weights_for_loading(model)
+    start_reload(model)
     for start in range(0, len(weights), 32):
-        load_quanted_weights(weights[start : start + 32], runner)
-    process_quanted_weights_after_loading(model, reload_state)
+        model.load_weights(weights[start : start + 32])
+    finish_reload(model, runner.vllm_config.model_config, runner.device)
 
 
 def _logprobs(llm):
@@ -188,7 +184,18 @@ def _free():
     torch.cuda.empty_cache()
 
 
-def test_preset_refit_matches_online_quantization(model_dir, request):
+def _set_reload_mode(monkeypatch, mode: str | None) -> None:
+    import vllm.envs as vllm_envs
+
+    if mode is None:
+        monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    if hasattr(vllm_envs.__getattr__, "cache_clear"):
+        vllm_envs.__getattr__.cache_clear()
+
+
+def test_preset_refit_matches_online_quantization(model_dir, request, monkeypatch):
     from verl.utils.vllm.vllm_nvfp4_per_token_utils import (
         attest_nvfp4_per_token_runtime,
         clear_kv_cache,
@@ -198,6 +205,10 @@ def test_preset_refit_matches_online_quantization(model_dir, request):
     from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches
 
     carved = [0, NUM_LAYERS - 1]
+    # Online quantization refuses VLLM_RELOAD_MODE=direct; keep default reload mode for the baseline.
+    # Clear vllm.envs's cache after toggling VLLM_RELOAD_MODE since LLM() enables env caching in-process.
+    request.addfinalizer(lambda: _set_reload_mode(monkeypatch, None))
+    _set_reload_mode(monkeypatch, None)
     # vLLM's online method quantizes the BF16 checkpoint at load. Eager mode keeps the
     # comparison independent of each engine's KV-cache size, which steers graph kernels.
     online = _engine(
@@ -211,6 +222,8 @@ def test_preset_refit_matches_online_quantization(model_dir, request):
     del online
     _free()
 
+    # The rollout pins VLLM_RELOAD_MODE=direct so refits update weights and scales in place.
+    _set_reload_mode(monkeypatch, "direct")
     apply_vllm_quant_patches()
     ignore = [r"re:.*layers\.(" + "|".join(map(str, carved)) + r")\.mlp\.experts\..*"]
     config = build_compressed_tensors_config(

@@ -60,11 +60,12 @@ from verl.utils.sglang.sglang_quant_utils import (
 )
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, prefix_cache_salt
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
 from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
     default_moe_runner_backend,
+    lora_base_kept_on_sleep,
     lora_rank_of,
     lora_served_as_adapter,
     sglang_lora_target_modules,
@@ -188,6 +189,9 @@ class SGLangHttpServer:
         self.base_gpu_id = base_gpu_id
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+        # Cleared before the tokenizer manager pauses, set after it resumes.
+        self._generation_allowed = asyncio.Event()
+        self._generation_allowed.set()
 
         # PD peer linkage populated post-launch by SGLangPDReplica.set_pd_peer.
         self._pd_decode_peers: list[ActorHandle] = []
@@ -477,8 +481,9 @@ class SGLangHttpServer:
             # In hybrid mode, rollout is wake up in `update_weights`
             raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            # Resume exactly what sleep() released; adapter mode keeps the base weights resident.
-            tags = ["kv_cache"] if self.lora_as_adapter else ["kv_cache", "weights"]
+            # Resume exactly what sleep() released; adapter mode keeps the base weights resident
+            # unless lora.resync_base is set.
+            tags = ["kv_cache"] if lora_base_kept_on_sleep(self.model_config) else ["kv_cache", "weights"]
             obj = ResumeMemoryOccupationReqInput(tags=tags)
             await self.tokenizer_manager.resume_memory_occupation(obj, None)
             await self.tokenizer_manager.flush_cache()
@@ -502,8 +507,9 @@ class SGLangHttpServer:
 
         # When using LoRA as adapter (merge=False), only release kv_cache —
         # keep base weights in GPU so we only need to sync adapter deltas.
+        # With lora.resync_base, the base is re-synced on every update, so release it too.
         # Mirrors the vLLM sleep() pattern in vllm_async_server.py.
-        if self.lora_as_adapter:
+        if lora_base_kept_on_sleep(self.model_config):
             tags = ["kv_cache"]
         else:
             tags = ["kv_cache", "weights"]
@@ -658,6 +664,15 @@ class SGLangHttpServer:
         if self.lora_as_adapter:
             generate_request.lora_path = SGLANG_LORA_NAME
 
+        if self.config.external_kv_cache_invalidation == "salt":
+            # A request submitted while paused waits inside generate_request() and then runs on
+            # the updated weights, so wait out the pause here and salt it with those weights.
+            # The gate closes before the tokenizer manager pauses, so a request that passes it
+            # either reaches the engine first and is aborted, or waits behind this gate. This
+            # relies on generate_request() not yielding before its own pause check (SGLang 0.5.20).
+            await self._generation_allowed.wait()
+            generate_request.cache_salt = prefix_cache_salt(self.config, self.global_steps)
+
         with RLInsightLogger.trace_state(
             "sglang_generate",
             state_lane_id=ray.get_runtime_context().get_actor_name(),
@@ -737,12 +752,19 @@ class SGLangHttpServer:
     async def abort_all_requests(self):
         if self.node_rank != 0:
             return
-        await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
+        self._generation_allowed.clear()
+        try:
+            await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
+        except Exception:
+            # Not paused, so do not hold requests behind the gate.
+            self._generation_allowed.set()
+            raise
 
     async def resume_generation(self):
         if self.node_rank != 0:
             return
         await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
+        self._generation_allowed.set()
 
     async def start_profile(self, **kwargs):
         if (

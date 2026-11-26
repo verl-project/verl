@@ -20,7 +20,7 @@ FP8 rollout-only mode keeps training in BF16 and quantizes rollout inference to 
 
 ### Implementation
 
-The rollout engine starts from a compressed-tensors `quantization_config` with dummy weights, and the trainer quantizes every weight sync to that config with the compressed-tensors compressors (`verl/utils/qat/compressed_tensors.py`). On the vLLM side we monkey patch `process_weights_after_loading` of the compressed-tensors FP8 linear/MoE methods so refits are written back into the live parameters (`verl/utils/vllm/vllm_fp8_utils.py`).
+The rollout engine starts from a compressed-tensors `quantization_config` with dummy weights, and the trainer quantizes every weight sync to that config with the compressed-tensors compressors (`verl/utils/qat/compressed_tensors.py`). On the vLLM side each refit runs inside vLLM's reload (`start_reload` / `finish_reload`), which restores the checkpoint layout before the first bucket and re-applies the kernel layout in place after the last.
 
 ### Support Matrix
 

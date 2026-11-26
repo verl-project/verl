@@ -1,12 +1,13 @@
 # Build the cu13 (CUDA 13) slice of verl's uv-managed multi-backend image.
 #
 # verl uses one universal uv.lock for the whole project; this Dockerfile
-# builds its cu13 (CUDA 13.0 / torch 2.13) slice. Backends are PEP 621
+# builds its cu13 (CUDA 13.0) slice. Backends are PEP 621
 # extras, and mutually exclusive ones are declared in pyproject.toml's
 # [tool.uv].conflicts, so a single committed uv.lock resolves them all:
 #
 #   * cu13.0 (this file, base nvidia/cuda:13.0.2): vllm, sglang, fsdp,
-#     megatron, VeOmni (fsdp + veomni-sft), cpu — all on torch 2.13 / cu130.
+#     megatron, VeOmni, cpu. vllm combinations use torch 2.14; sglang,
+#     trainer-only, and cpu combinations use torch 2.13.
 #     The `prefetch` below is scoped to `cu130 dev`.
 #   * DEFERRED in pyproject.toml (commented out, re-enable later):
 #     - the cu12.9 / torch-2.9.1 world (nemoautomodel) — its image

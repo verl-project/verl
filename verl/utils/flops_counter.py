@@ -21,7 +21,9 @@ from verl.utils.device import get_torch_device
 
 _DEVICE_FLOPS = {
     "CPU": 448e9,
+    "GB300": 2.5e15,
     "GB200": 2.5e15,
+    "B300": 2.25e15,
     "B200": 2.25e15,
     "MI300X": 1307e12,
     "MI350X": 2300e12,

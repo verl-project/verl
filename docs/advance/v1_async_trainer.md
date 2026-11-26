@@ -1,6 +1,6 @@
 # V1 Async Trainer
 
-Last updated: 09/21/2026.
+Last updated: 11/07/2026.
 
 The V1 trainer provides two asynchronous PPO training modes under the standard `verl.trainer.main_ppo` entry point:
 
@@ -68,6 +68,7 @@ The V1 sampler controls staleness in model-version units:
 | --------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `trainer.v1.sampler.max_off_policy_threshold` | `8`     | Maximum model versions from first generation to being trained before staleness handling is triggered. `null` disables off-policy version control entirely: no samples are dropped or awaited for staleness |
 | `trainer.v1.sampler.max_off_policy_strategy`  | `drop`  | `drop` evicts stale prompt groups (for GRPO, one stale trajectory, the whole sample dropped); `wait` blocks for threshold-reaching in-flight groups instead of dropping them. Ignored when `max_off_policy_threshold` is `null` |
+| `trainer.v1.sampler.poll_interval`            | `2.0`   | Seconds between two checks of the rollout progress while a training step waits for its batch. A batch that completes between two checks waits for the next one, so short steps (fast generation, small models) gain from a shorter interval such as `0.1`. Applies to the built-in replay buffers; a custom sampler sets its own |
 
 
 Monitor both forms of off-policy behavior:

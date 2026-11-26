@@ -361,6 +361,8 @@ jobs:
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3.5-2B
       TRANSFORMERS_VERBOSITY: 'error'
+      TRAIN_BATCH_SIZE: "32"
+      PPO_MINI_BATCH_SIZE: "32"
     steps:
       - name: Check npu and CANN info
         run: |
@@ -658,7 +660,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install -v -e .
-          pip install "veomni @ git+https://github.com/ByteDance-Seed/VeOmni.git@10a26aca258f91a7af3e698cc0db8c6c51705989" --ignore-requires-python --no-deps
+          pip install "veomni @ git+https://github.com/ByteDance-Seed/VeOmni.git@9f533f4613e8b3470fcc6b9b409c539e2391e6c1" --ignore-requires-python --no-deps
           pip install transformers==5.16.1
       - name: Check initial pip list from image
         run: |

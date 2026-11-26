@@ -16,8 +16,9 @@ requires-python = ">=3.10,<3.13"
 #
 #   uv sync --extra fsdp --extra vllm     # or: python manage_envs.py sync fsdp vllm
 #
-# All backends use torch 2.13.0: vllm/sglang/fsdp/megatron/veomni on cu130, cpu on cpu
-# wheels (CI/dev). Both torch worlds coexist via [tool.uv].conflicts forks.
+# Rollout extras select the complete native ABI stack (vllm: torch 2.14.0,
+# sglang: torch 2.13.0); training extras take that selection. cpu uses CPU
+# wheels for CI/dev. Both torch worlds coexist via [tool.uv].conflicts forks.
 # torchaudio stays at 2.11.0 — its last release, and what vllm 0.32 / sglang
 # 0.5.20 themselves pin alongside torch 2.13.
 # DEFERRED: trtllm (torch 2.10.0+cu130) — its RC sdist makes `uv lock` explode.
@@ -31,7 +32,7 @@ math          = ["math-verify"]
 
 # Shared runtime deps, included by every backend via `verl[verl-core]`.
 verl-core = [
-    "TransferQueue>=0.1.11",
+    "TransferQueue>=0.1.12",
     "pyzmq",
     "msgspec",
     "accelerate",
@@ -62,7 +63,8 @@ verl-core = [
     # torchcodec every video sample dies with AttributeError. It reached only
     # the sglang venv (a transitive sglang dep), leaving vllm / fsdp / megatron
     # / cpu broken — hence verl-core. Left unpinned the way sglang has it: it is
-    # ABI-coupled to torch and every extra here pins the same torch 2.13.0.
+    # ABI-coupled to torch, so the universal lock resolves it inside each torch
+    # world rather than forcing one version across vllm and sglang.
     # Decoding needs FFmpeg's shared libs (`ffmpeg`, docker/Dockerfile.uv.cu130).
     "torchcodec",
     "cachetools",
@@ -73,9 +75,19 @@ verl-core = [
     "pytest-rerunfailures",
 ]
 
-# Pins flash-attn once for the fsdp / megatron parents (wheelhouse-routed below).
-# Don't install alone — needs the parent extra's torch / cuDNN pins.
-flash-attn-cu130torch213 = ["flash-attn==2.8.3"]
+# Complete torch-2.13 ABI stack for trainer-only jobs that have no rollout
+# backend. RL environments get the equivalent stack directly from their
+# mutually exclusive vllm / sglang extra so uv can fork the wheelhouse source.
+native-cu130torch213 = [
+    "torch==2.13.0",
+    "torchvision==0.28.0",
+    "torchaudio==2.11.0",
+    "deep-ep==1.2.1",
+    "apex",
+    "flash-attn==2.8.3",
+    "transformer-engine==2.20.2",
+    "megatron-bridge==0.6.2",
+]
 
 # Pins cupy once for the fsdp / megatron parents. Two unrelated consumers, both
 # on the training side: `ray.util.collective`'s NCCL backend is cupy-based, so
@@ -87,17 +99,23 @@ cupy-cu130 = ["cupy-cuda13x==14.0.1"]
 # ---- inference backends ----------------------------------------------------
 vllm = [
     "verl[verl-core]",
-    "torch==2.13.0",
-    "torchvision==0.28.0",
+    "torch==2.14.0",
+    "torchvision==0.29.0",
     "torchaudio==2.11.0",
-    # PyPI's 0.32.0 wheel is already a cu130 / torch-2.13 abi3 build, so it needs
-    # no wheelhouse routing and no source build.
-    "vllm==0.32.0",
+    "deep-ep==1.2.1",
+    "apex",
+    "flash-attn==2.8.3",
+    "transformer-engine==2.20.2",
+    "megatron-bridge==0.6.2",
+    # PyPI's 0.34.0 wheel is already a cu130 / torch-2.14 abi3 build, so it needs
+    # no wheelhouse routing and no source build. 0.34 brings vLLM's reload lifecycle
+    # (start_reload / finish_reload) the rollout refit uses.
+    "vllm==0.34.0",
     # flashinfer is a transitive dependency supplied from PyPI rather than the
     # wheelhouse so vllm can select its compatible version.
-    # transformers 5.16.1 is the project-wide pin (enforced in
+    # transformers 5.18.0 is the project-wide pin (enforced in
     # override-dependencies below).
-    "transformers==5.16.1",
+    "transformers==5.18.0",
 ]
 
 sglang = [
@@ -105,6 +123,11 @@ sglang = [
     "torch==2.13.0",
     "torchvision==0.28.0",
     "torchaudio==2.11.0",
+    "deep-ep==1.2.1",
+    "apex",
+    "flash-attn==2.8.3",
+    "transformer-engine==2.20.2",
+    "megatron-bridge==0.6.2",
     # sglang + sglang-kernel come from PyPI; upstream's 0.5.20 wheels are cu130 /
     # torch-2.13 builds already (sglang-kernel links libcudart.so.13).
     "sglang==0.5.20",
@@ -112,10 +135,10 @@ sglang = [
     # still installs it if a future sglang loosens that pin.
     "sglang-kernel",
     # sglang hard-deps flash-attn-4 but we EXCLUDE it (it collides with the
-    # flash-attn 2.8.3 the training extras pin — see override-dependencies); it is
+    # flash-attn 2.8.3 the native stack pins — see override-dependencies); it is
     # imported lazily (fa4 backend only), so the default backends work.
     # sglang's transformers requirement is settled by the project-wide override.
-    "transformers==5.16.1",
+    "transformers==5.18.0",
 ]
 
 # DEFERRED — trtllm is a CUDA-13 backend (torch 2.10.0+cu130, conflict-gated).
@@ -134,10 +157,9 @@ sglang = [
 # ---- training backends -----------------------------------------------------
 fsdp = [
     "verl[verl-core]",
-    "verl[flash-attn-cu130torch213]",
     "verl[cupy-cu130]",
-    "torch==2.13.0",
-    "torchvision==0.28.0",
+    "torch",
+    "torchvision",
     "torchaudio==2.11.0",
     "liger-kernel==0.8.4",
     "trl==0.27.0",
@@ -146,29 +168,21 @@ fsdp = [
     # override below settles the version (5.12.1). See override-dependencies.
 ]
 
-# apex / TE / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
-# megatron-core is git-sourced (built at sync time). onnxscript: works around an
-# undeclared TE import.
+# ABI-bound apex / TE / flash-attn / deep-ep / megatron-bridge come from the
+# selected inference backend's native stack. megatron-core is git-sourced
+# (built at sync time). onnxscript works around an undeclared TE import.
 megatron = [
     "verl[verl-core]",
-    "verl[flash-attn-cu130torch213]",
     "verl[cupy-cu130]",
-    "torch==2.13.0",
-    "torchvision==0.28.0",
+    "torch",
+    "torchvision",
     "torchaudio==2.11.0",
     "nvidia-mathdx",
-    "apex",
-    "transformer-engine==2.20.2",
     "onnxscript",
     "trl==0.27.0",
     "matplotlib",
     "liger-kernel==0.8.4",
-    # Megatron-Bridge is imported as megatron.bridge and installed deps-free — see
-    # [[tool.uv.dependency-metadata]] below. The wheelhouse builds tag v0.6.2.
-    "megatron-bridge==0.6.2",
     "megatron-core",
-    # Native MoE dispatcher, built against this extra's torch 2.13 / CUDA 13.0.
-    "deep-ep==1.2.1",
     # Qwen3.5 Gated DeltaNet kernels; Bridge's dependencies are disabled below.
     "flash-linear-attention==0.5.2",
     # megatron.bridge.training.config imports megatron.energon at module level,
@@ -180,31 +194,35 @@ megatron = [
     # transformers NOT pinned here (see fsdp note): settled via override-deps below.
 ]
 
-# VeOmni is the third cu130 / torch-2.13 training backend, peer to fsdp / megatron.
+# VeOmni is the third cu130 training backend, peer to fsdp / megatron.
 # verl's VeOmni engine (verl/workers/engine/veomni) subclasses the FSDP engine and
-# drives ByteDance-Seed/VeOmni's own parallelism (FSDP / Ulysses-SP / EP) on the
-# SAME native stack fsdp uses, so this extra carries the fsdp runtime pins plus the
-# deps-free veomni package — i.e. it is the named, first-class form of the
-# `fsdp + veomni-sft` composition CI already runs. Select it at runtime with
+# drives ByteDance-Seed/VeOmni's own parallelism (FSDP / Ulysses-SP / EP), so
+# this extra carries the fsdp runtime pins plus the deps-free veomni package.
+# Its ABI-bound native stack comes from vllm / sglang in RL, or from combining
+# veomni with native-cu130torch213 for trainer-only use. Select it at runtime with
 # `model_engine=veomni` (PPO/GRPO) or `engine=veomni` (SFT), e.g.
 # `uv run --extra vllm --extra veomni -- python -m verl.trainer.main_ppo ...`.
 # veomni itself is installed deps-free (empty requires-dist in
 # [[tool.uv.dependency-metadata]] below): its real metadata pins
 # datasets<=2.21.0, which would downgrade the shared datasets dependency. The
-# project-wide transformers 5.16.1 pin covers VeOmni-generated models as well as
+# project-wide transformers 5.18.0 pin covers VeOmni-generated models as well as
 # the Qwen / GPT-OSS models used by the examples.
 veomni = [
     "verl[verl-core]",
-    "verl[flash-attn-cu130torch213]",
     "verl[cupy-cu130]",
-    "torch==2.13.0",
-    "torchvision==0.28.0",
+    "torch",
+    "torchvision",
     "torchaudio==2.11.0",
     "liger-kernel==0.8.4",
     "trl==0.27.0",
     "flash-linear-attention==0.5.2",
+    "tilelang",
     "veomni==0.1.12",
 ]
+
+# Trainer-only jobs (for example SFT without rollout) must explicitly combine
+# their backend with native-cu130torch213. RL jobs get a native stack directly
+# from vllm or sglang.
 
 # ---- CI-only extras --------------------------------------------------------
 # Layered by .github/workflows on top of a backend combo so CI deps come from
@@ -220,18 +238,8 @@ ci = [
     "sglang-router==0.2.2",  # router coverage in reward_model_sglang
 ]
 
-# veomni package alone, as a conflict-free ADD-ON the PPO/SFT engine-test jobs
-# layer on top of an already-synced cu130 backend (fsdp OR megatron) so one env can
-# host several engines at once (see .github/workflows/e2e_sft_*.yml). End users who
-# just want to train with VeOmni should sync the standalone `veomni` training backend
-# above instead, which bundles the matching fsdp stack. Installed deps-free (empty
-# requires-dist in [[tool.uv.dependency-metadata]] below): its real metadata pins
-# datasets<=2.21.0, which would downgrade the shared datasets dependency.
-# This pinned VeOmni revision uses the project-wide transformers==5.16.1.
-veomni-sft = ["veomni==0.1.12", "tilelang"]
-
-# TorchTitan engine add-on, layered on a cu130 backend (fsdp / megatron) like
-# veomni-sft. torchtitan is installed deps-free (empty requires-dist in
+# TorchTitan engine add-on, layered on a cu130 backend (fsdp / megatron).
+# torchtitan is installed deps-free (empty requires-dist in
 # [[tool.uv.dependency-metadata]] below): its real metadata caps datasets<4.8.0,
 # which would downgrade the shared datasets dependency. The runtime deps it
 # actually imports are listed here instead.
@@ -249,7 +257,7 @@ cpu = [
     "torch==2.13.0",
     "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    "transformers==5.16.1",
+    "transformers==5.18.0",
     # Plain source package (torch / numpy / packaging + one pybind11 C++ ext, no
     # CUDA toolchain), and it imports without TE / apex — both are optional there
     # with pure-torch fallbacks. It is what lets the `*_on_cpu.py` tests that
@@ -369,7 +377,7 @@ verl = [
 #     "some-x86-only-pkg ; platform_machine == 'x86_64'",
 #
 # or, for more than one package, as a marker-gated sub-extra (the same
-# convention flash-attn-cu130torch213 / cupy-cu130 use to share a pin):
+# convention the native-cu130torch* / cupy-cu130 extras use to share pins):
 #
 #     megatron-x86_64 = ["pkg-a", "pkg-b"]                      # in the extras
 #     "verl[megatron-x86_64] ; platform_machine == 'x86_64'",   # inside megatron
@@ -387,23 +395,25 @@ environments = [
 conflicts = [
     # (trtllm DEFERRED — add `{ extra = "trtllm" }` to each set when it rejoins.)
     [{ extra = "vllm" }, { extra = "sglang" }, { extra = "cpu" }],
+    [{ extra = "vllm" }, { extra = "native-cu130torch213" }],
+    [{ extra = "cpu" }, { extra = "native-cu130torch213" }],
     [{ extra = "fsdp" }, { extra = "cpu" }],
     [{ extra = "megatron" }, { extra = "cpu" }],
     [{ extra = "veomni" }, { extra = "cpu" }],
 ]
 
 # Global override pins:
-#   * transformers==5.16.1 project-wide — one version for every backend, so a
+#   * transformers==5.18.0 project-wide — one version for every backend, so a
 #     venv's transformers no longer depends on which engine it was synced with.
 #     Unmarked on purpose: overrides are absolute and replace EVERY requirement
 #     on the package, so this also settles the engines' own pins. Keep it inside
-#     setup.py / requirements.txt's supported window (>=5.5.3,!=5.6.0,<5.17)
+#     setup.py / requirements.txt's supported window (>=5.5.3,!=5.6.0,<5.19)
 #     and bump all of them together. Do NOT add
 #     an `extra` marker back unless a backend truly needs to diverge: such a
 #     marker matches only a requirement verl declares under that extra, never a
 #     transitive one, and a fork no override matches drops transformers outright.
-#   * tokenizers==0.23.2 — required by vllm 0.32 and compatible with transformers
-#     5.16.1. This overrides sglang 0.5.20's stale ==0.22.2 metadata pin.
+#   * tokenizers==0.23.3 — required by vllm 0.34 and compatible with transformers
+#     5.18.0. This overrides sglang 0.5.20's stale ==0.22.2 metadata pin.
 #   * numpy>=2.0.0 floor.
 #   * kernels>=0.14.1,<0.15 — sglang 0.5.20's own window. transformers only
 #     bounds `kernels` under extras we don't install (<0.13 there), so without an
@@ -422,8 +432,8 @@ conflicts = [
 #     non-default "fa4" attention backend.
 override-dependencies = [
     "tilelang==0.1.15",
-    "transformers==5.16.1",
-    "tokenizers==0.23.2",
+    "transformers==5.18.0",
+    "tokenizers==0.23.3",
     "numpy>=2.0.0",
     "kernels>=0.14.1,<0.15",
     "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
@@ -460,11 +470,9 @@ name = "megatron-bridge"
 version = "0.6.2"
 requires-dist = []
 
-# veomni 0.1.12 (pulled by BOTH the standalone `veomni` training backend and the
-# CI-only `veomni-sft` add-on) is installed deps-free: its metadata pins
-# datasets<=2.21.0, which would downgrade the shared datasets dependency. The
-# `veomni` backend (and the fsdp/megatron bases the add-on rides on) already supply
-# the PPO/SFT runtime dependencies.
+# veomni 0.1.12 is installed deps-free: its metadata pins datasets<=2.21.0,
+# which would downgrade the shared datasets dependency. The `veomni` backend
+# already supplies the PPO/SFT runtime dependencies.
 [[tool.uv.dependency-metadata]]
 name = "veomni"
 version = "0.1.12"
@@ -482,7 +490,7 @@ requires-dist = []
 # `ray[default]` and a `tensordict>=0.10.0` that sits right on verl's `<=0.10.0`
 # cap, and its optional storage backends drag in extras we never use. verl-core
 # supplies what it actually imports (see the pyzmq / msgspec note there). No
-# `version` key on purpose — the requirement is an open-ended `>=0.1.11`, so this
+# `version` key on purpose — the requirement is an open-ended `>=0.1.12`, so this
 # has to apply to every release it may resolve to, not one pinned version.
 [[tool.uv.dependency-metadata]]
 name = "TransferQueue"
@@ -496,25 +504,72 @@ name = "deep-ep"
 version = "1.2.1"
 requires-dist = []
 
-# Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.13
-# / cp312, built for x86_64 AND aarch64) — no source build here. megatron-bridge
-# rides along (pure-python wheel off the same wheelhouse, so no git clone / build
-# either), and being py3-none-any it is the one wheelhouse component with a single
-# arch-independent build.
+# The two wheelhouse worlds carry byte-different native wheels under the same
+# distribution versions. Supplying their stable upstream metadata keeps lock
+# generation from downloading every large wheel merely to inspect METADATA.
+[[tool.uv.dependency-metadata]]
+name = "apex"
+version = "0.1"
+requires-dist = ["packaging>20.6"]
+
+[[tool.uv.dependency-metadata]]
+name = "flash-attn"
+version = "2.8.3+cute.split.d51a4a1"
+requires-dist = ["torch", "einops"]
+
+[[tool.uv.dependency-metadata]]
+name = "transformer-engine"
+version = "2.20.2"
+requires-dist = [
+    "einops",
+    "packaging",
+    "torch>=2.1",
+    "importlib-metadata>=1.0",
+    "onnxscript",
+    "nvdlfw-inspect",
+    "onnx",
+    "pydantic",
+    "nvidia-cudnn-frontend>=1.29.0",
+]
+
+# Heavy native packages come prebuilt from the verl wheelhouse (cu130 / cp312,
+# built for x86_64 AND aarch64) — no source build here. vllm selects torch 2.14;
+# sglang and the explicit trainer-only native stack select torch 2.13.
+# megatron-bridge rides along as a pure-python, arch-independent wheel.
 #
-# The inference engines are deliberately NOT routed: upstream publishes cu130 /
-# torch-2.13 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
-# so the wheelhouse copies bought nothing (same builds, same download size, same
-# install time) while costing a hash-less index entry. flashinfer stays on PyPI
-# for the same reason — vllm/sglang pin their own and the wheelhouse's 0.6.13
-# matches neither.
+# The inference engines are deliberately NOT routed: upstream publishes matching
+# cu130 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI, so
+# wheelhouse copies bought nothing (same builds, same download size, same install
+# time) while costing a hash-less index entry. flashinfer stays on PyPI for the
+# same reason — vllm/sglang pin their own and the wheelhouse's 0.6.13 matches
+# neither.
 [tool.uv.sources]
-deep-ep              = { index = "verl-wheelhouse" }
-apex                 = { index = "verl-wheelhouse" }
-flash-attn           = { index = "verl-wheelhouse" }
-transformer-engine   = { index = "verl-wheelhouse" }
-megatron-bridge      = { index = "verl-wheelhouse" }
-veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "10a26aca258f91a7af3e698cc0db8c6c51705989" }
+deep-ep = [
+    { index = "verl-wheelhouse-torch214", extra = "vllm" },
+    { index = "verl-wheelhouse-torch213", extra = "sglang" },
+    { index = "verl-wheelhouse-torch213", extra = "native-cu130torch213" },
+]
+apex = [
+    { index = "verl-wheelhouse-torch214", extra = "vllm" },
+    { index = "verl-wheelhouse-torch213", extra = "sglang" },
+    { index = "verl-wheelhouse-torch213", extra = "native-cu130torch213" },
+]
+flash-attn = [
+    { index = "verl-wheelhouse-torch214", extra = "vllm" },
+    { index = "verl-wheelhouse-torch213", extra = "sglang" },
+    { index = "verl-wheelhouse-torch213", extra = "native-cu130torch213" },
+]
+transformer-engine = [
+    { index = "verl-wheelhouse-torch214", extra = "vllm" },
+    { index = "verl-wheelhouse-torch213", extra = "sglang" },
+    { index = "verl-wheelhouse-torch213", extra = "native-cu130torch213" },
+]
+megatron-bridge = [
+    { index = "verl-wheelhouse-torch214", extra = "vllm" },
+    { index = "verl-wheelhouse-torch213", extra = "sglang" },
+    { index = "verl-wheelhouse-torch213", extra = "native-cu130torch213" },
+]
+veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "9f533f4613e8b3470fcc6b9b409c539e2391e6c1" }
 
 # megatron-core isn't in the wheelhouse; git-sourced (built at sync
 # time). The wheelhouse megatron-bridge 0.6.2 (v0.6.2 tag) pairs with
@@ -523,6 +578,7 @@ megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",       
 
 # Per-extra routing to the matching pytorch wheel index.
 torch = [
+    { index = "pytorch-cu130", extra = "native-cu130torch213" },
     { index = "pytorch-cu130", extra = "vllm" },
     { index = "pytorch-cu130", extra = "sglang" },
     { index = "pytorch-cu130", extra = "fsdp" },
@@ -533,6 +589,7 @@ torch = [
     #   { index = "pytorch-cu130", extra = "trtllm" },
 ]
 torchvision = [
+    { index = "pytorch-cu130", extra = "native-cu130torch213" },
     { index = "pytorch-cu130", extra = "vllm" },
     { index = "pytorch-cu130", extra = "sglang" },
     { index = "pytorch-cu130", extra = "fsdp" },
@@ -541,6 +598,7 @@ torchvision = [
     { index = "pytorch-cpu",   extra = "cpu" },
 ]
 torchaudio = [
+    { index = "pytorch-cu130", extra = "native-cu130torch213" },
     { index = "pytorch-cu130", extra = "vllm" },
     { index = "pytorch-cu130", extra = "sglang" },
     { index = "pytorch-cu130", extra = "fsdp" },
@@ -559,11 +617,15 @@ name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
-# verl wheelhouse: prebuilt cu130 / torch-2.13 / cp312 native wheels, published
-# side by side for linux_x86_64 and linux_aarch64 (uv picks by platform tag).
-# Only the packages routed above are pulled here (explicit = true); the rest stay
-# on PyPI.
+# verl wheelhouses: prebuilt cu130 / cp312 native wheels, published side by side
+# for linux_x86_64 and linux_aarch64 (uv picks by platform tag). Only packages
+# routed above are pulled from these explicit indexes; the rest stay on PyPI.
 [[tool.uv.index]]
-name = "verl-wheelhouse"
+name = "verl-wheelhouse-torch213"
 url = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/"
+explicit = true
+
+[[tool.uv.index]]
+name = "verl-wheelhouse-torch214"
+url = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.14/simple/"
 explicit = true

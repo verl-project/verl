@@ -323,6 +323,7 @@ actor_rollout_ref:
     ray_actor_max_concurrency: 1024
     enable_chunked_prefill: true
     enable_prefix_caching: true
+    external_kv_cache_invalidation: reset
     logprobs_mode: processed_logprobs
     scheduling_policy: fcfs
     load_format: dummy
@@ -484,6 +485,7 @@ actor_rollout_ref:
     lora:
       type: lora
       merge: false
+      resync_base: false
       rank: 0
       alpha: 32
       dropout: 0.0
@@ -496,12 +498,17 @@ actor_rollout_ref:
       dropout_position: pre
       lora_A_init_method: xavier
       lora_B_init_method: zero
+      normalize_moe_lora: false
+      share_expert_adapters: true
+      experts_shared_outer_loras: false
+      lora_plus_ratio: 1.0
       a2a_experimental: false
       dtype: null
       adapter_path: null
       freeze_vision_model: true
       freeze_vision_projection: true
       freeze_language_model: true
+      enable_tower_connector_lora: true
   hybrid_engine: true
   nccl_timeout: 600
 data:
@@ -750,6 +757,7 @@ critic:
     lora:
       type: lora
       merge: false
+      resync_base: false
       rank: 0
       alpha: 32
       dropout: 0.0
@@ -762,12 +770,17 @@ critic:
       dropout_position: pre
       lora_A_init_method: xavier
       lora_B_init_method: zero
+      normalize_moe_lora: false
+      share_expert_adapters: true
+      experts_shared_outer_loras: false
+      lora_plus_ratio: 1.0
       a2a_experimental: false
       dtype: null
       adapter_path: null
       freeze_vision_model: true
       freeze_vision_projection: true
       freeze_language_model: true
+      enable_tower_connector_lora: true
 custom_reward_function:
   path: null
   name: null
@@ -1042,6 +1055,7 @@ trainer:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
       sync_refill_failed_groups: false
+      poll_interval: 2.0
       custom_sampler:
         path: null
         name: null

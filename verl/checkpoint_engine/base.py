@@ -332,10 +332,15 @@ class CheckpointEngineWorker(Worker):
 
         self.server_adapter: BaseRollout = server_adapter
         backend = self.rollout_config.checkpoint_engine.backend
-        if backend == "delta_sharded" and self.rollout_config.name not in {"sglang", "vllm"}:
+        if backend == "delta_sharded" and self.rollout_config.name != "sglang":
+            hint = (
+                "use checkpoint_engine.backend='vllm_sparse_nccl' for vLLM"
+                if self.rollout_config.name == "vllm"
+                else "use sglang"
+            )
             raise NotImplementedError(
                 f"checkpoint_engine.backend={backend!r} has no delta weight consumer for "
-                f"rollout.name={self.rollout_config.name!r}; use sglang or vllm"
+                f"rollout.name={self.rollout_config.name!r}; {hint}"
             )
         bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
         engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
@@ -605,9 +610,14 @@ class CheckpointEngineManager:
             global_steps: The global steps of the actor worker group.
         """
         # 0. update weights for sync training with colocated actor and rollout
+        # No global_steps check here: the only caller without one wakes replicas back up on unchanged
+        # weights, so the current salt still matches what the external KV store holds.
         if self.backend == "naive":
             await asyncio.gather(*self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
+
+        if getattr(getattr(self, "backend_cls", None), "is_vllm_native", False):
+            return await self._update_weights_vllm_native(global_steps=global_steps)
 
         # Wait previous update to be committed
         if self._update_ticket is not None:
@@ -620,7 +630,68 @@ class CheckpointEngineManager:
         else:
             return await self._update_ticket.wait_committed()
 
+    def _collect_vllm_targets(self) -> tuple[list[Any], list[int], list[Any]]:
+        server_handles, replica_world_sizes, wake_servers = [], [], []
+        for replica in self.replicas:
+            targets = (
+                replica.get_weight_transfer_targets()
+                if hasattr(replica, "get_weight_transfer_targets")
+                else [(replica.servers[0], replica.world_size)]
+            )
+            free_cache = bool(getattr(getattr(replica, "config", None), "free_cache_engine", False))
+            for handle, ws in targets:
+                server_handles.append(handle)
+                replica_world_sizes.append(ws)
+                if free_cache:
+                    wake_servers.append(handle)
+        return server_handles, replica_world_sizes, wake_servers
+
+    async def _update_weights_vllm_native(self, global_steps: int | None = None) -> dict[str, Any]:
+        """Drive vLLM's native WeightTransferEngine directly from trainer to vLLM servers."""
+        if global_steps is None and any(r.config.external_kv_cache_invalidation == "salt" for r in self.replicas):
+            raise ValueError("external_kv_cache_invalidation='salt' requires global_steps on every weight update")
+
+        server_handles, replica_world_sizes, wake_servers = self._collect_vllm_targets()
+        if not server_handles:
+            return {}
+
+        is_colocated = bool(getattr(self.backend_cls, "is_colocated", False))
+        if is_colocated:
+            if wake_servers:
+                await asyncio.gather(*[h.wake_up.remote(tags=["weights"]) for h in wake_servers])
+        else:
+            await self.abort_replicas()
+            await self.release_kv_cache_replicas()
+
+        n = self.actor_wg.world_size
+        await asyncio.gather(
+            *self.actor_wg.execute_checkpoint_engine(
+                ["configure_targets"] * n,
+                server_handles=[server_handles] * n,
+                replica_world_sizes=[replica_world_sizes] * n,
+            )
+        )
+        results = await asyncio.gather(*self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
+        await asyncio.gather(*self.actor_wg.execute_checkpoint_engine(["finalize"] * n))
+
+        await asyncio.gather(*[h.clear_kv_cache.remote() for h in server_handles])
+        if global_steps is not None:
+            await asyncio.gather(*[h.set_global_steps.remote(global_steps) for h in server_handles])
+
+        if is_colocated:
+            if wake_servers:
+                await asyncio.gather(*[h.wake_up.remote(tags=["kv_cache"]) for h in wake_servers])
+        else:
+            await self.resume_kv_cache_replicas()
+            await self.resume_generation_replicas()
+        return self._merge_sync_metrics(results)
+
     async def submit_update(self, global_steps: int | None, rollout_quiesced: bool = False) -> WeightUpdateTicket:
+        # Salted external KV caches tell weights apart only by global_steps, and the shared KV store
+        # is no longer wiped, so a weight change without a new version would serve stale KV.
+        if global_steps is None and any(r.config.external_kv_cache_invalidation == "salt" for r in self.replicas):
+            raise ValueError("external_kv_cache_invalidation='salt' requires global_steps on every weight update")
+
         # 1. create a temporay worker group for all replicas
         workers = []
         for replica in self.replicas:
