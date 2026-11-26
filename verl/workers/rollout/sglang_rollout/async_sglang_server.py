@@ -330,6 +330,7 @@ class SGLangHttpServer:
         args = {
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
+            "context_length": self.config.max_model_len,
             "mem_fraction_static": self.config.gpu_memory_utilization,
             "disable_cuda_graph": self.config.enforce_eager,
             "enable_memory_saver": True,
