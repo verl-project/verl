@@ -715,6 +715,8 @@ def test_trainer_owned_threaded_save_finalizes_only_the_role_manifest(tmp_path):
         register.assert_not_called()
         manager.close_threaded_checkpoint()
         writer.close.assert_called_once_with()
+        manager.discard_failed_async_checkpoint()
+        writer.discard_failed.assert_called_once_with()
 
 
 def test_trainer_owned_threaded_save_rejects_manager_storage_options(tmp_path):
@@ -732,3 +734,33 @@ def test_trainer_owned_threaded_save_rejects_manager_storage_options(tmp_path):
         with pytest.raises(ValueError, match="caller owns storage and retention"):
             manager.save_checkpoint(str(step_dir), global_step=1, hdfs_path="hdfs://example/checkpoints")
         assert not step_dir.exists()
+
+
+def test_trainer_owned_threaded_save_rejects_empty_save_contents_on_enable(tmp_path):
+    manager = _make_manager(save_contents=[], use_dist_checkpointing=True, async_save=True)
+    with (
+        patch("verl.utils.checkpoint.megatron_checkpoint_manager.is_cuda_available", True),
+        pytest.raises(ValueError, match="at least one native checkpoint content"),
+    ):
+        manager.enable_trainer_owned_threaded_checkpointing()
+    assert manager.previous_global_step is None
+
+
+def test_trainer_owned_threaded_save_propagates_transformer_config_error_before_scheduling(tmp_path):
+    from torch.distributed.checkpoint import CheckpointException
+
+    manager = _make_manager(save_contents=["extra"], use_dist_checkpointing=True, async_save=True)
+    step_dir = tmp_path / "global_step_1" / "actor"
+    with (
+        patch("verl.utils.checkpoint.megatron_checkpoint_manager.is_cuda_available", True),
+        patch("verl.utils.checkpoint.megatron_checkpoint_manager.ThreadedCheckpointWriter") as writer_type,
+        patch.object(manager, "_save_transformer_config", side_effect=OSError("disk full")),
+    ):
+        writer = writer_type.return_value
+        writer.pending = False
+        writer.save_dist_checkpoint.return_value = sentinel.extra
+        manager.enable_trainer_owned_threaded_checkpointing()
+
+        with pytest.raises(CheckpointException, match="disk full"):
+            manager.save_checkpoint(str(step_dir), global_step=1)
+        writer.schedule.assert_not_called()

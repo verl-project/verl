@@ -44,7 +44,7 @@ from verl.utils.megatron_utils import (
 from verl.utils.transformers_compat import copy_generation_config
 
 from .checkpoint_manager import BaseCheckpointManager
-from .megatron_thread_checkpoint import ThreadedCheckpointWriter
+from .megatron_thread_checkpoint import ThreadedCheckpointWriter, _raise_if_writer_failed
 
 # Setup logging
 logger = logging.getLogger(__file__)
@@ -1052,6 +1052,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             )
         if self.should_save_hf_model:
             raise ValueError("Threaded checkpointing does not support Hugging Face weight export")
+        if not (self.should_save_dist_ckpt_model or self.should_save_optimizer or self.should_save_extra):
+            raise ValueError("Threaded checkpointing requires at least one native checkpoint content")
         self._threaded_checkpoint_writer = ThreadedCheckpointWriter(cache_plans=cache_plans)
 
     def finalize_async_checkpoint(self, *, blocking: bool = True) -> bool:
@@ -1060,6 +1062,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         if writer is None:
             raise RuntimeError("Threaded checkpointing is not enabled")
         return writer.finalize(blocking=blocking)
+
+    def discard_failed_async_checkpoint(self) -> None:
+        """Clear a failed threaded checkpoint on all ranks before saving to a new directory."""
+        writer = self._threaded_checkpoint_writer
+        if writer is None:
+            raise RuntimeError("Threaded checkpointing is not enabled")
+        writer.discard_failed()
 
     def close_threaded_checkpoint(self) -> None:
         """Drain and release the thread writer on all ranks before shutting down."""
@@ -1219,6 +1228,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         """
         writer = self._threaded_checkpoint_writer
         if writer is not None:
+            writer.raise_if_failed()
             if writer.pending:
                 raise RuntimeError("Finalize the pending threaded checkpoint before starting another save")
             if hdfs_path is not None or max_ckpt_to_keep is not None:
@@ -1313,7 +1323,15 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
         # ── 4. Transformer config (rank 0, at checkpoint root) ──────────────
         if self.should_save_extra:
-            self._save_transformer_config(local_path)
+            if writer is not None:
+                config_error = None
+                try:
+                    self._save_transformer_config(local_path)
+                except BaseException as error:
+                    config_error = error
+                _raise_if_writer_failed(config_error)
+            else:
+                self._save_transformer_config(local_path)
 
         # ── 5. Finalization (manifest, HDFS upload, tracker, retention) ─────
         # FSDP saves synchronously and produces no async request, so the

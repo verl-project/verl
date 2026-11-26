@@ -234,3 +234,42 @@ def test_native_thread_queue_keeps_collectives_on_actor_thread_and_drains_on_clo
     assert queue.get_num_unfinalized_calls() == 0
     with pytest.raises(RuntimeError, match="cannot schedule new futures after shutdown"):
         queue.schedule_async_request(request)
+
+
+def test_overlapping_gc_disabled_scopes_keep_gc_disabled_until_last_exit():
+    from verl.utils.checkpoint.megatron_thread_checkpoint import _gc_disabled_scope
+
+    previous_gc = gc.isenabled()
+    gc.enable()
+    try:
+        with _gc_disabled_scope():
+            assert not gc.isenabled()
+            with _gc_disabled_scope():
+                assert not gc.isenabled()
+            assert not gc.isenabled()
+        assert gc.isenabled()
+    finally:
+        gc.enable() if previous_gc else gc.disable()
+
+
+def test_writer_close_shuts_down_executor_when_background_write_fails(monkeypatch):
+    native = pytest.importorskip("megatron.core.dist_checkpointing.strategies.async_utils")
+    from verl.utils.checkpoint.megatron_thread_checkpoint import (
+        ThreadedCheckpointWriter,
+        create_thread_checkpoint_queue,
+    )
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
+    queue = create_thread_checkpoint_queue(
+        synchronize=lambda: None,
+        sync_all_done=lambda alive: not alive,
+        sync_failure=_raise_local_error,
+    )
+    writer = ThreadedCheckpointWriter(queue=queue)
+    request = native.AsyncRequest(lambda: (_ for _ in ()).throw(OSError("background write boom")), (), [])
+    writer.schedule([request], lambda: None)
+    with pytest.raises(OSError, match="background write boom"):
+        writer.close()
+    assert not writer.pending and writer.failed
+    with pytest.raises(RuntimeError, match="cannot schedule new futures after shutdown"):
+        queue._executor.submit(lambda: None)

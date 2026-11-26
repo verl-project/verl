@@ -292,9 +292,10 @@ Trainer-owned threaded writes
 Integrations that coordinate their own saves can call
 ``MegatronCheckpointManager.enable_trainer_owned_threaded_checkpointing()`` on
 every rank during initialization. This requires ``async_save=True``, native
-Megatron shards on CUDA, and Megatron-Core's native async save API. Megatron-FSDP
-and Hugging Face weight export are outside this mode's supported save paths.
-``async_save=True`` alone continues to select verl's existing async path.
+Megatron shards on CUDA with at least one native ``save_contents`` entry, and
+Megatron-Core's native async save API. Megatron-FSDP and Hugging Face weight
+export are outside this mode's supported save paths. ``async_save=True`` alone
+continues to select verl's existing async path.
 
 Call ``save_checkpoint()`` on every rank for a new checkpoint directory. The
 call returns after staging the snapshot for background writes. Call

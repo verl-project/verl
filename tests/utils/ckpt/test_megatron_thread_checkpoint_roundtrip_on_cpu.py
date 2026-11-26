@@ -28,7 +28,12 @@ import torch.distributed as dist
 from verl.utils.checkpoint.megatron_thread_checkpoint import ThreadedCheckpointWriter, create_thread_checkpoint_queue
 
 
-def _check_rank_local_failures(rank, rendezvous):
+def _check_rank_local_failures(rank, rendezvous, root_dir):
+    from pathlib import Path
+
+    from megatron.core import mpu
+    from megatron.core.dist_checkpointing import serialization
+    from megatron.core.dist_checkpointing.strategies import filesystem_async
     from megatron.core.dist_checkpointing.strategies.async_utils import AsyncRequest
     from torch.distributed.checkpoint import CheckpointException
 
@@ -36,6 +41,8 @@ def _check_rank_local_failures(rank, rendezvous):
     with pytest.MonkeyPatch.context() as patch:
         # Adapt the native queue's CUDA control scalar to this CPU process group.
         patch.setattr(torch.cuda, "current_device", lambda: "cpu")
+        patch.setattr(torch.cuda, "synchronize", lambda: None)
+        patch.setattr(mpu, "get_data_parallel_group", lambda **kwargs: dist.group.WORLD)
         failure_phase = None
         writes, finalized = [], []
 
@@ -90,8 +97,55 @@ def _check_rank_local_failures(rank, rendezvous):
             with pytest.raises(CheckpointException, match="rank 0 failed to publish the role manifest") as captured:
                 writer.finalize()
             assert set(captured.value.failures) == {0}
-            assert writer.pending and not writer.finalize()
+            assert not writer.pending and writer.failed
             assert writes == [rank, rank]
+            with pytest.raises(CheckpointException, match="rank 0 failed to publish the role manifest"):
+                writer.finalize()
+            with pytest.raises(CheckpointException, match="rank 0 failed to publish the role manifest"):
+                writer.schedule([request], lambda: finalized.append(rank))
+
+            writer.discard_failed()
+            assert not writer.failed
+            writer.schedule([request], lambda: finalized.append(rank))
+            assert writer.finalize()
+            assert writes == [rank, rank, rank] and finalized == [rank, rank]
+
+            root = Path(root_dir)
+            tensor = torch.tensor([float(rank + 1), float(rank + 2)])
+            for bad_phase, expected_msg in (
+                ("finish", "rank 0 failed writing .metadata"),
+                ("save_config", "rank 0 failed writing metadata.json"),
+            ):
+                ckpt_dir = root / bad_phase / "model" / "dist_ckpt"
+                if rank == 0:
+                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                dist.barrier()
+                native_finish = filesystem_async.FileSystemWriterAsync.finish
+                native_save_config = serialization.save_config
+
+                def fail_finish(self, *args, _native=native_finish, _phase=bad_phase, **kwargs):
+                    if _phase == "finish" and rank == 0:
+                        raise OSError("rank 0 failed writing .metadata")
+                    return _native(self, *args, **kwargs)
+
+                def fail_save_config(*args, _native=native_save_config, _phase=bad_phase, **kwargs):
+                    if _phase == "save_config" and rank == 0:
+                        raise OSError("rank 0 failed writing metadata.json")
+                    return _native(*args, **kwargs)
+
+                with (
+                    patch.context() as inner_patch,
+                    pytest.raises(CheckpointException, match=expected_msg) as captured,
+                ):
+                    inner_patch.setattr(filesystem_async.FileSystemWriterAsync, "finish", fail_finish)
+                    inner_patch.setattr(serialization, "save_config", fail_save_config)
+                    req = writer.save_dist_checkpoint(ckpt_dir, {"w": _shard("w", tensor.clone(), replica_id=rank)})
+                    writer.schedule([req], lambda _phase=bad_phase: finalized.append(("role_manifest", _phase)))
+                    writer.finalize()
+                assert set(captured.value.failures) == {0}
+                assert not writer.pending and writer.failed
+                assert ("role_manifest", bad_phase) not in finalized
+                writer.discard_failed()
         finally:
             writer.close()
             dist.destroy_process_group()
@@ -100,7 +154,11 @@ def _check_rank_local_failures(rank, rendezvous):
 @pytest.mark.skipif(not dist.is_gloo_available(), reason="Gloo is required for two-rank checkpoint tests")
 def test_rank_local_scheduling_and_manifest_failures_reach_every_rank(tmp_path):
     pytest.importorskip("megatron.core", minversion="0.19.2")
-    torch.multiprocessing.spawn(_check_rank_local_failures, args=(f"file://{tmp_path / 'gloo'}",), nprocs=2)
+    torch.multiprocessing.spawn(
+        _check_rank_local_failures,
+        args=(f"file://{tmp_path / 'gloo'}", str(tmp_path / "ckpts")),
+        nprocs=2,
+    )
 
 
 @pytest.fixture
@@ -153,10 +211,10 @@ def _update(parameter, optimizer, scheduler, step):
     scheduler.step()
 
 
-def _shard(key, tensor):
+def _shard(key, tensor, replica_id=0):
     from megatron.core.dist_checkpointing.mapping import ShardedTensor
 
-    return ShardedTensor.from_rank_offsets(key, tensor)
+    return ShardedTensor.from_rank_offsets(key, tensor, replica_id=replica_id)
 
 
 def _load_trees(root, expected):
@@ -197,7 +255,7 @@ def test_threaded_native_three_tree_roundtrip_reuses_writer_and_restores_next_ad
     result_channels = []
     gc_enabled = gc.isenabled()
     try:
-        for step in (1, 2):
+        for step in (1, 2, 3):
             _update(parameter, optimizer, scheduler, step * 2 - 1)
             live_tensors = {"model.weight": parameter.detach()}
             for name, value in optimizer.state[parameter].items():
@@ -243,7 +301,7 @@ def test_threaded_native_three_tree_roundtrip_reuses_writer_and_restores_next_ad
             try:
                 metrics = writer.schedule(requests, lambda step=step: finalized.append(step))
                 assert writing.wait(5)
-                assert not writer.finalize(blocking=False, no_dist=True)
+                assert not writer.finalize(blocking=False)
                 assert finalized == list(range(1, step))
                 assert metrics["checkpoint/worker_snapshot_bytes"] == sum(
                     t.numel() * t.element_size() for t in expected.values()
@@ -279,6 +337,26 @@ def test_threaded_native_three_tree_roundtrip_reuses_writer_and_restores_next_ad
             for name, value in optimizer.state[parameter].items():
                 torch.testing.assert_close(restored_optimizer.state[restored_parameter][name], value, atol=0, rtol=0)
             assert restored_scheduler.state_dict() == scheduler.state_dict()
-        assert len(io_threads) == 2 and len(set(io_threads)) == 1 and io_threads[0] != actor_thread
+        assert len(io_threads) == 3 and len(set(io_threads)) == 1 and io_threads[0] != actor_thread
     finally:
         writer.close()
+
+
+def test_threaded_planning_does_not_spawn_unused_results_manager(cpu_native_runtime, tmp_path):
+    with pytest.MonkeyPatch.context() as inner_patch:
+        inner_patch.setattr(cpu_native_runtime.filesystem_async, "_results_queue", None)
+        inner_patch.setattr(
+            cpu_native_runtime.filesystem_async.mp,
+            "get_context",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not spawn Manager")),
+        )
+        queue = create_thread_checkpoint_queue(synchronize=lambda: None, sync_all_done=lambda alive: not alive)
+        writer = ThreadedCheckpointWriter(queue=queue)
+        try:
+            ckpt_dir = tmp_path / "model" / "dist_ckpt"
+            ckpt_dir.mkdir(parents=True)
+            request = writer.save_dist_checkpoint(ckpt_dir, {"w": _shard("w", torch.ones(4))})
+            assert isinstance(request.async_fn_args[2], Queue)
+            assert cpu_native_runtime.filesystem_async._results_queue is None
+        finally:
+            writer.close()
