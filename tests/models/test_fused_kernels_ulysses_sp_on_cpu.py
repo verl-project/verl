@@ -321,7 +321,7 @@ def test_adapter_falls_back_to_local_roll_when_shift_labels_absent(forward_fn):
 
 
 @pytest.mark.parametrize("forward_fn", TRITON_ADAPTERS, ids=_adapter_id)
-@pytest.mark.parametrize("backend", ["tilelang", "triton"])
+@pytest.mark.parametrize("backend", ["tilelang", "triton", "cutile"])
 def test_adapter_combines_and_splits_auxiliary_labels(forward_fn, backend):
     model = _make_fake_lm()
     model._verl_fused_kernels_backend = backend
@@ -372,7 +372,7 @@ def test_liger_adapter_forwards_auxiliary_labels_to_unified_kernel(forward_fn):
     assert output.topk_log_probs.shape == topk_labels.shape
 
 
-@pytest.mark.parametrize("backend", ["tilelang", "triton"])
+@pytest.mark.parametrize("backend", ["tilelang", "triton", "cutile"])
 def test_veomni_adapter_promotes_unified_topk_log_probs(backend):
     model = _make_fake_lm()
     input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)

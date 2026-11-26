@@ -168,17 +168,20 @@ class LinearCrossEntropy(torch.autograd.Function):
             REDUCTION = get_entropy_reduction_enum_number(reduction.lower())
 
             original_hidden_shape = hidden.shape
-            multi_label = backend == "triton" and labels.ndim == hidden.ndim and labels.shape[:-1] == hidden.shape[:-1]
-            if multi_label and labels.shape[-1] == 1 and reduction.lower() != "none":
+            multi_label = labels.ndim == hidden.ndim and labels.shape[:-1] == hidden.shape[:-1]
+            if multi_label and labels.shape[-1] == 1 and REDUCTION != 0:
                 multi_label = False
             if multi_label:
-                if not labels.shape[-1] or reduction.lower() != "none":
+                queries = labels.shape[-1]
+                if queries == 0 or REDUCTION != 0:
                     raise ValueError("multi-label queries require a positive query count and reduction='none'")
                 if labels.dtype != torch.int64:
                     raise ValueError("multi-label queries require int64 labels")
                 hidden = hidden.reshape(-1, hidden.shape[-1]).contiguous()
                 weight = weight.contiguous()
-                labels = labels.reshape(hidden.shape[0], labels.shape[-1]).contiguous()
+                labels = labels.reshape(hidden.shape[0], queries).contiguous()
+                if backend == "cutile" and queries == 1:
+                    labels = labels[:, 0]
             else:
                 hidden = hidden.view(-1, hidden.shape[-1])
                 labels = labels.reshape(-1).contiguous()
@@ -194,9 +197,7 @@ class LinearCrossEntropy(torch.autograd.Function):
             ctx.should_return_fp32_grad = False
             ctx.temperature = temperature
         if multi_label:
-            return logprobs.reshape(*original_hidden_shape[:-1], labels.shape[-1]), entropy.reshape(
-                original_hidden_shape[:-1]
-            )
+            return logprobs.reshape(*original_hidden_shape[:-1], queries), entropy.reshape(original_hidden_shape[:-1])
         return logprobs, entropy
 
     @staticmethod
@@ -211,7 +212,7 @@ class LinearCrossEntropy(torch.autograd.Function):
             temperature = ctx.temperature
 
             d_hidden, d_weight = kernels.efficient_entropy_backward(
-                dlogprobs.reshape_as(labels).contiguous() if labels.ndim == 2 else dlogprobs.contiguous(),
+                dlogprobs.reshape_as(labels).contiguous() if REDUCTION == 0 else dlogprobs.contiguous(),
                 dentropy.reshape(-1).contiguous(),
                 hidden,
                 weight,
@@ -241,6 +242,10 @@ def linear_cross_entropy(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused linear + cross-entropy (+ token entropy).
 
+    With cuTile, int64 labels shaped ``(*token_shape, K)`` query K selected
+    log probabilities per token under ``reduction="none"``; entropy has shape
+    ``token_shape``. Repeated IDs retain separate output positions.
+
     Always returns ``(logprobs, entropy)``. On Ascend NPU, dispatches to CANN
     vocab-parallel fused CE when available (``VERL_NPU_LCE_BACKEND=auto|cann``).
     Hybrid backward: CANN CE when ``dentropy==0``; chunked PyTorch CE+entropy
@@ -254,10 +259,10 @@ def linear_cross_entropy(
     if reduction is None:
         reduction = "none"
     num_tokens = hidden.numel() // hidden.shape[-1]
-    if impl_backend == "triton" and hidden.device.type != "npu":
+    if impl_backend in ("triton", "cutile") and hidden.device.type != "npu":
         if labels.numel() != num_tokens and (labels.ndim != hidden.ndim or labels.shape[:-1] != hidden.shape[:-1]):
             raise ValueError("labels must contain one or more labels for every hidden row")
-    elif impl_backend in ("triton", "liger", "cutile") and labels.numel() != num_tokens:
+    elif impl_backend in ("triton", "liger") and labels.numel() != num_tokens:
         raise ValueError(f"The {impl_backend} linear cross entropy backend only supports one label per token")
     if impl_backend == "cutile":
         if hidden.device.type != "cuda":

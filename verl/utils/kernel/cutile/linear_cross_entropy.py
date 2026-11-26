@@ -57,7 +57,9 @@ def _forward(
     tk: ct.Constant[int],
 ):
     row, split = ct.bid(0), ct.bid(1)
-    ids = _load(labels, (row,), (tm,))
+    rows = row * tm + ct.arange(tm, dtype=ct.int32)
+    if labels.ndim == 1:
+        ids = _load(labels, (row,), (tm,))
     maximum = ct.full((tm,), -float("inf"), dtype=ct.float32)
     total = ct.full((tm,), 0, dtype=ct.float32)
     moment = ct.full((tm,), 0, dtype=ct.float32)
@@ -73,14 +75,22 @@ def _forward(
         exp_z = ct.exp(masked - next_max[:, None])
         total = total * scale + ct.sum(exp_z, axis=1)
         moment = moment * scale + ct.sum(z * exp_z, axis=1)
-        selected += ct.sum(ct.where(ids[:, None] == rank_offset + vocab[None, :], z, 0), axis=1)
+        if labels.ndim == 1:
+            selected += ct.sum(ct.where(ids[:, None] == rank_offset + vocab[None, :], z, 0), axis=1)
+        else:
+            start = rank_offset + col * tn
+            for q in range(labels.shape[1]):
+                query = ct.gather(labels, (rows, q))
+                value = ct.sum(ct.where(query[:, None] == rank_offset + vocab[None, :], z, 0), axis=1)
+                owned = (query >= start) & (query < min(start + tn, rank_offset + w.shape[0]))
+                ct.scatter(targets, (rows, q), value, mask=owned)
         maximum = next_max
     ct.store(maxima, (row, split), maximum[:, None])
     ct.store(sums, (row, split), total[:, None])
     ct.store(moments, (row, split), moment[:, None])
-    rows = row * tm + ct.arange(tm, dtype=ct.int32)
-    start = split * _SPLIT + rank_offset
-    ct.scatter(targets, rows, selected, mask=(ids >= start) & (ids < min(start + _SPLIT, rank_offset + w.shape[0])))
+    if labels.ndim == 1:
+        start = split * _SPLIT + rank_offset
+        ct.scatter(targets, rows, selected, mask=(ids >= start) & (ids < min(start + _SPLIT, rank_offset + w.shape[0])))
 
 
 # Each vocabulary tile divides the fixed split; the last split may be partial.
@@ -99,7 +109,7 @@ _forward_launch_cache = {}
 def _launch_forward(stream, x, w, labels, maxima, sums, moments, targets, offset, inv_temp):
     m, k = x.shape
     splits = maxima.shape[1]
-    key = (x.device, x.dtype, w.dtype, labels.dtype, m, w.shape[0], k)
+    key = (x.device, x.dtype, w.dtype, labels.dtype, labels.shape, m, w.shape[0], k)
     args = (x, w, labels, maxima, sums, moments, targets, offset, inv_temp)
     launch = _forward_launch_cache.get(key)
     if launch is None:
@@ -145,8 +155,13 @@ def _merge(maxima, local_maxima, sums, moments):
 def _finish(maximum, total, moment, targets, entropy, out, reduction):
     row = ct.bid(0)
     lse = maximum + ct.log(total)
-    lp = _load(targets, (row,), (_BLOCK,)) - lse
     ct.store(entropy, (row,), lse - moment / total)
+    if targets.ndim == 2:
+        for q in range(ct.cdiv(targets.shape[1], _BLOCK)):
+            lp = _load(targets, (row, q), (_BLOCK, _BLOCK)) - lse[:, None]
+            ct.store(out, (row, q), lp)
+        return
+    lp = _load(targets, (row,), (_BLOCK,)) - lse
     if reduction == 0:
         ct.store(out, (row,), lp)
     else:
@@ -191,17 +206,27 @@ def _grad(
 ):
     z = _projection(x, w, row, col, inv_temp, tm, tn, tk)
     vocab = col * tn + ct.arange(tn, dtype=ct.int32)
-    ids = _load(labels, (row,), (tm,))
+    rows = row * tm + ct.arange(tm, dtype=ct.int32)
     inv_total = 1.0 / _load(total, (row,), (tm,))
     p = ct.exp(z - _load(maximum, (row,), (tm,))[:, None]) * inv_total[:, None]
-    upstream = _load(g, (row,), (tm,))[:, None] if reduction == 0 else ct.gather(g, 0)
-    if reduction == 2:
-        upstream = upstream / x.shape[0]
+    if labels.ndim == 1:
+        ids = _load(labels, (row,), (tm,))
+        upstream = _load(g, (row,), (tm,))[:, None] if reduction == 0 else ct.gather(g, 0)
+        if reduction == 2:
+            upstream = upstream / x.shape[0]
+        grad = upstream * (ct.astype(ids[:, None] == offset + vocab[None, :], ct.float32) - p)
+    else:
+        selected = ct.full((tm, tn), 0, dtype=ct.float32)
+        upstream_sum = ct.full((tm,), 0, dtype=ct.float32)
+        for q in range(labels.shape[1]):
+            ids = ct.gather(labels, (rows, q))
+            upstream = ct.gather(g, (rows, q))
+            upstream_sum += upstream
+            selected += ct.where(ids[:, None] == offset + vocab[None, :], upstream[:, None], 0)
+        grad = selected - upstream_sum[:, None] * p
     dh = _load(h, (row,), (tm,))
     mu = _load(mean, (row,), (tm,))
-    grad = upstream * (ct.astype(ids[:, None] == offset + vocab[None, :], ct.float32) - p)
     grad += dh[:, None] * p * (mu[:, None] - z)
-    rows = row * tm + ct.arange(tm, dtype=ct.int32)
     return ct.where((rows[:, None] < x.shape[0]) & (vocab[None, :] < w.shape[0]), grad * inv_temp, 0)
 
 
@@ -260,7 +285,7 @@ _chunk_launch_cache = {}
 def _launch_chunk(stream, x, w, labels, maximum, total, mean, g, h, dst, offset, inv_temp, reduction):
     m, k = x.shape
     n = w.shape[0]
-    key = (x.device, x.dtype, labels.dtype, m, n, k, dst.stride(0), g.stride(0), h.stride(0), reduction)
+    key = (x.device, x.dtype, labels.dtype, labels.shape, m, n, k, dst.stride(0), g.stride(0), h.stride(0), reduction)
     launch = _chunk_launch_cache.get(key)
     args = (x, w, labels, maximum, total, mean, g, h, dst, offset, inv_temp, reduction)
     if launch is None:
@@ -343,19 +368,19 @@ def efficient_entropy_forward(hidden, weight, labels, reduction, temperature, gr
     assert hidden.is_contiguous() and weight.is_contiguous() and labels.is_contiguous()
     m, d = hidden.shape
     v, dw = weight.shape
-    assert d == dw and d % 128 == 0 and labels.shape == (m,)
+    assert d == dw and d % 128 == 0 and labels.shape[0] == m
     splits = (v + _SPLIT - 1) // _SPLIT
     options = dict(device=hidden.device, dtype=torch.float32)
     maxima = torch.empty((m, splits), **options)
     sums = torch.empty_like(maxima)
     moments = torch.empty_like(maxima)
-    targets = torch.zeros(m, **options)
-    maximum = torch.empty_like(targets)
+    targets = torch.zeros(labels.shape, **options)
+    maximum = torch.empty(m, **options)
     # Keep the two row-statistic arrays aligned for tiled loads, including
     # when the token count is odd. TP reduces both rows in one collective.
     stats = torch.zeros((2, _blocks(m) * _BLOCK), **options)
     total, mean = stats[:, :m].unbind()
-    entropy = torch.empty_like(targets)
+    entropy = torch.empty_like(maximum)
     out = targets if reduction == 0 else torch.zeros(1, **options)
     rank = 0 if group is None else dist.get_rank(group)
     stream = torch.cuda.current_stream(hidden.device)
@@ -385,7 +410,7 @@ def efficient_entropy_backward(
     m, d = hidden.shape
     v = weight.shape[0]
     stream = torch.cuda.current_stream(hidden.device)
-    g = g.reshape(-1)
+    g = g.reshape_as(labels) if labels.ndim == 2 else g.reshape(-1)
     args = (hidden, weight, labels, maximum, total, mean, g, h)
     offset = 0 if group is None else dist.get_rank(group) * v
     params = (offset, 1.0 / temperature, reduction)
