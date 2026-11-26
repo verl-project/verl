@@ -60,7 +60,11 @@ from verl.utils.fsdp_utils import (
     replace_lora_wrapper,
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
-from verl.utils.optimizer_in_backward import OptimizerInBackwardWrapper, create_optim_in_bwd_wrapper
+from verl.utils.optimizer_in_backward import (
+    OptimizerInBackwardWrapper,
+    create_optim_in_bwd_wrapper,
+    supports_step_in_hooks,
+)
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.seqlen_balancing import ceildiv
 from verl.utils.torch_functional import logprobs_from_logits
@@ -518,11 +522,11 @@ class FSDPEngine(BaseEngine):
         optimizer = build_optimizer(module.parameters(), self.optimizer_config)
 
         if getattr(self.optimizer_config, "optimizer_in_backward", False):
-            optimizer = self._wrap_optimizer_in_backward(optimizer)
+            optimizer = self._wrap_optimizer_in_backward(optimizer, module)
 
         return optimizer
 
-    def _wrap_optimizer_in_backward(self, optimizer):
+    def _wrap_optimizer_in_backward(self, optimizer, module):
         """Wrap ``optimizer`` so it steps during the backward pass.
 
         A global grad-norm clip needs every gradient of the mini-batch, and those only
@@ -534,9 +538,19 @@ class FSDPEngine(BaseEngine):
             raise ValueError("optimizer_in_backward is not supported by the fsdp_turbo strategy")
         if getattr(self, "scaler", None) is not None:
             raise ValueError("optimizer_in_backward does not support fp16 loss scaling; use bf16 instead")
+        step_in_hooks = self.optimizer_config.clip_grad is None
+        if step_in_hooks and not supports_step_in_hooks(module):
+            # FSDP1 writes gradients from its own backward hook instead of the autograd
+            # accumulator, so the in-backward step would never fire. Keep the update at the
+            # end of the last backward instead of silently never stepping.
+            logger.warning(
+                "optimizer_in_backward cannot step from grad hooks under FSDP1; falling back to "
+                "releasing gradients one parameter at a time after the backward pass."
+            )
+            step_in_hooks = False
         return create_optim_in_bwd_wrapper(
             optimizer,
-            step_in_hooks=self.optimizer_config.clip_grad is None,
+            step_in_hooks=step_in_hooks,
             grad_norm_group=self._get_grad_norm_group(),
         )
 

@@ -31,6 +31,14 @@ pass is over, so the wrapper runs in one of two modes:
     gradient is ready. The reported grad norm is assembled from per-parameter partial norms
     and reduced once, after backward, with a single collective.
 
+    Skipping a whole mini-batch is only possible while no parameter has been updated yet.
+    Gradients become non-finite in practice because the loss exploded, which makes *every*
+    gradient non-finite, so the first hook that fires already sees it and the update is
+    skipped atomically. A non-finite gradient that only shows up *after* some parameters
+    were stepped cannot be rolled back (the pre-step weights are not kept, which is exactly
+    what saves memory), so that case raises instead of silently leaving a partially updated
+    model. Set ``clip_grad`` if mini-batches can be skipped for any reason.
+
 ``step_in_hooks=False`` (used when ``clip_grad`` is enabled)
     Gradients stay materialized until the last micro-batch's backward returns. The caller
     then computes the grad norm / clip with exactly the same code as the non-fused path and
@@ -50,8 +58,21 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
-__all__ = ["OptimizerInBackwardWrapper", "create_optim_in_bwd_wrapper"]
+__all__ = ["OptimizerInBackwardWrapper", "create_optim_in_bwd_wrapper", "supports_step_in_hooks"]
+
+
+def supports_step_in_hooks(module: torch.nn.Module) -> bool:
+    """Whether ``post_accumulate_grad_hook`` fires for ``module``'s parameters.
+
+    FSDP1 (``FullyShardedDataParallel``) does not route parameter gradients through the
+    autograd accumulator: its post-backward hook writes the reduce-scattered shards into
+    ``flat_param.grad`` directly, so the hook never fires and, until the backward pass
+    returns, the parameters are only available in their *unsharded* view. FSDP2
+    (``fully_shard``) and plain modules keep using ``AccumulateGrad`` and are fine.
+    """
+    return not isinstance(module, FSDP)
 
 
 class OptimizerInBackwardWrapper:
@@ -86,7 +107,11 @@ class OptimizerInBackwardWrapper:
         self._stepping = False
         self._single_param_groups: dict[torch.nn.Parameter, dict] = {}
         self._sq_norm = None
-        self._nonfinite_params = 0
+        # Hook mode only: a non-finite gradient was seen, and how many parameters the hooks
+        # already stepped. Both are needed to either skip the mini-batch atomically or to
+        # refuse a rollback that is impossible after a partial step.
+        self._nonfinite = False
+        self._stepped_params = 0
 
         if step_in_hooks:
             for param in self._params:
@@ -116,7 +141,8 @@ class OptimizerInBackwardWrapper:
     def zero_grad(self, set_to_none: bool = True):
         self.optimizer.zero_grad(set_to_none=set_to_none)
         self._sq_norm = None
-        self._nonfinite_params = 0
+        self._nonfinite = False
+        self._stepped_params = 0
 
     # ------------------------------------------------------------------
     # in-backward lifecycle
@@ -130,7 +156,8 @@ class OptimizerInBackwardWrapper:
         self._stepping = stepping
         if stepping:
             self._sq_norm = None
-            self._nonfinite_params = 0
+            self._nonfinite = False
+            self._stepped_params = 0
             self._refresh_single_param_groups()
 
     def finalize(self, grad_norm: Optional[float] = None, *, step: bool = True) -> float:
@@ -142,18 +169,31 @@ class OptimizerInBackwardWrapper:
                 the hooks accumulated (hook mode only).
             step: When False, only the leftover gradients are released -- used when the
                 caller decides the update must be skipped, e.g. for a non-finite grad norm.
+
+        Raises:
+            RuntimeError: A non-finite gradient was seen in hook mode after some parameters
+                had already been updated, so the mini-batch cannot be skipped atomically.
         """
         self._stepping = False
         if grad_norm is None:
             grad_norm = self._reduce_partial_norm()
-        if step:
+        if self._nonfinite and self._stepped_params:
+            raise RuntimeError(
+                "optimizer_in_backward hit a non-finite gradient after updating "
+                f"{self._stepped_params} parameter(s) in place; parameters stepped from inside the "
+                "backward pass cannot be rolled back. Set optimizer.clip_grad so the grad norm is "
+                "checked before any update, or fix the numerical instability."
+            )
+        if not step or self._nonfinite:
+            self.optimizer.zero_grad(set_to_none=True)
+        else:
             self._refresh_single_param_groups()
             for param in self._params:
                 if param.grad is not None:
                     self._step_param(param)
-        else:
-            self.optimizer.zero_grad(set_to_none=True)
         self._sq_norm = None
+        self._nonfinite = False
+        self._stepped_params = 0
         return grad_norm
 
     # ------------------------------------------------------------------
@@ -165,23 +205,39 @@ class OptimizerInBackwardWrapper:
         grad = param.grad
         self._accumulate_sq_norm(grad)
         if not torch.isfinite(self._local_view(grad)).all():
-            # Earlier parameters are already updated by now, so the best we can do is leave
-            # this one untouched; the caller reports the non-finite norm.
-            self._nonfinite_params += 1
+            # An exploding loss makes every gradient non-finite, so the first hook to fire
+            # normally lands here before anything was stepped and the update is skipped whole.
+            self._nonfinite = True
+            return
+        if self._nonfinite:
             return
         self._step_param(param)
+        self._stepped_params += 1
 
     def _accumulate_sq_norm(self, grad: torch.Tensor):
         sq = self._local_view(grad).detach().float().pow(2).sum()
         self._sq_norm = sq if self._sq_norm is None else self._sq_norm + sq
 
     def _reduce_partial_norm(self) -> float:
-        if self._sq_norm is None:
-            return 0.0
         total = self._sq_norm
+        if total is None:
+            # No partial norms were recorded, so this is the non-hook mode and the caller did
+            # not measure the norm either (``clip_grad`` disabled): measure the gradients now.
+            total = self._sq_norm_of_current_grads()
+        if total is None:
+            return 0.0
         if self._grad_norm_group is not None and torch.distributed.is_initialized():
             torch.distributed.all_reduce(total, group=self._grad_norm_group)
         return total.sqrt().item()
+
+    def _sq_norm_of_current_grads(self):
+        total = None
+        for param in self._params:
+            if param.grad is None:
+                continue
+            sq = self._local_view(param.grad).detach().float().pow(2).sum()
+            total = sq if total is None else total + sq
+        return total
 
     @staticmethod
     def _local_view(grad: torch.Tensor) -> torch.Tensor:

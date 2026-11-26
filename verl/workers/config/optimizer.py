@@ -103,10 +103,11 @@ class FSDPOptimizerConfig(OptimizerConfig):
         optimizer_in_backward (bool): Update parameters while the backward pass is still running
             instead of after it, which releases each gradient as soon as it is consumed and grows the
             optimizer state one parameter at a time (mirrors torchtune's optimizer-in-backward).
-            Default False keeps the standard zero_grad -> backward -> optimizer_step order. Requires
-            ``clip_grad`` to be None to get the memory win: a global grad-norm clip needs every
-            gradient, so with ``clip_grad`` set the step is still taken inside the backward phase but
-            gradients are only released afterwards. See :mod:`verl.utils.optimizer_in_backward`.
+            Default False keeps the standard zero_grad -> backward -> optimizer_step order. The
+            per-parameter release inside the backward pass needs ``clip_grad`` to be None: a global
+            grad-norm clip requires every gradient, so with ``clip_grad`` set the update happens at
+            the end of the last micro-batch, one parameter at a time, and the peak gradient memory is
+            unchanged. See :mod:`verl.utils.optimizer_in_backward`.
     """
 
     _mutable_fields = OptimizerConfig._mutable_fields.copy()
