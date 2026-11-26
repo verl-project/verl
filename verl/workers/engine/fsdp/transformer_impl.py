@@ -59,6 +59,20 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
     replace_lora_wrapper,
 )
+from verl.utils.lora_utils import (
+    MultiAdapterLRScheduler,
+    adapter_context,
+    bind_optimizer_to_adapter,
+    build_adapter_param_groups,
+    build_lora_config_from_spec,
+    has_adapter_param_groups,
+    is_peft_model,
+    list_peft_adapters,
+    resolve_adapter_name,
+    select_adapter_parameters,
+    unwrap_peft_model,
+    validate_adapter_name,
+)
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.seqlen_balancing import ceildiv
@@ -177,7 +191,11 @@ class FSDPEngine(BaseEngine):
         # set FSDP offload params
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
-        self._is_lora = self.model_config.lora_rank > 0
+        self._is_lora = (
+            self.model_config.lora_rank > 0
+            or getattr(self.model_config, "lora_adapter_path", None) is not None
+            or bool(getattr(self.model_config, "lora_adapters", None))
+        )
         # Set in _build_fsdp_module when FSDP2 CPUOffloadPolicy is configured (see #5995).
         self._uses_fsdp2_cpu_offload_policy = False
 
@@ -186,6 +204,7 @@ class FSDPEngine(BaseEngine):
         # defaults so forward_step / optimizer_step can still read them safely.
         self._autocast_dtype = torch.bfloat16
         self.scaler = None
+        self._adapter_scalers: dict[str, object] = {}
 
         if self.engine_config.entropy_from_logits_with_chunking:
             entropy_from_logits = verl_F.entropy_from_logits_with_chunking
@@ -353,6 +372,75 @@ class FSDPEngine(BaseEngine):
     def _build_lora_module(self, module):
         module.enable_input_require_grads()
 
+        lora_adapters = getattr(self.model_config, "lora_adapters", None) or {}
+        if lora_adapters:
+            from peft import PeftModel
+
+            from verl.utils.fs import copy_to_local
+
+            adapter_items = list(convert_to_regular_types(lora_adapters).items())
+            for adapter_name, _ in adapter_items:
+                validate_adapter_name(adapter_name)
+            first_name = adapter_items[0][0]
+            for idx, (adapter_name, adapter_spec) in enumerate(adapter_items):
+                spec = adapter_spec or {}
+                adapter_path = spec.get("adapter_path", spec.get("lora_adapter_path", None))
+                if adapter_path is not None:
+                    local_adapter_path = copy_to_local(adapter_path, use_shm=self.model_config.use_shm)
+                    if idx == 0:
+                        module = PeftModel.from_pretrained(
+                            module, local_adapter_path, adapter_name=adapter_name, is_trainable=True
+                        )
+                    else:
+                        module.load_adapter(local_adapter_path, adapter_name=adapter_name, is_trainable=True)
+                else:
+                    lora_cfg = build_lora_config_from_spec(spec, self.model_config, adapter_name=adapter_name)
+                    if idx == 0:
+                        module = get_peft_model(module, lora_cfg, adapter_name=adapter_name)
+                    else:
+                        module.add_adapter(adapter_name, lora_cfg)
+
+            if len(module.peft_config) > 1:
+                for adapter_name, peft_config in module.peft_config.items():
+                    if getattr(peft_config, "bias", "none") != "none":
+                        raise ValueError(
+                            f"Resident multi-LoRA does not support shared trainable biases "
+                            f"(adapter {adapter_name!r} has bias={peft_config.bias!r}); use bias='none'."
+                        )
+
+            for peft_config in module.peft_config.values():
+                if isinstance(peft_config.task_type, str):
+                    peft_config.task_type = (
+                        TaskType[peft_config.task_type]
+                        if peft_config.task_type in TaskType.__members__
+                        else TaskType.CAUSAL_LM
+                    )
+            module.set_adapter(first_name)
+
+            base_dtype = next(
+                (
+                    p.dtype
+                    for name, p in module.named_parameters()
+                    if "lora_" not in name and "modules_to_save" not in name
+                ),
+                None,
+            )
+            if base_dtype is not None:
+                mismatched = [
+                    p
+                    for adapter_name in list_peft_adapters(module)
+                    for p in select_adapter_parameters(module, adapter_name)
+                    if p.dtype != base_dtype
+                ]
+                if mismatched:
+                    logger.info(
+                        f"Casting {len(mismatched)} LoRA adapter params from "
+                        f"{mismatched[0].dtype} to {base_dtype} to match base."
+                    )
+                    for param in mismatched:
+                        param.data = param.data.to(base_dtype)
+            return module
+
         lora_adapter_path = getattr(self.model_config, "lora_adapter_path", None)
         if lora_adapter_path is not None:
             from peft import PeftModel
@@ -364,10 +452,15 @@ class FSDPEngine(BaseEngine):
             local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.model_config.use_shm)
 
             module = PeftModel.from_pretrained(module, local_adapter_path, is_trainable=True)
-            peft_config = module.peft_config["default"]
+            resolved_adapter = resolve_adapter_name(module)
+            peft_config = module.peft_config[resolved_adapter]
             # Ensure task_type is TaskType enum, not string
             if isinstance(peft_config.task_type, str):
-                peft_config.task_type = TaskType.CAUSAL_LM
+                peft_config.task_type = (
+                    TaskType[peft_config.task_type]
+                    if peft_config.task_type in TaskType.__members__
+                    else TaskType.CAUSAL_LM
+                )
         else:
             # Convert config to regular Python types before creating PEFT model
             lora_config = {
@@ -417,17 +510,28 @@ class FSDPEngine(BaseEngine):
         self._autocast_dtype = param_dtype
         # fp16 training requires loss scaling to avoid gradient underflow. Mirror the pattern
         # landed in #4036 for the legacy dp_actor path. bf16 / fp32 do not need a scaler.
+        adapters = list_peft_adapters(module)
+        use_per_adapter_state = len(adapters) > 1 or bool(getattr(self.model_config, "lora_adapters", None))
         if param_dtype == torch.float16:
             from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 
-            self.scaler = ShardedGradScaler(growth_interval=400)
+            if use_per_adapter_state and adapters:
+                self._adapter_scalers = {name: ShardedGradScaler(growth_interval=400) for name in adapters}
+                self.scaler = None
+            else:
+                self._adapter_scalers = {}
+                self.scaler = ShardedGradScaler(growth_interval=400)
         else:
+            self._adapter_scalers = {}
             self.scaler = None
+
+        if self.engine_config.strategy == "fsdp" and len(adapters) > 1 and not self.engine_config.use_orig_params:
+            raise ValueError("Resident multi-LoRA with FSDP1 requires use_orig_params=True (FSDP2 is recommended).")
 
         auto_wrap_policy = get_fsdp_wrap_policy(
             module=module,
             config=self.engine_config.wrap_policy,
-            is_lora=self.model_config.lora_rank > 0,
+            is_lora=self._is_lora,
         )
 
         fsdp_mesh = self.device_mesh
@@ -510,6 +614,16 @@ class FSDPEngine(BaseEngine):
     def _build_optimizer(self, module):
         from verl.workers.config.optimizer import build_optimizer
 
+        adapters = list_peft_adapters(module)
+        lora_adapters_cfg = getattr(self.model_config, "lora_adapters", None)
+        if len(adapters) > 1 or (adapters and bool(lora_adapters_cfg)):
+            param_groups = build_adapter_param_groups(
+                module,
+                adapter_names=adapters,
+                adapter_specs=lora_adapters_cfg,
+            )
+            return build_optimizer(param_groups, self.optimizer_config)
+
         optimizer = build_optimizer(module.parameters(), self.optimizer_config)
 
         return optimizer
@@ -532,20 +646,25 @@ class FSDPEngine(BaseEngine):
         if self.rank == 0:
             print(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
 
-        if lr_scheduler_type == "constant":
-            lr_scheduler = get_constant_schedule_with_warmup(optimizer=optimizer, num_warmup_steps=num_warmup_steps)
-        elif lr_scheduler_type == "cosine":
-            lr_scheduler = get_cosine_schedule_with_warmup(
-                optimizer=optimizer,
-                num_warmup_steps=num_warmup_steps,
-                num_training_steps=total_steps,
-                min_lr_ratio=min_lr_ratio,
-                num_cycles=num_cycles,
-                zero_indexed_step=zero_indexed_step,
-            )
-        else:
-            raise NotImplementedError(f"LR scheduler type {lr_scheduler_type} is not supported")
-        return lr_scheduler
+        def _make_scheduler(opt):
+            if lr_scheduler_type == "constant":
+                return get_constant_schedule_with_warmup(optimizer=opt, num_warmup_steps=num_warmup_steps)
+            elif lr_scheduler_type == "cosine":
+                return get_cosine_schedule_with_warmup(
+                    optimizer=opt,
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=total_steps,
+                    min_lr_ratio=min_lr_ratio,
+                    num_cycles=num_cycles,
+                    zero_indexed_step=zero_indexed_step,
+                )
+            else:
+                raise NotImplementedError(f"LR scheduler type {lr_scheduler_type} is not supported")
+
+        if has_adapter_param_groups(optimizer):
+            return MultiAdapterLRScheduler(optimizer=optimizer, scheduler_factory=_make_scheduler)
+
+        return _make_scheduler(optimizer)
 
     def _build_model_optimizer(self):
         from verl.utils.model import print_model_size
@@ -700,9 +819,10 @@ class FSDPEngine(BaseEngine):
 
         ctx = torch.no_grad() if forward_only else nullcontext()
 
-        # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
-        # and _build_fsdp_module, so self.scaler may not be set.
-        scaler = getattr(self, "scaler", None)
+        # getattr fallback: some subclasses (e.g. VeOmniEngine) or direct-call test doubles
+        # bypass FSDPEngine.__init__ and _build_fsdp_module, so self._get_scaler / self.scaler may not be set.
+        get_scaler = getattr(self, "_get_scaler", None)
+        scaler = get_scaler() if get_scaler is not None else getattr(self, "scaler", None)
 
         for micro_batch_idx, micro_batch in enumerate(micro_batches):
             sync_ctx = (
@@ -737,59 +857,144 @@ class FSDPEngine(BaseEngine):
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
         raise NotImplementedError("forward_step must be implemented in subclass")
 
-    def optimizer_zero_grad(self):
+    def _resolve_target_adapter_for_optimizer(self, adapter_name: Optional[str]) -> Optional[str]:
+        if adapter_name is not None:
+            return resolve_adapter_name(self.module, adapter_name)
+        if has_adapter_param_groups(self.optimizer) and is_peft_model(self.module):
+            return resolve_adapter_name(self.module)
+        return None
+
+    def _get_scaler(self, adapter_name: Optional[str] = None):
+        adapter_scalers = getattr(self, "_adapter_scalers", None)
+        if adapter_scalers:
+            target_adapter = adapter_name
+            if target_adapter is None and is_peft_model(self.module):
+                target_adapter = resolve_adapter_name(self.module)
+            if target_adapter is not None:
+                if target_adapter not in adapter_scalers:
+                    raise KeyError(
+                        f"No GradScaler found for adapter {target_adapter!r}; available: {list(adapter_scalers.keys())}"
+                    )
+                return adapter_scalers[target_adapter]
+        return getattr(self, "scaler", None)
+
+    @staticmethod
+    def _clip_fsdp1_adapter_grad_norm_(
+        fsdp_module: FSDP,
+        parameters: list[torch.nn.Parameter],
+        max_norm: float,
+    ) -> torch.Tensor:
+        """Clip gradients for a single adapter under FSDP1 with exact distributed L2 norm reduction."""
+        from torch.distributed.fsdp import ShardingStrategy
+
+        grads = [p.grad for p in parameters if p.grad is not None]
+        device = grads[0].device if grads else next(fsdp_module.parameters()).device
+        local_sq = torch.zeros((), dtype=torch.float32, device=device)
+        for grad in grads:
+            local_sq = local_sq + grad.detach().float().pow(2).sum()
+
+        pg = getattr(fsdp_module, "process_group", None)
+        sharding_strategy = getattr(fsdp_module, "sharding_strategy", None)
+        if (
+            sharding_strategy != ShardingStrategy.NO_SHARD
+            and torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+            and torch.distributed.get_world_size(group=pg) > 1
+        ):
+            torch.distributed.all_reduce(local_sq, op=torch.distributed.ReduceOp.SUM, group=pg)
+
+        total_norm = local_sq.sqrt()
+        clip_coef = float(max_norm) / (total_norm + 1e-6)
+        if torch.isfinite(total_norm) and clip_coef.item() < 1.0:
+            for grad in grads:
+                grad.detach().mul_(clip_coef.to(device=grad.device, dtype=grad.dtype))
+        return total_norm
+
+    def optimizer_zero_grad(self, adapter_name: Optional[str] = None, all_adapters: bool = False):
         """
-        Zero gradients and enforce FSDP grad-clipping logic.
+        Zero gradients for the active (or specified) adapter, or all parameters when not using
+        per-adapter optimizer parameter groups.
         """
+        if not all_adapters and has_adapter_param_groups(self.optimizer):
+            target_adapter = self._resolve_target_adapter_for_optimizer(adapter_name)
+            if target_adapter is not None:
+                with bind_optimizer_to_adapter(self.optimizer, target_adapter):
+                    self.optimizer.zero_grad()
+                return
         self.optimizer.zero_grad()
 
-    def optimizer_step(self):
+    def optimizer_step(self, adapter_name: Optional[str] = None):
         """
         Clip gradients, skip update if non-finite, and step optimizer.
+
+        When per-adapter optimizer parameter groups are active, clipping, unscaling,
+        and stepping are isolated to the target adapter so other resident adapters'
+        accumulated gradients and optimizer states remain untouched.
 
         Returns:
             grad_norm (float): Norm of gradients before clipping.
         """
         assert self.optimizer_config.clip_grad is not None
 
-        # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__.
-        scaler = getattr(self, "scaler", None)
+        target_adapter = (
+            self._resolve_target_adapter_for_optimizer(adapter_name)
+            if has_adapter_param_groups(self.optimizer)
+            else None
+        )
+        scaler = self._get_scaler(target_adapter)
+        opt_ctx = (
+            bind_optimizer_to_adapter(self.optimizer, target_adapter) if target_adapter is not None else nullcontext()
+        )
+        clip_params = (
+            select_adapter_parameters(self.module, target_adapter)
+            if target_adapter is not None
+            else self.module.parameters()
+        )
 
-        # Unscale gradients before clip so the clip threshold is applied to true gradient
-        # magnitudes, not scaled ones. scaler.step() will skip the update if any grad is inf/nan.
-        if scaler is not None:
-            scaler.unscale_(self.optimizer)
+        with opt_ctx:
+            # Unscale gradients before clip so the clip threshold is applied to true gradient
+            # magnitudes, not scaled ones. scaler.step() will skip the update if any grad is inf/nan.
+            if scaler is not None:
+                scaler.unscale_(self.optimizer)
 
-        if isinstance(self.module, FSDP):
-            grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
-        elif isinstance(self.module, FSDPModule):
-            grad_norm = fsdp2_clip_grad_norm_(self.module.parameters(), max_norm=self.optimizer_config.clip_grad)
-        else:
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.module.parameters(), max_norm=self.optimizer_config.clip_grad
-            )
-
-        if isinstance(grad_norm, DTensor):
-            grad_norm = grad_norm.full_tensor()
-
-        if scaler is not None:
-            # scaler handles inf/nan skipping internally via _check_inf_per_device.
-            scaler.step(self.optimizer)
-            scaler.update()
-        else:
-            # if grad_norm is not finite, skip the update
-            if not torch.isfinite(grad_norm):
-                print(f"WARN: grad_norm is not finite: {grad_norm}")
-                self.optimizer.zero_grad()
+            if isinstance(self.module, FSDP):
+                if target_adapter is not None:
+                    grad_norm = self._clip_fsdp1_adapter_grad_norm_(
+                        self.module, clip_params, max_norm=self.optimizer_config.clip_grad
+                    )
+                else:
+                    grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
+            elif isinstance(self.module, FSDPModule):
+                grad_norm = fsdp2_clip_grad_norm_(clip_params, max_norm=self.optimizer_config.clip_grad)
             else:
-                self.optimizer.step()
+                grad_norm = torch.nn.utils.clip_grad_norm_(clip_params, max_norm=self.optimizer_config.clip_grad)
+
+            if isinstance(grad_norm, DTensor):
+                grad_norm = grad_norm.full_tensor()
+
+            if scaler is not None:
+                # scaler handles inf/nan skipping internally via _check_inf_per_device.
+                scaler.step(self.optimizer)
+                scaler.update()
+            else:
+                # if grad_norm is not finite, skip the update
+                if not torch.isfinite(grad_norm):
+                    print(f"WARN: grad_norm is not finite: {grad_norm}")
+                    self.optimizer.zero_grad()
+                else:
+                    self.optimizer.step()
 
         return grad_norm.item()
 
-    def lr_scheduler_step(self):
+    def lr_scheduler_step(self, adapter_name: Optional[str] = None):
         """
         Advance FSDP scheduler and return updated learning rate.
         """
+        if isinstance(self.lr_scheduler, MultiAdapterLRScheduler):
+            target_adapter = self._resolve_target_adapter_for_optimizer(adapter_name)
+            self.lr_scheduler.step(adapter_name=target_adapter)
+            return self.lr_scheduler.get_last_lr(adapter_name=target_adapter)[0]
+
         self.lr_scheduler.step()
         lr = self.lr_scheduler.get_last_lr()[0]  # only return the first group
         return lr
@@ -927,7 +1132,7 @@ class FSDPEngine(BaseEngine):
         gen, _ = self.get_per_tensor_param_shard()
         return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
 
-    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, adapter_name=None, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
@@ -940,7 +1145,8 @@ class FSDPEngine(BaseEngine):
         # (adapter merge does real weight math on the module). A LoRA base export streams
         # DTensor refs the same way; staging it would leave those refs holding the GPU copy
         # of the whole local shard after the offload, for the length of the sync.
-        _is_peft = hasattr(getattr(self.module, "_fsdp_wrapped_module", self.module), "peft_config")
+        peft_model = unwrap_peft_model(self.module)
+        _is_peft = is_peft_model(peft_model)
         _lora_base_export = (
             _is_peft and not self.model_config.lora.get("merge", False) and not base_sync_done and not layered_summon
         )
@@ -953,14 +1159,15 @@ class FSDPEngine(BaseEngine):
         peft_config = None
         merge_lora = self.model_config.lora.get("merge", False)
 
-        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
-        if hasattr(peft_model, "peft_config"):  # LoRA
+        if _is_peft:  # LoRA
+            resolved_adapter = resolve_adapter_name(peft_model, adapter_name)
             if not merge_lora:
-                peft_config = peft_model.peft_config.get("default", None)
+                peft_config = peft_model.peft_config.get(resolved_adapter, None)
                 params = collect_lora_params(
                     module=self.module,
                     layered_summon=layered_summon,
                     base_sync_done=base_sync_done,
+                    adapter_name=resolved_adapter,
                 )
                 if not base_sync_done:
                     params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
@@ -969,11 +1176,12 @@ class FSDPEngine(BaseEngine):
                 # restores the un-merged base weights on exit, so tensors must be
                 # materialized while the context is still open (inside the generator).
                 # Materializing after exit silently sends base weights without adapters.
-                return self._merged_lora_per_tensor_param(), None
+                merge_adapters = [resolved_adapter] if adapter_name is not None else None
+                return self._merged_lora_per_tensor_param(adapter_names=merge_adapters), None
         else:
             params = self.module.state_dict()
 
-        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+        params = convert_weight_keys(params, peft_model)
 
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
         if self._is_offload_param and not _skip_staging:
@@ -996,7 +1204,7 @@ class FSDPEngine(BaseEngine):
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
 
-    def _merged_lora_per_tensor_param(self):
+    def _merged_lora_per_tensor_param(self, adapter_names: Optional[list[str]] = None):
         """Stream merged (base + LoRA) weights for rollout weight sync.
 
         ``state_dict()`` returns tensors that alias the live FSDP parameter
@@ -1009,9 +1217,9 @@ class FSDPEngine(BaseEngine):
         """
         device = get_device_id()
         try:
-            with merged_lora_context(self.module, backup_adapters=True):
+            with merged_lora_context(self.module, backup_adapters=True, adapter_names=adapter_names):
                 params = normalize_peft_param_name(self.module.state_dict())
-                params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+                params = convert_weight_keys(params, unwrap_peft_model(self.module))
                 for name, param in params.items():
                     yield (
                         name,
@@ -1034,7 +1242,23 @@ class FSDPEngine(BaseEngine):
         return self.get_per_tensor_param()
 
     def disable_adapter(self) -> ContextManager:
-        return self.module.disable_adapter()
+        return unwrap_peft_model(self.module).disable_adapter()
+
+    def list_adapters(self) -> list[str]:
+        return list_peft_adapters(self.module)
+
+    def get_active_adapter(self) -> Optional[str]:
+        if not is_peft_model(self.module):
+            return None
+        return resolve_adapter_name(self.module)
+
+    def set_adapter(self, adapter_name: str) -> None:
+        peft_model = unwrap_peft_model(self.module)
+        resolved = resolve_adapter_name(peft_model, adapter_name)
+        peft_model.set_adapter(resolved)
+
+    def adapter_context(self, adapter_name: str) -> ContextManager:
+        return adapter_context(self.module, adapter_name)
 
 
 class EngineEvalModeCtx(BaseEngineCtx):

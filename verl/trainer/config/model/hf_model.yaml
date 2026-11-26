@@ -54,6 +54,9 @@ exclude_modules: null
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
 
+# Optional resident multi-LoRA adapter configs keyed by adapter name
+lora_adapters: {}
+
 # whether to use liger. Only valid when we use hf model definition
 use_liger: False
 

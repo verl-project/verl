@@ -66,6 +66,7 @@ def test_fsdp_forward_backward_honors_return_model_output(monkeypatch, return_mo
     engine = SimpleNamespace(
         ulysses_sequence_parallel_size=1,
         scaler=None,
+        _get_scaler=lambda: None,
         get_data_parallel_group=lambda: None,
         get_data_parallel_size=lambda: 1,
         _gradient_sync_context=lambda **kwargs: nullcontext(),

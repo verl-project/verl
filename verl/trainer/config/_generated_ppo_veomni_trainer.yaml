@@ -441,6 +441,7 @@ actor_rollout_ref:
     target_modules: all-linear
     exclude_modules: null
     lora_adapter_path: null
+    lora_adapters: {}
     use_liger: false
     use_fused_kernels: false
     fused_kernel_options:
@@ -689,6 +690,7 @@ critic:
     target_modules: all-linear
     exclude_modules: null
     lora_adapter_path: null
+    lora_adapters: {}
     use_liger: false
     use_fused_kernels: false
     fused_kernel_options:

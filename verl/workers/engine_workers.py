@@ -314,7 +314,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
             dataloader_kwargs=dataloader_kwargs,
         )
 
+        lora_adapter_name = self._validate_single_adapter_request(
+            data, tu.get(data, key="lora_adapter_name", default=None)
+        )
+        adapter_ctx = self.engine.adapter_context(lora_adapter_name) if lora_adapter_name is not None else nullcontext()
         with (
+            adapter_ctx,
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None),
         ):
@@ -374,6 +379,55 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 output = None
         return output
 
+    @staticmethod
+    def _validate_single_adapter_request(data: TensorDict, lora_adapter_name) -> Optional[str]:
+        """Validate single-adapter routing for Phase 1 serialized per-adapter execution.
+
+        Rejects non-scalar ``lora_adapter_name`` or unsplit mixed-adapter ``adapter_name``
+        batches so callers must split mixed batches via ``split_batch_by_adapter`` first.
+        """
+        if lora_adapter_name is not None:
+            if not isinstance(lora_adapter_name, str) or not lora_adapter_name:
+                raise ValueError(
+                    "lora_adapter_name must be a non-empty string for single-adapter steps, "
+                    f"got {lora_adapter_name!r}. Split mixed-adapter batches with split_batch_by_adapter() "
+                    "before calling train_batch/infer_batch."
+                )
+
+        if "adapter_name" in data.keys():
+            raw = tu.get(data, key="adapter_name")
+            if hasattr(raw, "tolist") and not isinstance(raw, (str, bytes)):
+                raw = raw.tolist()
+            if isinstance(raw, (list, tuple)):
+                for idx, x in enumerate(raw):
+                    if not isinstance(x, str) or not x:
+                        raise ValueError(f"Expected non-empty string adapter name at index {idx}, got {x!r}.")
+                unique = set(raw)
+                if len(unique) > 1:
+                    raise ValueError(
+                        f"Mixed-adapter batch ({sorted(unique)}) passed directly to worker; "
+                        "split with split_batch_by_adapter() and run adapters in canonical order."
+                    )
+                if len(unique) == 1:
+                    only = next(iter(unique))
+                    if lora_adapter_name is not None and lora_adapter_name != only:
+                        raise ValueError(
+                            f"Conflicting adapter selection: lora_adapter_name={lora_adapter_name!r} "
+                            f"vs batch adapter_name={only!r}."
+                        )
+                    lora_adapter_name = only
+            elif isinstance(raw, str) and raw:
+                if lora_adapter_name is not None and lora_adapter_name != raw:
+                    raise ValueError(
+                        f"Conflicting adapter selection: lora_adapter_name={lora_adapter_name!r} "
+                        f"vs batch adapter_name={raw!r}."
+                    )
+                lora_adapter_name = raw
+            else:
+                raise ValueError(f"Expected non-empty string or sequence of adapter names, got {raw!r}.")
+
+        return lora_adapter_name
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     @DistProfiler.annotate(color="red", role="train_batch")
     def train_batch(self, data: TensorDict) -> TensorDict:
@@ -382,6 +436,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # global_token_num should be a list of number of tokens of each seq in this batch
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
+        lora_adapter_name = self._validate_single_adapter_request(
+            data, tu.pop(data, key="lora_adapter_name", default=None)
+        )
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
 
         # inject engineering parameters if not specified
@@ -397,7 +454,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
             if key not in data.keys():
                 tu.assign_non_tensor(data, **{key: val})
 
+        adapter_ctx = self.engine.adapter_context(lora_adapter_name) if lora_adapter_name is not None else nullcontext()
         with (
+            adapter_ctx,
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None) as timer,
         ):
@@ -409,7 +468,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
         update_lr_scheduler = tu.get(data, key="update_lr_scheduler", default=False)
         # update lr scheduler
         if update_lr_scheduler:
-            lr = self.engine.lr_scheduler_step()
+            if lora_adapter_name is not None:
+                lr = self.engine.lr_scheduler_step(adapter_name=lora_adapter_name)
+            else:
+                lr = self.engine.lr_scheduler_step()
         else:
             lr = None
 
@@ -437,6 +499,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         compute_loss = tu.get(data, key="compute_loss", default=True)
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         no_lora_adapter = tu.pop(data, key="no_lora_adapter", default=False)
+        lora_adapter_name = self._validate_single_adapter_request(
+            data, tu.pop(data, key="lora_adapter_name", default=None)
+        )
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
 
         default_keys = dict(
@@ -458,7 +523,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.engine.eval_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="eval_batch", logger=None) as timer,
         ):
-            adapter_ctx = self.engine.disable_adapter() if no_lora_adapter else nullcontext()
+            if no_lora_adapter:
+                adapter_ctx = self.engine.disable_adapter()
+            elif lora_adapter_name is not None:
+                adapter_ctx = self.engine.adapter_context(lora_adapter_name)
+            else:
+                adapter_ctx = nullcontext()
             with adapter_ctx:
                 output = self.engine.infer_batch(data, loss_function=loss_function)
         delta_time = timer.last
@@ -731,10 +801,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
             # resync_base only applies to an active, unmerged LoRA adapter.
-            lora_active = model_config.lora_rank > 0 or model_config.lora.get("rank", 0) > 0
-            self.lora_resync_base: bool = (
-                bool(model_config.lora.get("resync_base", False)) and lora_active and not self.peft_merge
-            )
+            self.lora_resync_base: bool = self._resolve_lora_resync_base(model_config)
 
         # 4. build checkpoint engine
         if "actor" in self.role:
@@ -796,6 +863,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+
+    @staticmethod
+    def _resolve_lora_resync_base(model_config) -> bool:
+        """Whether ``lora.resync_base`` applies to an active, unmerged LoRA configuration."""
+        from verl.utils.lora_utils import get_max_lora_rank
+
+        peft_merge = bool(model_config.lora.get("merge", False))
+        lora_active = get_max_lora_rank(model_config) > 0
+        return bool(model_config.lora.get("resync_base", False)) and lora_active and not peft_merge
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     @RLInsightLogger.trace_state_decorator(

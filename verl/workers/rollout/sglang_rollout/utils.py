@@ -69,9 +69,10 @@ def normalize_peft_config_for_sglang(peft_config: dict) -> dict:
 
 
 def lora_rank_of(model_config) -> int:
-    """The LoRA rank, from whichever block carries it: megatron sets ``model.lora.rank``, fsdp
-    the flat ``model.lora_rank``."""
-    return max(int(getattr(model_config, "lora_rank", 0) or 0), int(model_config.lora.get("rank", 0) or 0))
+    """The effective LoRA rank across ``model.lora.rank``, ``model.lora_rank``, and ``model.lora_adapters``."""
+    from verl.utils.lora_utils import get_max_lora_rank
+
+    return get_max_lora_rank(model_config)
 
 
 def lora_served_as_adapter(model_config) -> bool:

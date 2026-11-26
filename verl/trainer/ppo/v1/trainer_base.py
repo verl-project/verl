@@ -255,7 +255,11 @@ class PPOTrainer(ABC):
         lora_rank = self.config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
         if lora_rank <= 0:
             lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        self.ref_in_actor = (
+            lora_rank > 0
+            or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+            or bool(self.config.actor_rollout_ref.model.get("lora_adapters"))
+        )
 
         # 1. define actor and rollout class
         if Role.Actor in self.role_worker_mapping:
@@ -874,7 +878,11 @@ class PPOTrainer(ABC):
         lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
         if lora_rank <= 0:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        ref_in_actor = (
+            lora_rank > 0
+            or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+            or bool(config.actor_rollout_ref.model.get("lora_adapters"))
+        )
 
         if not getattr(self, "_enable_hybrid_replicas", True):
             role = Role.Actor

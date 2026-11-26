@@ -133,6 +133,9 @@ class HFModelConfig(BaseConfig):
 
     # path to pre-trained LoRA adapter to load for continued training
     lora_adapter_path: Optional[str] = None
+    # optional resident multi-LoRA adapter configs keyed by adapter name:
+    # {adapter_name: {"r": ..., "lora_alpha": ..., "target_modules": ..., "adapter_path": ..., "lr": ...}}
+    lora_adapters: dict[str, dict[str, Any]] = field(default_factory=dict)
     use_liger: bool = False
 
     use_fused_kernels: bool = False

@@ -190,7 +190,9 @@ class FSDPModelMerger(BaseModelMerger):
                 # add tensor shard in order of rank to state_dict[key]
                 tensor = model_state_shard.pop(key)
                 if isinstance(tensor, DTensor):
-                    state_dict[key].append(tensor._local_tensor.bfloat16())
+                    local_tensor = tensor._local_tensor
+                    converted = local_tensor.bfloat16() if local_tensor.is_floating_point() else local_tensor
+                    state_dict[key].append(converted)
 
                     placements = tuple(tensor.placements)
                     # replicated placement at dp dimension can be discarded
@@ -202,7 +204,7 @@ class FSDPModelMerger(BaseModelMerger):
                     else:
                         assert param_placements[key] == placements
                 else:
-                    state_dict[key].append(tensor.bfloat16())
+                    state_dict[key].append(tensor.bfloat16() if tensor.is_floating_point() else tensor)
 
         del model_state_dict_lst
 
