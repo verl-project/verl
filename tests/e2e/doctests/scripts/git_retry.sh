@@ -15,16 +15,16 @@ function git() (
       while [[ $# -gt 0 ]]; do
         case "$1" in
           -b|--branch|--depth)
-            [[ $# -ge 2 ]] || { command git "${original[@]}"; return $?; }
+            [[ $# -ge 2 ]] || exec git "${original[@]}"
             options+=("$1" "$2"); shift 2 ;;
           --recursive|--recurse-submodules|--single-branch|--depth=*|--branch=*)
             options+=("$1"); shift ;;
           --) shift; break ;;
-          -*) command git "${original[@]}"; return $? ;;
+          -*) exec git "${original[@]}" ;;
           *) break ;;
         esac
       done
-      [[ $# -ge 1 && $# -le 2 ]] || { command git "${original[@]}"; return $?; }
+      [[ $# -ge 1 && $# -le 2 ]] || exec git "${original[@]}"
       repository="$1"
       destination="${repository%/}"
       destination="${destination##*/}"
@@ -43,9 +43,9 @@ function git() (
       fi
       ;;
     submodule)
-      [[ "${2:-}" == update ]] || { command git "$@"; return $?; }
+      [[ "${2:-}" == update ]] || exec git "$@"
       ;;
-    *) command git "$@"; return $? ;;
+    *) exec git "$@" ;;
   esac
   [[ "${attempts}" =~ ^[1-9][0-9]*$ && "${limit}" =~ ^[1-9][0-9]*$ && "${delay}" =~ ^(0|[1-9][0-9]*)$ ]] || {
     printf 'Error: Git attempts/timeout must be positive seconds/count; retry delay must be nonnegative.\n' >&2
@@ -61,16 +61,8 @@ function git() (
       "${original[0]}" "${attempt}" "${attempts}" "${limit}" \
       "${GIT_HTTP_LOW_SPEED_LIMIT}" "${GIT_HTTP_LOW_SPEED_TIME}" >&2
     if timeout --kill-after=30s "${limit}s" git "${args[@]}"; then
-      if [[ -n "${staging}" ]]; then
-        mv -T --no-clobber -- "${staging}/checkout" "${destination}" || return $?
-        [[ ! -e "${staging}/checkout" ]] || return 128
-        if [[ "${repository}" == https://github.com/verl-project/verl.git && -n "${VERL_REVISION:-}" ]]; then
-          command git -C "${destination}" checkout --detach "${VERL_REVISION}" || return $?
-          (cd "${destination}" && git submodule update --init --recursive) || return $?
-          command git -C "${destination}" rev-parse HEAD || return $?
-        fi
-      fi
-      return 0
+      [[ -n "${staging}" ]] || return 0  # Submodule updates run in place.
+      break
     else
       status=$?
     fi
@@ -84,6 +76,16 @@ function git() (
       sleep "$((delay * attempt))" || return $?
     fi
   done
-  return "${status}"
+  if ((attempt > attempts)); then
+    return "${status}"
+  fi
+
+  mv -T --no-clobber -- "${staging}/checkout" "${destination}" || return $?
+  [[ ! -e "${staging}/checkout" ]] || return 128
+  if [[ "${repository}" == https://github.com/verl-project/verl.git && -n "${VERL_REVISION:-}" ]]; then
+    command git -C "${destination}" checkout --detach "${VERL_REVISION}" || return $?
+    (cd "${destination}" && git submodule update --init --recursive) || return $?
+    command git -C "${destination}" rev-parse HEAD || return $?
+  fi
 )
 export -f git

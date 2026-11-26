@@ -1,190 +1,67 @@
 # Ascend documentation doctests
 
-These scripts extract existing commands from
-`docs/ascend_tutorial/zh/get_start/` and exercise verl's installation and GRPO
-Quick Start. Test-side selectors identify the installation code blocks and
-Quick Start table entries. The existing installation and Quick Start pages keep
-their layout; the container and Docker guides use standard RST code-block names
-for image selection, prerequisites and builds. Missing or ambiguous commands fail the check.
+These tests execute commands from the public [source installation](../../../docs/ascend_tutorial/zh/get_start/container_source_install.rst),
+[installation](../../../docs/ascend_tutorial/zh/get_start/install_guidance.rst),
+[Docker](../../../docs/ascend_tutorial/zh/get_start/dockerfile_build_guidance.rst), and
+[Quick Start](../../../docs/ascend_tutorial/zh/get_start/quick_start.rst) guides.
 
-Read-only checks require Bash and Python 3.10 or newer, without an NPU:
+| CI job | What it verifies |
+| --- | --- |
+| CPU documentation checks | Extract the documented commands, check Bash syntax, and test the workers with pytest. |
+| A3 vLLM Docker build (ARM64 CPU) | Build the PR checkout with its submodules and read package metadata inside the new image. The image stays on the build runner. |
+| Published A3 vLLM image (8 NPUs) | Run one GRPO step from the installed source at `/verl` with FSDP2 and Megatron. |
+| CANN source installation (8 NPUs) | Create the documented Conda environment, install the PR commit, check imports and run one GRPO step for each FSDP2/Megatron × vLLM/SGLang combination. |
 
-```bash
-bash tests/e2e/doctests/scripts/run_doctests.sh installation check
-DRY_RUN=1 bash tests/e2e/doctests/scripts/run_doctests.sh quickstart fsdp2_vllm
-```
+CI reads the image tags from the guides. NPU cases run one at a time. A manual
+workflow run can select `fsdp2_vllm`, `megatron_vllm`, `fsdp2_sglang`,
+`megatron_sglang`, or `all`. A vLLM selection also runs the Docker build and
+the corresponding published-image case.
 
-`installation check` validates all registered commands and the syntax
-of installation blocks. `DRY_RUN=1` checks the selected Quick Start blocks
-and training script without sourcing CANN, reading models, preprocessing
-data, or starting training. Set `DOCTEST_PYTHON` to select the interpreter
-used by the extraction tool when `python3` is unavailable locally.
+## Run locally
 
-Real Quick Start runs require a compatible Ascend container, CANN/ATB,
-installed verl and backend packages, a local Qwen3-0.6B model, and GSM8K input:
-
-```bash
-MODEL_PATH=/path/to/Qwen3-0.6B GSM8K_DATASET_PATH=/path/to/gsm8k \
-  bash tests/e2e/doctests/scripts/run_doctests.sh quickstart fsdp2_vllm
-```
-
-Supported cases are `fsdp2_vllm`, `megatron_vllm`, `fsdp2_sglang`, and
-`megatron_sglang`. Each run defaults to one GRPO step and eight visible NPU
-devices; override `TOTAL_TRAINING_STEPS` and `NDEVICES_PER_NODE` as needed.
-The worker runs the documented preprocessing command and uses its output
-directory (`GSM8K_OUTPUT_DIR`, default `$HOME/data/gsm8k`). To reuse existing
-parquet files, set **both** `TRAIN_FILE` and `TEST_FILE`; this skips preprocessing.
-
-Source installation requires a disposable Ubuntu/openEuler container with
-compatible drivers, CANN/ATB and Conda already installed. It installs system
-build tools, initializes Conda, creates a new environment, runs the documented
-installer, logs Python/package versions, checks imports, and executes the chosen
-Quick Start case. Version logging helps diagnose mismatches; it is not a strict
-comparison against the documentation's compatibility table.
-The CPU suite separately checks that SGLang's documented Conda Python version
-and Python table entry match the `py311` ABI in the installer's kernel archive.
-
-For the A3 Ubuntu environment used by CI, follow the public
-[CANN container source-install guide](../../../docs/ascend_tutorial/zh/get_start/container_source_install.rst).
-Its image assignments are the source of truth for CI, and the Ubuntu worker
-executes its system-dependency block. The guide explains how to start the
-container, prepare Conda, and continue with the existing installation commands.
+Run these commands from the repository root. The read-only checks need Bash
+and Python 3.10+. `DOCTEST_PYTHON` selects the extraction interpreter.
+On Windows, `DOCTEST_TEST_BASH` selects Git Bash for the pytest suite.
 
 ```bash
-ALLOW_INSTALL=1 INSTALL_BACKEND=sglang INSTALL_CASE=fsdp2_sglang \
-MODEL_PATH=/path/to/Qwen3-0.6B GSM8K_DATASET_PATH=/path/to/gsm8k \
-  bash tests/e2e/doctests/scripts/run_doctests.sh installation source
-```
-
-`INSTALL_BACKEND` defaults to `vllm`; `INSTALL_CASE` defaults to
-`fsdp2_<backend>` and must match that backend. It selects `USE_MEGATRON`
-for the installer. The checkout defaults to the current repository's **HEAD
-commit**, so uncommitted changes are not included in the cloned installation.
-Set `VERL_REPOSITORY`/`VERL_REVISION` to test another repository or commit.
-Quick Start itself uses the working checkout, including uncommitted changes.
-
-The harness isolates the documented named Conda environment under
-`INSTALL_WORKDIR/conda-envs` and redirects the documented verl clone to the
-repository/revision under test. `CANN_ENV_SCRIPT`, `ATB_ENV_SCRIPT`,
-`GSM8K_DATASET_PATH` and `GSM8K_OUTPUT_DIR` override local paths only during
-execution; plain `doctest_helper.py extract` returns the original commands.
-
-The automatically created temporary installation directory is deleted on exit.
-Set `KEEP_INSTALL_WORKDIR=1` to retain it, or provide an empty
-`INSTALL_WORKDIR` (which is always retained). Source installation also supports
-`ALLOW_INSTALL=1 DRY_RUN=1` to validate the plan without installing packages.
-
-The GitHub workflow runs CPU tool tests on relevant pull requests, then covers
-two documentation runtime routes and a separate Dockerfile build check:
-
-| Check | Runner | Validation |
-| --- | --- | --- |
-| Build the documented A3 vLLM Dockerfile | GitHub ARM64 CPU runner | Copy the PR checkout into the image, start it without NPU devices, and check installed package metadata |
-| Use the published A3 vLLM image | A3 eight-device runner | Use the image's installed source at `/verl` and dependencies, then run one GRPO step for FSDP2 and Megatron |
-| Install from source in a CANN container | A3 eight-device runner | Create the documented Conda environment, install dependencies and run one GRPO step for each of the four combinations |
-
-The first two routes read commands/images from the public
-[Docker guide](../../../docs/ascend_tutorial/zh/get_start/dockerfile_build_guidance.rst).
-Like vLLM-Ascend's documentation tests, published-image jobs use the workflow's
-`container.image`; they do not invoke Docker inside the NPU container. The build
-job does not push to a registry or require registry credentials. Its image stays
-on the build runner: **published-image Quick Start does not validate that newly
-built image on NPU**. Such validation needs a supported image transfer or publishing
-path between the build runner and the NPU runner.
-The published-image worker reads the PR's documentation, but executes the
-preprocessing and training scripts under `/verl` in the image. It does not
-reinstall verl or backend dependencies. Missing image scripts fail the job;
-the worker does not substitute scripts from the PR checkout.
-
-Build locally on a disposable ARM64 Docker host:
-
-```bash
-ALLOW_INSTALL=1 PIP_INDEX_URL=https://mirrors.huaweicloud.com/repository/pypi/simple \
-  bash tests/e2e/doctests/scripts/run_doctests.sh installation docker
-```
-
-First initialize submodules with `git submodule update --init --recursive`.
-Like [vLLM-Ascend's Dockerfile](https://github.com/vllm-project/vllm-ascend/blob/ce61785f0b2f551e6068e9bb9259ce73395e0c77/Dockerfile), the A3 Dockerfile copies the current source checkout,
-including uncommitted edits. It does not clone verl again during the build. Its
-Dockerfile-specific ignore file excludes Git metadata and local Python caches.
-The worker runs the documented build command from the repository root and retains
-the image locally. `ALLOW_INSTALL=1 DRY_RUN=1`
-validates the command without requiring Docker. CI retains the build log as an
-artifact and allows up to six hours for the full image build.
-
-Source installation has a six-hour job limit to allow for Megatron native builds.
-Within source installation, documented Bash `git clone` commands and
-`git submodule update` use at most three attempts. An HTTP transfer below
-10 KiB/s for 120 seconds aborts through Git's low-speed settings; each attempt
-also has a 20-minute limit, followed by a 30-second termination grace period.
-Retries wait 30 and 60 seconds. Failed clones are discarded from a private
-temporary directory, and existing destination directories are never removed.
-After the final failure the installation fails. Override `DOCTEST_GIT_TIMEOUT`
-(seconds), `DOCTEST_GIT_ATTEMPTS`, `DOCTEST_GIT_RETRY_DELAY` (seconds),
-`GIT_HTTP_LOW_SPEED_LIMIT` (bytes/second), and `GIT_HTTP_LOW_SPEED_TIME` (seconds)
-for local diagnosis. This policy applies to the source-install worker, not
-checkout actions, pip, or Dockerfile builds. Other Git commands pass through;
-clone options beyond those used by the documented installers also pass through
-without retries. HTTP low-speed detection does not measure local checkout or
-server-side packing progress; the total timeout still bounds those phases.
-Published-image tests run before source installation, with one NPU job at a time.
-One failed case does not cancel the remaining cases. Fork pull requests follow the repository's workflow
-approval policy; a maintainer must approve runs when GitHub requires it.
-New runs on the same ref cancel older runs. Workflows running in forks execute
-only the CPU checks.
-
-Manual runs can select one combination or `all`; selecting a vLLM case also runs
-the Dockerfile build and that case's published-image test. SGLang selections only
-run source installation. Configured coverage does not
-mean that every combination has already passed; inspect each job's result.
-The Quick Start prose describes 16 logical devices on a full eight-card A3 host;
-these jobs pass `NDEVICES_PER_NODE=8` and `TOTAL_TRAINING_STEPS=1` to the existing
-parameterized scripts. They do not establish coverage of that full 16-device
-configuration or the scripts' default 15 training steps.
-Preview the exact image/case matrix without installing anything:
-
-```bash
-python3 tests/e2e/doctests/scripts/doctest_helper.py matrix
-python3 tests/e2e/doctests/scripts/doctest_helper.py matrix --case fsdp2_sglang
-python3 tests/e2e/doctests/scripts/doctest_helper.py matrix --method prebuilt
-```
-
-GitHub requires
-the workflow to exist on the default branch before `workflow_dispatch` is
-available; the pull-request trigger provides installation coverage before merge.
-The CANN base image comes from the selected backend's command in the public
-container guide; the workflow bootstraps Miniforge, while the original installation
-documentation creates the Python environment.
-The runner must expose its NPU devices and cached inputs to the container:
-Qwen3-0.6B under `/root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B` and GSM8K
-under `/root/.cache/modelscope/dataset/openai/gsm8k`, matching the existing
-Ascend E2E dataset cache. These shared inputs can be mounted read-only.
-The workflow sets `HF_DATASETS_CACHE=/tmp/verl-doctest/huggingface/datasets`
-inside the disposable container for Datasets lock files and Arrow processing
-cache. It checks the model config, dataset directory, and cache write access
-before installing packages. A2 and openEuler are not included in this workflow.
-
-The installation jobs configure download sources for the A3 runner:
-
-- Conda uses the [TUNA conda-forge mirror](https://mirrors.tuna.tsinghua.edu.cn/help/anaconda/)
-  through setup-miniconda's `channel-alias` and `channels` inputs, with `defaults`
-  removed. This applies to subsequent documented `conda create` commands.
-- pip uses the [Huawei Cloud PyPI mirror](https://support.huaweicloud.com/mirrors_faq/mirrors_faq_0010.html)
-  through `PIP_INDEX_URL`, including isolated build dependency installation.
-  The installers retain their explicit Triton-Ascend extra index.
-- CANN container images already use Huawei Cloud SWR in China, as specified in
-  the public container guide. A Docker Hub mirror does not replace this registry.
-
-The Docker build also receives `PIP_INDEX_URL` as a build argument; it does not use
-Conda. Published-image Quick Start reuses dependencies and does not install them.
-Miniforge remains pinned to `26.9.4-1` and downloads from GitHub Releases; Git
-clones still use the URLs in the documented installers. Package mirrors do not
-resolve failures in those GitHub downloads or native operator builds.
-
-```bash
+runner=tests/e2e/doctests/scripts/run_doctests.sh
+bash "$runner" installation check
+DRY_RUN=1 bash "$runner" quickstart fsdp2_vllm
 python3 -m pytest -q tests/special_sanity/test_doctest_helper.py
 ```
 
-On Windows, the Bash integration tests can use Git Bash via `DOCTEST_TEST_BASH`.
-These CPU checks validate test orchestration; an actual installation/training
-run is still required on Ascend hardware.
+To build the documented A3 vLLM image on an ARM64 Docker host:
+
+```bash
+git submodule update --init --recursive
+ALLOW_INSTALL=1 bash "$runner" installation docker
+```
+
+For Quick Start in an installed Ascend environment or source installation in
+a disposable CANN container with Conda, point both workers to local inputs:
+
+```bash
+export MODEL_PATH=/path/to/Qwen3-0.6B GSM8K_DATASET_PATH=/path/to/gsm8k
+bash "$runner" quickstart fsdp2_vllm
+ALLOW_INSTALL=1 INSTALL_BACKEND=sglang INSTALL_CASE=megatron_sglang \
+  bash "$runner" installation source
+```
+
+- Source installation defaults to `fsdp2_vllm`. `INSTALL_CASE` must match
+  `INSTALL_BACKEND`. The worker clones the current commit. Use `VERL_REPOSITORY`
+  and `VERL_REVISION` to select another source. Set `KEEP_INSTALL_WORKDIR=1`
+  to retain its temporary Conda environment, or supply an empty `INSTALL_WORKDIR`.
+- Quick Start defaults to one training step and eight logical devices. Set
+  `TOTAL_TRAINING_STEPS` and `NDEVICES_PER_NODE` to override them. Supply both
+  `TRAIN_FILE` and `TEST_FILE` to reuse parquet files, or set `GSM8K_OUTPUT_DIR`
+  to choose the preprocessing output directory. `CANN_ENV_SCRIPT` and
+  `ATB_ENV_SCRIPT` select local environment scripts.
+- Source and Docker modes support `ALLOW_INSTALL=1 DRY_RUN=1`. To inspect the
+  planned images, run `python3 tests/e2e/doctests/scripts/doctest_helper.py matrix`
+  with `--method source` or `--method prebuilt` and optionally `--case`.
+- On the A3 runner, source installation uses the TUNA conda-forge mirror,
+  the Huawei Cloud PyPI mirror, and a writable `HF_DATASETS_CACHE`. Documented
+  Git clones and submodule updates get up to three attempts, with a 20-minute
+  limit per attempt. Git aborts HTTP transfers below 10 KiB/s for 120 seconds.
+  For local diagnosis set `DOCTEST_GIT_ATTEMPTS`, `DOCTEST_GIT_TIMEOUT`,
+  `DOCTEST_GIT_RETRY_DELAY`, `GIT_HTTP_LOW_SPEED_LIMIT` or `GIT_HTTP_LOW_SPEED_TIME`.

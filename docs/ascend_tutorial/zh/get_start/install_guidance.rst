@@ -1,7 +1,7 @@
 昇腾安装指南
 =================
 
-Last updated: 11/18/2026.
+Last updated: 11/26/2026.
 
 .. contents:: 目录
    :local:
@@ -192,7 +192,7 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
 ============= ======================================= ===================
 HDK           ``25.5.0``                              NPU硬件驱动与固件
 CANN          ``>=8.5.0``                             CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
-Python        ``3.11``                                与当前安装脚本下载的预编译内核包匹配
+Python        ``3.11``                                安装脚本下载的内核 wheel 使用 ``cp311`` 标签
 torch         ``2.8.0``                               PyTorch 深度学习框架基础包
 torch_npu     ``2.8.0.post2``                         NPU PyTorch 适配插件
 SGLang        ``v0.5.10``                             高性能 LLM 推理引擎
@@ -207,12 +207,6 @@ MindSpeed     ``core_r0.18.0``                        Megatron-LM 在昇腾 NPU 
 Megatron-LM、MindSpeed、MegatronAdaptor 使用 ``core_r0.18.0``，
 Megatron-Bridge 使用 ``v0.5.0``；MindSpeed-Bridge 使用仓库默认分支，
 当前未固定 tag 或 commit。SGLang 安装脚本和当前 CI 镜像构建文件使用同一组合。
-
-.. note::
-
-   当前安装脚本下载的内核包归档名包含 ``py311``，其中的 wheel 使用 ``cp311`` 标签，
-   因此运行该脚本的 Conda 环境需要使用 Python 3.11。
-   基础镜像中的 Python 版本不会决定新建 Conda 环境的版本，请保留下面命令中的 ``python=3.11``。
 
 
 安装前准备（HDK & CANN）

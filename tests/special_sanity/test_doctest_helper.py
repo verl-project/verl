@@ -333,7 +333,9 @@ def isolated_repo(tmp_path):
 def test_matrix_follows_public_image_changes(helper, isolated_repo):
     """Changing a public image must update both training-engine cases without a Dockerfile."""
     guide = isolated_repo / helper.CONTAINER_DOC
-    guide.write_text(guide.read_text(encoding="utf-8").replace("9.2.1-a3-", "9.2.2-a3-"), encoding="utf-8")
+    original = helper.container_image("vllm")
+    replacement = original.rsplit(":", 1)[0] + ":doctest-example"
+    guide.write_text(guide.read_text(encoding="utf-8").replace(original, replacement), encoding="utf-8")
     result = subprocess.run(
         [sys.executable, str(isolated_repo / DOCTEST_PATH / "scripts/doctest_helper.py"), "matrix"],
         check=True,
@@ -343,8 +345,8 @@ def test_matrix_follows_public_image_changes(helper, isolated_repo):
     entries = json.loads(result.stdout)["include"]
     assert [entry["case"] for entry in entries] == list(CASES)
     for entry in entries:
-        expected = "9.2.2-a3-ubuntu22.04-py3.12" if entry["case"].endswith("_vllm") else "8.5.0-a3-ubuntu22.04-py3.11"
-        assert entry["image"].endswith(":" + expected)
+        expected = replacement if entry["case"].endswith("_vllm") else helper.container_image("sglang")
+        assert entry["image"] == expected
 
 
 def test_prebuilt_matrix_follows_document_and_case_selection(helper, monkeypatch):
@@ -519,6 +521,9 @@ def fake_training_runtime(isolated_repo, tmp_path):
         '  mkdir -p "$output"\n'
         '  printf data > "$output/train.parquet"\n'
         '  printf data > "$output/test.parquet"\n'
+        'elif [[ "${STUB_BACKEND_IMPORTS:-}" == 1 && "$1" == */verify_runtime.py'
+        ' && " $* " == *" --check-imports "* ]]; then\n'
+        '  printf "imports\\n" >> "$DOCTEST_TRACE"\n'
         "else\n"
         f'  exec {shlex.quote(Path(sys.executable).as_posix())} "$@"\n'
         "fi\n",
@@ -624,15 +629,6 @@ def test_source_installation_flow(run_worker, isolated_repo, fake_training_runti
         executable = binary_dir / name
         executable.write_text(f"#!/bin/bash\n{command}\n", encoding="utf-8")
         executable.chmod(0o755)
-    python = binary_dir / "python3"
-    python.write_text(
-        python.read_text(encoding="utf-8").replace(
-            "else\n",
-            'elif [[ "$1" == */verify_runtime.py && " $* " == *" --check-imports "* ]]; then\n'
-            '  printf "imports\\n" >> "$DOCTEST_TRACE"\nelse\n',
-        ),
-        encoding="utf-8",
-    )
     os_release = tmp_path / "os-release"
     os_release.write_text("ID=ubuntu\n", encoding="utf-8")
     worker = isolated_repo / DOCTEST_PATH / "002-installation-test.sh"
@@ -667,6 +663,7 @@ def test_source_installation_flow(run_worker, isolated_repo, fake_training_runti
         VERL_REPOSITORY=isolated_repo.as_posix(),
         VERL_REVISION=revision,
         INSTALL_WORKDIR=work.as_posix(),
+        STUB_BACKEND_IMPORTS="1",
         **env,
     )
     assert result.returncode == exit_code, result.stdout + result.stderr

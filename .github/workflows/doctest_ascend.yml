@@ -42,9 +42,6 @@ jobs:
       prebuilt: ${{ steps.matrix.outputs.prebuilt }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - uses: astral-sh/setup-uv@v3
       - name: Test documentation tooling on CPU
         run: |
@@ -56,9 +53,10 @@ jobs:
         env:
           SELECTED_CASE: ${{ inputs.backend || 'all' }}
         run: |
-          matrix=$(.venv/bin/python tests/e2e/doctests/scripts/doctest_helper.py matrix --case "$SELECTED_CASE")
+          helper=tests/e2e/doctests/scripts/doctest_helper.py
+          matrix=$(.venv/bin/python "$helper" matrix --case "$SELECTED_CASE")
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          prebuilt=$(.venv/bin/python tests/e2e/doctests/scripts/doctest_helper.py matrix --method prebuilt --case "$SELECTED_CASE")
+          prebuilt=$(.venv/bin/python "$helper" matrix --method prebuilt --case "$SELECTED_CASE")
           echo "prebuilt=$prebuilt" >> "$GITHUB_OUTPUT"
   docker-build:
     name: Dockerfile build (A3 vLLM, arm64)
@@ -107,13 +105,11 @@ jobs:
     defaults:
       run:
         shell: bash -el {0}
-    env:
-      QUICKSTART_CASE: ${{ matrix.case }}
-      # The guide places the installed source in /verl in published vLLM images.
-      DOCTEST_REPO_ROOT: /verl
+    env: &npu_inputs
       NDEVICES_PER_NODE: "8"
       HF_ENDPOINT: https://hf-mirror.com
       HF_HUB_ENABLE_HF_TRANSFER: "0"
+      # Shared inputs may be read-only. Datasets writes locks and Arrow files here.
       HF_DATASETS_CACHE: /tmp/verl-doctest/huggingface/datasets
       TRANSFORMERS_VERBOSITY: error
       MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B
@@ -121,6 +117,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run documented Quick Start in the published image
+        env:
+          QUICKSTART_CASE: ${{ matrix.case }}
+          DOCTEST_REPO_ROOT: /verl
         run: |
           npu-smi info
           bash tests/e2e/doctests/scripts/run_doctests.sh quickstart "$QUICKSTART_CASE"
@@ -128,7 +127,6 @@ jobs:
     name: Installation (${{ matrix.case }})
     # Run after image Quick Start so this workflow allocates one NPU job at a time.
     needs: [check, quickstart-image]
-    # Fork PRs use the upstream repository's workflow-approval policy, as in e2e_ascend.yml.
     if: ${{ !cancelled() && needs.check.result == 'success' && github.repository_owner == 'verl-project' }}
     runs-on: linux-aarch64-a3-800i-8
     strategy:
@@ -143,17 +141,7 @@ jobs:
     defaults:
       run:
         shell: bash -el {0}
-    env:
-      INSTALL_CASE: ${{ matrix.case }}
-      # Inherited by the documented installers and pip's isolated build environments.
-      PIP_INDEX_URL: https://mirrors.huaweicloud.com/repository/pypi/simple
-      HF_ENDPOINT: https://hf-mirror.com
-      HF_HUB_ENABLE_HF_TRANSFER: "0"
-      # The runner's shared cache can be read-only; Datasets needs to write locks and Arrow files.
-      HF_DATASETS_CACHE: /tmp/verl-doctest/huggingface/datasets
-      TRANSFORMERS_VERBOSITY: error
-      MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B
-      GSM8K_DATASET_PATH: /root/.cache/modelscope/dataset/openai/gsm8k
+    env: *npu_inputs
     steps:
       - uses: actions/checkout@v4
         with:
@@ -186,7 +174,8 @@ jobs:
       - name: Install documented environment and run Quick Start
         env:
           ALLOW_INSTALL: "1"
-          NDEVICES_PER_NODE: "8"
+          INSTALL_CASE: ${{ matrix.case }}
+          PIP_INDEX_URL: https://mirrors.huaweicloud.com/repository/pypi/simple
         run: |
           npu-smi info
           export INSTALL_BACKEND="${INSTALL_CASE##*_}"

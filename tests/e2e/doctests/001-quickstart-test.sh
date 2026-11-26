@@ -12,17 +12,13 @@
 # This file is a part of the verl project.
 set -Eeuo pipefail
 DOCTEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOCTEST_HELPER_PATH="${DOCTEST_DIR}/scripts/doctest_helper.py"
-VERIFY_RUNTIME_PATH="${DOCTEST_DIR}/scripts/verify_runtime.py"
 source "${DOCTEST_DIR}/scripts/common.sh"
 REPO_ROOT="${DOCTEST_REPO_ROOT:-$(cd "${DOCTEST_DIR}/../../.." && pwd)}"
-CASES=(fsdp2_vllm megatron_vllm fsdp2_sglang megatron_sglang)
 function validate_case_selection() {
-  local case_name="$1"
-  local marker="quickstart-${case_name}"
+  local marker="quickstart-$1"
   local block
   local script
-  block="$("${DOCTEST_PYTHON}" "${DOCTEST_HELPER_PATH}" extract "${marker}")" || return $?
+  block="$(doctest_helper extract "${marker}")" || return $?
   bash -n <<<"${block}"
   script="$(grep -Eo 'tests/special_npu/quick_start/[A-Za-z0-9_.-]+\.sh' <<<"${block}" | head -n 1)"
   [[ -n "${script}" ]] || die "No quick_start script referenced by marker ${marker}"

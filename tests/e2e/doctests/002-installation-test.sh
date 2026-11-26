@@ -12,8 +12,6 @@
 # This file is a part of the verl project.
 set -Eeuo pipefail
 DOCTEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOCTEST_HELPER_PATH="${DOCTEST_DIR}/scripts/doctest_helper.py"
-VERIFY_RUNTIME_PATH="${DOCTEST_DIR}/scripts/verify_runtime.py"
 source "${DOCTEST_DIR}/scripts/common.sh"
 REPO_ROOT="$(cd "${DOCTEST_DIR}/../../.." && pwd)"
 WORK_DIR=""
@@ -31,12 +29,9 @@ function detect_os() {
 function run_installation_check() {
   local block
   log_info "Validating documented commands (read-only)..."
-  "${DOCTEST_PYTHON}" "${DOCTEST_HELPER_PATH}" validate
-  check_shell_block installation-vllm
-  check_shell_block installation-sglang
-  check_shell_block docker-image-vllm-a3
-  check_shell_block docker-build-vllm-a3
-  for block in container-image-vllm container-image-sglang container-prerequisites-ubuntu container-conda; do
+  doctest_helper validate
+  for block in installation-vllm installation-sglang docker-image-vllm-a3 docker-build-vllm-a3 \
+      container-image-vllm container-image-sglang container-prerequisites-ubuntu container-conda; do
     check_shell_block "${block}"
   done
   log_info "Installation documentation check passed."
@@ -55,9 +50,10 @@ function run_installation_docker() {
   pushd "${REPO_ROOT}" >/dev/null
   run_shell_block docker-build-vllm-a3
   # Check the built image on CPU; importing NPU extensions needs host drivers.
-  docker run --rm --network none --entrypoint /bin/bash "${IMAGE}" -ec '
-    python3 -c "from importlib.metadata import version; print({p: version(p) for p in (\"verl\", \"torch\", \"torch-npu\", \"vllm\", \"vllm-ascend\", \"triton-ascend\")})"
-  '
+  docker run --rm --network none --entrypoint python3 "${IMAGE}" -c '
+from importlib.metadata import version
+packages = ("verl", "torch", "torch-npu", "vllm", "vllm-ascend", "triton-ascend")
+print({package: version(package) for package in packages})'
   popd >/dev/null
 }
 
@@ -139,10 +135,9 @@ function cleanup_installation() {
   fi
   return "${exit_code}"
 }
-[[ $# -eq 1 && "${1:-}" =~ ^(check|source|docker)$ ]] ||
-  die "Usage: $0 {check|source|docker}"
-case "$1" in
-  check) run_installation_check ;;
-  source) run_installation_source ;;
-  docker) run_installation_docker ;;
+case "$#:${1:-}" in
+  1:check) run_installation_check ;;
+  1:source) run_installation_source ;;
+  1:docker) run_installation_docker ;;
+  *) die "Usage: $0 {check|source|docker}" ;;
 esac

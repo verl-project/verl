@@ -8,16 +8,19 @@ function require_command() {
   command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
 DOCTEST_PYTHON="${DOCTEST_PYTHON:-python3}"
+VERIFY_RUNTIME_PATH="${DOCTEST_DIR}/scripts/verify_runtime.py"
+function doctest_helper() {
+  "${DOCTEST_PYTHON}" "${DOCTEST_DIR}/scripts/doctest_helper.py" "$@"
+}
 function run_shell_block() {
-  local marker="$1"
   local block
-  block="$("${DOCTEST_PYTHON}" "${DOCTEST_HELPER_PATH}" extract --runtime "${marker}")" || return $?
+  block="$(doctest_helper extract --runtime "$1")" || return $?
   set +u
   source /dev/stdin <<<"${block}"
   set -u
 }
 function check_shell_block() {
   local block
-  block="$("${DOCTEST_PYTHON}" "${DOCTEST_HELPER_PATH}" extract "$1")" || return $?
+  block="$(doctest_helper extract "$1")" || return $?
   bash -n <<<"${block}"
 }

@@ -32,33 +32,25 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 INSTALL_DOC = "docs/ascend_tutorial/zh/get_start/install_guidance.rst"
-
 QUICK_DOC = "docs/ascend_tutorial/zh/get_start/quick_start.rst"
 CONTAINER_DOC = "docs/ascend_tutorial/zh/get_start/container_source_install.rst"
 DOCKER_DOC = "docs/ascend_tutorial/zh/get_start/dockerfile_build_guidance.rst"
 
 CASES = ("fsdp2_vllm", "megatron_vllm", "fsdp2_sglang", "megatron_sglang")
 
-BLOCKS_BY_FILE = {
-    DOCKER_DOC: ("docker-image-vllm-a3", "docker-build-vllm-a3"),
-    CONTAINER_DOC: (
-        "container-image-vllm",
-        "container-image-sglang",
-        "container-prerequisites-ubuntu",
-        "container-conda",
-    ),
-    INSTALL_DOC: (
-        "installation-vllm",
-        "installation-sglang",
-    ),
-    QUICK_DOC: (
-        "quickstart-environment",
-        "quickstart-data",
-        *(f"quickstart-{case}" for case in CASES),
-    ),
+FILE_BY_BLOCK = {
+    "docker-image-vllm-a3": DOCKER_DOC,
+    "docker-build-vllm-a3": DOCKER_DOC,
+    "container-image-vllm": CONTAINER_DOC,
+    "container-image-sglang": CONTAINER_DOC,
+    "container-prerequisites-ubuntu": CONTAINER_DOC,
+    "container-conda": CONTAINER_DOC,
+    "installation-vllm": INSTALL_DOC,
+    "installation-sglang": INSTALL_DOC,
+    "quickstart-environment": QUICK_DOC,
+    "quickstart-data": QUICK_DOC,
+    **{f"quickstart-{case}": QUICK_DOC for case in CASES},
 }
-
-FILE_BY_BLOCK = {name: path for path, names in BLOCKS_BY_FILE.items() for name in names}
 
 # Match executable lines, not comments or prose mentioning the same command.
 BLOCK_ANCHORS = {
@@ -119,7 +111,7 @@ def extract_rst_blocks(text, source="input", *, name=None):
 
 def extract_doctest_block(text, name, source="input"):
     """Select exactly one existing code block or Quick Start table command."""
-    if name in (*BLOCKS_BY_FILE[CONTAINER_DOC], *BLOCKS_BY_FILE[DOCKER_DOC]):
+    if FILE_BY_BLOCK.get(name) in (CONTAINER_DOC, DOCKER_DOC):
         matches = extract_rst_blocks(text, source, name=name)
     elif name in BLOCK_ANCHORS:
         matches = [
@@ -139,6 +131,26 @@ def extract_doctest_block(text, name, source="input"):
     return matches[0] if matches else None
 
 
+def adapt_data_command(line):
+    """Override only GSM8K input/output arguments in the documented command."""
+    argument = r"""(?:"[^"\n]*"|'[^'\n]*'|[^\s;]+)"""
+    for option, variable in (("--local_dataset_path", "GSM8K_DATASET_PATH"), ("--local_save_dir", "GSM8K_OUTPUT_DIR")):
+        value = os.environ.get(variable)
+        if not value:
+            continue
+        quoted = shlex.quote(value)
+        pattern = rf"({option}[ \t]+){argument}"
+        line, replaced = re.subn(pattern, lambda match, replacement=quoted: match[1] + replacement, line)
+        if replaced:
+            continue
+        if option in line:
+            raise DoctestError(f"Missing value for {option}")
+        if option != "--local_save_dir":
+            raise DoctestError(f"Documented preprocessing command is missing {option}")
+        line += f" {option} {quoted}"
+    return line
+
+
 def adapt_runtime_block(block, name):
     """Substitute local CANN/data paths only; keep raw extraction unchanged."""
     for path, variable in (
@@ -155,24 +167,8 @@ def adapt_runtime_block(block, name):
     if name == "quickstart-data":
         lines = block.splitlines()
         for index, line in enumerate(lines):
-            if not re.match(BLOCK_ANCHORS[name], line):
-                continue
-            for option, variable in (
-                ("--local_dataset_path", "GSM8K_DATASET_PATH"),
-                ("--local_save_dir", "GSM8K_OUTPUT_DIR"),
-            ):
-                if value := os.environ.get(variable):
-                    argument = r"""(?:"[^"\n]*"|'[^'\n]*'|[^\s;]+)"""
-                    pattern = rf"({re.escape(option)}[ \t]+){argument}"
-                    if re.search(pattern, line):
-                        line = re.sub(pattern, lambda match: match[1] + shlex.quote(value), line)
-                    elif option in line:
-                        raise DoctestError(f"Missing value for {option}")
-                    elif option == "--local_save_dir":
-                        line += f" {option} {shlex.quote(value)}"
-                    else:
-                        raise DoctestError(f"Documented preprocessing command is missing {option}")
-            lines[index] = line
+            if re.match(BLOCK_ANCHORS[name], line):
+                lines[index] = adapt_data_command(line)
         block = "\n".join(lines) + "\n"
     return block
 
