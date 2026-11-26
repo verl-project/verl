@@ -152,7 +152,6 @@ class vLLMHttpServer:
         cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
-        placement_group: Any = None,
     ):
         """
         Args:
@@ -180,10 +179,8 @@ class vLLMHttpServer:
         self._pd_prefill_side_channel_port: Optional[int] = None
         self._pd_prefill_engine_id: Optional[str] = None
         self._pd_peer_idx: int = 0
-        self._placement_group = placement_group
 
-        if placement_group is None:
-            os.environ[get_visible_devices_keyword()] = cuda_visible_devices
+        os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
         # Forward the Ray job id into the vLLM worker subprocess so the
         # colocated weight-transfer IPC socket path is unique per Ray job.
@@ -585,8 +582,6 @@ class vLLMHttpServer:
         usage_context = UsageContext.OPENAI_API_SERVER
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
         vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
-        if self._placement_group is not None and vllm_config.parallel_config.distributed_executor_backend == "ray":
-            vllm_config.parallel_config.placement_group = self._placement_group
 
         fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
         kwargs = {}
@@ -1548,14 +1543,6 @@ class vLLMHttpServer:
             if wt_backend == "ipc":
                 # CUDA IPC handles (reduce_tensor tuples) require pickle fallback on vLLM's ZMQ RPC.
                 os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-            if wt_backend == "sharded_rdt":
-                exec_backend = engine_kwargs.get("distributed_executor_backend")
-                if exec_backend not in {None, "ray"}:
-                    raise ValueError(
-                        f"weight_transfer_config backend='sharded_rdt' requires distributed_executor_backend='ray'; "
-                        f"got {exec_backend!r}"
-                    )
-                engine_kwargs["distributed_executor_backend"] = "ray"
 
         lora_enabled = getattr(self, "lora_as_adapter", False) or bool(engine_kwargs.get("enable_lora"))
         if (
@@ -1700,57 +1687,9 @@ class vLLMReplica(RolloutReplica):
             **get_platform().rollout_env_vars(),
         }
 
-    def _resolve_ray_placement_group(
-        self, *, bundle_offset: int = 0, bundle_count: int | None = None
-    ) -> tuple[Any, list[int] | None]:
-        """Resolve a single Ray placement group and local bundle indices for this server, if contained in one PG."""
-        pgs = getattr(self.resource_pool, "pgs", None) if self.resource_pool is not None else None
-        if not pgs:
-            return None, None
-        count = int(self.world_size if bundle_count is None else bundle_count)
-        if hasattr(self.resource_pool, "start_bundle_index"):
-            global_start = int(self.resource_pool.start_bundle_index)
-        elif getattr(self, "rollout_mode", None) == RolloutMode.STANDALONE:
-            global_start = 0
-        else:
-            global_start = int(self.world_size) * int(getattr(self, "replica_rank", 0))
-        global_start += int(bundle_offset)
-
-        store = getattr(self.resource_pool, "store", None)
-        pg_counts: list[int | None] = []
-        for idx, pg in enumerate(pgs):
-            bc = getattr(pg, "bundle_count", None)
-            if isinstance(bc, int):
-                pg_counts.append(bc)
-            elif getattr(pg, "bundle_specs", None) is not None:
-                pg_counts.append(len(pg.bundle_specs))
-            elif store is not None and idx < len(store):
-                pg_counts.append(int(store[idx]))
-            else:
-                pg_counts.append(None)
-
-        if len(pgs) == 1 and pg_counts[0] is None:
-            return pgs[0], list(range(global_start, global_start + count))
-        if any(c is None for c in pg_counts):
-            return None, None
-
-        local_start = global_start
-        for pg, pg_bundles in zip(pgs, pg_counts, strict=True):
-            assert pg_bundles is not None
-            if local_start < pg_bundles:
-                if local_start + count <= pg_bundles:
-                    return pg, list(range(local_start, local_start + count))
-                # Replica spans multiple PGs; vLLM's parallel_config.placement_group only accepts a single PG.
-                return None, None
-            local_start -= pg_bundles
-        return None, None
-
-    def _resolve_weight_transfer_launch_config(
-        self, *, bundle_offset: int = 0, bundle_count: int | None = None
-    ) -> tuple[dict[str, str], Any]:
-        """Compute extra server env vars and Ray placement group for native vLLM weight transfer."""
+    def _resolve_weight_transfer_launch_config(self) -> dict[str, str]:
+        """Compute extra server env vars for native vLLM weight transfer."""
         extra_env: dict[str, str] = {}
-        placement_group = None
         vllm_ek = _get_vllm_engine_kwargs(self.config, "vllm")
         checkpoint_backend = _effective_vllm_checkpoint_backend(
             getattr(getattr(self.config, "checkpoint_engine", None), "backend", None),
@@ -1764,20 +1703,7 @@ class vLLMReplica(RolloutReplica):
         if checkpoint_backend == "vllm_nccl_m2n" or wtc_backend == "nccl_m2n":
             # ncclDevCommCreate (NCCL Device API used by nccl_m2n) requires cuMem enabled.
             extra_env["NCCL_CUMEM_ENABLE"] = "1"
-        uses_ray_executor = (
-            checkpoint_backend == "vllm_sharded_rdt"
-            or wtc_backend == "sharded_rdt"
-            or vllm_ek.get("distributed_executor_backend") == "ray"
-        )
-        if uses_ray_executor:
-            placement_group, bundle_indices = self._resolve_ray_placement_group(
-                bundle_offset=bundle_offset, bundle_count=bundle_count
-            )
-            if placement_group is not None and bundle_indices is not None:
-                max_colocate = max(int(getattr(self.resource_pool, "max_colocate_count", 2)), 2)
-                extra_env["VLLM_RAY_BUNDLE_INDICES"] = ",".join(str(i) for i in bundle_indices)
-                extra_env["VLLM_RAY_PER_WORKER_GPUS"] = str(round(1.0 / max_colocate, 4))
-        return extra_env, placement_group
+        return extra_env
 
     async def launch_servers(self):
         """Launch http server in each node."""
@@ -1803,7 +1729,7 @@ class vLLMReplica(RolloutReplica):
         # create server actor in each node with node affinity and cuda visible devices
         nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
         env_vars = self._get_server_env_vars(worker_node_ids[::gpus_per_replica_node])
-        wt_env_vars, placement_group = self._resolve_weight_transfer_launch_config()
+        wt_env_vars = self._resolve_weight_transfer_launch_config()
         if wt_env_vars:
             env_vars = {**env_vars, **wt_env_vars}
         for node_rank in range(nnodes):
@@ -1837,7 +1763,6 @@ class vLLMReplica(RolloutReplica):
                 gpus_per_node=gpus_per_replica_node,
                 nnodes=nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
-                placement_group=placement_group,
             )
             self.servers.append(server)
 

@@ -606,16 +606,17 @@ def test_vllm_server_preprocess_engine_kwargs_and_sleep_level(monkeypatch):
     lora_srv._preprocess_engine_kwargs({})
     assert "VLLM_RELOAD_MODE" not in os.environ
 
-    # vllm_sharded_rdt sets distributed_executor_backend=ray and leaves VLLM_RELOAD_MODE unset.
+    # vllm_sharded_rdt leaves VLLM_RELOAD_MODE unset and does not force ray executor.
     monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
     ek = {}
     _make_server("vllm_sharded_rdt")._preprocess_engine_kwargs(ek)
     assert ek["weight_transfer_config"] == {"backend": "sharded_rdt"}
-    assert ek["distributed_executor_backend"] == "ray"
+    assert "distributed_executor_backend" not in ek
     assert "VLLM_RELOAD_MODE" not in os.environ
 
-    with pytest.raises(ValueError, match="distributed_executor_backend='ray'"):
-        _make_server("vllm_sharded_rdt")._preprocess_engine_kwargs({"distributed_executor_backend": "mp"})
+    ek_mp = {"distributed_executor_backend": "mp"}
+    _make_server("vllm_sharded_rdt")._preprocess_engine_kwargs(ek_mp)
+    assert ek_mp["distributed_executor_backend"] == "mp"
 
     # vllm_sparse_nccl uses sleep level 1 so live weights survive KV cache release.
     assert _make_server("vllm_sparse_nccl")._resolve_sleep_level() == 1
@@ -853,9 +854,8 @@ def test_hybrid_mode_ignores_disaggregated_vllm_backends(monkeypatch):
     replica.resource_pool = None
     replica.world_size = 2
     replica.replica_rank = 0
-    extra_env, pg = replica._resolve_weight_transfer_launch_config()
+    extra_env = replica._resolve_weight_transfer_launch_config()
     assert "NCCL_CUMEM_ENABLE" not in extra_env
-    assert pg is None
 
     # HYBRID still allows colocated vllm_ipc.
     monkeypatch.delenv("VLLM_ALLOW_INSECURE_SERIALIZATION", raising=False)
@@ -865,10 +865,9 @@ def test_hybrid_mode_ignores_disaggregated_vllm_backends(monkeypatch):
     assert os.environ.get("VLLM_ALLOW_INSECURE_SERIALIZATION") == "1"
 
 
-def test_vllm_replica_launch_servers_safe_config_and_multinode_split_pg(monkeypatch):
+def test_vllm_replica_launch_servers_safe_config_and_no_ray_executor_plumbing(monkeypatch):
     mod = _load_vllm_async_server_with_stubs(monkeypatch)
 
-    # 1. Safe handling of SimpleNamespace config (no .get) and non-mapping weight_transfer_config.
     captured_calls: list[tuple[dict, dict]] = []
 
     class _FakeServerActorCls:
@@ -898,7 +897,6 @@ def test_vllm_replica_launch_servers_safe_config_and_multinode_split_pg(monkeypa
         replica.workers = [_FakeWorker("node-1", str(i)) for i in range(replica.world_size)]
         monkeypatch.setattr(replica, "_get_server_env_vars", lambda node_ids: {})
 
-        # Patch get_master_address / launch_server on returned handles.
         orig_options = replica.server_class.options
 
         def _patched_options(**opts):
@@ -939,57 +937,34 @@ def test_vllm_replica_launch_servers_safe_config_and_multinode_split_pg(monkeypa
     )
     asyncio.run(_run_launch(rep_ns))
     assert captured_calls[0][0]["runtime_env"]["env_vars"]["NCCL_CUMEM_ENABLE"] == "1"
-    assert captured_calls[0][1]["placement_group"] is None
+    assert "placement_group" not in captured_calls[0][1]
 
-    # Case B: Multi-node SubRayResourcePool where replica lives entirely inside pg1 (bundles 4..7).
+    # Case B: vllm_sharded_rdt never injects Ray executor placement_group or VLLM_RAY_* env vars (mp executor only).
     captured_calls.clear()
     pg0 = SimpleNamespace(name="pg0", bundle_count=8)
-    pg1 = SimpleNamespace(name="pg1", bundle_count=8)
-    rep_split = object.__new__(mod.vLLMReplica)
-    rep_split.rollout_mode = mod.RolloutMode.STANDALONE
-    rep_split.replica_rank = 3
-    rep_split.world_size = 4
-    rep_split.resource_pool = SimpleNamespace(
-        pgs=[pg0, pg1],
-        start_bundle_index=12,
+    rep_rdt = object.__new__(mod.vLLMReplica)
+    rep_rdt.rollout_mode = mod.RolloutMode.STANDALONE
+    rep_rdt.replica_rank = 0
+    rep_rdt.world_size = 4
+    rep_rdt.resource_pool = SimpleNamespace(
+        pgs=[pg0],
+        start_bundle_index=0,
         subgroup_world_size=4,
         max_colocate_count=2,
     )
-    rep_split.config = SimpleNamespace(
+    rep_rdt.config = SimpleNamespace(
         checkpoint_engine=SimpleNamespace(backend="vllm_sharded_rdt"),
         engine_kwargs={},
         ray_actor_max_concurrency=8,
     )
-    asyncio.run(_run_launch(rep_split))
+    asyncio.run(_run_launch(rep_rdt))
     env_b = captured_calls[0][0]["runtime_env"]["env_vars"]
-    assert captured_calls[0][1]["placement_group"] is pg1
-    assert env_b["VLLM_RAY_BUNDLE_INDICES"] == "4,5,6,7"
-    assert env_b["VLLM_RAY_PER_WORKER_GPUS"] == "0.5"
-
-    # Case C: Replica genuinely spanning 2 PGs must NOT pass a single PG or invalid bundle indices.
-    captured_calls.clear()
-    rep_span = object.__new__(mod.vLLMReplica)
-    rep_span.rollout_mode = mod.RolloutMode.STANDALONE
-    rep_span.replica_rank = 0
-    rep_span.world_size = 8
-    rep_span.resource_pool = SimpleNamespace(
-        pgs=[SimpleNamespace(bundle_count=4), SimpleNamespace(bundle_count=4)],
-        start_bundle_index=0,
-        subgroup_world_size=8,
-        max_colocate_count=2,
-    )
-    rep_span.config = SimpleNamespace(
-        checkpoint_engine=SimpleNamespace(backend="vllm_sharded_rdt"),
-        engine_kwargs={},
-        ray_actor_max_concurrency=8,
-    )
-    asyncio.run(_run_launch(rep_span))
-    env_c = captured_calls[0][0]["runtime_env"]["env_vars"]
-    assert captured_calls[0][1]["placement_group"] is None
-    assert "VLLM_RAY_BUNDLE_INDICES" not in env_c
+    assert "placement_group" not in captured_calls[0][1]
+    assert "VLLM_RAY_BUNDLE_INDICES" not in env_b
+    assert "VLLM_RAY_PER_WORKER_GPUS" not in env_b
 
 
-def test_vllm_pd_replica_spawn_wires_ipc_m2n_and_sharded_rdt(monkeypatch):
+def test_vllm_pd_replica_spawn_wires_ipc_m2n_and_no_ray_executor_plumbing(monkeypatch):
     import importlib.util
     from pathlib import Path
 
@@ -1066,13 +1041,14 @@ def test_vllm_pd_replica_spawn_wires_ipc_m2n_and_sharded_rdt(monkeypatch):
         )
     )
     assert opts_m2n["runtime_env"]["env_vars"]["NCCL_CUMEM_ENABLE"] == "1"
+    assert "placement_group" not in kw_m2n
 
     # 2. vllm_ipc sets VLLM_ALLOW_INSECURE_SERIALIZATION=1.
     opts_ipc, _ = _spawn_with(_FakePDConfig(checkpoint_engine=SimpleNamespace(backend="vllm_ipc"), engine_kwargs={}))
     assert opts_ipc["runtime_env"]["env_vars"]["VLLM_ALLOW_INSECURE_SERIALIZATION"] == "1"
     assert opts_ipc["runtime_env"]["env_vars"]["NCCL_CUMEM_ENABLE"] == "0"
 
-    # 3. vllm_sharded_rdt wires placement_group and role-specific VLLM_RAY_BUNDLE_INDICES / PER_WORKER_GPUS.
+    # 3. vllm_sharded_rdt does NOT inject placement_group or VLLM_RAY_* env vars (mp executor only).
     pg0 = SimpleNamespace(name="pg0", bundle_count=8)
     pool = SimpleNamespace(pgs=[pg0], start_bundle_index=4, subgroup_world_size=3, max_colocate_count=2)
     opts_rdt, kw_rdt = _spawn_with(
@@ -1081,9 +1057,9 @@ def test_vllm_pd_replica_spawn_wires_ipc_m2n_and_sharded_rdt(monkeypatch):
         tp=2,
         zmq_base=1,
     )
-    assert kw_rdt["placement_group"] is pg0
-    assert opts_rdt["runtime_env"]["env_vars"]["VLLM_RAY_BUNDLE_INDICES"] == "5,6"
-    assert opts_rdt["runtime_env"]["env_vars"]["VLLM_RAY_PER_WORKER_GPUS"] == "0.5"
+    assert "placement_group" not in kw_rdt
+    assert "VLLM_RAY_BUNDLE_INDICES" not in opts_rdt["runtime_env"]["env_vars"]
+    assert "VLLM_RAY_PER_WORKER_GPUS" not in opts_rdt["runtime_env"]["env_vars"]
 
 
 def test_vllm_sparse_nccl_retarget_resets_seed_and_flushes_and_finishes_on_error(monkeypatch):

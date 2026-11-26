@@ -290,9 +290,7 @@ class vLLMPDReplica(vLLMReplica):
         """Construct one PD ``vLLMHttpServer`` actor."""
         per_role_config = _dc_replace(self.config, tensor_model_parallel_size=tp)
 
-        wt_env_vars, placement_group = self._resolve_weight_transfer_launch_config(
-            bundle_offset=zmq_base_trainer_rank, bundle_count=tp
-        )
+        wt_env_vars = self._resolve_weight_transfer_launch_config()
         env_vars = {
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
@@ -325,7 +323,6 @@ class vLLMPDReplica(vLLMReplica):
             gpus_per_node=self.gpus_per_replica_node,
             nnodes=1,
             cuda_visible_devices=cuda_visible_devices,
-            placement_group=placement_group,
             disaggregation_role=role,
             disaggregation_kv_transfer_config=kv_transfer_config,
         )
