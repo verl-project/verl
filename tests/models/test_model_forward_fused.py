@@ -392,6 +392,7 @@ def test_output_processor_aligns_mcore_sequence_batch_layout_for_topk(monkeypatc
         (True, True, "liger", False),
         (True, False, "triton", True),
         (True, False, "tilelang", True),
+        (True, False, "cutile", True),
         (False, False, "tilelang", None),
         (False, False, "liger", None),
     ],

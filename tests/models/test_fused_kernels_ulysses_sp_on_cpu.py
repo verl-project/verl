@@ -254,16 +254,19 @@ def _adapter_id(forward_fn) -> str:
     return f"{forward_fn.__module__.rsplit('.', 1)[-1]}.{forward_fn.__name__}"
 
 
-@pytest.mark.parametrize("forward_fn", TORCH_ADAPTERS, ids=_adapter_id)
-def test_torch_adapter_propagates_fused_linear_backend(forward_fn):
+@pytest.mark.parametrize(
+    ("forward_fn", "backend"),
+    [(fn, "liger") for fn in TORCH_ADAPTERS] + [(fn, "cutile") for fn in TRITON_ADAPTERS],
+)
+def test_adapter_propagates_fused_linear_backend(forward_fn, backend):
     model = _make_fake_lm()
-    model._verl_fused_kernels_backend = "liger"
+    model._verl_fused_kernels_backend = backend
     input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
 
     with _patch_fused_kernels() as captured:
         forward_fn(model, input_ids=input_ids, labels=None, temperature=1.0, return_dict=True)
 
-    assert captured["impl_backend"] == "liger"
+    assert captured["impl_backend"] == backend
 
 
 @pytest.mark.parametrize("forward_fn", ALL_ADAPTERS, ids=_adapter_id)

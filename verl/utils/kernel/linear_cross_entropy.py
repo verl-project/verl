@@ -147,6 +147,7 @@ class LinearCrossEntropy(torch.autograd.Function):
         temperature: typing.Optional[float] = 1.0,
         reduction: typing.Optional[str] = "none",
         dist_process_group: typing.Optional[dist.ProcessGroup] = None,
+        backend="triton",
     ) -> list[torch.Tensor]:
         """Return selected log probabilities and one entropy per hidden row.
 
@@ -156,12 +157,18 @@ class LinearCrossEntropy(torch.autograd.Function):
         assert isinstance(temperature, float), f"temperature must be a float, but got {type(temperature)}"
         assert isinstance(reduction, str), f"reduction must be a str, but got {type(reduction)}"
         with get_platform().nvtx_range("LinearCrossEntropy-forward"):
-            from . import kernels
+            if backend == "cutile":
+                from .cutile import linear_cross_entropy as kernels
+            else:
+                from . import kernels
+            ctx.kernel_module = kernels
 
-            REDUCTION = kernels.get_entropy_reduction_enum_number(reduction.lower())
+            from .linear_cross_entropy_config import get_entropy_reduction_enum_number
+
+            REDUCTION = get_entropy_reduction_enum_number(reduction.lower())
 
             original_hidden_shape = hidden.shape
-            multi_label = labels.ndim == hidden.ndim and labels.shape[:-1] == hidden.shape[:-1]
+            multi_label = backend == "triton" and labels.ndim == hidden.ndim and labels.shape[:-1] == hidden.shape[:-1]
             if multi_label and labels.shape[-1] == 1 and reduction.lower() != "none":
                 multi_label = False
             if multi_label:
@@ -194,7 +201,7 @@ class LinearCrossEntropy(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dlogprobs: torch.Tensor, dentropy: torch.Tensor) -> list[torch.Tensor]:
-        from . import kernels
+        kernels = ctx.kernel_module
 
         with get_platform().nvtx_range("LinearCrossEntropy-backward"):
             (hidden, weight, labels, _maximum, _accumulate, _entropy_b) = ctx.saved_tensors
@@ -219,7 +226,7 @@ class LinearCrossEntropy(torch.autograd.Function):
             )
             d_hidden = d_hidden.view(ctx.original_hidden_shape)
 
-        return (d_hidden, d_weight, None, None, None, None)
+        return (d_hidden, d_weight, None, None, None, None, None)[: len(ctx.needs_input_grad)]
 
 
 def linear_cross_entropy(
@@ -250,8 +257,14 @@ def linear_cross_entropy(
     if impl_backend == "triton" and hidden.device.type != "npu":
         if labels.numel() != num_tokens and (labels.ndim != hidden.ndim or labels.shape[:-1] != hidden.shape[:-1]):
             raise ValueError("labels must contain one or more labels for every hidden row")
-    elif impl_backend in ("triton", "liger") and labels.numel() != num_tokens:
+    elif impl_backend in ("triton", "liger", "cutile") and labels.numel() != num_tokens:
         raise ValueError(f"The {impl_backend} linear cross entropy backend only supports one label per token")
+    if impl_backend == "cutile":
+        if hidden.device.type != "cuda":
+            raise RuntimeError("The cuTile linear cross entropy backend is CUDA-only")
+        return LinearCrossEntropy.apply(
+            hidden, weight, labels, float(temperature), str(reduction), dist_process_group, "cutile"
+        )
     if impl_backend == "triton":
         if hidden.device.type == "npu":
             from verl.utils.kernel.npu.cann_linear_ce import CannLinearCrossEntropy, should_use_cann_linear_ce
@@ -294,5 +307,5 @@ def linear_cross_entropy(
             dist_process_group,
         )
     raise ValueError(
-        f"Unsupported linear cross entropy backend {impl_backend!r}; choose 'triton', 'liger', or 'tilelang'"
+        f"Unsupported linear cross entropy backend {impl_backend!r}; choose 'triton', 'liger', 'tilelang', or 'cutile'"
     )

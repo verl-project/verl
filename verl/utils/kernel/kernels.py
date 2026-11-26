@@ -33,12 +33,27 @@ Implementations of the linear cross entropy with token entropy kernel.
 """
 
 import typing
-from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
 
 from verl.utils.device import get_device_capability, get_device_name, is_cuda_available
+
+from .linear_cross_entropy_config import (
+    BackwardEnum,
+    EntropyReductionEnum,
+    _config,
+    get_entropy_reduction_enum,
+)
+from .linear_cross_entropy_config import (
+    Config as Config,
+)
+from .linear_cross_entropy_config import (
+    get_entropy_reduction_enum_number as get_entropy_reduction_enum_number,
+)
+from .linear_cross_entropy_config import (
+    set_backward_method as set_backward_method,
+)
 
 try:
     import triton
@@ -97,87 +112,6 @@ elif SUPPORT_CUDA_TMA:
         pass
 
     triton.set_allocator(alloc_fn)
-
-
-@dataclass
-class EntropyReductionEnum:
-    """
-    Enum for the reduction method of cross entropy.
-    """
-
-    _None = 0
-    _Sum = 1
-    _Mean = 2
-
-
-def get_entropy_reduction_enum_number(reduction: str) -> int:
-    """
-    Get the enum number for the reduction method of cross entropy.
-    """
-    _enum = EntropyReductionEnum._None
-    if reduction == "none":
-        _enum = EntropyReductionEnum._None
-    elif reduction == "sum":
-        _enum = EntropyReductionEnum._Sum
-    elif reduction == "mean":
-        _enum = EntropyReductionEnum._Mean
-    else:
-        raise ValueError(f"Invalid reduction: {reduction}")
-    return _enum
-
-
-def get_entropy_reduction_enum(ce_reduction: int) -> EntropyReductionEnum:
-    """
-    Get the enum for the reduction method of cross entropy.
-    """
-    _enum = EntropyReductionEnum._None
-    if ce_reduction == 0:
-        _enum = EntropyReductionEnum._None
-    elif ce_reduction == 1:
-        _enum = EntropyReductionEnum._Sum
-    elif ce_reduction == 2:
-        _enum = EntropyReductionEnum._Mean
-    else:
-        raise ValueError(f"Invalid ce_reduction: {ce_reduction}")
-    return _enum
-
-
-@dataclass
-class BackwardEnum:
-    """
-    Enum for the backward method.
-    """
-
-    _Total_Fuse_MN = (
-        0  # Fuse d_logits & d_hidden & d_weight, no intermediate storage, requires fp32 for d_hidden & d_weight
-    )
-    _Total_Separate = 1  # Store d_logits, no special requirements for d_hidden & d_weight
-    _Split_Dlogits_N = 2  # split d_logits along its N dimension, aka. vocab_size
-    _Split_Dlogits_M = 3  # split d_logits along its M dimension, aka. num_tokens
-
-
-@dataclass
-class Config:
-    """Configuration for efficient entropy kernel operations.
-
-    Args:
-        _backward (BackwardEnum): Backward computation method. Defaults to BackwardEnum._Split_Dlogits_N.
-        _use_triton (bool): Whether to use Triton kernels for computation. Defaults to True.
-    """
-
-    _backward: BackwardEnum = BackwardEnum._Split_Dlogits_N
-    _use_triton: bool = True
-
-
-_config = Config()
-
-
-def set_backward_method(backward_method: BackwardEnum):
-    """
-    Set the backward method.
-    """
-    global _config
-    _config._backward = backward_method
 
 
 # The inner strides are deliberately left unannotated so that Triton specializes them to 1 and can prove

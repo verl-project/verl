@@ -86,7 +86,7 @@ def get_fused_impl_backend(model: torch.nn.Module) -> str:
 
 def _gather_fused_hidden_states(hidden_states: Tensor, sequence_parallel: bool, impl_backend: str) -> Tensor:
     if not sequence_parallel:
-        # Triton and TileLang return the contribution from the local vocabulary
+        # Triton, TileLang and cuTile return the contribution from the local vocabulary
         # shard. Match ColumnParallelLinear's replicated-input contract by
         # reducing dHidden across TP ranks in backward.
         if impl_backend.lower() != "liger":
@@ -275,7 +275,9 @@ def patch_fused_forward(
     if model_config is not None:
         configured_backend = (model_config.fused_kernel_options or {}).get("impl_backend")
         impl_backend = (
-            "liger" if model_config.use_liger else ("tilelang" if configured_backend == "tilelang" else "triton")
+            "liger"
+            if model_config.use_liger
+            else (configured_backend if configured_backend in ("tilelang", "cutile") else "triton")
         )
     if impl_backend == "liger" and engine_config is not None and model.config.params_dtype == torch.bfloat16:
         _configure_liger_runtime(model, engine_config)
