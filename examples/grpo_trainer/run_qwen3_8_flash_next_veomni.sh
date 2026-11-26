@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GRPO | Qwen3.8-Flash-Next | VeOmni training | vLLM rollout
 #
-# Rollout: FP8 MoE weights and FP8 KV cache
+# Rollout: FP8 MoE weights
 # Training: TileLang fused kernels and R3 router replay
 # Algorithm: score centering (SC) with token-level importance sampling (TIS)
 # Trainer: colocate_async
@@ -70,7 +70,7 @@ use_remove_padding=True
 use_dynamic_bsz=True
 max_prompt_length=$((1024 * 2))
 max_response_length=$((1024 * 10))
-actor_max_token_len_per_gpu=$(((max_prompt_length + max_response_length) * 2))
+actor_max_token_len_per_gpu=$((max_prompt_length + max_response_length))
 
 # Inference config
 rollout_name=vllm
@@ -153,7 +153,8 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=$use_dynamic_bsz
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
     actor_rollout_ref.rollout.quantization.moe=MXFP8
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8
+    # fp8 kv cache has large train-rollout drift, rollout_corr/k3_kl=0.3
+    # +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8
 )
 
 DATA=(
