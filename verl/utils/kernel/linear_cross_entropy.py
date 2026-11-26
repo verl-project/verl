@@ -256,8 +256,10 @@ def _linear_cross_entropy_cut_cross_entropy(
     reduction: str,
     dist_process_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    cce_linear_cross_entropy = _require_cut_cross_entropy()
+    # Reject unsupported devices before importing the optional package so that
+    # NPU/CPU users get a "CUDA-only" message instead of install instructions.
     _check_cut_cross_entropy_device(hidden.device)
+    cce_linear_cross_entropy = _require_cut_cross_entropy()
 
     if not isinstance(reduction, str):
         raise TypeError(f"reduction must be a string, got {type(reduction)}")
@@ -420,7 +422,7 @@ def linear_cross_entropy(
     if impl_backend == "triton" and hidden.device.type != "npu":
         if labels.numel() != num_tokens and (labels.ndim != hidden.ndim or labels.shape[:-1] != hidden.shape[:-1]):
             raise ValueError("labels must contain one or more labels for every hidden row")
-    elif impl_backend in ("triton", "liger") and labels.numel() != num_tokens:
+    elif impl_backend in ("triton", "liger", "cut_cross_entropy", "ml_cross_entropy") and labels.numel() != num_tokens:
         raise ValueError(f"The {impl_backend} linear cross entropy backend only supports one label per token")
     if impl_backend == "triton":
         if hidden.device.type == "npu":

@@ -108,12 +108,31 @@ def test_non_cuda_device_fails_fast(monkeypatch):
         lce.linear_cross_entropy(hidden, weight, labels, impl_backend="cut_cross_entropy")
 
 
+def test_non_cuda_device_fails_before_importing_optional_package(monkeypatch):
+    """NPU/CPU must fail fast instead of reporting a missing optional package."""
+    hidden, weight, labels = _inputs()
+    monkeypatch.setattr(lce, "_CUT_CROSS_ENTROPY", None)
+
+    with pytest.raises(RuntimeError, match="requires a CUDA device"):
+        lce.linear_cross_entropy(hidden, weight, labels, impl_backend="cut_cross_entropy")
+
+
 def test_multi_label_queries_are_rejected(fake_runtime):
     hidden, weight, labels = _inputs()
     multi_label = torch.stack((labels, labels), dim=-1)
 
     with pytest.raises(ValueError, match="one label per token"):
         lce.linear_cross_entropy(hidden, weight, multi_label, impl_backend="cut_cross_entropy")
+
+
+def test_multi_label_queries_are_rejected_at_dispatch(monkeypatch):
+    """The dispatcher must reject top-k queries before device/import checks."""
+    hidden, weight, labels = _inputs()
+    monkeypatch.setattr(lce, "_CUT_CROSS_ENTROPY", None)
+    multi_label = torch.stack((labels, labels), dim=-1)
+
+    with pytest.raises(ValueError, match="only supports one label per token"):
+        lce.linear_cross_entropy(hidden, weight, multi_label, impl_backend="ml_cross_entropy")
 
 
 def test_non_none_reduction_is_rejected(fake_runtime):
