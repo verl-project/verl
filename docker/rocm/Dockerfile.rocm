@@ -29,6 +29,7 @@ RUN cd /workspace \
     && rm -fr causal-conv1d
 
 # vLLM v0.34.0 — used by verl's weight-reload lifecycle.
+# Ref: https://github.com/verl-project/verl/pull/8780
 ARG VLLM_TAG="62d4bc3c7e33b1b6c906e233e6af2d3506c482ca"
 # [Bugfix][ROCm] Restore MoE weight padding dropped by #46009 (merged after v0.32.0)
 # Ref: https://github.com/vllm-project/vllm/pull/61872
