@@ -218,3 +218,49 @@ def test_temperature_scales_logits(fake_runtime):
     log_probs, _ = lce.linear_cross_entropy(hidden, weight, labels, 0.5, impl_backend="cut_cross_entropy")
     ref_log_probs, _ = _reference(hidden, weight, labels, 0.5)
     torch.testing.assert_close(log_probs, ref_log_probs, atol=1e-5, rtol=1e-5)
+
+
+def test_bf16_entropy_accumulates_logits_in_fp32(fake_runtime):
+    """The entropy estimator must not round the logits to bf16.
+
+    A bf16-output matmul rounds each logit to ~2^-8 relative, which drifts the
+    entropy by O(0.1) once the vocabulary is large. The estimator has to upcast
+    to fp32 so it agrees with the Triton kernel's fp32 accumulation.
+    """
+    torch.manual_seed(0)
+    num_tokens, hidden_size, vocab_size = 16, 256, 4096
+    hidden = torch.empty(num_tokens, hidden_size, dtype=torch.bfloat16).uniform_(-0.5, 0.5)
+    weight = torch.empty(vocab_size, hidden_size, dtype=torch.bfloat16).uniform_(-0.5, 0.5)
+    labels = torch.randint(0, vocab_size, (num_tokens,))
+
+    log_probs, entropy = lce.linear_cross_entropy(hidden, weight, labels, impl_backend="cut_cross_entropy")
+
+    logits = hidden.float() @ weight.float().t()
+    log_probs_ref = torch.log_softmax(logits, dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    entropy_ref = -(torch.softmax(logits, dim=-1) * torch.log_softmax(logits, dim=-1)).sum(dim=-1)
+
+    torch.testing.assert_close(log_probs.float(), log_probs_ref, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(entropy.float(), entropy_ref, atol=1e-3, rtol=1e-3)
+
+
+def test_bf16_backward_matches_fp32_reference(fake_runtime):
+    torch.manual_seed(0)
+    num_tokens, hidden_size, vocab_size = 8, 128, 1024
+    hidden = torch.empty(num_tokens, hidden_size, dtype=torch.bfloat16).uniform_(-0.5, 0.5).requires_grad_()
+    weight = torch.empty(vocab_size, hidden_size, dtype=torch.bfloat16).uniform_(-0.5, 0.5).requires_grad_()
+    labels = torch.randint(0, vocab_size, (num_tokens,))
+
+    _, entropy = lce.linear_cross_entropy(hidden, weight, labels, impl_backend="cut_cross_entropy")
+    grad_entropy = torch.randn(num_tokens, dtype=entropy.dtype)
+    grad_hidden, grad_weight = torch.autograd.grad(entropy, (hidden, weight), grad_entropy)
+
+    ref_hidden = hidden.detach().clone().float().requires_grad_(True)
+    ref_weight = weight.detach().clone().float().requires_grad_(True)
+    logits = ref_hidden @ ref_weight.t()
+    ref_entropy = -(torch.softmax(logits, dim=-1) * torch.log_softmax(logits, dim=-1)).sum(dim=-1)
+    ref_grad_hidden, ref_grad_weight = torch.autograd.grad(
+        ref_entropy, (ref_hidden, ref_weight), grad_entropy.float()
+    )
+
+    torch.testing.assert_close(grad_hidden.float(), ref_grad_hidden, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(grad_weight.float(), ref_grad_weight, atol=1e-2, rtol=1e-2)

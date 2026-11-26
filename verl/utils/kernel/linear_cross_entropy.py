@@ -160,9 +160,11 @@ _CUT_CROSS_ENTROPY = None
 _CUT_CROSS_ENTROPY_INSTALL_COMMAND = (
     'pip install "cut-cross-entropy @ git+https://github.com/apple/ml-cross-entropy.git"'
 )
-# Budget for the fp32 logits chunk used by the entropy estimator. Keeping this
-# small is what lets the backend stay below the unfused logits path.
-_CUT_CROSS_ENTROPY_ENTROPY_CHUNK_BYTES = 4 * 1024 * 1024
+# Budget for the scratch used by the entropy estimator. The per-chunk matmul
+# upcasts both operands to at least fp32 so its logits match the fp32
+# accumulation used by the Triton kernel; keeping the chunk small bounds the
+# extra memory below the unfused logits path.
+_CUT_CROSS_ENTROPY_ENTROPY_CHUNK_BYTES = 16 * 1024 * 1024
 
 
 def _require_cut_cross_entropy():
@@ -193,9 +195,17 @@ def _check_cut_cross_entropy_device(device: torch.device):
         )
 
 
-def _cut_cross_entropy_entropy_chunk(num_tokens: int) -> int:
-    per_token_bytes = max(int(num_tokens), 1) * 4
-    return max(1, min(65536, _CUT_CROSS_ENTROPY_ENTROPY_CHUNK_BYTES // per_token_bytes))
+def _entropy_accumulate_dtype(dtype: torch.dtype) -> torch.dtype:
+    # The Triton kernel accumulates logits in fp32; fp16/bf16 operands must be
+    # upcast for the entropy estimator to agree with it. Wider inputs stay put.
+    return torch.float32 if dtype in (torch.bfloat16, torch.float16) else dtype
+
+
+def _cut_cross_entropy_entropy_chunk(num_tokens: int, hidden_size: int, itemsize: int) -> int:
+    # The upcast weight chunk [chunk, hidden] and the logits [tokens, chunk] are
+    # alive at the same time, so size the chunk to keep both within budget.
+    row_bytes = (max(int(num_tokens), 1) + max(int(hidden_size), 1)) * itemsize
+    return max(1, _CUT_CROSS_ENTROPY_ENTROPY_CHUNK_BYTES // row_bytes)
 
 
 class _ExpectedLogit(torch.autograd.Function):
@@ -208,44 +218,47 @@ class _ExpectedLogit(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, hidden, weight, lse, valid):
-        num_tokens = hidden.shape[0]
-        chunk = _cut_cross_entropy_entropy_chunk(num_tokens)
-        safe_lse = torch.where(valid, lse, torch.full_like(lse, float("inf")))
-        expected = hidden.new_zeros((num_tokens,), dtype=torch.float32)
+        compute_dtype = _entropy_accumulate_dtype(hidden.dtype)
+        itemsize = torch.empty((), dtype=compute_dtype).element_size()
+        chunk = _cut_cross_entropy_entropy_chunk(hidden.shape[0], weight.shape[1], itemsize)
+        safe_lse = torch.where(valid, lse, torch.full_like(lse, float("inf"))).to(compute_dtype)
+        hidden_work = hidden.to(compute_dtype)
+        expected = torch.zeros((hidden.shape[0],), dtype=compute_dtype, device=hidden.device)
 
         for start in range(0, weight.shape[0], chunk):
             stop = min(start + chunk, weight.shape[0])
-            logits = hidden @ weight[start:stop].t()
-            if logits.dtype in (torch.bfloat16, torch.float16):
-                logits = logits.float()
+            logits = hidden_work @ weight[start:stop].to(compute_dtype).t()
             probs = torch.exp(logits - safe_lse[:, None])
             expected += (probs * logits).sum(dim=-1)
 
         ctx.save_for_backward(hidden, weight, safe_lse, valid, expected)
         ctx.chunk = chunk
+        ctx.compute_dtype = compute_dtype
         return expected
 
     @staticmethod
     def backward(ctx, grad_expected):
         hidden, weight, safe_lse, valid, expected = ctx.saved_tensors
         chunk = ctx.chunk
-        grad_expected = torch.where(valid, grad_expected, torch.zeros_like(grad_expected)).float()
-        grad_hidden = torch.zeros_like(hidden)
+        compute_dtype = ctx.compute_dtype
+        grad_expected = torch.where(valid, grad_expected, torch.zeros_like(grad_expected)).to(compute_dtype)
+        hidden_work = hidden.to(compute_dtype)
+        # Accumulate the hidden gradient in fp32 even when hidden is bf16: it is
+        # summed over every vocabulary chunk.
+        grad_hidden = torch.zeros_like(hidden_work)
         grad_weight = torch.zeros_like(weight)
 
         for start in range(0, weight.shape[0], chunk):
             stop = min(start + chunk, weight.shape[0])
-            logits = hidden @ weight[start:stop].t()
-            if logits.dtype in (torch.bfloat16, torch.float16):
-                logits = logits.float()
+            weight_chunk = weight[start:stop].to(compute_dtype)
+            logits = hidden_work @ weight_chunk.t()
             probs = torch.exp(logits - safe_lse[:, None])
             # d/dz_j sum_i p_i z_i = p_j * (1 + z_j - sum_i p_i z_i)
             grad_logits = grad_expected[:, None] * probs * (1.0 + logits - expected[:, None])
-            grad_logits = grad_logits.to(hidden.dtype)
-            grad_hidden += grad_logits @ weight[start:stop]
-            grad_weight[start:stop] = grad_logits.t() @ hidden
+            grad_hidden += grad_logits @ weight_chunk
+            grad_weight[start:stop] = (grad_logits.t() @ hidden_work).to(weight.dtype)
 
-        return grad_hidden, grad_weight, None, None
+        return grad_hidden.to(hidden.dtype), grad_weight, None, None
 
 
 def _linear_cross_entropy_cut_cross_entropy(
