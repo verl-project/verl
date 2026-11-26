@@ -13,7 +13,6 @@
 # limitations under the License.
 
 
-import inspect
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass, field, fields
@@ -405,15 +404,6 @@ class VeOmniEngine(FSDPEngine):
 
         self._maybe_apply_async_activation_offload(module)
 
-        ple_parallelize_kwargs: dict[str, Any] = {}
-        if "freeze_ple_embeddings" in inspect.signature(build_parallelize_model).parameters:
-            ple_parallelize_kwargs["freeze_ple_embeddings"] = self.engine_config.freeze_ple_embeddings
-            ple_parallelize_kwargs["frozen_ple_dtype"] = self.engine_config.frozen_ple_dtype
-        elif self.engine_config.freeze_ple_embeddings:
-            raise ValueError(
-                "The installed VeOmni's build_parallelize_model does not support freeze_ple_embeddings; upgrade VeOmni."
-            )
-
         # Applies parallel strategies to the model.
         log_gpu_memory_usage("Before parallelize model", logger=logger)
         module = build_parallelize_model(
@@ -433,7 +423,8 @@ class VeOmniEngine(FSDPEngine):
             broadcast_model_weights_from_rank0=self.engine_config.broadcast_model_weights_from_rank0,
             ep_sharded_stream_load=self.engine_config.ep_sharded_stream_load,
             fqn_to_index_mapping=load_safetensors_index(self.model_config.local_path),
-            **ple_parallelize_kwargs,
+            freeze_ple_embeddings=self.engine_config.freeze_ple_embeddings,
+            frozen_ple_dtype=self.engine_config.frozen_ple_dtype,
         )
         log_gpu_memory_usage("After parallelize model", logger=logger)
 
@@ -692,11 +683,14 @@ class VeOmniEngine(FSDPEngine):
     # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
-        per_tensor_param, peft_config = self._get_hf_export_per_tensor_param()
+        per_tensor_param, peft_config = self._export_per_tensor_param(skip_frozen_ple=True)
         return self._quantize_for_rollout(per_tensor_param), peft_config
 
     def _get_hf_export_per_tensor_param(self):
         """Full HF-format weights without the rollout weight quantizer: the checkpoint 'hf_model' export."""
+        return self._export_per_tensor_param(skip_frozen_ple=False)
+
+    def _export_per_tensor_param(self, *, skip_frozen_ple: bool):
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
         # per-DTensor .to(device).full_tensor() in export_weights() stages each shard
@@ -714,7 +708,7 @@ class VeOmniEngine(FSDPEngine):
                 (next(iter(convert_weight_keys({name: tensor}, wrapped_module))), tensor)
                 if hasattr(wrapped_module, "_checkpoint_conversion_mapping")
                 else (name, tensor)
-                for name, tensor in export_weights(self.module)
+                for name, tensor in export_weights(self.module, skip_frozen_ple=skip_frozen_ple)
             )
 
         def _with_offload_back():

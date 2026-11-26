@@ -719,13 +719,14 @@ def test_engram_safetensors_requires_local_index_json(tmp_path):
         list(iter_engram_safetensors_batches(str(tmp_path)))
 
 
-def test_veomni_engine_delegates_ple_freeze_and_passes_through_export(monkeypatch, tmp_path):
+def test_veomni_engine_skips_frozen_ple_only_for_rollout_export(monkeypatch, tmp_path):
     import torch.distributed as dist
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.tensor import Shard, distribute_tensor
 
     fake_ps = types.SimpleNamespace(ep_enabled=False, ep_size=1, ep_rank=0)
     captured_parallelize_kwargs: dict[str, object] = {}
+    captured_export_kwargs: list[dict[str, object]] = []
 
     def _fake_build_parallelize_model(
         model,
@@ -748,8 +749,9 @@ def test_veomni_engine_delegates_ple_freeze_and_passes_through_export(monkeypatc
     def _fake_has_frozen_ple_embeddings(model: torch.nn.Module) -> bool:
         return bool(getattr(model, "_veomni_freeze_ple_embeddings", False))
 
-    def _fake_export_weights(model: torch.nn.Module):
-        skip_frozen = _fake_has_frozen_ple_embeddings(model)
+    def _fake_export_weights(model: torch.nn.Module, *, skip_frozen_ple: bool = False):
+        captured_export_kwargs.append({"skip_frozen_ple": skip_frozen_ple})
+        skip_frozen = skip_frozen_ple and _fake_has_frozen_ple_embeddings(model)
         converter = getattr(model, "_converter", None)
         crop_fn = getattr(converter, "crop_hf_export_tensor", None)
         for name, param in model.state_dict().items():
@@ -888,9 +890,10 @@ def test_veomni_engine_delegates_ple_freeze_and_passes_through_export(monkeypatc
 
         monkeypatch.setattr(torch.distributed.tensor.DTensor, "full_tensor", _guarded_full_tensor)
 
-        # 2. VeOmniEngine passes through VeOmni's export_weights (frozen PLE skipped before full_tensor()).
+        # 2. Rollout export asks VeOmni to skip frozen PLE before full_tensor().
         rollout_weights, _ = engine.get_per_tensor_param()
         rollout_dict = dict(rollout_weights)
+        assert captured_export_kwargs == [{"skip_frozen_ple": True}]
         assert ple_full_tensor_calls == 0
         assert "ple.ple_embedding.ngram_embedding.shard_0.weight" not in rollout_dict
         assert "ple.key_proj.weight" in rollout_dict
@@ -902,14 +905,22 @@ def test_veomni_engine_delegates_ple_freeze_and_passes_through_export(monkeypatc
         assert "ple_trainable.weight" in shard_items
         assert shard_items["ple_trainable.weight"][1].to_hf_chunk is None
 
-        # 4. When freeze_ple_embeddings is not set on the model, VeOmni exports cropped PLE weights.
+        # 4. Checkpoint/HF export remains complete even when PLE is frozen.
+        checkpoint_weights, _ = engine._get_hf_export_per_tensor_param()
+        checkpoint_dict = dict(checkpoint_weights)
+        assert captured_export_kwargs[-1] == {"skip_frozen_ple": False}
+        assert ple_full_tensor_calls == 1
+        assert checkpoint_dict["ple.ple_embedding.ngram_embedding.shard_0.weight"].shape == (5, 4)
+
+        # 5. A non-frozen PLE table is still included in rollout export.
         module._veomni_freeze_ple_embeddings = False
         trainable_weights, _ = engine.get_per_tensor_param()
         trainable_dict = dict(trainable_weights)
-        assert ple_full_tensor_calls == 1
+        assert captured_export_kwargs[-1] == {"skip_frozen_ple": True}
+        assert ple_full_tensor_calls == 2
         assert trainable_dict["ple.ple_embedding.ngram_embedding.shard_0.weight"].shape == (5, 4)
 
-        # 5. Default config flags and PLE validation.
+        # 6. Default config flags and PLE validation.
         default_cfg = VeOmniEngineConfig()
         assert default_cfg.freeze_ple_embeddings is True
         assert default_cfg.frozen_ple_dtype == "bfloat16"
