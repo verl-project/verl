@@ -31,7 +31,7 @@ actor_rollout_ref:
       expert_parallel_size: 1
       ple_parallel_size: 1
       freeze_ple_embeddings: true
-      frozen_ple_dtype: null
+      frozen_ple_dtype: bfloat16
       mixed_precision: true
       low_precision_reduce_scatter_comm: false
       seed: 42
@@ -236,7 +236,7 @@ actor_rollout_ref:
       expert_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.expert_parallel_size,1}
       ple_parallel_size: 1
       freeze_ple_embeddings: true
-      frozen_ple_dtype: null
+      frozen_ple_dtype: bfloat16
       mixed_precision: true
       low_precision_reduce_scatter_comm: false
       seed: ${oc.select:actor_rollout_ref.actor.veomni.seed,42}
@@ -569,7 +569,7 @@ critic:
     expert_parallel_size: 1
     ple_parallel_size: 1
     freeze_ple_embeddings: true
-    frozen_ple_dtype: null
+    frozen_ple_dtype: bfloat16
     mixed_precision: true
     low_precision_reduce_scatter_comm: false
     seed: 42

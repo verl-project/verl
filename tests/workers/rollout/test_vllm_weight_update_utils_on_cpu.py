@@ -912,7 +912,7 @@ def test_veomni_engine_delegates_ple_freeze_and_passes_through_export(monkeypatc
         # 5. Default config flags and PLE validation.
         default_cfg = VeOmniEngineConfig()
         assert default_cfg.freeze_ple_embeddings is True
-        assert default_cfg.frozen_ple_dtype is None
+        assert default_cfg.frozen_ple_dtype == "bfloat16"
         assert default_cfg.broadcast_model_weights_from_rank0 is False
         assert default_cfg.ep_sharded_stream_load is True
         with pytest.raises(ValueError, match="requires freeze_ple_embeddings=True"):

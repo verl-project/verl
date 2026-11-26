@@ -440,7 +440,7 @@ class VeOmniEngineConfig(EngineConfig):
     expert_parallel_size: int = 1
     ple_parallel_size: int = 1
     freeze_ple_embeddings: bool = True
-    frozen_ple_dtype: Optional[str] = None
+    frozen_ple_dtype: str = "bfloat16"
     seed: int = 42
     full_determinism: bool = False
     mixed_precision: bool = False
