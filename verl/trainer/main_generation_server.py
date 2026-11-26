@@ -45,6 +45,16 @@ async def start_server(config):
     rollout_config = copy.deepcopy(config.actor_rollout_ref.rollout)
     if rollout_config.get("profiler") is not None:
         rollout_config.profiler = resolve_ray_actor_profiler_config(rollout_config.profiler, config)
+        profiler = rollout_config.profiler
+        if (
+            profiler.get("tool") == "nsys"
+            and profiler.get("enable", False)
+            and (profiler.get("ray_actor_nsight_options") or {}).get("capture-range") == "cudaProfilerApi"
+        ):
+            raise ValueError(
+                "Standalone generation does not drive cudaProfilerApi capture. "
+                "Disable rollout profiling or use capture-range: none."
+            )
     model_config = config.actor_rollout_ref.model
     # create standalone rollout server
     rollout_server_class = get_rollout_replica_class(config.actor_rollout_ref.rollout.name)
