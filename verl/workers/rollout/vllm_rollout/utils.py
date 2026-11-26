@@ -21,7 +21,6 @@ import platform
 import signal
 import threading
 from collections.abc import Mapping
-from contextlib import nullcontext
 from types import MethodType
 from typing import Any, Literal, Optional, get_args
 
@@ -36,11 +35,9 @@ from verl.utils.vllm.vllm_quant_utils import (
     apply_vllm_quant_patches,
     configure_fp8_ignored_layers_match_mode,
     is_quantized_model,
-    load_quanted_weights,
-    prepare_quanted_weights_for_loading,
-    process_quanted_weights_after_loading,
+    refresh_rocm_attention_weight_caches,
+    reset_uncalibrated_kv_cache_scales,
 )
-from verl.utils.vllm.vllm_unquant_utils import fold_unquantized_moe_params, stage_unquantized_moe_params
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 from verl.workers.rollout.vllm_rollout.weight_update_utils import (
     apply_buffer_updates,
@@ -226,13 +223,6 @@ class vLLMColocateWorkerExtension:
         # 1. patch for Lora
         VLLMHijack.hijack()
         vllm_config = kwargs.get("vllm_config")
-        weight_transfer_config = getattr(vllm_config, "weight_transfer_config", None)
-        if getattr(weight_transfer_config, "backend", None) == "verl_delta_ipc":
-            from verl.workers.rollout.vllm_rollout.delta_weight_transfer import (
-                register_verl_delta_weight_transfer_engine,
-            )
-
-            register_verl_delta_weight_transfer_engine()
 
         # 2. patch the refit of quantized weights, whether the quantization_config comes
         # from the checkpoint (e.g. DeepSeek-V4) or from rollout.quantization via hf_overrides.
@@ -317,9 +307,6 @@ class vLLMColocateWorkerExtension:
             self.device = torch.device(f"{get_device_name()}:{self.local_rank}")
 
         # =========================== step 1: prepare for weight loading ===========================
-        quant_reload_states = None
-        staged_moe_layers = []
-
         # The engine came up on dummy weights, whose init zeroes integer buffers on
         # ROCm -- including the expert-parallel routing maps, which no weight stream
         # restores. Repair them before the reload so the rollout routes correctly.
@@ -331,19 +318,12 @@ class vLLMColocateWorkerExtension:
             # Remove the old LoRA before the new one arrives (applied after is_last below).
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
-        elif is_quantized_model(self.model_runner.vllm_config):
-            quant_reload_states = [
-                (model, prepare_quanted_weights_for_loading(model)) for model in self._iter_all_models()
-            ]
-        else:
-            # TODO(wuxibin): not need anymore for newer vllm version.
+        elif not is_npu_available:
+            # vLLM views the live tensors back to the checkpoint layout the loaders expect (direct reload)
+            from vllm.model_executor.model_loader.reload import start_reload
+
             for model in self._iter_all_models():
-                patch_vllm_moe_model_weight_loader(model)
-            # A kernel prep that reshapes the expert weights (FlashInfer TRT-LLM, vLLM's default bf16 MoE
-            # backend on SM100) leaves nothing the checkpoint-layout loads fit (#7978): hand them a
-            # checkpoint-layout view over the live storage, folded back after the last bucket.
-            for model in self._iter_all_models():
-                staged_moe_layers.extend(stage_unquantized_moe_params(model))
+                start_reload(model)
 
         # =========================== step 2: receive weights and update ===========================
         receiver = BucketedWeightReceiver(
@@ -362,23 +342,6 @@ class vLLMColocateWorkerExtension:
             from vllm.utils.platform_utils import is_pin_memory_available
 
             pin_memory = is_pin_memory_available()
-
-        # A bucket can contain only base-model weights, so skip the drafter's
-        # per-load completeness check during this bucketed transfer, including
-        # the initial base-weight sync for LoRA.
-        skip_mtp_completeness_check = (
-            not (peft_config and base_sync_done)
-            and not is_quantized_model(self.model_runner.vllm_config)
-            and self._use_mtp_drafter_weight_sync()
-        )
-        mtp_load_context = nullcontext
-        if skip_mtp_completeness_check:
-            try:
-                from vllm.model_executor.model_loader.mtp_validation import disable_mtp_completeness_check
-            except ImportError:
-                pass  # Older vLLM versions do not provide the scoped helper.
-            else:
-                mtp_load_context = disable_mtp_completeness_check
 
         def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
             if lora_weights is not None:
@@ -410,22 +373,27 @@ class vLLMColocateWorkerExtension:
                 base_sync_done=base_sync_done,
             )
 
-        with mtp_load_context():
-            receiver.receive_weights(on_bucket_received=on_bucket_received)
+        receiver.receive_weights(on_bucket_received=on_bucket_received)
 
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")
-        elif is_quantized_model(self.model_runner.vllm_config):
-            for model, reload_state in quant_reload_states:
-                process_quanted_weights_after_loading(model, reload_state)
-        else:
+        elif is_npu_available:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
-            with fold_unquantized_moe_params(staged_moe_layers):
-                for model, model_config in self._iter_all_models_with_config():
-                    process_weights_after_loading(model, model_config, self.device)
+            for model, model_config in self._iter_all_models_with_config():
+                process_weights_after_loading(model, model_config, self.device)
+        else:
+            # vLLM reruns post-load processing once, after the last bucket
+            from vllm.model_executor.model_loader.reload import finish_reload
+
+            for model, model_config in self._iter_all_models_with_config():
+                finish_reload(model, model_config, self.device)
+            if is_quantized_model(self.model_runner.vllm_config):
+                for model in self._iter_all_models():
+                    reset_uncalibrated_kv_cache_scales(model)
+                    refresh_rocm_attention_weight_caches(model)
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
@@ -459,35 +427,17 @@ class vLLMColocateWorkerExtension:
             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
         else:
             param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
-            # Add the FP8 related logic here as sharding manager has been deprecated.
-            # Check if FP8 quantization is enabled and apply appropriate weight loading
-            if is_quantized_model(self.model_runner.vllm_config):
-                logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
-                # Convert bf16 weights to fp8 format before loading
-                model_updates = drop_tied_alias_updates(self.model_runner.model, param_updates)
-                loaded_params = load_quanted_weights(model_updates, self.model_runner) if model_updates else []
-                # Keep the draft model in sync when present.
-                if self._use_mtp_drafter_weight_sync() and model_updates:
-                    load_quanted_weights(model_updates, self.model_runner, is_drafter=True)
-                loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
-                logger.info(
-                    f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
-                )
-            else:
-                if param_updates:
-                    for model in self._iter_all_models():
-                        model_updates = drop_tied_alias_updates(model, param_updates)
-                        if peft_config is None:
-                            model.load_weights(model_updates)
-                        else:
-                            names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
-                            names.update(n for n, _ in model.named_buffers())
-                            model.load_weights((resolve_weight_name(model, n, names), t) for n, t in model_updates)
-                loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
-                logger.info(
-                    f"Loading standard weights (non-FP8, async), "
-                    f"loaded_params: {len(param_updates)}, loaded_buffers: {loaded_buffers}"
-                )
+            if param_updates:
+                for model in self._iter_all_models():
+                    model_updates = drop_tied_alias_updates(model, param_updates)
+                    if peft_config is None:
+                        model.load_weights(model_updates)
+                    else:
+                        names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
+                        names.update(n for n, _ in model.named_buffers())
+                        model.load_weights((resolve_weight_name(model, n, names), t) for n, t in model_updates)
+            loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
+            logger.info(f"vLLM load weights, loaded_params: {len(param_updates)}, loaded_buffers: {loaded_buffers}")
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
@@ -505,12 +455,6 @@ class vLLMColocateWorkerExtension:
         trainer_rank_base = os.environ.get("VERL_ZMQ_BASE_TRAINER_RANK")
         trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
-
-    def update_verl_delta_weights(self, update_info: dict) -> None:
-        """Add this worker's IPC endpoint and forward the delta update to vLLM."""
-        worker_update_info = dict(update_info)
-        worker_update_info["zmq_handle"] = self._get_zmq_handle()
-        self.update_weights(worker_update_info)
 
 
 class SuppressSignalInThread:

@@ -148,21 +148,11 @@ class LinearCrossEntropy(torch.autograd.Function):
         reduction: typing.Optional[str] = "none",
         dist_process_group: typing.Optional[dist.ProcessGroup] = None,
     ) -> list[torch.Tensor]:
-        """_summary_
+        """Return selected log probabilities and one entropy per hidden row.
 
-        Args:
-            ctx (_type_): _description_
-            hidden (torch.Tensor): (batch_size, num_tokens, hidden_size) -> (batch_size * num_tokens, hidden_size)
-            weight (torch.Tensor): (vocab_size, hidden_size)
-            labels (torch.Tensor): (batch_size, num_tokens) -> (batch_size * num_tokens, )
-            temperature (typing.Optional[float], optional): _description_. Defaults to 1.0.
-            reduction (typing.Optional[str], optional): _description_. Defaults to "none".
-            dist_process_group (typing.Optional[dist.ProcessGroup], optional): _description_. Defaults to None.
-
-        Returns:
-            typing.List[torch.Tensor]: _description_
+        A trailing query axis on labels is preserved for unreduced output.
+        Single-label reductions retain the original flattened-token interface.
         """
-
         assert isinstance(temperature, float), f"temperature must be a float, but got {type(temperature)}"
         assert isinstance(reduction, str), f"reduction must be a str, but got {type(reduction)}"
         with get_platform().nvtx_range("LinearCrossEntropy-forward"):
@@ -171,10 +161,20 @@ class LinearCrossEntropy(torch.autograd.Function):
             REDUCTION = kernels.get_entropy_reduction_enum_number(reduction.lower())
 
             original_hidden_shape = hidden.shape
-            if len(hidden.shape) != 2:
-                hidden = hidden.view(-1, hidden.shape[-1])  # (batch_size * num_tokens, hidden_size)
-            if len(labels.shape) != 1:
-                labels = labels.view(-1)
+            multi_label = labels.ndim == hidden.ndim and labels.shape[:-1] == hidden.shape[:-1]
+            if multi_label and labels.shape[-1] == 1 and reduction.lower() != "none":
+                multi_label = False
+            if multi_label:
+                if not labels.shape[-1] or reduction.lower() != "none":
+                    raise ValueError("multi-label queries require a positive query count and reduction='none'")
+                if labels.dtype != torch.int64:
+                    raise ValueError("multi-label queries require int64 labels")
+                hidden = hidden.reshape(-1, hidden.shape[-1]).contiguous()
+                weight = weight.contiguous()
+                labels = labels.reshape(hidden.shape[0], labels.shape[-1]).contiguous()
+            else:
+                hidden = hidden.view(-1, hidden.shape[-1])
+                labels = labels.reshape(-1).contiguous()
 
             logprobs, entropy, _maximum, _accumulate, _entropy_b = kernels.efficient_entropy_forward(
                 hidden, weight, labels, REDUCTION, temperature, dist_process_group
@@ -186,6 +186,10 @@ class LinearCrossEntropy(torch.autograd.Function):
             ctx.dist_process_group = dist_process_group
             ctx.should_return_fp32_grad = False
             ctx.temperature = temperature
+        if multi_label:
+            return logprobs.reshape(*original_hidden_shape[:-1], labels.shape[-1]), entropy.reshape(
+                original_hidden_shape[:-1]
+            )
         return logprobs, entropy
 
     @staticmethod
@@ -200,8 +204,8 @@ class LinearCrossEntropy(torch.autograd.Function):
             temperature = ctx.temperature
 
             d_hidden, d_weight = kernels.efficient_entropy_backward(
-                dlogprobs,
-                dentropy,
+                dlogprobs.reshape_as(labels).contiguous() if labels.ndim == 2 else dlogprobs.contiguous(),
+                dentropy.reshape(-1).contiguous(),
                 hidden,
                 weight,
                 labels,
@@ -243,7 +247,10 @@ def linear_cross_entropy(
     if reduction is None:
         reduction = "none"
     num_tokens = hidden.numel() // hidden.shape[-1]
-    if impl_backend in ("triton", "liger") and labels.numel() != num_tokens:
+    if impl_backend == "triton" and hidden.device.type != "npu":
+        if labels.numel() != num_tokens and (labels.ndim != hidden.ndim or labels.shape[:-1] != hidden.shape[:-1]):
+            raise ValueError("labels must contain one or more labels for every hidden row")
+    elif impl_backend in ("triton", "liger") and labels.numel() != num_tokens:
         raise ValueError(f"The {impl_backend} linear cross entropy backend only supports one label per token")
     if impl_backend == "triton":
         if hidden.device.type == "npu":

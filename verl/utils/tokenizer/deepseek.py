@@ -62,15 +62,36 @@ TASK_TOKENS = {
 # Roles that collapse into a single user turn when they appear back to back.
 _USER_RUN_ROLES = ("user", "tool")
 
-REASONING_EFFORT_MAX = (
-    "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
-    "You MUST be very thorough in your thinking and comprehensively decompose the problem to "
-    "resolve the root cause, rigorously stress-testing your logic against all potential paths, "
-    "edge cases, and adversarial scenarios.\n"
-    "Explicitly write out your entire deliberation process, documenting every intermediate step, "
-    "considered alternative, and rejected hypothesis to ensure absolutely no assumption is left "
-    "unchecked.\n\n"
-)
+REASONING_EFFORT_PROMPTS: dict[str, str] = {
+    "low": "",
+    "high": (
+        "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
+        "You MUST be very thorough in your thinking and comprehensively decompose the problem to "
+        "resolve the root cause, rigorously stress-testing your logic against all potential paths, "
+        "edge cases, and adversarial scenarios.\n"
+        "Explicitly write out your entire deliberation process, documenting every intermediate step, "
+        "considered alternative, and rejected hypothesis to ensure absolutely no assumption is left "
+        "unchecked.\n\n"
+    ),
+    "max": (
+        "Reasoning Effort: Beyond maximum — exhaustive, relentless, and uncompromising.\n"
+        "You MUST reason with the utmost depth and rigor, leaving absolutely nothing to chance: "
+        "exhaustively decompose the problem into its most fundamental components, trace every causal "
+        "chain to its root, and resolve the underlying cause rather than any surface symptom.\n"
+        "Do not stop reasoning until you have independently verified the solution from multiple angles "
+        "and are certain that no assumption remains unchecked and no error remains undiscovered.\n\n"
+    ),
+}
+DEFAULT_REASONING_EFFORT = "low"
+
+# Compatibility aliases preserve the effective prompt used by older DeepSeek-V4
+# serving contracts while canonicalizing onto the current low/high/max levels.
+_REASONING_EFFORT_ALIASES = {
+    "minimal": "low",
+    "medium": "low",
+    "xhigh": "high",
+    "ultra": "max",
+}
 
 TOOLS_TEMPLATE = """## Tools
 
@@ -123,6 +144,25 @@ def _text_of(content: Any) -> str:
     return str(content)
 
 
+def _resolve_reasoning_effort(reasoning_effort: Optional[str]) -> Optional[str]:
+    """Resolve canonical and compatibility effort names.
+
+    ``None`` keeps checkpoint-level behavior (low). ``none`` is the serving
+    compatibility spelling for disabling thinking.
+    """
+    if reasoning_effort is None:
+        return DEFAULT_REASONING_EFFORT
+    if reasoning_effort == "none":
+        return None
+    resolved = _REASONING_EFFORT_ALIASES.get(reasoning_effort, reasoning_effort)
+    if resolved not in REASONING_EFFORT_PROMPTS:
+        raise ValueError(
+            f"Invalid reasoning effort: {reasoning_effort!r}; expected one of "
+            f"{[*REASONING_EFFORT_PROMPTS, 'none', *_REASONING_EFFORT_ALIASES]}"
+        )
+    return resolved
+
+
 def render_tools(tools: list[dict[str, Any]]) -> str:
     """Render OpenAI-format tool schemas into the DSML tool prompt."""
     schemas = [_to_json(tool.get("function", tool)) for tool in tools]
@@ -163,6 +203,7 @@ def encode_messages(
     enable_thinking: bool = False,
     drop_thinking: bool = True,
     reasoning_effort: Optional[str] = None,
+    previous_role: Optional[str] = None,
 ) -> str:
     """Encode a conversation into a DeepSeek-V4 prompt.
 
@@ -177,13 +218,17 @@ def encode_messages(
             token so the model answers directly.
         drop_thinking: Drop reasoning from assistant turns before the last user turn. Automatically
             disabled when tools are present, because tool calling needs the full reasoning trace.
-        reasoning_effort: ``"max"``/``"xhigh"`` prepend the maximum effort preamble, ``"none"``
-            disables thinking.
+        reasoning_effort: Canonical ``"low"``/``"high"``/``"max"`` effort.
+            Compatibility aliases are normalized, and ``"none"`` disables thinking.
+        previous_role: Role immediately preceding ``messages`` when rendering
+            an incremental continuation. Consecutive user/tool messages share
+            one DeepSeek-V4 user turn across request boundaries.
 
     Returns:
         The encoded prompt.
     """
-    think = enable_thinking and reasoning_effort != "none"
+    resolved_reasoning_effort = _resolve_reasoning_effort(reasoning_effort)
+    think = enable_thinking and resolved_reasoning_effort is not None
     has_tools = bool(tools) or any(message.get("tools") for message in messages)
     drop = drop_thinking and not has_tools
     last_user = max(
@@ -194,9 +239,20 @@ def encode_messages(
     out: list[str] = []
     if add_bos_token:
         out.append(BOS_TOKEN)
-    if think and reasoning_effort in ("max", "xhigh"):
-        out.append(REASONING_EFFORT_MAX)
-    if tools:
+    # Reasoning effort is a conversation-level prefix. Incremental Continuous
+    # Token appends set ``add_bos_token=False`` and must not inject it between
+    # assistant and tool turns.
+    if add_bos_token and think and resolved_reasoning_effort is not None:
+        out.append(REASONING_EFFORT_PROMPTS[resolved_reasoning_effort])
+
+    # The reference DeepSeek-V4 encoder appends tool schemas to the leading
+    # system/developer message. If there is no such message, keep the schemas
+    # before the first user turn.
+    top_level_tools_target = next(
+        (index for index, message in enumerate(messages) if message["role"] in ("system", "developer")),
+        None,
+    )
+    if tools and top_level_tools_target is None:
         out.append("\n\n" + render_tools(tools))
 
     for index, message in enumerate(messages):
@@ -207,6 +263,8 @@ def encode_messages(
             if role == "developer":
                 out.append(USER_TOKEN)
             out.append(_text_of(message.get("content")))
+            if tools and index == top_level_tools_target:
+                out.append("\n\n" + render_tools(tools))
             if message.get("tools"):
                 out.append("\n\n" + render_tools(message["tools"]))
             if message.get("response_format"):
@@ -217,7 +275,8 @@ def encode_messages(
 
         elif role in _USER_RUN_ROLES:
             # A run of consecutive user/tool messages is encoded as one user turn.
-            if index == 0 or messages[index - 1]["role"] not in _USER_RUN_ROLES:
+            preceding_role = messages[index - 1]["role"] if index else previous_role
+            if preceding_role not in _USER_RUN_ROLES:
                 out.append(USER_TOKEN)
             else:
                 out.append("\n\n")
@@ -309,6 +368,7 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
             tools=None,
             add_bos_token=False,
             drop_thinking=False,
+            previous_role=previous_messages[-1].get("role") if previous_messages else None,
         )
 
     def _encode(
@@ -318,6 +378,7 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         tools: list[dict[str, Any]] | None,
         add_bos_token: bool,
         drop_thinking: bool | None = None,
+        previous_role: str | None = None,
     ) -> list[int]:
         text = encode_messages(
             messages,
@@ -327,6 +388,7 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
             enable_thinking=self._enable_thinking,
             drop_thinking=self._drop_thinking if drop_thinking is None else drop_thinking,
             reasoning_effort=self._reasoning_effort,
+            previous_role=previous_role,
         )
         return normalize_token_ids(self.tokenizer.encode(text, add_special_tokens=False))
 

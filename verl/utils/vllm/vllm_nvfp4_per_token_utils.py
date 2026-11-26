@@ -19,8 +19,7 @@ Transformer Engine's row-scaled NVFP4 training. vLLM supports per-token
 activations for its online method and ModelOpt checkpoints; this module adds
 the compressed-tensors equivalent.
 
-Refits go through the NVFP4 refit in ``vllm_fp4_utils``; this module adds the
-per-token checks around it.
+Refits go through vLLM's reload; this module adds the per-token checks around it.
 """
 
 import re
@@ -44,6 +43,7 @@ def install_nvfp4_per_token_compressed_tensors_patch():
         CompressedTensorsMoEMethod,
         compressed_tensors_moe_w4a4_nvfp4,
     )
+    from vllm.model_executor.utils import move_parameter
 
     if getattr(CompressedTensorsMoEMethod, "_verl_nvfp4_per_token_method", None) is not None:
         return
@@ -62,12 +62,9 @@ def install_nvfp4_per_token_compressed_tensors_patch():
                 )
 
         def process_weights_after_loading(self, layer):
-            # The base method with per-token activations. The conversion helpers are looked up on
-            # the base method's module, where the NVFP4 refit in vllm_fp4_utils redirects them.
-            layer.w13_weight = torch.nn.Parameter(layer.w13_weight_packed.data, requires_grad=False)
-            delattr(layer, "w13_weight_packed")
-            layer.w2_weight = torch.nn.Parameter(layer.w2_weight_packed.data, requires_grad=False)
-            delattr(layer, "w2_weight_packed")
+            # The base method with per-token activations; the loaded wN_weight_packed stay registered.
+            move_parameter(layer, "w13_weight_packed", "w13_weight")
+            move_parameter(layer, "w2_weight_packed", "w2_weight")
 
             # The export gives gate_proj and up_proj one global scale. Activations are scaled
             # per token by the kernel, so the static input scales stay 1.

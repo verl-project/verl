@@ -264,7 +264,9 @@ class TestEngineKwargsManagedArgs:
         with pytest.raises(ValueError, match=points_to):
             self._preprocess({key: True})
 
-    def test_passes_through_other_args(self):
+    def test_passes_through_other_args(self, monkeypatch):
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "")
+        monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
         engine_kwargs = {"max_num_seqs": 8}
         self._preprocess(engine_kwargs)
         assert engine_kwargs["max_num_seqs"] == 8
