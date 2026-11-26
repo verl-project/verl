@@ -166,8 +166,8 @@ def _reference_shares_actor_group(config: DictConfig) -> bool:
     """Whether the reference worker is colocated with the actor/rollout group.
 
     Mirrors ``PPOTrainer._init_resource_pool_mgr``: LoRA keeps the reference in the actor group, and
-    a v1 ``separate_async`` run only creates a distinct reference worker when hybrid replicas are
-    enabled (``enable_switch`` and ``hybrid_engine``).
+    a v1 ``separate_async`` run also shares the actor group when hybrid replicas are enabled
+    (``enable_switch`` and ``hybrid_engine``); otherwise it creates a distinct reference worker.
     """
     lora_rank = _select_profiler_field(config, "actor_rollout_ref.model.lora.rank", 0) or _select_profiler_field(
         config, "actor_rollout_ref.model.lora_rank", 0
