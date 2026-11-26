@@ -100,6 +100,13 @@ class FSDPOptimizerConfig(OptimizerConfig):
         num_cycles (float): Number of cosine cycles in LR schedule.
         zero_indexed_step (bool): Whether the LR schedule uses 0-indexed steps. If True (default),
             step counting starts at 0. If False, step counting starts at 1.
+        optimizer_in_backward (bool): Update parameters while the backward pass is still running
+            instead of after it, which releases each gradient as soon as it is consumed and grows the
+            optimizer state one parameter at a time (mirrors torchtune's optimizer-in-backward).
+            Default False keeps the standard zero_grad -> backward -> optimizer_step order. Requires
+            ``clip_grad`` to be None to get the memory win: a global grad-norm clip needs every
+            gradient, so with ``clip_grad`` set the step is still taken inside the backward phase but
+            gradients are only released afterwards. See :mod:`verl.utils.optimizer_in_backward`.
     """
 
     _mutable_fields = OptimizerConfig._mutable_fields.copy()
@@ -114,6 +121,7 @@ class FSDPOptimizerConfig(OptimizerConfig):
     num_cycles: float = 0.5
     override_optimizer_config: Optional[dict] = None
     zero_indexed_step: bool = True
+    optimizer_in_backward: bool = False
 
     def __post_init__(self):
         if self.warmup_style is not None:
