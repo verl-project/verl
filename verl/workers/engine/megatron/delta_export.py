@@ -52,6 +52,8 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -60,6 +62,142 @@ import torch
 from verl.workers.engine.spec import ShardSpec
 
 logger = logging.getLogger(__name__)
+
+_EXPERT_ID_PATTERNS = (
+    r"local_experts\.(\d+)",
+    r"(?:weight|bias)(\d+)",
+    r"experts\.(\d+)",
+)
+
+
+def _extract_expert_id(param_name: str) -> int:
+    """Extract the global expert index from a Megatron global parameter name.
+
+    Mirrors ``megatron.bridge.utils.common_utils.extract_expert_number_from_param``
+    with a regex fallback so CPU unit tests do not require Megatron-Bridge.
+    """
+    try:
+        from megatron.bridge.utils.common_utils import extract_expert_number_from_param
+
+        return int(extract_expert_number_from_param(param_name))
+    except ImportError:
+        for pattern in _EXPERT_ID_PATTERNS:
+            match = re.search(pattern, param_name)
+            if match:
+                return int(match.group(1))
+        raise ValueError(f"No expert number found in parameter name: {param_name}") from None
+
+
+def _get_num_moe_experts(megatron_model, module) -> int:
+    """Resolve ``num_moe_experts`` from the task module or unwrapped model config."""
+    candidates = [module]
+    if isinstance(megatron_model, list | tuple):
+        candidates.extend(megatron_model)
+    elif megatron_model is not None:
+        candidates.append(megatron_model)
+    for obj in candidates:
+        cur = obj
+        while cur is not None:
+            cfg = getattr(cur, "config", None)
+            num_experts = getattr(cfg, "num_moe_experts", None)
+            if num_experts is not None:
+                num_experts = int(num_experts)
+                if num_experts <= 0:
+                    raise ValueError(f"Expected positive num_moe_experts, got {num_experts}")
+                return num_experts
+            cur = getattr(cur, "module", None)
+    raise ValueError("Could not determine num_moe_experts for grouped-export MoE parameter")
+
+
+# Sentinel cache entry recording that every shard header has already been walked.
+_SCANNED_SHARDS = "\0scanned-shards"
+
+
+def _get_hf_expected_shape(
+    bridge,
+    key: str,
+    cache: dict[str, Optional[tuple[int, ...]]],
+) -> Optional[tuple[int, ...]]:
+    """Read an HF tensor's expected shape without loading tensor bytes when possible.
+
+    For ``is_grouped_export=True`` mappings this is the only external ground truth the
+    probe has: it both mirrors ``MegatronModelBridge._accumulate_grouped_export``'s
+    adaptive transpose check and lets ``mcore_hf_delta_entry`` verify that the stacked
+    slot shape it reports actually matches the checkpoint.
+    """
+    if key in cache:
+        return cache[key]
+    shape: Optional[tuple[int, ...]] = None
+    hf_pretrained = getattr(bridge, "hf_pretrained", None)
+    hf_state = getattr(hf_pretrained, "state", None) if hf_pretrained is not None else None
+    if hf_state is not None:
+        source = getattr(hf_state, "source", None)
+        if source is not None and hasattr(source, "path") and hasattr(source, "key_to_filename_map"):
+            try:
+                from safetensors import safe_open
+
+                file_path = None
+                filename = (source.key_to_filename_map or {}).get(key)
+                if filename:
+                    candidate = source.path / filename
+                    if candidate.exists():
+                        file_path = candidate
+                if file_path is not None:
+                    with safe_open(file_path, framework="pt", device="cpu") as f:
+                        if key in f.keys():
+                            shape = tuple(int(d) for d in f.get_slice(key).get_shape())
+                elif _SCANNED_SHARDS not in cache:
+                    # No index to resolve this key, so walk the shards once and cache
+                    # every header shape rather than re-globbing for each key.
+                    cache[_SCANNED_SHARDS] = None
+                    for candidate in sorted(source.path.glob("*.safetensors")):
+                        with safe_open(candidate, framework="pt", device="cpu") as f:
+                            for k in f.keys():
+                                cache.setdefault(k, tuple(int(d) for d in f.get_slice(k).get_shape()))
+                    shape = cache.get(key)
+            except Exception as e:  # pragma: no cover - defensive fallback to state dict
+                logger.debug("safetensors header shape lookup failed for %s: %s", key, e)
+        if shape is None:
+            try:
+                if key in hf_state:
+                    shape = tuple(int(d) for d in hf_state[key].shape)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("hf_state shape lookup failed for %s: %s", key, e)
+    cache[key] = shape
+    return shape
+
+
+def _slot_idx_dtype(slots: list[tuple[str, tuple[int, ...]]]) -> torch.dtype:
+    """Choose the flat-index dtype for a directory row from its global slot table.
+
+    Every rank shares the identical ``rec.slots`` table after ``_exchange_slot_tables``,
+    so all ranks agree on ``idx_dtype`` even for zero-count or PP placeholder rows.
+    Keeps ``int32`` whenever every slot fits in signed 32-bit offsets and promotes to
+    ``int64`` if any stacked tensor has ``>= 2**31`` elements to avoid silent wraparound.
+    """
+    return torch.int64 if any(math.prod(shape) >= (1 << 31) for _, shape in slots) else torch.int32
+
+
+@dataclass(frozen=True)
+class _GroupedExportMeta:
+    """Metadata for a Megatron-Bridge ``is_grouped_export=True`` parameter.
+
+    Mappings such as ``FusedGatedExpertMapping`` / ``FusedExpertMapping``
+    (Qwen3.5-MoE, Qwen3-VL-MoE, Gemma4(-VL), stacked-key GLM4.5(-V), Step3.5/3.7)
+    emit one per-expert slice under a shared HF tensor name and rely on
+    ``MegatronModelBridge._accumulate_grouped_export`` to stack all
+    ``num_experts`` slices along dim 0 (and optionally transpose the last two
+    dims when ``transpose_on_export=True``).
+
+    Because the probe invokes ``megatron_to_hf`` directly per task, each task
+    promotes its per-expert slice into stacked ``(num_experts, *slice_shape)``
+    coordinates by shifting flat indices by ``expert_id * slice_numel``.
+    """
+
+    expert_id: int
+    num_experts: int
+    transpose_on_export: bool = False
+    expected_shapes: Optional[dict[str, tuple[int, ...]]] = None
 
 
 class _ProbeGroup:
@@ -193,6 +331,10 @@ class McoreParamExport:
     # GLOBAL slot table for this directory row (set by the index-build
     # exchange): identical on every rank of the row's merge group.
     slots: Optional[list] = None
+    # Set for Megatron-Bridge ``is_grouped_export=True`` expert parameters so
+    # ``mcore_hf_delta_entry`` promotes each per-expert slice into stacked
+    # ``(num_experts, *slice_shape)`` coordinates.
+    grouped_export: Optional[_GroupedExportMeta] = None
 
 
 def build_export_index(bridge, megatron_model, slot_cache: dict | None = None) -> list[McoreParamExport]:
@@ -218,13 +360,20 @@ def build_export_index(bridge, megatron_model, slot_cache: dict | None = None) -
     """
     from megatron.core import parallel_state as mpu
 
+    if slot_cache is None:
+        slot_cache = {}
+
     pp_world = mpu.get_pipeline_model_parallel_world_size()
     tp_group = mpu.get_tensor_model_parallel_group()
     tp_world = torch.distributed.get_world_size(group=tp_group)
     ep_size = mpu.get_expert_model_parallel_world_size()
+    etp_size = (
+        mpu.get_expert_tensor_parallel_world_size() if hasattr(mpu, "get_expert_tensor_parallel_world_size") else 1
+    )
     world = torch.distributed.group.WORLD
 
     tasks = bridge.get_conversion_tasks(megatron_model)
+    hf_shape_cache: dict[str, Optional[tuple[int, ...]]] = {}
     index: list[McoreParamExport] = []
     for task in tasks:
         mapping = task.mapping
@@ -249,7 +398,7 @@ def build_export_index(bridge, megatron_model, slot_cache: dict | None = None) -
         module = task.megatron_module
         local_shape = tuple(int(x) for x in param.shape)
 
-        is_expert = mapping.is_expert and (ep_size > 1 or tp_world > 1)
+        is_expert = mapping.is_expert and (ep_size > 1 or tp_world > 1 or etp_size > 1)
         is_tp_sharded = getattr(param, "tensor_model_parallel", False) and tp_world > 1
 
         if pp_world > 1:
@@ -283,6 +432,38 @@ def build_export_index(bridge, megatron_model, slot_cache: dict | None = None) -
             # directly, replicas stay in lockstep via zero counts).
             spec = ShardSpec(full_shape=local_shape)
 
+        grouped_export: Optional[_GroupedExportMeta] = None
+        if getattr(mapping, "is_grouped_export", False):
+            expert_id = _extract_expert_id(name)
+            num_experts = _get_num_moe_experts(megatron_model, module)
+            assert 0 <= expert_id < num_experts, (
+                f"{name}: extracted global expert_id={expert_id} out of range [0, {num_experts})"
+            )
+            transpose_on_export = bool(getattr(mapping, "transpose_on_export", False))
+            # Always resolve the checkpoint shape, not just for transpose_on_export:
+            # it is the only check that can catch a wrong num_experts or a slice that
+            # already carries a leading expert dim. Header-only reads, cached per key.
+            expected_shapes: dict[str, tuple[int, ...]] = {}
+            candidate_keys: list[str] = []
+            hf_param = getattr(mapping, "hf_param", None)
+            if isinstance(hf_param, str):
+                candidate_keys.append(hf_param)
+            elif isinstance(hf_param, dict):
+                candidate_keys.extend(v for v in hf_param.values() if isinstance(v, str))
+            group_key = getattr(mapping, "group_key", None)
+            if isinstance(group_key, str) and group_key not in candidate_keys:
+                candidate_keys.append(group_key)
+            for hf_key in candidate_keys:
+                exp_shape = _get_hf_expected_shape(bridge, hf_key, hf_shape_cache)
+                if exp_shape is not None:
+                    expected_shapes[hf_key] = exp_shape
+            grouped_export = _GroupedExportMeta(
+                expert_id=expert_id,
+                num_experts=num_experts,
+                transpose_on_export=transpose_on_export,
+                expected_shapes=expected_shapes or None,
+            )
+
         index.append(
             McoreParamExport(
                 megatron_name=name,
@@ -290,6 +471,7 @@ def build_export_index(bridge, megatron_model, slot_cache: dict | None = None) -
                 spec=spec,
                 probe=make_probe(mapping, module),
                 module=module,
+                grouped_export=grouped_export,
             )
         )
 
@@ -385,11 +567,12 @@ def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval
         # empty delta: the slot table froze after the first probe, so the
         # zero-count lockstep entry needs no probe run at all -- skip the
         # buffer build, the transform and the full-output NaN scan.
+        idx_dtype = _slot_idx_dtype(cached)
         return (
             cached,
             dtype_str,
             torch.zeros(len(cached), dtype=torch.int64),
-            torch.empty(0, dtype=torch.int32, device=lval.device),
+            torch.empty(0, dtype=idx_dtype, device=lval.device),
             torch.empty(0, dtype=lval.dtype, device=lval.device),
         )
 
@@ -398,6 +581,26 @@ def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval
         buf.view(-1)[lidx] = lval
 
     outs = rec.probe.megatron_to_hf(buf, rec.module)
+    ge = rec.grouped_export
+    if ge is not None and ge.transpose_on_export:
+        # Mirror MegatronModelBridge._accumulate_grouped_export: transpose the
+        # last two dims of each per-expert slice before indexing so flat
+        # coordinates match the stacked+transposed HF tensor layout.
+        transformed: dict[str, torch.Tensor] = {}
+        for sname, out in outs.items():
+            if out.ndim >= 2:
+                stacked_shape = (ge.num_experts, *(int(x) for x in out.shape))
+                transposed_shape = (
+                    ge.num_experts,
+                    *(int(x) for x in out.shape[:-2]),
+                    int(out.shape[-1]),
+                    int(out.shape[-2]),
+                )
+                expected = ge.expected_shapes.get(sname) if ge.expected_shapes else None
+                if expected is None or (stacked_shape != expected and transposed_shape == expected):
+                    out = out.transpose(-1, -2).contiguous()
+            transformed[sname] = out
+        outs = transformed
 
     key = rec.megatron_name
     slots = rec.slots if rec.slots is not None else slot_cache.get(key)
@@ -405,30 +608,52 @@ def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval
         # only reachable from the index-build exchange itself, which probes a
         # zero delta to reveal this rank's local list before the row unions
         # are installed on the recs; steady entries always find rec.slots.
-        slots = [(n, tuple(int(x) for x in t.shape)) for n, t in outs.items()]
+        if ge is not None:
+            slots = [(n, (ge.num_experts, *(int(x) for x in t.shape))) for n, t in outs.items()]
+        else:
+            slots = [(n, tuple(int(x) for x in t.shape)) for n, t in outs.items()]
         slot_cache[key] = slots
     unknown = set(outs) - {n for n, _ in slots}
     assert not unknown, (
         f"{key}: probe emitted slots missing from the global table {sorted(unknown)[:4]} -- "
         "non-deterministic converter naming would misalign the batched gather"
     )
+    idx_dtype = _slot_idx_dtype(slots)
     counts = torch.zeros(len(slots), dtype=torch.int64)
     idx_pieces: list[torch.Tensor] = []
     val_pieces: list[torch.Tensor] = []
-    for s_i, (sname, _sshape) in enumerate(slots):
+    for s_i, (sname, sshape) in enumerate(slots):
         out = outs.get(sname)
         if out is None:
             continue  # another rank's slot (e.g. its ep-local experts): zero count here
+        if ge is not None:
+            expected_slot_shape = (ge.num_experts, *(int(x) for x in out.shape))
+            assert tuple(sshape) == expected_slot_shape, (
+                f"{key}/{sname}: grouped-export slice shape {tuple(out.shape)} with "
+                f"num_experts={ge.num_experts} does not match slot shape {tuple(sshape)}"
+            )
+            # The assert above only proves this rank agrees with the shared slot
+            # table, which was built from the same probe; the checkpoint header is
+            # the only independent witness that num_experts is right and that the
+            # slice is a single expert rather than an already-stacked tensor.
+            checkpoint_shape = ge.expected_shapes.get(sname) if ge.expected_shapes else None
+            assert checkpoint_shape is None or tuple(sshape) == checkpoint_shape, (
+                f"{key}/{sname}: stacked slot shape {tuple(sshape)} (num_experts="
+                f"{ge.num_experts} x slice {tuple(out.shape)}) does not match the "
+                f"checkpoint tensor shape {checkpoint_shape}"
+            )
         fl = out.reshape(-1)
         p_ = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
         if p_.numel():
             counts[s_i] = p_.numel()
-            idx_pieces.append(p_.to(torch.int32))
             val_pieces.append(fl[p_])
+            if ge is not None:
+                p_ = p_ + ge.expert_id * fl.numel()
+            idx_pieces.append(p_.to(idx_dtype))
     if idx_pieces:
         hf_idx = torch.cat(idx_pieces)
         hf_val = torch.cat(val_pieces)
     else:
-        hf_idx = torch.empty(0, dtype=torch.int32, device=lval.device)
+        hf_idx = torch.empty(0, dtype=idx_dtype, device=lval.device)
         hf_val = torch.empty(0, dtype=lval.dtype, device=lval.device)
     return slots, dtype_str, counts, hf_idx, hf_val
