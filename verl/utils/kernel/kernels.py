@@ -818,9 +818,20 @@ def _selected_logprob_grad(
             {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 16},
             num_stages=3,
             num_warps=8,
-        )
+        ),
+        triton.Config(
+            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 16},
+            num_stages=2,
+            num_warps=8,
+        ),
+        triton.Config(
+            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 16},
+            num_stages=1,
+            num_warps=8,
+        ),
     ],
-    key=["num_tokens", "hidden_size", "vocab_size"],
+    key=["num_tokens", "hidden_size", "vocab_size", "USE_TMA", "TOPK"],
+    reset_to_zero=["d_hidden_ptr", "d_weight_ptr"],
 )
 @triton.jit
 def efficient_entropy_backward_kernel_general_mainloop_MN(
