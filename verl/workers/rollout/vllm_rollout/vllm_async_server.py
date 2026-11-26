@@ -103,6 +103,35 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
+def _get_vllm_engine_kwargs(config: Any, key: str = "vllm") -> dict[str, Any]:
+    """Safely extract rollout.engine_kwargs[key] for DictConfig, dict, or SimpleNamespace configs."""
+    engine_kwargs = (
+        config.get("engine_kwargs", {}) if hasattr(config, "get") else getattr(config, "engine_kwargs", None)
+    ) or {}
+    if not isinstance(engine_kwargs, Mapping):
+        return {}
+    sub = engine_kwargs.get(key)
+    return dict(sub) if isinstance(sub, Mapping) else {}
+
+
+def _effective_vllm_checkpoint_backend(checkpoint_backend: str | None, rollout_mode: RolloutMode | None) -> str | None:
+    """Resolve the active vLLM checkpoint_engine backend for this replica's rollout_mode.
+
+    In HYBRID mode (e.g. separate_async with enable_switch=True), disaggregated vllm_*
+    backends do not drive the hybrid replica's weight sync; only colocated ``vllm_ipc``
+    activates native weight transfer on HYBRID replicas.
+    """
+    from verl.checkpoint_engine.vllm_weight_transfer import VLLM_NATIVE_BACKENDS
+
+    if (
+        rollout_mode == RolloutMode.HYBRID
+        and checkpoint_backend in VLLM_NATIVE_BACKENDS
+        and checkpoint_backend != "vllm_ipc"
+    ):
+        return None
+    return checkpoint_backend
+
+
 class vLLMHttpServer:
     """vLLM http server in single node, this is equivalent to launch server with command line:
     ```
@@ -123,7 +152,6 @@ class vLLMHttpServer:
         cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
-        placement_group: Any = None,
     ):
         """
         Args:
@@ -151,10 +179,8 @@ class vLLMHttpServer:
         self._pd_prefill_side_channel_port: Optional[int] = None
         self._pd_prefill_engine_id: Optional[str] = None
         self._pd_peer_idx: int = 0
-        self._placement_group = placement_group
 
-        if placement_group is None:
-            os.environ[get_visible_devices_keyword()] = cuda_visible_devices
+        os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
         # Forward the Ray job id into the vLLM worker subprocess so the
         # colocated weight-transfer IPC socket path is unique per Ray job.
@@ -556,8 +582,6 @@ class vLLMHttpServer:
         usage_context = UsageContext.OPENAI_API_SERVER
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
         vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
-        if self._placement_group is not None and vllm_config.parallel_config.distributed_executor_backend == "ray":
-            vllm_config.parallel_config.placement_group = self._placement_group
 
         fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
         kwargs = {}
@@ -1503,10 +1527,14 @@ class vLLMHttpServer:
         from verl.checkpoint_engine.vllm_weight_transfer import resolve_vllm_weight_transfer_backend
 
         checkpoint_config = getattr(self.config, "checkpoint_engine", None)
+        rollout_mode = getattr(self, "rollout_mode", None)
+        effective_ce_backend = _effective_vllm_checkpoint_backend(
+            getattr(checkpoint_config, "backend", None), rollout_mode
+        )
         wt_backend = resolve_vllm_weight_transfer_backend(
-            getattr(checkpoint_config, "backend", None),
+            effective_ce_backend,
             engine_kwargs,
-            allow_delta_sharded=getattr(self, "rollout_mode", None) == RolloutMode.HYBRID,
+            allow_delta_sharded=rollout_mode == RolloutMode.HYBRID,
         )
         if wt_backend is not None:
             existing_wtc = dict(engine_kwargs.get("weight_transfer_config") or {})
@@ -1515,14 +1543,6 @@ class vLLMHttpServer:
             if wt_backend == "ipc":
                 # CUDA IPC handles (reduce_tensor tuples) require pickle fallback on vLLM's ZMQ RPC.
                 os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-            if wt_backend == "sharded_rdt":
-                exec_backend = engine_kwargs.get("distributed_executor_backend")
-                if exec_backend not in {None, "ray"}:
-                    raise ValueError(
-                        f"weight_transfer_config backend='sharded_rdt' requires distributed_executor_backend='ray'; "
-                        f"got {exec_backend!r}"
-                    )
-                engine_kwargs["distributed_executor_backend"] = "ray"
 
         lora_enabled = getattr(self, "lora_as_adapter", False) or bool(engine_kwargs.get("enable_lora"))
         if (
@@ -1593,13 +1613,11 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        checkpoint_backend = getattr(getattr(self.config, "checkpoint_engine", None), "backend", None)
-        engine_kwargs = (
-            self.config.get("engine_kwargs", {})
-            if hasattr(self.config, "get")
-            else getattr(self.config, "engine_kwargs", None)
-        ) or {}
-        vllm_engine_kwargs = engine_kwargs.get(self._get_engine_kwargs_key(), {}) or {}
+        checkpoint_backend = _effective_vllm_checkpoint_backend(
+            getattr(getattr(self.config, "checkpoint_engine", None), "backend", None),
+            getattr(self, "rollout_mode", None),
+        )
+        vllm_engine_kwargs = _get_vllm_engine_kwargs(self.config, self._get_engine_kwargs_key())
         wtc = vllm_engine_kwargs.get("weight_transfer_config")
         sparse_update = checkpoint_backend == "vllm_sparse_nccl" or (
             isinstance(wtc, Mapping) and wtc.get("backend") == "sparse_nccl"
@@ -1669,6 +1687,24 @@ class vLLMReplica(RolloutReplica):
             **get_platform().rollout_env_vars(),
         }
 
+    def _resolve_weight_transfer_launch_config(self) -> dict[str, str]:
+        """Compute extra server env vars for native vLLM weight transfer."""
+        extra_env: dict[str, str] = {}
+        vllm_ek = _get_vllm_engine_kwargs(self.config, "vllm")
+        checkpoint_backend = _effective_vllm_checkpoint_backend(
+            getattr(getattr(self.config, "checkpoint_engine", None), "backend", None),
+            getattr(self, "rollout_mode", None),
+        )
+        wtc = vllm_ek.get("weight_transfer_config")
+        wtc_backend = wtc.get("backend") if isinstance(wtc, Mapping) else None
+        if checkpoint_backend == "vllm_ipc" or wtc_backend == "ipc":
+            # CUDA IPC handles (reduce_tensor tuples) require pickle fallback on vLLM's ZMQ RPC.
+            extra_env["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+        if checkpoint_backend == "vllm_nccl_m2n" or wtc_backend == "nccl_m2n":
+            # ncclDevCommCreate (NCCL Device API used by nccl_m2n) requires cuMem enabled.
+            extra_env["NCCL_CUMEM_ENABLE"] = "1"
+        return extra_env
+
     async def launch_servers(self):
         """Launch http server in each node."""
         assert len(self.workers) == self.world_size, (
@@ -1693,32 +1729,9 @@ class vLLMReplica(RolloutReplica):
         # create server actor in each node with node affinity and cuda visible devices
         nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
         env_vars = self._get_server_env_vars(worker_node_ids[::gpus_per_replica_node])
-        placement_group = None
-        vllm_ek = (self.config.get("engine_kwargs", {}) or {}).get("vllm", {}) or {}
-        checkpoint_backend = getattr(getattr(self.config, "checkpoint_engine", None), "backend", None)
-        wtc_backend = (vllm_ek.get("weight_transfer_config") or {}).get("backend")
-        if checkpoint_backend == "vllm_ipc" or wtc_backend == "ipc":
-            # CUDA IPC handles (reduce_tensor tuples) require pickle fallback on vLLM's ZMQ RPC.
-            env_vars = {**env_vars, "VLLM_ALLOW_INSECURE_SERIALIZATION": "1"}
-        if checkpoint_backend == "vllm_nccl_m2n" or wtc_backend == "nccl_m2n":
-            # ncclDevCommCreate (NCCL Device API used by nccl_m2n) requires cuMem enabled.
-            env_vars = {**env_vars, "NCCL_CUMEM_ENABLE": "1"}
-        uses_ray_executor = (
-            checkpoint_backend == "vllm_sharded_rdt"
-            or wtc_backend == "sharded_rdt"
-            or vllm_ek.get("distributed_executor_backend") == "ray"
-        )
-        pgs = getattr(self.resource_pool, "pgs", None) if self.resource_pool is not None else None
-        if uses_ray_executor and pgs and len(pgs) == 1:
-            placement_group = pgs[0]
-            start_idx = int(getattr(self.resource_pool, "start_bundle_index", 0))
-            bundle_indices = list(range(start_idx, start_idx + self.world_size))
-            max_colocate = max(int(getattr(self.resource_pool, "max_colocate_count", 2)), 2)
-            env_vars = {
-                **env_vars,
-                "VLLM_RAY_BUNDLE_INDICES": ",".join(str(i) for i in bundle_indices),
-                "VLLM_RAY_PER_WORKER_GPUS": str(round(1.0 / max_colocate, 4)),
-            }
+        wt_env_vars = self._resolve_weight_transfer_launch_config()
+        if wt_env_vars:
+            env_vars = {**env_vars, **wt_env_vars}
         for node_rank in range(nnodes):
             workers = self.workers[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             node_cuda_visible_devices = get_node_visible_devices(
@@ -1750,7 +1763,6 @@ class vLLMReplica(RolloutReplica):
                 gpus_per_node=gpus_per_replica_node,
                 nnodes=nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
-                placement_group=placement_group,
             )
             self.servers.append(server)
 

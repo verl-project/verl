@@ -21,6 +21,7 @@ import platform
 import signal
 import threading
 from collections.abc import Mapping
+from contextlib import nullcontext
 from types import MethodType
 from typing import Any, Literal, Optional, get_args
 
@@ -314,6 +315,7 @@ class vLLMColocateWorkerExtension:
             for model in self._iter_all_models():
                 restore_moe_expert_maps(model)
 
+        reload_models = [] if (peft_config and base_sync_done) else list(self._iter_all_models_with_config())
         if peft_config and base_sync_done:
             # Remove the old LoRA before the new one arrives (applied after is_last below).
             self.remove_lora(VLLM_LORA_INT_ID)
@@ -322,7 +324,7 @@ class vLLMColocateWorkerExtension:
             # vLLM views the live tensors back to the checkpoint layout the loaders expect (direct reload)
             from vllm.model_executor.model_loader.reload import start_reload
 
-            for model in self._iter_all_models():
+            for model, _ in reload_models:
                 start_reload(model)
 
         # =========================== step 2: receive weights and update ===========================
@@ -331,6 +333,17 @@ class vLLMColocateWorkerExtension:
             device=self.device,
             use_shm=use_shm,
         )
+        # On NPU we skip vLLM's start_reload (which otherwise disables per-load
+        # MTP completeness checks across buckets), so guard bucketed MTP loads here.
+        mtp_load_context = nullcontext
+        if is_npu_available and not (peft_config and base_sync_done) and self._use_mtp_drafter_weight_sync():
+            try:
+                from vllm.model_executor.model_loader.mtp_validation import disable_mtp_completeness_check
+            except ImportError:
+                pass  # Older vLLM versions do not provide the scoped helper.
+            else:
+                mtp_load_context = disable_mtp_completeness_check
+
         # LoRA adapters need a single complete tensor dict per ``add_lora``, but
         # the bucketed transport may split one across buckets. Accumulate and
         # apply only after ``is_last``; standard base weights load per bucket.
@@ -373,7 +386,8 @@ class vLLMColocateWorkerExtension:
                 base_sync_done=base_sync_done,
             )
 
-        receiver.receive_weights(on_bucket_received=on_bucket_received)
+        with mtp_load_context():
+            receiver.receive_weights(on_bucket_received=on_bucket_received)
 
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
@@ -382,13 +396,16 @@ class vLLMColocateWorkerExtension:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
-            for model, model_config in self._iter_all_models_with_config():
+            for model, model_config in reload_models:
                 process_weights_after_loading(model, model_config, self.device)
+            if is_quantized_model(self.model_runner.vllm_config):
+                for model in self._iter_all_models():
+                    reset_uncalibrated_kv_cache_scales(model)
         else:
             # vLLM reruns post-load processing once, after the last bucket
             from vllm.model_executor.model_loader.reload import finish_reload
 
-            for model, model_config in self._iter_all_models_with_config():
+            for model, model_config in reload_models:
                 finish_reload(model, model_config, self.device)
             if is_quantized_model(self.model_runner.vllm_config):
                 for model in self._iter_all_models():

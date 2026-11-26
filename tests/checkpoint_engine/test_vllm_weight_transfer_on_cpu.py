@@ -21,6 +21,7 @@ import sys
 import types
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -605,16 +606,17 @@ def test_vllm_server_preprocess_engine_kwargs_and_sleep_level(monkeypatch):
     lora_srv._preprocess_engine_kwargs({})
     assert "VLLM_RELOAD_MODE" not in os.environ
 
-    # vllm_sharded_rdt sets distributed_executor_backend=ray and leaves VLLM_RELOAD_MODE unset.
+    # vllm_sharded_rdt leaves VLLM_RELOAD_MODE unset and does not force ray executor.
     monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
     ek = {}
     _make_server("vllm_sharded_rdt")._preprocess_engine_kwargs(ek)
     assert ek["weight_transfer_config"] == {"backend": "sharded_rdt"}
-    assert ek["distributed_executor_backend"] == "ray"
+    assert "distributed_executor_backend" not in ek
     assert "VLLM_RELOAD_MODE" not in os.environ
 
-    with pytest.raises(ValueError, match="distributed_executor_backend='ray'"):
-        _make_server("vllm_sharded_rdt")._preprocess_engine_kwargs({"distributed_executor_backend": "mp"})
+    ek_mp = {"distributed_executor_backend": "mp"}
+    _make_server("vllm_sharded_rdt")._preprocess_engine_kwargs(ek_mp)
+    assert ek_mp["distributed_executor_backend"] == "mp"
 
     # vllm_sparse_nccl uses sleep level 1 so live weights survive KV cache release.
     assert _make_server("vllm_sparse_nccl")._resolve_sleep_level() == 1
@@ -710,16 +712,547 @@ def test_set_default_vllm_quantization_backends_respects_deep_gemm_exclusion(mon
     fp8_cfg = {"quant_method": "fp8", "weight_block_size": [128, 128]}
     monkeypatch.setattr(vllm_quant_utils, "_is_hopper", lambda: False)
 
+    seen_model_types: list[str] = []
+    fake_dg = types.ModuleType("vllm.utils.deep_gemm")
+
+    def _fake_should_auto_disable_deep_gemm(model_type: str) -> bool:
+        seen_model_types.append(model_type)
+        return model_type == "qwen3_5_moe_text"
+
+    fake_dg.should_auto_disable_deep_gemm = _fake_should_auto_disable_deep_gemm
+    monkeypatch.setitem(sys.modules, "vllm.utils.deep_gemm", fake_dg)
+
     # Normal models default to deep_gemm.
-    monkeypatch.setattr(vllm_quant_utils, "_should_auto_disable_deep_gemm", lambda hf_config: False)
     ek: dict = {}
     vllm_quant_utils.set_default_vllm_quantization_backends(fp8_cfg, ek, hf_config=SimpleNamespace(model_type="qwen3"))
     assert ek == {"linear_backend": "deep_gemm", "moe_backend": "deep_gemm"}
 
     # Models where vLLM auto-disables DeepGEMM on Blackwell (e.g. qwen3_5_moe_text) stay unset.
-    monkeypatch.setattr(vllm_quant_utils, "_should_auto_disable_deep_gemm", lambda hf_config: True)
     ek_excluded: dict = {}
     vllm_quant_utils.set_default_vllm_quantization_backends(
         fp8_cfg, ek_excluded, hf_config=SimpleNamespace(text_config=SimpleNamespace(model_type="qwen3_5_moe_text"))
     )
     assert ek_excluded == {}
+    assert seen_model_types == ["qwen3", "qwen3_5_moe_text"]
+
+
+def test_veomni_uv_ci_and_scripts_do_not_pin_stale_transformers_5_16_1():
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    checked_files = [
+        repo_root / ".github" / "workflows" / "e2e_ppo_trainer_veomni_vllm.yml",
+        repo_root / "tests" / "special_e2e" / "run_ppo_trainer_veomni.sh",
+        repo_root / ".github" / "workflows" / "e2e_sft_llm.yml",
+        repo_root / ".github" / "workflows" / "e2e_sft_vlm.yml",
+        repo_root / ".github" / "workflows" / "README.md",
+    ]
+    for path in checked_files:
+        text = path.read_text(encoding="utf-8")
+        assert "--with transformers==5.16.1" not in text, f"stale transformers==5.16.1 overlay in {path}"
+        assert "Transformers 5.16.1" not in text, f"stale Transformers 5.16.1 doc in {path}"
+
+
+def test_shard_spec_layout_rejects_strided_shard_and_unsupported_spec_features(monkeypatch):
+    _install_fake_vllm_weight_transfer(monkeypatch)
+    from torch.distributed.tensor.placement_types import Shard as TorchShard
+
+    from verl.checkpoint_engine.vllm_weight_transfer import _shard_spec_layout
+
+    class _FakeStridedShard(TorchShard):
+        def __init__(self, dim: int, split_factor: int) -> None:
+            super().__init__(dim)
+            self.split_factor = split_factor
+
+    class _FakeMesh:
+        def __init__(self) -> None:
+            self.mesh = torch.tensor([0, 1])
+            self.shape = (2,)
+
+    # _StridedShard subclasses TorchShard; must not silently downgrade to plain Shard(dim).
+    strided_spec = SimpleNamespace(full_shape=(4, 4), mesh=_FakeMesh(), placements=(_FakeStridedShard(0, 2),))
+    with pytest.raises(NotImplementedError, match="Unsupported DTensor placement"):
+        _shard_spec_layout(strided_spec, trainer_world_size=2)
+
+    # Unsupported ShardSpec fields must fail fast.
+    for kwargs in [
+        {"place": 0},
+        {"to_hf_chunk": lambda s, seg: []},
+        {"hf_slots": [("w0", (2, 2))]},
+        {"contributes": False},
+    ]:
+        spec = SimpleNamespace(full_shape=(2, 3), mesh=None, placements=None, **kwargs)
+        with pytest.raises(NotImplementedError):
+            _shard_spec_layout(spec, trainer_world_size=2)
+
+    # Unmeshed local shard whose size does not match full_shape (e.g. Megatron TP/PP) must fail fast.
+    unmeshed_partial = SimpleNamespace(full_shape=(4, 4), mesh=None, placements=None)
+
+    class _PartialShardEngine:
+        def get_per_tensor_param_shard(self, **kwargs):
+            return iter([("w0", torch.zeros(8, dtype=torch.bfloat16), unmeshed_partial)]), None
+
+    source = VerlEngineWeightSource(_PartialShardEngine(), use_local_shards=True, trainer_world_size=2)
+    with pytest.raises(NotImplementedError, match="unmeshed local shards"):
+        _ = source.metadata
+
+
+def test_dispatch_rollout_weight_quantizer_rejects_vllm_nccl_m2n():
+    from verl.utils.qat.compressed_tensors import dispatch_rollout_weight_quantizer
+
+    model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(
+            model_type="qwen3",
+            quantization_config={
+                "quant_method": "fp8",
+                "activation_scheme": "dynamic",
+                "weight_block_size": [128, 128],
+            },
+        ),
+        local_path="/unused",
+    )
+    rollout_config = SimpleNamespace(
+        name="vllm",
+        quantization=None,
+        checkpoint_engine=SimpleNamespace(backend="vllm_nccl_m2n"),
+    )
+    with pytest.raises(NotImplementedError, match="vllm_nccl_m2n"):
+        dispatch_rollout_weight_quantizer(model_config=model_config, rollout_config=rollout_config)
+
+
+def test_hybrid_mode_ignores_disaggregated_vllm_backends(monkeypatch):
+    mod = _load_vllm_async_server_with_stubs(monkeypatch)
+    monkeypatch.setattr(mod, "is_torch_npu_available", lambda check_device=False: False)
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "")
+
+    def _make_hybrid_server(ce_backend: str):
+        server = object.__new__(mod.vLLMHttpServer)
+        server.rollout_mode = mod.RolloutMode.HYBRID
+        cfg_dict = {"engine_kwargs": {"vllm": {}}}
+        server.config = SimpleNamespace(
+            checkpoint_engine=SimpleNamespace(backend=ce_backend),
+            mtp=None,
+            get=lambda k, default=None: cfg_dict.get(k, default),
+        )
+        server.model_config = SimpleNamespace(lora_rank=0, lora={})
+        return server
+
+    # HYBRID ignores vllm_sharded_rdt (must not force ray executor or inject weight_transfer_config).
+    ek: dict = {}
+    _make_hybrid_server("vllm_sharded_rdt")._preprocess_engine_kwargs(ek)
+    assert "weight_transfer_config" not in ek
+    assert "distributed_executor_backend" not in ek
+
+    # HYBRID ignores vllm_sparse_nccl (must keep sleep level 2).
+    assert _make_hybrid_server("vllm_sparse_nccl")._resolve_sleep_level() == 2
+
+    # HYBRID ignores vllm_nccl_m2n in launch_servers env vars (must not set NCCL_CUMEM_ENABLE=1).
+    replica = object.__new__(mod.vLLMReplica)
+    replica.rollout_mode = mod.RolloutMode.HYBRID
+    replica.config = SimpleNamespace(checkpoint_engine=SimpleNamespace(backend="vllm_nccl_m2n"), engine_kwargs={})
+    replica.resource_pool = None
+    replica.world_size = 2
+    replica.replica_rank = 0
+    extra_env = replica._resolve_weight_transfer_launch_config()
+    assert "NCCL_CUMEM_ENABLE" not in extra_env
+
+    # HYBRID still allows colocated vllm_ipc.
+    monkeypatch.delenv("VLLM_ALLOW_INSECURE_SERIALIZATION", raising=False)
+    ek_ipc: dict = {}
+    _make_hybrid_server("vllm_ipc")._preprocess_engine_kwargs(ek_ipc)
+    assert ek_ipc["weight_transfer_config"] == {"backend": "ipc"}
+    assert os.environ.get("VLLM_ALLOW_INSECURE_SERIALIZATION") == "1"
+
+
+def test_vllm_replica_launch_servers_safe_config_and_no_ray_executor_plumbing(monkeypatch):
+    mod = _load_vllm_async_server_with_stubs(monkeypatch)
+
+    captured_calls: list[tuple[dict, dict]] = []
+
+    class _FakeServerActorCls:
+        def options(self, **opts):
+            class _Remote:
+                def remote(self_inner, **kwargs):
+                    captured_calls.append((opts, kwargs))
+                    return _FakeServerHandle("s0", [])
+
+            return _Remote()
+
+    class _FakeWorker:
+        def __init__(self, node_id: str, gpu_id: str) -> None:
+            self._info = (node_id, [gpu_id])
+            self.__ray_call__ = SimpleNamespace(remote=lambda fn: _DoneAwaitable(self._info))
+
+    async def _run_launch(replica):
+        monkeypatch.setattr(mod, "get_node_visible_devices", lambda ids: ",".join(x[0] for x in ids))
+        replica.server_class = _FakeServerActorCls()
+        replica.servers = []
+        replica.nnodes = 1
+        replica.gpus_per_replica_node = replica.world_size
+        replica.is_reward_model = False
+        replica.is_teacher_model = False
+        replica.name_suffix = ""
+        replica.model_config = SimpleNamespace()
+        replica.workers = [_FakeWorker("node-1", str(i)) for i in range(replica.world_size)]
+        monkeypatch.setattr(replica, "_get_server_env_vars", lambda node_ids: {})
+
+        orig_options = replica.server_class.options
+
+        def _patched_options(**opts):
+            inner = orig_options(**opts)
+            orig_remote = inner.remote
+
+            def _remote(**kwargs):
+                orig_remote(**kwargs)
+                return SimpleNamespace(
+                    get_master_address=SimpleNamespace(remote=lambda: _DoneAwaitable(("127.0.0.1", 10000, 10001))),
+                    launch_server=SimpleNamespace(remote=lambda **kw: _DoneAwaitable(None)),
+                    get_server_address=SimpleNamespace(remote=lambda: _DoneAwaitable(("127.0.0.1", 10002))),
+                )
+
+            inner.remote = _remote
+            return inner
+
+        replica.server_class.options = _patched_options
+        monkeypatch.setattr(
+            mod.ray.util.scheduling_strategies,
+            "NodeAffinitySchedulingStrategy",
+            lambda **kw: kw,
+            raising=False,
+        )
+        await replica.launch_servers()
+
+    # Case A: SimpleNamespace config without .get and non-mapping weight_transfer_config.
+    captured_calls.clear()
+    rep_ns = object.__new__(mod.vLLMReplica)
+    rep_ns.rollout_mode = mod.RolloutMode.STANDALONE
+    rep_ns.replica_rank = 0
+    rep_ns.world_size = 2
+    rep_ns.resource_pool = None
+    rep_ns.config = SimpleNamespace(
+        checkpoint_engine=SimpleNamespace(backend="vllm_nccl_m2n"),
+        engine_kwargs={"vllm": {"weight_transfer_config": "invalid-non-mapping"}},
+        ray_actor_max_concurrency=8,
+    )
+    asyncio.run(_run_launch(rep_ns))
+    assert captured_calls[0][0]["runtime_env"]["env_vars"]["NCCL_CUMEM_ENABLE"] == "1"
+    assert "placement_group" not in captured_calls[0][1]
+
+    # Case B: vllm_sharded_rdt never injects Ray executor placement_group or VLLM_RAY_* env vars (mp executor only).
+    captured_calls.clear()
+    pg0 = SimpleNamespace(name="pg0", bundle_count=8)
+    rep_rdt = object.__new__(mod.vLLMReplica)
+    rep_rdt.rollout_mode = mod.RolloutMode.STANDALONE
+    rep_rdt.replica_rank = 0
+    rep_rdt.world_size = 4
+    rep_rdt.resource_pool = SimpleNamespace(
+        pgs=[pg0],
+        start_bundle_index=0,
+        subgroup_world_size=4,
+        max_colocate_count=2,
+    )
+    rep_rdt.config = SimpleNamespace(
+        checkpoint_engine=SimpleNamespace(backend="vllm_sharded_rdt"),
+        engine_kwargs={},
+        ray_actor_max_concurrency=8,
+    )
+    asyncio.run(_run_launch(rep_rdt))
+    env_b = captured_calls[0][0]["runtime_env"]["env_vars"]
+    assert "placement_group" not in captured_calls[0][1]
+    assert "VLLM_RAY_BUNDLE_INDICES" not in env_b
+    assert "VLLM_RAY_PER_WORKER_GPUS" not in env_b
+
+
+def test_vllm_pd_replica_spawn_wires_ipc_m2n_and_no_ray_executor_plumbing(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+
+    async_mod = _load_vllm_async_server_with_stubs(monkeypatch)
+    monkeypatch.setitem(sys.modules, "verl.workers.rollout.vllm_rollout.vllm_async_server", async_mod)
+    repo_root = Path(__file__).resolve().parents[2]
+    pd_path = repo_root / "verl" / "workers" / "rollout" / "vllm_rollout" / "vllm_pd_replica.py"
+    spec = importlib.util.spec_from_file_location("_test_vllm_pd_replica_spawn", pd_path)
+    pd_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pd_mod)
+
+    @dataclass
+    class _FakePDConfig:
+        tensor_model_parallel_size: int = 1
+        checkpoint_engine: Any = None
+        engine_kwargs: dict = None  # type: ignore[assignment]
+        ray_actor_max_concurrency: int = 8
+
+        def get(self, key: str, default: Any = None) -> Any:
+            return getattr(self, key, default)
+
+    monkeypatch.setattr(
+        pd_mod.ray,
+        "get_runtime_context",
+        lambda: SimpleNamespace(get_job_id=lambda: "job-1"),
+    )
+    monkeypatch.setattr(
+        pd_mod.ray.util.scheduling_strategies,
+        "NodeAffinitySchedulingStrategy",
+        lambda **kw: kw,
+        raising=False,
+    )
+
+    def _spawn_with(cfg: _FakePDConfig, *, resource_pool=None, tp: int = 2, zmq_base: int = 1):
+        captured: list[tuple[dict, dict]] = []
+
+        class _FakeCls:
+            def options(self, **opts):
+                class _R:
+                    def remote(self_inner, **kwargs):
+                        captured.append((opts, kwargs))
+                        return "handle"
+
+                return _R()
+
+        rep = object.__new__(pd_mod.vLLMPDReplica)
+        rep.config = cfg
+        rep.model_config = SimpleNamespace()
+        rep.rollout_mode = async_mod.RolloutMode.STANDALONE
+        rep.replica_rank = 0
+        rep.world_size = 3
+        rep.gpus_per_replica_node = 3
+        rep.resource_pool = resource_pool
+        rep.server_class = _FakeCls()
+        rep._spawn_pd_server(
+            role="decode",
+            workers=[],
+            node_id="node-0",
+            cuda_visible_devices="1,2",
+            tp=tp,
+            kv_transfer_config={},
+            side_channel_host="127.0.0.1",
+            side_channel_port=20000,
+            mooncake_bootstrap_port=20001,
+            actor_name="pd_decode_0",
+            zmq_base_trainer_rank=zmq_base,
+        )
+        return captured[0]
+
+    # 1. checkpoint_engine=None must not crash, and wtc backend=nccl_m2n sets NCCL_CUMEM_ENABLE=1.
+    opts_m2n, kw_m2n = _spawn_with(
+        _FakePDConfig(
+            checkpoint_engine=None, engine_kwargs={"vllm": {"weight_transfer_config": {"backend": "nccl_m2n"}}}
+        )
+    )
+    assert opts_m2n["runtime_env"]["env_vars"]["NCCL_CUMEM_ENABLE"] == "1"
+    assert "placement_group" not in kw_m2n
+
+    # 2. vllm_ipc sets VLLM_ALLOW_INSECURE_SERIALIZATION=1.
+    opts_ipc, _ = _spawn_with(_FakePDConfig(checkpoint_engine=SimpleNamespace(backend="vllm_ipc"), engine_kwargs={}))
+    assert opts_ipc["runtime_env"]["env_vars"]["VLLM_ALLOW_INSECURE_SERIALIZATION"] == "1"
+    assert opts_ipc["runtime_env"]["env_vars"]["NCCL_CUMEM_ENABLE"] == "0"
+
+    # 3. vllm_sharded_rdt does NOT inject placement_group or VLLM_RAY_* env vars (mp executor only).
+    pg0 = SimpleNamespace(name="pg0", bundle_count=8)
+    pool = SimpleNamespace(pgs=[pg0], start_bundle_index=4, subgroup_world_size=3, max_colocate_count=2)
+    opts_rdt, kw_rdt = _spawn_with(
+        _FakePDConfig(checkpoint_engine=SimpleNamespace(backend="vllm_sharded_rdt"), engine_kwargs={}),
+        resource_pool=pool,
+        tp=2,
+        zmq_base=1,
+    )
+    assert "placement_group" not in kw_rdt
+    assert "VLLM_RAY_BUNDLE_INDICES" not in opts_rdt["runtime_env"]["env_vars"]
+    assert "VLLM_RAY_PER_WORKER_GPUS" not in opts_rdt["runtime_env"]["env_vars"]
+
+
+def test_vllm_sparse_nccl_retarget_resets_seed_and_flushes_and_finishes_on_error(monkeypatch):
+    _install_fake_vllm_weight_transfer(monkeypatch)
+    monkeypatch.setattr("verl.checkpoint_engine.vllm_weight_transfer.ray.get", lambda refs: list(refs))
+    monkeypatch.setattr(
+        "verl.checkpoint_engine.vllm_weight_transfer._broadcast_rendezvous_endpoint",
+        lambda rank: ("127.0.0.1", 29502),
+    )
+
+    order: list[str] = []
+
+    class _OrderedDeltaEngine:
+        def __init__(self, fail_on_prime: bool = False):
+            self.fail_on_prime = fail_on_prime
+
+        def get_per_tensor_param(self, **kwargs):
+            return iter([("w0", torch.ones(2, 2, dtype=torch.bfloat16))]), None
+
+        def prime_delta_snapshots(self):
+            order.append("prime")
+            if self.fail_on_prime:
+                raise RuntimeError("prime failed")
+
+        def get_per_tensor_param_delta_shard(self):
+            order.append("delta")
+            return iter([]), None
+
+    log: list = []
+    s0 = _FakeServerHandle("r0", log)
+    s1 = _FakeServerHandle("r1", log)
+    ce = CheckpointEngineRegistry.new("vllm_sparse_nccl", bucket_size=64 << 20, is_master=True)
+    ce.configure_targets([s0], [2])
+
+    # Patch trainer_init so send_weight_chunk records ordering relative to prime_delta_snapshots.
+    import vllm.distributed.weight_transfer as wt_mod
+
+    orig_init = wt_mod.WeightTransferTrainerFactory.trainer_init
+
+    def _recording_init(init_info, *, client, source=None):
+        te = orig_init(init_info, client=client, source=source)
+        orig_send = te.send_weight_chunk
+
+        def _send(patches):
+            order.append("send_chunk")
+            return orig_send(patches)
+
+        te.send_weight_chunk = _send
+        return te
+
+    monkeypatch.setattr(wt_mod.WeightTransferTrainerFactory, "trainer_init", staticmethod(_recording_init))
+
+    # 1. Seed flushes pending chunks BEFORE prime_delta_snapshots().
+    asyncio.run(ce.send_weights(_OrderedDeltaEngine(), global_steps=0))
+    assert order == ["send_chunk", "prime"]
+    assert ce._shard_seeded is True
+
+    # 2. Retargeting to a new replica resets _shard_seeded=False so the new replica gets seeded.
+    ce.configure_targets([s0, s1], [2, 2])
+    assert ce._shard_seeded is False
+
+    # 3. If prime_delta_snapshots fails after start_weight_update(), finish_weight_update() still runs!
+    log.clear()
+    order.clear()
+    with pytest.raises(RuntimeError, match="prime failed"):
+        asyncio.run(ce.send_weights(_OrderedDeltaEngine(fail_on_prime=True), global_steps=1))
+    assert [name for sid, name, _, _ in log if sid == "r0"] == ["start_weight_update", "finish_weight_update"]
+    assert [name for sid, name, _, _ in log if sid == "r1"] == ["start_weight_update", "finish_weight_update"]
+    assert ce._shard_seeded is False
+
+
+def test_vllm_shutdown_isolates_errors_and_ignores_dead_ray_actor(monkeypatch):
+    _install_fake_vllm_weight_transfer(monkeypatch)
+    import ray
+
+    dead_ref = object()
+    alive_ref = object()
+    waited: list[object] = []
+
+    def _fake_ray_get(refs):
+        out = []
+        for r in refs:
+            waited.append(r)
+            if r is dead_ref:
+                raise ray.exceptions.RayActorError()
+            out.append(r)
+        return out
+
+    monkeypatch.setattr("verl.checkpoint_engine.vllm_weight_transfer.ray.get", _fake_ray_get)
+
+    dead_handle = SimpleNamespace(
+        shutdown_weight_transfer_engine=SimpleNamespace(remote=lambda: dead_ref),
+    )
+    alive_handle = SimpleNamespace(
+        shutdown_weight_transfer_engine=SimpleNamespace(remote=lambda: alive_ref),
+    )
+
+    ce = CheckpointEngineRegistry.new("vllm_nccl", bucket_size=64 << 20, is_master=True)
+    ce._client = VerlRayVLLMWeightSyncClient([dead_handle, alive_handle], [2, 2])
+    ce._target_sig = ((id(dead_handle), 2), (id(alive_handle), 2))
+    ce._trainer_engine = SimpleNamespace(shutdown=lambda: (_ for _ in ()).throw(RuntimeError("nccl broken")))
+
+    # Reconfiguring targets during elastic scale-down must survive BOTH trainer shutdown error and dead Ray actor,
+    # and must still wait for the surviving server's shutdown RPC.
+    ce.configure_targets([alive_handle], [2])
+    assert ce._trainer_engine is None
+    assert waited == [dead_ref, alive_ref]
+    assert ce._client.server_handles == [alive_handle]
+
+
+def test_build_trainer_init_info_sparse_nccl_forwards_kwargs_and_client_start_draft(monkeypatch):
+    _install_fake_vllm_weight_transfer(monkeypatch)
+    import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
+
+    @dataclass
+    class _SparseWithOpt:
+        master_address: str
+        master_port: int
+        world_size: int
+        rank: int
+        packed_buffer_size_bytes: int = 0
+
+    monkeypatch.setattr(sparse_mod, "SparseNCCLTrainerInitInfo", _SparseWithOpt)
+    monkeypatch.setattr("verl.checkpoint_engine.vllm_weight_transfer.ray.get", lambda refs: list(refs))
+    monkeypatch.setattr(
+        "verl.checkpoint_engine.vllm_weight_transfer._broadcast_rendezvous_endpoint",
+        lambda rank: ("127.0.0.1", 29503),
+    )
+
+    from verl.checkpoint_engine.vllm_weight_transfer import _build_trainer_init_info
+
+    log: list = []
+    s0 = _FakeServerHandle("r0", log)
+    s1 = _FakeServerHandle("r1", log)
+    client = VerlRayVLLMWeightSyncClient([s0, s1], [2, 2])
+
+    info = _build_trainer_init_info(
+        "sparse_nccl",
+        rank=0,
+        trainer_world_size=2,
+        client=client,
+        bucket_size=1024,
+        trainer_kwargs={"packed_buffer_size_bytes": 4096},
+    )
+    assert info.packed_buffer_size_bytes == 4096
+
+    client.start_draft_weight_update()
+    assert [(sid, name) for sid, name, _, _ in log] == [
+        ("r0", "start_draft_weight_update"),
+        ("r1", "start_draft_weight_update"),
+    ]
+
+
+def test_checkpoint_engine_manager_vllm_ipc_allows_salt_with_none_global_steps():
+    class _FakeActorWG:
+        world_size = 2
+
+        def execute_checkpoint_engine(self, method, **kwargs):
+            return [_DoneAwaitable(None) for _ in range(self.world_size)]
+
+        def update_weights(self, global_steps=None, mode="auto"):
+            return [_DoneAwaitable({}) for _ in range(self.world_size)]
+
+    class _SaltedReplica:
+        def __init__(self, server_log: list) -> None:
+            self.world_size = 2
+            self.config = SimpleNamespace(free_cache_engine=True, external_kv_cache_invalidation="salt")
+            self.servers = [_FakeServerHandle("r0_s0", server_log)]
+
+        def get_weight_transfer_targets(self):
+            return [(self.servers[0], self.world_size)]
+
+    # Colocated vllm_ipc allows global_steps=None with external_kv_cache_invalidation='salt' (matching naive).
+    server_log: list = []
+    mgr_ipc = CheckpointEngineManager(
+        config=CheckpointEngineConfig(backend="vllm_ipc"),
+        actor_wg=_FakeActorWG(),
+        replicas=[_SaltedReplica(server_log)],
+    )
+    try:
+        mgr_ipc.update_weights(global_steps=None)
+        assert [name for _, name, _, _ in server_log] == ["wake_up", "clear_kv_cache", "wake_up"]
+    finally:
+        mgr_ipc.close()
+
+    # Disaggregated vllm_nccl still requires global_steps when external_kv_cache_invalidation='salt'.
+    mgr_nccl = CheckpointEngineManager(
+        config=CheckpointEngineConfig(backend="vllm_nccl"),
+        actor_wg=_FakeActorWG(),
+        replicas=[_SaltedReplica([])],
+    )
+    try:
+        with pytest.raises(ValueError, match="external_kv_cache_invalidation='salt' requires global_steps"):
+            mgr_nccl.update_weights(global_steps=None)
+    finally:
+        mgr_nccl.close()

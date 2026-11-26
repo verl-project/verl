@@ -335,3 +335,101 @@ def _install_fake_reload(monkeypatch, events):
     reload.start_reload = lambda model: events.append("start_reload")
     reload.finish_reload = lambda model, model_config, device: events.append("finish_reload")
     monkeypatch.setitem(sys.modules, reload.__name__, reload)
+
+
+def test_reload_skips_drafter_start_reload_when_draft_model_config_is_none(monkeypatch):
+    started_models = []
+    finished_models = []
+    reload = types.ModuleType("vllm.model_executor.model_loader.reload")
+    reload.start_reload = lambda model: started_models.append(model)
+    reload.finish_reload = lambda model, model_config, device: finished_models.append(model)
+    monkeypatch.setitem(sys.modules, reload.__name__, reload)
+
+    class _Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([], True)
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", _Receiver)
+    monkeypatch.setattr(_vllm_rollout_utils, "is_npu_available", False)
+
+    main_model = _ToyModel()
+    drafter_model = _ToyModel()
+
+    class _SpecConfig:
+        method = "mtp"
+        draft_model_config = None
+
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.device = torch.device("cpu")
+    worker.model_runner = _FakeModelRunner(main_model, speculative_config=_SpecConfig())
+    worker.model_runner.vllm_config.model_config = object()
+    worker.model_runner.drafter = types.SimpleNamespace(model=drafter_model)
+    monkeypatch.setattr(worker, "_get_zmq_handle", lambda: "unused")
+    monkeypatch.setattr(worker, "_update_weights", lambda *args, **kwargs: None)
+
+    worker.update_weights_from_ipc()
+    assert started_models == [main_model]
+    assert finished_models == [main_model]
+
+
+def test_npu_quantized_and_mtp_update_resets_kv_scales_and_disables_mtp_check(monkeypatch):
+    events = []
+
+    class _MtpCtx:
+        def __enter__(self):
+            events.append("enter_mtp_disable")
+
+        def __exit__(self, *args):
+            events.append("exit_mtp_disable")
+
+    mtp_mod = types.ModuleType("vllm.model_executor.model_loader.mtp_validation")
+    mtp_mod.disable_mtp_completeness_check = _MtpCtx
+    monkeypatch.setitem(sys.modules, mtp_mod.__name__, mtp_mod)
+
+    loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
+    loader_utils.process_weights_after_loading = lambda model, cfg, dev: events.append(("post_load", model))
+    monkeypatch.setitem(sys.modules, loader_utils.__name__, loader_utils)
+
+    class _Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            events.append("receive")
+            on_bucket_received([], True)
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", _Receiver)
+    monkeypatch.setattr(_vllm_rollout_utils, "is_npu_available", True)
+    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda cfg: True)
+    monkeypatch.setattr(
+        _vllm_rollout_utils, "reset_uncalibrated_kv_cache_scales", lambda m: events.append(("reset_kv", m))
+    )
+
+    main_model = _ToyModel()
+    drafter_model = _ToyModel()
+
+    class _SpecConfig:
+        method = "mtp"
+        draft_model_config = object()
+
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.device = torch.device("cpu")
+    worker.model_runner = _FakeModelRunner(main_model, speculative_config=_SpecConfig())
+    worker.model_runner.vllm_config.model_config = object()
+    worker.model_runner.drafter = types.SimpleNamespace(model=drafter_model)
+    monkeypatch.setattr(worker, "_get_zmq_handle", lambda: "unused")
+    monkeypatch.setattr(worker, "_update_weights", lambda *args, **kwargs: None)
+
+    worker.update_weights_from_ipc()
+    assert events == [
+        "enter_mtp_disable",
+        "receive",
+        "exit_mtp_disable",
+        ("post_load", main_model),
+        ("post_load", drafter_model),
+        ("reset_kv", main_model),
+        ("reset_kv", drafter_model),
+    ]

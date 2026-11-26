@@ -9,10 +9,8 @@ if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
     # First-class `veomni` training backend: it already bundles the fsdp stack
     # plus the deps-free veomni package, so no separate fsdp extra is needed.
     UV_EXTRAS=(--extra vllm --extra veomni --extra math)
-    UV_OVERLAY=(--with transformers==5.16.1)
-    LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" "${UV_OVERLAY[@]}" python3)
-    # Quote the Hydra value so the Transformers requirement's == stays literal.
-    RAY=("ray_kwargs.ray_init.runtime_env.py_executable=\"uv -v run --frozen --all-packages ${UV_EXTRAS[*]} ${UV_OVERLAY[*]}\"")
+    LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" python3)
+    RAY=("ray_kwargs.ray_init.runtime_env.py_executable=\"uv -v run --frozen --all-packages ${UV_EXTRAS[*]}\"")
 fi
 
 
