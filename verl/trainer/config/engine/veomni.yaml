@@ -16,7 +16,7 @@ expert_parallel_size: 1
 
 ple_parallel_size: 1
 
-freeze_ple_embeddings: true
+freeze_ple_embeddings: false
 
 frozen_ple_dtype: bfloat16
 

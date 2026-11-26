@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GRPO | Qwen3-30B-A3B | Megatron training | vLLM rollout
+# GRPO | Qwen3.8-Flash-Next | VeOmni training | vLLM rollout
 #
 # Rollout: FP8 MoE weights and FP8 KV cache
 # Training: TileLang fused kernels and R3 router replay
@@ -13,7 +13,7 @@ set -xeuo pipefail
 
 # ---- user-adjustable ----
 n_gpus_per_node=${NGPUS_PER_NODE:-8}
-trainer_nnodes=${NNODES:-1}
+trainer_nnodes=${NNODES:-2}
 
 project_name='wuxibin_dapo'
 exp_name="qwen3_8_flash_next_score_centering_veomni_1125"
@@ -59,6 +59,7 @@ enable_thinking=${enable_thinking:-True}
 
 NUM_WARMUP_BATCHES=${NUM_WARMUP_BATCHES:-4}
 MAX_OFF_POLICY_THRESHOLD=${MAX_OFF_POLICY_THRESHOLD:-16}
+SAVE_FREQ=${SAVE_FREQ:-50}
 
 # Training config
 EP=${EP:-8}
@@ -90,6 +91,8 @@ ENGINE_CONFIG=(
     actor_rollout_ref.actor.veomni.ulysses_parallel_size=${SP}
     actor_rollout_ref.actor.veomni.expert_parallel_size=${EP}
     actor_rollout_ref.actor.veomni.ple_parallel_size=${ENGRAM_TP}
+    actor_rollout_ref.actor.veomni.freeze_ple_embeddings=True
+    actor_rollout_ref.actor.veomni.frozen_ple_dtype=bfloat16
     actor_rollout_ref.actor.veomni.attn_implementation=flash_attention_2
     actor_rollout_ref.actor.veomni.moe_implementation=fused_triton
     actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation=liger_kernel
@@ -149,7 +152,7 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=$use_dynamic_bsz
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
-    actor_rollout_ref.rollout.quantization.moe=FP8_BLOCK
+    actor_rollout_ref.rollout.quantization.moe=MXFP8
     +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8
 )
 
@@ -174,6 +177,7 @@ DATA=(
     data.filter_overlong_prompts=False
     data.filter_overlong_prompts_workers=64
     data.truncation='error'
+    +data.apply_chat_template_kwargs.enable_thinking=${enable_thinking}
 )
 
 TRAINER=(
@@ -189,12 +193,16 @@ TRAINER=(
     trainer.nnodes=$trainer_nnodes
     trainer.val_before_train=False
     trainer.log_val_generations=100
-    trainer.save_freq=-1
+    trainer.save_freq=${SAVE_FREQ}
     trainer.test_freq=80
     trainer.max_actor_ckpt_to_keep=2
     trainer.default_local_dir=$checkpoint_dir
     trainer.total_epochs=10
     trainer.total_training_steps=500
+)
+
+RUNTIME_ENV=(
+    "+ray_kwargs.ray_init.runtime_env.env_vars.GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth0}"
 )
 
 ########################### launch ###########################

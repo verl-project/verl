@@ -54,6 +54,7 @@ def test_prepare_model_outputs_keeps_logits_intact_for_score_centering(use_remov
     )
     engine = object.__new__(FSDPEngineWithLMHead)
     engine.use_ulysses_sp = False
+    engine.pad_to_length = False
     engine.engine_config = SimpleNamespace(batch_invariant=False)
 
     def logits_processor(student_logits, data):
@@ -65,6 +66,50 @@ def test_prepare_model_outputs_keeps_logits_intact_for_score_centering(use_remov
         FSDPEngineWithLMHead.prepare_model_outputs(engine, output, output_args, micro_batch, logits_processor)
 
     assert mock_logprobs.call_args.kwargs.get("inplace_backward", True) is not score_centering
+
+
+def test_fused_score_centering_receives_static_padding_bucket():
+    total_nnz, padded_nnz, vocab_size, topk = 5, 8, 16, 4
+    offsets = torch.tensor([0, 3, 5])
+    input_ids = torch.nested.nested_tensor_from_jagged(torch.randint(0, vocab_size, (total_nnz,)), offsets=offsets)
+    output = SimpleNamespace(
+        log_probs=torch.zeros(1, padded_nnz),
+        topk_log_probs=torch.randn(1, padded_nnz, topk),
+    )
+    output_args = {
+        "input_ids_rmpad_rolled": torch.randint(0, vocab_size, (padded_nnz,)),
+        "temperature_rmpad": torch.ones(padded_nnz),
+        "pad_size": padded_nnz - total_nnz,
+    }
+    micro_batch = TensorDict({"input_ids": input_ids}, batch_size=[])
+    tu.assign_non_tensor(
+        micro_batch,
+        use_remove_padding=True,
+        pad_mode=DatasetPadMode.NO_PADDING,
+        use_fused_kernels=True,
+        score_centering=True,
+    )
+    engine = object.__new__(FSDPEngineWithLMHead)
+    engine.use_ulysses_sp = False
+    engine.pad_to_length = True
+    engine.pad_to_length_bucket = padded_nnz
+    engine.engine_config = SimpleNamespace(batch_invariant=False)
+    seen = {}
+
+    def logits_processor(*, student_topk_log_probs, data, pad_to_length_bucket):
+        seen.update(
+            shape=student_topk_log_probs.shape,
+            data=data,
+            pad_to_length_bucket=pad_to_length_bucket,
+        )
+        return {"sc_correction": torch.zeros(student_topk_log_probs.shape[:2])}
+
+    model_output = engine.prepare_model_outputs(output, output_args, micro_batch, logits_processor)
+
+    assert seen["shape"] == (1, padded_nnz, topk)
+    assert seen["data"] is micro_batch
+    assert seen["pad_to_length_bucket"] == padded_nnz
+    assert model_output["sc_correction"].values().shape == (total_nnz,)
 
 
 @pytest.mark.parametrize("score_centering", [True, False])
