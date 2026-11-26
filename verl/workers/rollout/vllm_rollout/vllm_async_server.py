@@ -717,8 +717,9 @@ class vLLMHttpServer:
         # and numeric logprobs (never .text), so detokenizing every generated token into a
         # string is pure overhead. Skip it. Guard: string-based `stop` / `bad_words` need
         # detokenized text to match, so only skip when neither is used (`stop_token_ids`
-        # is unaffected). Teacher requests already set detokenize=False upstream, so this
-        # setdefault leaves them untouched.
+        # is unaffected). Teacher prompt-logprob requests get detokenize=False here too:
+        # they never set `stop` / `bad_words`, and the teacher manager leaves `detokenize`
+        # out of its sampling params because SGLang rejects it.
         if not sampling_params.get("stop") and not sampling_params.get("bad_words"):
             sampling_params.setdefault("detokenize", False)
 

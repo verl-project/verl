@@ -49,11 +49,12 @@ def _get_teacher_sampling_params(
             teacher_model_config.inference.temperature,
         )
     num_logprobs = distillation_loss_config.topk if distillation_loss_config.loss_settings.use_topk else 0
+    # These params go to every teacher backend; set backend-only fields
+    # (e.g. vLLM's `detokenize`) in that backend's server instead.
     return {
         "max_tokens": 1,
         "temperature": 1.0,
         "prompt_logprobs": num_logprobs,
-        "detokenize": False,
     }
 
 
