@@ -244,7 +244,14 @@ def patch_forward_with_backends(
         use_fused_kernels (bool): Whether to use fused kernels.
         fused_kernels_backend (str): The backend to use for fused kernels.
     """
-    if not use_fused_kernels or fused_kernels_backend not in ["triton", "torch", "liger", "tilelang"]:
+    if not use_fused_kernels or fused_kernels_backend not in [
+        "triton",
+        "torch",
+        "liger",
+        "tilelang",
+        "cut_cross_entropy",
+        "ml_cross_entropy",
+    ]:
         print(
             f"Skipping monkey patch for {model.__class__.__name__} as use_fused_kernels is "
             f"{use_fused_kernels} or fused_kernels_backend is {fused_kernels_backend}"
@@ -280,7 +287,7 @@ def patch_forward_with_backends(
         forward_with_triton_backend_function = forward_with_triton_backend
 
     model._verl_fused_kernels_backend = fused_kernels_backend
-    if fused_kernels_backend in ("triton", "tilelang"):
+    if fused_kernels_backend in ("triton", "tilelang", "cut_cross_entropy", "ml_cross_entropy"):
         model.__class__.forward = forward_with_triton_backend_function
         print(f"Using {fused_kernels_backend.capitalize()} backend for fused kernels in {model.__class__.__name__}")
     elif fused_kernels_backend in ("torch", "liger"):
@@ -289,7 +296,7 @@ def patch_forward_with_backends(
     else:
         raise ValueError(
             f"Unsupported fused_kernels_backend: {fused_kernels_backend}. "
-            "Choose 'triton', 'torch', 'liger', or 'tilelang'."
+            "Choose 'triton', 'torch', 'liger', 'tilelang', or 'cut_cross_entropy'."
         )
 
 
@@ -307,10 +314,10 @@ def patch_veomni_forward_with_backends(
     """
     if not use_fused_kernels:
         return
-    if fused_kernels_backend not in ("triton", "torch", "liger", "tilelang"):
+    if fused_kernels_backend not in ("triton", "torch", "liger", "tilelang", "cut_cross_entropy", "ml_cross_entropy"):
         raise ValueError(
             f"Unsupported fused_kernels_backend: {fused_kernels_backend}. "
-            "Choose 'triton', 'torch', 'liger', or 'tilelang'."
+            "Choose 'triton', 'torch', 'liger', 'tilelang', or 'cut_cross_entropy'."
         )
     if getattr(model, "_verl_veomni_fused_linear_patched", False):
         return

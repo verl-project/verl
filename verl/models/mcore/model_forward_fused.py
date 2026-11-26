@@ -274,6 +274,13 @@ def patch_fused_forward(
         return
     if model_config is not None:
         configured_backend = (model_config.fused_kernel_options or {}).get("impl_backend")
+        if configured_backend in ("cut_cross_entropy", "ml_cross_entropy"):
+            raise ValueError(
+                f"fused_kernel_options.impl_backend={configured_backend!r} is not supported by the "
+                "Megatron engine: apple/ml-cross-entropy requires the full vocabulary on each device, "
+                "but Megatron shards the output head across tensor-parallel ranks. Use 'triton' "
+                "(optionally with use_liger) or disable use_fused_kernels."
+            )
         impl_backend = (
             "liger" if model_config.use_liger else ("tilelang" if configured_backend == "tilelang" else "triton")
         )

@@ -137,6 +137,145 @@ def _linear_cross_entropy_liger(
     return -nll, entropy
 
 
+_CUT_CROSS_ENTROPY = None
+_CUT_CROSS_ENTROPY_INSTALL_COMMAND = (
+    'pip install "cut-cross-entropy @ git+https://github.com/apple/ml-cross-entropy.git"'
+)
+# Budget for the fp32 logits chunk used by the entropy estimator. Keeping this
+# small is what lets the backend stay below the unfused logits path.
+_CUT_CROSS_ENTROPY_ENTROPY_CHUNK_BYTES = 4 * 1024 * 1024
+
+
+def _require_cut_cross_entropy():
+    global _CUT_CROSS_ENTROPY
+
+    if _CUT_CROSS_ENTROPY is not None:
+        return _CUT_CROSS_ENTROPY
+
+    try:
+        from cut_cross_entropy import linear_cross_entropy as cce_linear_cross_entropy
+    except ImportError as exc:
+        raise RuntimeError(
+            "The cut_cross_entropy fused linear cross entropy backend requires the optional "
+            "`cut-cross-entropy` package (apple/ml-cross-entropy). Install it with:\n    "
+            f"{_CUT_CROSS_ENTROPY_INSTALL_COMMAND}\n"
+            "It also requires PyTorch >= 2.4, Triton >= 3.0, and an Ampere or newer CUDA GPU."
+        ) from exc
+
+    _CUT_CROSS_ENTROPY = cce_linear_cross_entropy
+    return _CUT_CROSS_ENTROPY
+
+
+def _check_cut_cross_entropy_device(device: torch.device):
+    if device.type != "cuda":
+        raise RuntimeError(
+            "The cut_cross_entropy fused linear cross entropy backend requires a CUDA device "
+            f"(got {device.type!r}). Disable use_fused_kernels or select another impl_backend."
+        )
+
+
+def _cut_cross_entropy_entropy_chunk(num_tokens: int) -> int:
+    per_token_bytes = max(int(num_tokens), 1) * 4
+    return max(1, min(65536, _CUT_CROSS_ENTROPY_ENTROPY_CHUNK_BYTES // per_token_bytes))
+
+
+class _ExpectedLogit(torch.autograd.Function):
+    """Compute ``sum_j softmax(z)_j * z_j`` without materializing the logits.
+
+    ``lse`` comes from Cut Cross Entropy, so both paths share the same
+    normalization. Vocabulary is processed in chunks in both directions, which
+    bounds the extra memory to one chunk of fp32 logits.
+    """
+
+    @staticmethod
+    def forward(ctx, hidden, weight, lse, valid):
+        num_tokens = hidden.shape[0]
+        chunk = _cut_cross_entropy_entropy_chunk(num_tokens)
+        safe_lse = torch.where(valid, lse, torch.full_like(lse, float("inf")))
+        expected = hidden.new_zeros((num_tokens,), dtype=torch.float32)
+
+        for start in range(0, weight.shape[0], chunk):
+            stop = min(start + chunk, weight.shape[0])
+            logits = (hidden @ weight[start:stop].t()).float()
+            probs = torch.exp(logits - safe_lse[:, None])
+            expected += (probs * logits).sum(dim=-1)
+
+        ctx.save_for_backward(hidden, weight, safe_lse, valid, expected)
+        ctx.chunk = chunk
+        return expected
+
+    @staticmethod
+    def backward(ctx, grad_expected):
+        hidden, weight, safe_lse, valid, expected = ctx.saved_tensors
+        chunk = ctx.chunk
+        grad_expected = torch.where(valid, grad_expected, torch.zeros_like(grad_expected)).float()
+        grad_hidden = torch.zeros_like(hidden)
+        grad_weight = torch.zeros_like(weight)
+
+        for start in range(0, weight.shape[0], chunk):
+            stop = min(start + chunk, weight.shape[0])
+            logits = (hidden @ weight[start:stop].t()).float()
+            probs = torch.exp(logits - safe_lse[:, None])
+            # d/dz_j sum_i p_i z_i = p_j * (1 + z_j - sum_i p_i z_i)
+            grad_logits = grad_expected[:, None] * probs * (1.0 + logits - expected[:, None])
+            grad_logits = grad_logits.to(hidden.dtype)
+            grad_hidden += grad_logits @ weight[start:stop]
+            grad_weight[start:stop] = grad_logits.t() @ hidden
+
+        return grad_hidden, grad_weight, None, None
+
+
+def _linear_cross_entropy_cut_cross_entropy(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: float,
+    reduction: str,
+    dist_process_group: dist.ProcessGroup,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cce_linear_cross_entropy = _require_cut_cross_entropy()
+    _check_cut_cross_entropy_device(hidden.device)
+
+    if not isinstance(reduction, str):
+        raise TypeError(f"reduction must be a string, got {type(reduction)}")
+    if reduction.lower() != "none":
+        raise NotImplementedError("The cut_cross_entropy backend currently supports reduction='none' only")
+    if dist_process_group is not None:
+        raise RuntimeError(
+            "The cut_cross_entropy backend does not support tensor-parallel process groups because "
+            "apple/ml-cross-entropy needs the full vocabulary on every device. Use the triton backend "
+            "for vocab-parallel output heads."
+        )
+    if hidden.ndim not in (2, 3):
+        raise ValueError(f"hidden must be 2D or 3D, got shape {tuple(hidden.shape)}")
+    if weight.ndim != 2:
+        raise ValueError(f"weight must be 2D, got shape {tuple(weight.shape)}")
+
+    hidden = hidden.reshape(-1, hidden.shape[-1]).contiguous()
+    num_tokens = hidden.shape[0]
+    if labels.numel() != num_tokens:
+        raise ValueError(
+            "The cut_cross_entropy linear cross entropy backend only supports one label per token; "
+            "multi-label/top-k queries are not supported"
+        )
+    labels = labels.reshape(-1).to(torch.int64).contiguous()
+
+    scaled_hidden = hidden / float(temperature) if temperature not in (None, 1.0) else hidden
+    nll, lse = cce_linear_cross_entropy(
+        scaled_hidden,
+        weight,
+        labels,
+        None,
+        reduction="none",
+        return_lse=True,
+        ignore_index=-100,
+    )
+
+    valid = labels != -100
+    expected_logit = _ExpectedLogit.apply(scaled_hidden, weight, lse, valid)
+    return -nll, lse - expected_logit
+
+
 class LinearCrossEntropy(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -238,6 +377,12 @@ def linear_cross_entropy(
     vocab-parallel fused CE when available (``VERL_NPU_LCE_BACKEND=auto|cann``).
     Hybrid backward: CANN CE when ``dentropy==0``; chunked PyTorch CE+entropy
     (Triton-aligned) when ``dentropy!=0``.
+
+    ``impl_backend="cut_cross_entropy"`` (alias ``"ml_cross_entropy"``) uses
+    apple/ml-cross-entropy for the log-probability path when the optional
+    ``cut-cross-entropy`` package is installed. It requires a CUDA device with
+    bf16 tensor cores, the full vocabulary on every device, and a single label
+    per token.
     """
     if not isinstance(impl_backend, str):
         raise TypeError(f"impl_backend must be a string, got {type(impl_backend)}")
@@ -293,6 +438,16 @@ def linear_cross_entropy(
             float(temperature),
             dist_process_group,
         )
+    if impl_backend in ("cut_cross_entropy", "ml_cross_entropy"):
+        return _linear_cross_entropy_cut_cross_entropy(
+            hidden,
+            weight,
+            labels,
+            temperature,
+            reduction,
+            dist_process_group,
+        )
     raise ValueError(
-        f"Unsupported linear cross entropy backend {impl_backend!r}; choose 'triton', 'liger', or 'tilelang'"
+        f"Unsupported linear cross entropy backend {impl_backend!r}; choose 'triton', 'liger', "
+        "'tilelang', or 'cut_cross_entropy'"
     )
