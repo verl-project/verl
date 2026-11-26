@@ -354,9 +354,7 @@ def test_lr_scheduler_updates_are_picked_up():
         wrapper.begin_backward(stepping=True)
         _loss(model, inputs, targets).backward()
         wrapper.finalize()
-        return max(
-            (after - prior).abs().max().item() for prior, after in zip(before, model.parameters(), strict=True)
-        )
+        return max((after - prior).abs().max().item() for prior, after in zip(before, model.parameters(), strict=True))
 
     first_update = step_and_measure_update()
     assert first_update > 0
@@ -411,9 +409,7 @@ def _run_engine_step(monkeypatch, optimizer_in_backward, clip_grad, batches, *, 
     engine.forward_step = forward_step
 
     monkeypatch.setattr(transformer_impl, "prepare_micro_batches", lambda **_: (micro_batches, None))
-    monkeypatch.setattr(
-        transformer_impl, "postprocess_batch_func", lambda output_lst, indices, data: {"metrics": {}}
-    )
+    monkeypatch.setattr(transformer_impl, "postprocess_batch_func", lambda output_lst, indices, data: {"metrics": {}})
     monkeypatch.setattr(transformer_impl, "get_device_id", lambda: "cpu")
     monkeypatch.setattr(torch.distributed, "all_reduce", lambda *args, **kwargs: None)
 
