@@ -15,8 +15,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -112,6 +114,88 @@ def test_log_uses_metric_log_with_step_when_available(monkeypatch, mock_rl_insig
 
     mock_rl_insight.metric_log.assert_called_once_with("actor/pg_loss", 0.12, step=100)
     mock_rl_insight.metric_gauge.assert_not_called()
+
+
+def _install_fake_rl_insight_server(monkeypatch, services):
+    import sys
+    import types
+
+    package = types.ModuleType("rl_insight")
+    package.__path__ = []
+    server = types.ModuleType("rl_insight.server")
+    server.__path__ = []
+    http_api = types.ModuleType("rl_insight.server.http_api")
+    http_api.get_server_services = lambda: services
+    http_api.server_url = lambda: "http://127.0.0.1:18080"
+    network = types.ModuleType("rl_insight.server.network")
+    network.service_url_from_server_url = lambda base, port, path: (f"http://127.0.0.1:{port}{path}" if port else "")
+    monkeypatch.setitem(sys.modules, "rl_insight", package)
+    monkeypatch.setitem(sys.modules, "rl_insight.server", server)
+    monkeypatch.setitem(sys.modules, "rl_insight.server.http_api", http_api)
+    monkeypatch.setitem(sys.modules, "rl_insight.server.network", network)
+    return http_api
+
+
+def test_discover_otlp_traces_endpoint_uses_server_otlp_port(monkeypatch):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    _install_fake_rl_insight_server(monkeypatch, {"otlp_port": 4318})
+
+    assert RLInsightLogger.discover_otlp_traces_endpoint() == "http://127.0.0.1:4318/v1/traces"
+
+
+def test_discover_otlp_traces_endpoint_returns_none_without_otlp_port(monkeypatch):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    _install_fake_rl_insight_server(monkeypatch, {"otlp_port": None})
+
+    assert RLInsightLogger.discover_otlp_traces_endpoint() is None
+
+
+def test_discover_otlp_traces_endpoint_returns_none_when_discovery_raises(monkeypatch, caplog):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    http_api = _install_fake_rl_insight_server(monkeypatch, {"otlp_port": 4318})
+
+    def _raise():
+        raise RuntimeError("discovery boom")
+
+    http_api.get_server_services = _raise
+
+    with caplog.at_level("WARNING", logger="verl.utils.tracking"):
+        assert RLInsightLogger.discover_otlp_traces_endpoint() is None
+
+    assert "OTLP endpoint discovery failed" in caplog.text
+
+
+def test_configure_vllm_tracing_discovers_endpoint(monkeypatch, mock_rl_insight):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", raising=False)
+    monkeypatch.setattr(
+        RLInsightLogger,
+        "discover_otlp_traces_endpoint",
+        classmethod(lambda cls: "http://127.0.0.1:4318/v1/traces"),
+    )
+    args = {}
+    trace_config = SimpleNamespace(enable_otel=True)
+
+    RLInsightLogger.configure_vllm_tracing(args, 3, trace_config)
+
+    assert args["otlp_traces_endpoint"] == "http://127.0.0.1:4318/v1/traces"
+    assert os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] == "http/protobuf"
+    assert os.environ["OTEL_RESOURCE_ATTRIBUTES"] == "replica=3"
+
+
+def test_configure_vllm_tracing_keeps_explicit_endpoint(monkeypatch, mock_rl_insight):
+    monkeypatch.delenv(RLInsightLogger.ENABLE_ENV, raising=False)
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", raising=False)
+    args = {"otlp_traces_endpoint": "http://collector:4318/v1/traces"}
+    trace_config = SimpleNamespace(enable_otel=True)
+
+    RLInsightLogger.configure_vllm_tracing(args, 1, trace_config)
+
+    assert args == {"otlp_traces_endpoint": "http://collector:4318/v1/traces"}
+    assert os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] == "http/protobuf"
+    assert os.environ["OTEL_RESOURCE_ATTRIBUTES"] == "replica=1"
 
 
 def test_trace_state_decorator_resolves_callable_lane(monkeypatch, mock_rl_insight):

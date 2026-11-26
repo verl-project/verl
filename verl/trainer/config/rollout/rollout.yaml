@@ -346,6 +346,11 @@ trace:
   # Total traces per step = max_samples_per_step_per_worker * num_workers * n_rollouts_per_sample
   max_samples_per_step_per_worker: null
 
+  # Export vLLM request spans to the RL-Insight OTLP endpoint (vLLM only).
+  # Automatic discovery requires `rl_insight` in trainer.logger and RL_INSIGHT_SERVER_URL;
+  # engine_kwargs.vllm.otlp_traces_endpoint overrides discovery.
+  enable_otel: false
+
 
 # Whether to skip tokenizer initialization for rollout engine
 # When enabled (True), the rollout assume token in token out for generation
