@@ -400,7 +400,8 @@ class PPOTrainer(ABC):
 
         # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        checkpoint_engine_config.backend = "naive"
+        if checkpoint_engine_config.backend != "vllm_ipc":
+            checkpoint_engine_config.backend = "naive"
         self.checkpoint_manager: CheckpointEngineManager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,

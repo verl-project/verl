@@ -48,11 +48,10 @@ would be loaded into parameters that an earlier post-processing pass already
 transformed. The bucketed transfer path must prepare the model before the first
 bucket and finalize it only after the last bucket.
 
-``verl/utils/vllm/vllm_quant_utils.py`` is the entry point: it quantizes the
-outgoing weight stream and dispatches the prepare/finalize pair to the scheme
-that owns each layer. ``verl/utils/vllm/vllm_fp8_utils.py`` handles the block
-FP8 linear and MoE methods, ``verl/utils/vllm/vllm_fp4_utils.py`` handles the
-MXFP4 routed experts, and the bucket-level orchestration is in
+vLLM's reload does both: ``start_reload`` before the first bucket restores the
+checkpoint layout the loaders expect, and ``finish_reload`` after the last
+bucket re-applies the kernel layout in place (``VLLM_RELOAD_MODE=direct``,
+which the rollout sets). The bucket-level orchestration is in
 ``verl/workers/rollout/vllm_rollout/utils.py``.
 
 Incorrect synchronization can fail immediately with an expert shape mismatch

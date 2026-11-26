@@ -252,6 +252,27 @@ class vLLMPDReplica(vLLMReplica):
             cfg["kv_connector_extra_config"] = {"mooncake_protocol": mooncake_protocol}
         return cfg
 
+    def get_weight_transfer_targets(self) -> list[tuple[ActorHandle, int]]:
+        """Return (server_handle, world_size) for prefill and every decode server."""
+        return [(s, self._prefill_tp) for s in self._prefill_servers] + [
+            (s, self._decode_tp) for s in self._decode_servers
+        ]
+
+    async def resume_generation(self):
+        """Resume engine generation and submission gates on prefill and every decode server."""
+        await asyncio.gather(*[server.resume_engine_generation.remote() for server in self.servers])
+        await asyncio.gather(*[server.open_submission_gate.remote() for server in self.servers])
+
+    async def sleep(self):
+        """Drain and sleep prefill and every decode server."""
+        await asyncio.gather(*[server.wait_for_requests_to_drain.remote() for server in self.servers])
+        await asyncio.gather(*[server.sleep.remote() for server in self.servers])
+
+    async def release_kv_cache(self):
+        """Drain and release KV caches on prefill and every decode server."""
+        await asyncio.gather(*[server.wait_for_requests_to_drain.remote() for server in self.servers])
+        await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
+
     def _spawn_pd_server(
         self,
         role: str,
@@ -272,7 +293,7 @@ class vLLMPDReplica(vLLMReplica):
         env_vars = {
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-            "NCCL_CUMEM_ENABLE": "0",
+            "NCCL_CUMEM_ENABLE": "1" if self.config.checkpoint_engine.backend == "vllm_nccl_m2n" else "0",
             "VLLM_NIXL_SIDE_CHANNEL_HOST": side_channel_host,
             "VLLM_NIXL_SIDE_CHANNEL_PORT": str(side_channel_port),
             "VLLM_MOONCAKE_BOOTSTRAP_PORT": str(mooncake_bootstrap_port),

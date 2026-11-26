@@ -5,7 +5,7 @@
 #   - 128+ GPUs (80GB each, e.g. 16x8 H100/H200)
 #   - Image dependency cache: Megatron-Core 0.18.0 / Megatron-Bridge 0.5.2.
 #   - Install the current uv.lock's megatron extra, including flash-linear-attention:
-#       uv sync --frozen --extra megatron
+#       uv sync --frozen --extra megatron --extra native-cu130torch213
 #       source .venv/bin/activate
 #
 # CUDA dependencies from the current uv.lock (Python 3.12):

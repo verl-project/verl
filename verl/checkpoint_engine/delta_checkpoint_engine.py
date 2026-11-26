@@ -25,9 +25,8 @@ fork or patch needed) decodes and masked-applies it *in place* onto the live
 weights. No full-model mirror is staged anywhere on the rollout side: receiver
 peak memory is one bucket plus one decode chunk, independent of model size.
 
-With vLLM, the rollout adapter forwards the same payload over same-GPU IPC to
-VERL's registered weight-transfer backend. It decodes each flush into vLLM
-checkpoint patches, whose loader reuses native ``model.load_weights()`` mapping.
+With vLLM, use ``checkpoint_engine.backend='vllm_sparse_nccl'`` to stream
+sparse patches directly into vLLM's native ``SparseNCCLWeightTransferEngine``.
 
 The first (seed) sync streams the backend's FULL HF export (``get_per_tensor_
 param()``) over the values-only wire -- every backend already knows how to
