@@ -673,7 +673,7 @@ algorithm:
 
 - Fused kernels are optional. Megatron score centering supports
   `actor_rollout_ref.model.use_fused_kernels: true` with
-  `actor_rollout_ref.model.fused_kernel_options.impl_backend: tilelang`; use `false` for fused
+  `actor_rollout_ref.model.fused_kernel_options.impl_backend` set to `triton` or `tilelang` on CUDA; use `false` for fused
   backends that cannot return log-probs for the recorded top-k labels
 - Megatron static `pad_to_length` is supported; the sampler heads and router-replay tensors use
   the same bucket padding as the student rows. Dynamic context parallelism remains unsupported

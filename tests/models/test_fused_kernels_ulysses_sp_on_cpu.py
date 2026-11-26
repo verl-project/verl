@@ -195,7 +195,7 @@ def _patch_fused_kernels():
     def fake_linear_ce(hidden_states, vocab_weights, input_ids, temperature, reduction, *_args, **kwargs):
         captured["input_ids"] = input_ids.detach().clone()
         captured["impl_backend"] = kwargs.get("impl_backend")
-        return _fake_log_probs_and_entropy(input_ids, multi_label=kwargs.get("impl_backend") == "tilelang")
+        return _fake_log_probs_and_entropy(input_ids, multi_label=input_ids.ndim == hidden_states.ndim)
 
     def fake_qwen2_vl_forward(self, input_ids, **_kwargs):
         # Bypass `process_position_ids` and the real VLM body; we only care
@@ -318,9 +318,10 @@ def test_adapter_falls_back_to_local_roll_when_shift_labels_absent(forward_fn):
 
 
 @pytest.mark.parametrize("forward_fn", TRITON_ADAPTERS, ids=_adapter_id)
-def test_tilelang_adapter_combines_and_splits_auxiliary_labels(forward_fn):
+@pytest.mark.parametrize("backend", ["tilelang", "triton"])
+def test_adapter_combines_and_splits_auxiliary_labels(forward_fn, backend):
     model = _make_fake_lm()
-    model._verl_fused_kernels_backend = "tilelang"
+    model._verl_fused_kernels_backend = backend
     input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
     shift_labels = torch.tensor([[20, 30, 40, 50]], dtype=torch.long)
     topk_labels = torch.tensor([[[3, 3], [5, 6], [7, 8], [9, 9]]], dtype=torch.long)
@@ -336,7 +337,7 @@ def test_tilelang_adapter_combines_and_splits_auxiliary_labels(forward_fn):
         )
 
     expected_labels = torch.cat((shift_labels.unsqueeze(-1), topk_labels), dim=-1)
-    assert captured["impl_backend"] == "tilelang"
+    assert captured["impl_backend"] == backend
     assert torch.equal(captured["input_ids"], expected_labels)
     assert output.log_probs.shape == shift_labels.shape
     assert output.topk_log_probs.shape == topk_labels.shape
@@ -368,7 +369,8 @@ def test_liger_adapter_forwards_auxiliary_labels_to_unified_kernel(forward_fn):
     assert output.topk_log_probs.shape == topk_labels.shape
 
 
-def test_veomni_adapter_promotes_unified_topk_log_probs():
+@pytest.mark.parametrize("backend", ["tilelang", "triton"])
+def test_veomni_adapter_promotes_unified_topk_log_probs(backend):
     model = _make_fake_lm()
     input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
     shift_labels = torch.tensor([[20, 30, 40, 50]], dtype=torch.long)
@@ -390,7 +392,7 @@ def test_veomni_adapter_promotes_unified_topk_log_probs():
 
     model.loss_function = unused_loss_function
     model.forward = veomni_forward
-    patch_veomni_forward_with_backends(model, use_fused_kernels=True, fused_kernels_backend="tilelang")
+    patch_veomni_forward_with_backends(model, use_fused_kernels=True, fused_kernels_backend=backend)
 
     with _patch_fused_kernels() as captured:
         output = model(
@@ -403,6 +405,6 @@ def test_veomni_adapter_promotes_unified_topk_log_probs():
         )
 
     expected_labels = torch.cat((shift_labels.unsqueeze(-1), topk_labels), dim=-1)
-    assert captured["impl_backend"] == "tilelang"
+    assert captured["impl_backend"] == backend
     assert torch.equal(captured["input_ids"], expected_labels)
     assert output.topk_log_probs.shape == topk_labels.shape
