@@ -141,7 +141,14 @@ def test_record_replay_roundtrip_uses_model_padding(monkeypatch, nested, precisi
         pad_to_length_bucket=pad_to_length_bucket,
         model=model,
     )
-    torch.testing.assert_close(router.target_topk_idx, router.recorded_topk_idx.to(torch.int64))
+    # The recorded test routes are all nonzero. Replay must preserve those
+    # rows exactly, while dropless R2 generates distinct routes for padding.
+    recorded_routes = router.recorded_topk_idx.to(torch.int64)
+    valid_rows = recorded_routes.ne(0).any(dim=-1)
+    assert router.target_topk_idx.shape == recorded_routes.shape
+    torch.testing.assert_close(router.target_topk_idx[valid_rows], recorded_routes[valid_rows])
+    padding_routes = router.target_topk_idx[~valid_rows]
+    assert (padding_routes[:, 0] != padding_routes[:, 1]).all()
 
 
 def test_action_queries_use_forwarded_model_instead_of_global_registry(monkeypatch):

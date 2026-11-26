@@ -543,6 +543,7 @@ def set_router_replay_data(
                     quant_align_size=quant_align_size,
                     min_local_rows=min_local_rows,
                     local_cp_size=local_cp_size,
+                    pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                 )
             if replay_mask is not None:
