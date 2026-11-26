@@ -306,7 +306,7 @@ class RLInsightLogger:
 
     @classmethod
     def finish(cls):
-        if not cls._init_done:
+        if cls._rl_insight_module is None:
             return
 
         cls._get_rl_insight().finish()

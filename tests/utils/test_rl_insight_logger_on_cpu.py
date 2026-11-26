@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
@@ -48,7 +49,7 @@ def mock_rl_insight(monkeypatch):
         yield
 
     module.trace_state.side_effect = _trace_state
-    monkeypatch.setattr(RLInsightLogger, "_get_rl_insight", classmethod(lambda cls: module))
+    monkeypatch.setitem(sys.modules, "rl_insight", module)
     return module
 
 
@@ -181,6 +182,17 @@ def test_trace_state_does_not_init_under_concurrent_async_tasks(monkeypatch, moc
     mock_rl_insight.init.assert_not_called()
     assert mock_rl_insight.trace_state.call_count == 16
     assert RLInsightLogger._init_done is False
+
+
+def test_finish_after_trace_state_without_init(monkeypatch, mock_rl_insight):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    with RLInsightLogger.trace_state("rollout"):
+        pass
+
+    RLInsightLogger.finish()
+
+    mock_rl_insight.init.assert_not_called()
+    mock_rl_insight.finish.assert_called_once_with()
 
 
 def test_register_metrics_dedups_and_finish_resets(monkeypatch, mock_rl_insight):
