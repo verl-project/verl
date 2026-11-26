@@ -18,6 +18,7 @@ import json
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -37,27 +38,39 @@ def workflow_matches(paths, rules):
     return bool(matched)
 
 
-def main():
+@dataclass
+class WorkflowSelection:
+    by_path: set[str]
+    by_coverage: set[str]
+
+    @property
+    def selected(self) -> list[str]:
+        # Incomplete coverage can add workflows but cannot cancel a path match.
+        return sorted(self.by_path | self.by_coverage)
+
+
+def select_workflows(paths, recommended=()):
+    """Select Ascend workflows for repository-relative paths and coverage recommendations."""
     rules = json.loads(Path(__file__).with_name("pr_paths.json").read_text())
+    by_path = {name for name, patterns in rules.items() if workflow_matches(paths, patterns)}
+    return WorkflowSelection(by_path, set(recommended).intersection(rules))
+
+
+def main():
     diff = subprocess.check_output(
         ["git", "diff", "--name-only", "--no-renames", "-z", f"{os.environ['BASE_SHA']}...{os.environ['HEAD_SHA']}"]
     )
     paths = os.fsdecode(diff).split("\0")[:-1]
-    by_path = {name for name, patterns in rules.items() if workflow_matches(paths, patterns)}
-
+    selection = select_workflows(paths, json.loads(os.environ.get("COVERAGE_WORKFLOWS") or "[]"))
     outcome = os.environ["SELECTOR_OUTCOME"]
-    by_coverage = set(json.loads(os.environ.get("COVERAGE_WORKFLOWS") or "[]")).intersection(rules)
-
-    # Raw collections can omit failed jobs and uninstrumented workers. Their
-    # recommendations can add a workflow, but cannot cancel a path match.
-    selected = sorted(by_path | by_coverage)
+    selected = selection.selected
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
         print(f"workflows={json.dumps(selected)}", file=output)
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
         print("### Ascend test selection", file=summary)
         print(f"\nCoverage run: {os.environ['BASELINE_RUN'] or 'unavailable'} (selector: {outcome}).", file=summary)
-        print(f"\nRecommended: {', '.join(sorted(by_coverage)) or 'none'}.", file=summary)
-        print(f"\nSelected by path: {', '.join(sorted(by_path)) or 'none'}.", file=summary)
+        print(f"\nRecommended: {', '.join(sorted(selection.by_coverage)) or 'none'}.", file=summary)
+        print(f"\nSelected by path: {', '.join(sorted(selection.by_path)) or 'none'}.", file=summary)
         print(f"\nRunning: {', '.join(selected) or 'none'}.", file=summary)
 
 
