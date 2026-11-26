@@ -146,10 +146,8 @@ jobs:
           coverage-dir: precision-baseline/workflows
           source-dir: precision-baseline/covstub
           map-file: precision-baseline/test_case_map.json
-      - name: Check recommendation inputs
-        run: |
-          test -f precision-baseline/covstub/verl/__init__.py
-          jq -e 'any(.[]; (.files | length) > 0)' precision-baseline/test_case_map.json
+      - name: Validate the map and record baseline completeness
+        run: python scripts/ci/coverage/baseline.py publish precision-baseline
       - name: Publish map and matching source snapshot for PRs
         uses: actions/upload-artifact@v4
         with:

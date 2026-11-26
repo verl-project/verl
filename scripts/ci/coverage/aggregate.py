@@ -72,7 +72,16 @@ def aggregate(inputs, destination, workflow):
     temporary = destination.with_suffix(".partial")
     # Read committed source once, independently of workload environments or reruns.
     snapshot = subprocess.check_output(
-        ["git", "-c", "core.autocrlf=false", "archive", "--format=tar", "--prefix=covstub/", index["source_sha"], "verl"],
+        [
+            "git",
+            "-c",
+            "core.autocrlf=false",
+            "archive",
+            "--format=tar",
+            "--prefix=covstub/",
+            index["source_sha"],
+            "verl",
+        ],
         cwd=Path(__file__).resolve().parents[3],
     )
     with tarfile.open(temporary, "w:gz") as output:
