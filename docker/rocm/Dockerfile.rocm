@@ -103,7 +103,6 @@ FROM install_verl AS install_sglang
 ENV SGLANG_USE_AITER=0
 ENV SGLANG_ATTENTION_BACKEND=triton
 # SGLang package version in the validated ROCm image: 0.5.23.
-# Pin this commit for the ROCm TP weight-sync fix (verl #8716).
 ARG SGLANG_TAG="97c6978369ac1e04c91fcc01c98acc25129a6000"
 
 RUN cd /workspace && git clone https://github.com/sgl-project/sglang.git && \
