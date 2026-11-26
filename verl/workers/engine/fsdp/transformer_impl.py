@@ -1401,7 +1401,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     )
                     if semantic_eos_token_ids:
                         log_probs = semantic_eos_log_probs(
-                            logits_rmpad, input_ids_rmpad_rolled, log_probs, semantic_eos_token_ids
+                            unscaled_logits_rmpad if batch_invariant else logits_rmpad,
+                            input_ids_rmpad_rolled,
+                            log_probs,
+                            semantic_eos_token_ids,
+                            temperature=temperature_rmpad if batch_invariant and not temperature_is_one else None,
                         )
 
             # gather across the ulysses sp group and drop the packed-sequence padding

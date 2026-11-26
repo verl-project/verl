@@ -29,7 +29,7 @@ import pytest
 import torch
 
 from verl.experimental.teacher_loop.teacher_manager import merge_semantic_eos_logprobs
-from verl.utils.torch_functional import semantic_eos_log_probs
+from verl.utils.torch_functional import logprobs_from_logits, semantic_eos_log_probs
 from verl.workers.config import DistillationLossConfig
 from verl.workers.rollout.vllm_rollout.utils import extract_prompt_logprobs
 
@@ -63,6 +63,20 @@ def test_student_terminal_rows_score_whole_class_with_gradient():
 def test_student_without_terminal_labels_is_unchanged():
     log_probs = torch.randn(3)
     assert semantic_eos_log_probs(torch.randn(3, 10), torch.tensor([0, 1, 2]), log_probs, EOS) is log_probs
+
+
+@pytest.mark.parametrize("temperature, effective", [(0.0, 1.0), (1e-6, 1.0), (0.7, 0.7)])
+def test_student_batch_invariant_terminal_rows_use_sampler_temperature(temperature, effective):
+    """Terminal rows must use the same effective temperature as the sampled-token log-probs."""
+    torch.manual_seed(0)
+    labels = torch.tensor([1, 5, 3, 7])
+    logits = torch.randn(len(labels), 10)
+    temperatures = torch.full((len(labels),), temperature)
+
+    sampled = logprobs_from_logits(logits, labels, batch_invariant=True, temperature=temperatures)
+    merged = semantic_eos_log_probs(logits, labels, sampled, EOS, temperature=temperatures)
+
+    torch.testing.assert_close(merged, _reference_class_log_probs(logits / effective, labels))
 
 
 def test_teacher_merges_terminal_tokens_found_in_top_k():

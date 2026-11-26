@@ -127,7 +127,7 @@ def logprobs_from_logits(logits, labels, inplace_backward=True, batch_invariant=
     return output
 
 
-def semantic_eos_log_probs(logits, labels, log_probs, eos_token_ids):
+def semantic_eos_log_probs(logits, labels, log_probs, eos_token_ids, temperature=None):
     """Replace the log-prob of each terminal label with that of the whole terminal class.
 
     Treats functionally equivalent end-of-turn tokens as one stop action
@@ -138,6 +138,8 @@ def semantic_eos_log_probs(logits, labels, log_probs, eos_token_ids):
         labels (LongTensor): (N,) labels.
         log_probs (Tensor): (N,) log-probs of ``labels``.
         eos_token_ids (list[int]): Token ids that all mean "end of turn".
+        temperature (Tensor, optional): (N,) per-row temperature, applied to unscaled logits with the
+            vLLM sampler rule, as in the ``batch_invariant`` path of ``logprobs_from_logits``.
 
     Returns:
         Tensor: (N,) log-probs, ``logsumexp(logits[eos]) - logsumexp(logits)`` at terminal labels.
@@ -147,6 +149,8 @@ def semantic_eos_log_probs(logits, labels, log_probs, eos_token_ids):
     if rows.numel() == 0:
         return log_probs
     eos_logits = logits[rows].float()
+    if temperature is not None:
+        eos_logits = eos_logits / _sampler_temperature(temperature[rows]).unsqueeze(-1)
     eos_log_probs = torch.logsumexp(eos_logits[:, eos_ids], dim=-1) - torch.logsumexp(eos_logits, dim=-1)
     return log_probs.index_put((rows,), eos_log_probs.to(log_probs.dtype))
 
@@ -251,14 +255,17 @@ def logprobs_from_logits_v2(logits: torch.FloatTensor, labels: torch.Tensor) -> 
     return logprobs_labels
 
 
+def _sampler_temperature(temperature: torch.Tensor) -> torch.Tensor:
+    # vLLM samples greedily below this temperature and reports the log-probs of the unscaled logits
+    return torch.where(temperature < 1e-5, 1.0, temperature.float())
+
+
 def _sampler_chunk_logprobs(
     chunk_logits: torch.Tensor, chunk_labels: torch.Tensor, chunk_temperature: Optional[torch.Tensor]
 ) -> torch.Tensor:
     chunk_logits = chunk_logits.float()
     if chunk_temperature is not None:
-        # vLLM samples greedily below this temperature and reports the log-probs of the unscaled logits
-        chunk_temperature = torch.where(chunk_temperature < 1e-5, 1.0, chunk_temperature.float())
-        chunk_logits = chunk_logits / chunk_temperature.unsqueeze(-1)
+        chunk_logits = chunk_logits / _sampler_temperature(chunk_temperature).unsqueeze(-1)
     chunk_logprobs = F.log_softmax(chunk_logits, dim=-1)
     return chunk_logprobs.gather(dim=-1, index=chunk_labels.unsqueeze(-1)).squeeze(-1)
 
