@@ -23,6 +23,7 @@ import torch
 import torch.distributed
 from megatron.core import parallel_state as mpu
 from megatron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.fp8_utils import is_float8tensor
 from megatron.core.package_info import __version__
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
@@ -1061,13 +1062,20 @@ class MegatronEngine(BaseEngine):
 
             if weight in offloaded_params:
                 cpu_data, start, end = offloaded_params[weight]
-                source = cpu_data[start:end].view(weight.shape)
+                staged_weight = cpu_data[start:end].view(weight.shape).to(device, non_blocking=True)
+                if is_float8tensor(weight):
+                    # Preserve quantization metadata while replacing only the raw parameter data.
+                    metadata = weight.get_metadata()
+                    metadata["data" if "data" in metadata else "rowwise_data"] = staged_weight
+                    staged_weight = type(weight)(
+                        shape=weight.shape, dtype=weight.dtype, device=staged_weight.device, **metadata
+                    )
             else:
-                source = weight.detach()
+                staged_weight = weight.detach().to(device, non_blocking=True)
 
             # Never rebind model parameters or cache the temporary device copies.
             # The consumer keeps each copy alive until its conversion/send finishes.
-            yield replace(task, param_weight=source.to(device, non_blocking=True))
+            yield replace(task, param_weight=staged_weight)
 
     def get_per_tensor_param(self, base_sync_done=False, **kwargs):
         peft_config = None
