@@ -1,0 +1,25 @@
+vLLM's gfx950 MXFP8 linear kernel compacts weight_scale to [N/32, K/32] when every 32 rows share their
+scales (DeepSeek-V4 checkpoints). verl starts vLLM with dummy weights, whose scales always pass that test,
+so the live parameter is compacted and every later MXFP8 refit fails with "FP8 refit re-derived
+weight_scale as (N, K/32) ... but the live parameter is (N/32, K/32)". Make the compaction switchable
+(VLLM_ROCM_MXFP8_BLOCK32_SCALES, default on as upstream); set VLLM_ROCM_MXFP8_BLOCK32_SCALES=0 for verl:
+verl's MXFP8 weights carry one scale per row and 32 elements, which never compacts, so only the dummy
+weights take the block-scaled path. v0.34.0 still decides from the scale values (unchanged from v0.32.0).
+Applies to /workspace/vllm (vLLM v0.34.0): cd /workspace/vllm && git apply <this file>
+
+diff --git a/vllm/model_executor/kernels/linear/mxfp8/rocm_native.py b/vllm/model_executor/kernels/linear/mxfp8/rocm_native.py
+index f6d869e..3005dcb 100644
+--- a/vllm/model_executor/kernels/linear/mxfp8/rocm_native.py
++++ b/vllm/model_executor/kernels/linear/mxfp8/rocm_native.py
+@@ -471,7 +471,10 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
+         weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+         # rocm_mxfp8_block32_gemm's split-K varies with M.
+         block_scale = (
+-            None if envs.VLLM_BATCH_INVARIANT else _as_block32_scale(weight_scale)
++            None
++            if envs.VLLM_BATCH_INVARIANT
++            or __import__("os").environ.get("VLLM_ROCM_MXFP8_BLOCK32_SCALES", "1") == "0"
++            else _as_block32_scale(weight_scale)
+         )
+         if block_scale is not None:
+             # Checkpoints with 32x32 scale blocks (DeepSeek V4/V4.1) get them

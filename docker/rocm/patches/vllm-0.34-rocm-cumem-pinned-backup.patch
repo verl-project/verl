@@ -1,0 +1,40 @@
+vLLM 0.34 on ROCm: sleep-mode CPU backups are torch pinned tensors again.
+
+vLLM 0.34 backs up weights to CPU on sleep with an mmap registered by
+cudaHostRegister. On ROCm (rocm/primus:v26.10, HIP 7.18, MI355X) with HIP graphs
+captured, hipMemUnmap then fails with "invalid argument" for some weights
+allocations (cumem_allocator.cpp:274), and wake_up runs out of memory
+(cumem_allocator.cpp:187). Without HIP graphs, without the cudaHostRegister,
+or with a torch pinned tensor, two sleep / wake_up cycles pass. CUDA keeps the
+mmap backup.
+
+--- a/vllm/device_allocator/cumem.py
++++ b/vllm/device_allocator/cumem.py
+@@ -67,7 +67,18 @@
+     python_unmap_and_release(*allocation_handle)
+ 
+ 
++# On ROCm, registering the mmap backup with cudaHostRegister makes hipMemUnmap
++# fail with hipErrorInvalidValue during sleep for some weights allocations that
++# captured HIP graphs read, and the next wake_up then runs out of memory. A torch
++# pinned tensor, as in vLLM 0.32, does not.
++_TORCH_PINNED_BACKUP = current_platform.is_rocm()
++
++
+ def create_cpu_backup(size_in_bytes: int) -> torch.Tensor:
++    if _TORCH_PINNED_BACKUP:
++        return torch.empty(
++            size_in_bytes, dtype=torch.uint8, device="cpu", pin_memory=PIN_MEMORY
++        )
+     backup = torch.frombuffer(
+         mmap.mmap(-1, size_in_bytes, flags=mmap.MAP_PRIVATE), dtype=torch.uint8
+     )
+@@ -84,6 +95,8 @@
+ 
+ 
+ def release_cpu_backup(backup: torch.Tensor) -> None:
++    if _TORCH_PINNED_BACKUP:
++        return
+     if backup.is_pinned() and libcudart.cudaHostUnregister(backup.data_ptr()):
+         libcudart.cudaGetLastError()
+ 

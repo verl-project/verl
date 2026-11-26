@@ -1,0 +1,106 @@
+vLLM 0.34 on ROCm: run the per-row MXFP8 linear (RocmDotScaledMxfp8LinearKernel)
+through opaque custom ops.
+
+_mxfp8_dot_scaled_linear / _mxfp8_dot_scaled_gemm choose the fused-quant branch
+and the Triton tile (_select_cfg) from the token count M. Called straight from
+the torch.compile'd forward, the choice is made once at trace time (the profile
+run, M = max_num_batched_tokens) and frozen into every CUDA graph, so decode at
+M = 256 ran the 128x128x256 prefill tile: grid 2x20 (qkv) / 2x16 (o_proj) on
+MI355X's 256 CUs, ~18 us per call. Eager mode picks 64x64x512 (grid 4x40 / 4x32,
+~10 us). The block32 path (rocm_block32_gemm.py) already uses opaque ops for the
+same reason; this does the same for the per-row path. Numerics: same kernel and
+MXFP8 format, only the tile changes.
+
+Apply after vllm-0.34-rocm-mxfp8-block32-scales-switch.patch:
+cd /workspace/vllm && git apply <this file>
+
+--- a/vllm/model_executor/kernels/linear/mxfp8/rocm_native.py
++++ b/vllm/model_executor/kernels/linear/mxfp8/rocm_native.py
+@@ -32,6 +32,7 @@
+ from vllm.model_executor.utils import replace_parameter
+ from vllm.platforms import current_platform
+ from vllm.triton_utils import tl, triton
++from vllm.utils.torch_utils import direct_register_custom_op
+ 
+ from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
+ from .rocm_block32_gemm import (
+@@ -254,6 +255,63 @@
+     return out
+ 
+ 
++# Opaque ops for the per-row path, as rocm_block32_gemm does for the block32 one:
++# _mxfp8_dot_scaled_linear / _gemm pick the fused-quant branch and the tile
++# config from the token count M. Called directly from a torch.compile'd
++# forward, that choice is made once at trace time (vLLM compiles in its profile
++# run, at max_num_batched_tokens), so every CUDA graph, decode included, runs
++# the large-M prefill tile. Behind an op the choice is made per call, with each
++# captured graph's own M.
++def _rocm_mxfp8_linear_impl(
++    x: torch.Tensor, w: torch.Tensor, w_scale: torch.Tensor
++) -> torch.Tensor:
++    if x.shape[0] == 0:
++        return x.new_empty((0, w.shape[0]))
++    return _mxfp8_dot_scaled_linear(x, w, w_scale)
++
++
++def _rocm_mxfp8_linear_fake(
++    x: torch.Tensor, w: torch.Tensor, w_scale: torch.Tensor
++) -> torch.Tensor:
++    return x.new_empty((x.shape[0], w.shape[0]))
++
++
++direct_register_custom_op(
++    op_name="rocm_mxfp8_linear",
++    op_func=_rocm_mxfp8_linear_impl,
++    fake_impl=_rocm_mxfp8_linear_fake,
++)
++
++
++def _rocm_mxfp8_gemm_impl(
++    x_q: torch.Tensor,
++    x_scale: torch.Tensor,
++    w: torch.Tensor,
++    w_scale: torch.Tensor,
++    out_dtype: torch.dtype,
++) -> torch.Tensor:
++    if x_q.shape[0] == 0:
++        return x_q.new_empty((0, w.shape[0]), dtype=out_dtype)
++    return _mxfp8_dot_scaled_gemm(x_q, x_scale, w, w_scale, out_dtype)
++
++
++def _rocm_mxfp8_gemm_fake(
++    x_q: torch.Tensor,
++    x_scale: torch.Tensor,
++    w: torch.Tensor,
++    w_scale: torch.Tensor,
++    out_dtype: torch.dtype,
++) -> torch.Tensor:
++    return x_q.new_empty((x_q.shape[0], w.shape[0]), dtype=out_dtype)
++
++
++direct_register_custom_op(
++    op_name="rocm_mxfp8_gemm",
++    op_func=_rocm_mxfp8_gemm_impl,
++    fake_impl=_rocm_mxfp8_gemm_fake,
++)
++
++
+ # gfx950's async-copy LDS (default in the triton 3.8 this branch pins) leaves no
+ # room for num_stages=3 at BLOCK_K=256; use 2 there.
+ _BK256_STAGES = 3
+@@ -543,13 +601,13 @@
+                     x2d, layer.weight, layer.weight_scale, out_dtype
+                 )
+         elif qa is not None:
+-            out = _mxfp8_dot_scaled_gemm(
++            out = torch.ops.vllm.rocm_mxfp8_gemm(
+                 x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
+             )
+         elif layer.weight.element_size() >= 2:
+             out = torch.nn.functional.linear(x2d, layer.weight.to(out_dtype))
+         elif x2d.shape[-1] % _DOT_SCALED_K_ALIGN == 0:
+-            out = _mxfp8_dot_scaled_linear(x2d, layer.weight, layer.weight_scale)
++            out = torch.ops.vllm.rocm_mxfp8_linear(x2d, layer.weight, layer.weight_scale)
+         else:
+             # process_weights_after_loading dequantizes these weights once, so
+             # this runs only if it did not; dot_scaled would be invalid here.
