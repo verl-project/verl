@@ -15,6 +15,8 @@ import inspect
 import logging
 import os
 import socket
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -46,6 +48,19 @@ def get_random_string(length: int) -> str:
 
     letters_digits = string.ascii_letters + string.digits
     return "".join(random.choice(letters_digits) for _ in range(length))
+
+
+_submitted_worker_refs = ContextVar("submitted_worker_refs", default=None)
+
+
+@contextmanager
+def track_worker_submissions(refs):
+    """Retain each submitted ref even if a later submission or blocking get fails."""
+    token = _submitted_worker_refs.set(refs)
+    try:
+        yield
+    finally:
+        _submitted_worker_refs.reset(token)
 
 
 def func_generator(self, method_name, dispatch_fn, collect_fn, execute_fn, blocking):
@@ -814,10 +829,14 @@ class RayWorkerGroup(WorkerGroup):
         """
         if self.fused_worker_used and method_name not in self.method_names:
             remote_call = getattr(worker, self.fused_worker_execute_fn_name)
-            return remote_call.remote(f"{self.sub_cls_name}_fwmn_{method_name}", *args, **kwargs)
-        # fused worker not used
-        remote_call = getattr(worker, method_name)
-        return remote_call.remote(*args, **kwargs)
+            args = (f"{self.sub_cls_name}_fwmn_{method_name}", *args)
+        else:
+            remote_call = getattr(worker, method_name)
+        ref = remote_call.remote(*args, **kwargs)
+        refs = _submitted_worker_refs.get()
+        if refs is not None:
+            refs.append(ref)
+        return ref
 
     def execute_rank_zero_sync(self, method_name: str, *args, **kwargs):
         """Execute a method on rank zero worker synchronously.

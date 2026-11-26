@@ -19,15 +19,22 @@ non-primitive parameter (e.g. an ``array``) is parsed from untrusted model
 output.
 """
 
+import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-from verl.experimental.agent_loop.tool_parser import Qwen3XMLToolParser
+import pytest
+
+from verl.experimental.agent_loop.tool_agent_loop import AgentData, AgentState, ToolAgentLoop
+from verl.experimental.agent_loop.tool_parser import HermesToolParser, Qwen3XMLToolParser
 from verl.tools.schemas import (
     OpenAIFunctionParametersSchema,
     OpenAIFunctionPropertySchema,
     OpenAIFunctionSchema,
     OpenAIFunctionToolSchema,
 )
+from verl.utils.tokenizer.continuous_token import ContinuousTokenBuilder
 
 
 def _make_tool(param_name: str, param_type: str) -> OpenAIFunctionToolSchema:
@@ -108,3 +115,57 @@ def test_missing_tools_defaults_to_empty_list():
 
     assert result is not None
     assert json.loads(result.arguments) == {"items": "value"}
+
+
+@pytest.mark.parametrize("parser_cls", [Qwen3XMLToolParser, HermesToolParser])
+def test_call_spans_follow_sampled_token_boundaries(parser_cls):
+    # The second call uses a noncanonical split of the closing tag. The last
+    # one is incomplete when the generation reaches its token limit.
+    pieces = [
+        "prose",
+        "<tool_call>",
+        "1",
+        "</tool_call>",
+        "more",
+        "<",
+        "tool",
+        "_call>",
+        "2",
+        "</",
+        "tool_call",
+        ">",
+        "<|im_end|>",
+        "<tool_call>",
+        "3",
+    ]
+    tokenizer = SimpleNamespace(convert_ids_to_tokens=lambda ids: [pieces[i] for i in ids])
+    parser = parser_cls(tokenizer=tokenizer)
+    assert parser.tool_call_token_spans(list(range(len(pieces)))) == [(1, 4), (5, 12), (13, 15)]
+    assert parser.tool_call_token_spans([0, 4, 12]) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skip_calls", [True, False])
+async def test_call_mask_at_final_turn_preserves_prior_observations(skip_calls):
+    pieces = ["<tool_call>", "argument", "</tool_call>", "answer", "<|im_end|>"]
+    parser = HermesToolParser(tokenizer=SimpleNamespace(convert_ids_to_tokens=lambda ids: [pieces[i] for i in ids]))
+    # The previous tool result includes a literal unclosed tag. Its contents
+    # must not affect the next independently generated assistant turn.
+    data = AgentData([], None, None, None, None, {}, "request", {})
+    data.prompt_ids = [50, 51, 20, 21, 0]
+    data.response_mask = [1, 0, 0]
+    ids = [3, 0, 1, 2, 4]
+    output = SimpleNamespace(token_ids=ids, num_preempted=0, extra_fields={}, log_probs=None, routed_experts=None)
+    loop = ToolAgentLoop.__new__(ToolAgentLoop)
+    loop.tool_parser = parser
+    loop.server_manager = SimpleNamespace(generate=AsyncMock(return_value=output))
+    loop.continuous_token_builder = ContinuousTokenBuilder(parser.tokenizer)
+    loop.loop = asyncio.get_running_loop()
+    loop.skip_tool_call_tokens = skip_calls
+    loop.response_length = 8
+
+    state = await loop._handle_generating_state(data, {})
+    assert state is AgentState.TERMINATED
+    assert data.prompt_ids == [50, 51, 20, 21, 0, *ids]
+    expected_turn_mask = [1, 0, 0, 0, 1] if skip_calls else [1] * len(ids)
+    assert data.response_mask == [1, 0, 0, *expected_turn_mask]

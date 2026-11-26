@@ -16,6 +16,8 @@ import json
 import logging
 import os
 from abc import ABC, abstractmethod
+from bisect import bisect_left, bisect_right
+from itertools import accumulate
 from typing import Any, Optional
 
 import regex
@@ -93,8 +95,27 @@ class ToolParser(ABC):
         return decorator
 
 
+class XMLToolCallSpanParser(ToolParser):
+    """Locate Qwen/Hermes XML call envelopes in the original generation's token space."""
+
+    _call_envelope = regex.compile(r"<tool_call>.*?(?:</tool_call>|\Z)", regex.DOTALL)
+
+    def tool_call_token_spans(self, token_ids: list[int]) -> list[tuple[int, int]]:
+        # Keep the sampled token boundaries, including noncanonical splits of a tag.
+        # Byte-level and SentencePiece token strings retain the ASCII XML delimiters.
+        pieces = self.tokenizer.convert_ids_to_tokens(token_ids)
+        text = "".join(pieces)
+        if "<tool_call>" not in text:
+            return []
+        ends = list(accumulate(map(len, pieces)))
+        return [
+            (bisect_right(ends, match.start()), bisect_left(ends, match.end()) + 1)
+            for match in self._call_envelope.finditer(text)
+        ]
+
+
 @ToolParser.register("hermes")
-class HermesToolParser(ToolParser):
+class HermesToolParser(XMLToolCallSpanParser):
     """Adapted from https://github.com/vllm-project/vllm/blob/v0.9.1/vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py"""
 
     def __init__(self, tokenizer) -> None:
@@ -187,7 +208,7 @@ class GptOssToolParser(ToolParser):
 
 
 @ToolParser.register("qwen3_coder")
-class Qwen3XMLToolParser(ToolParser):
+class Qwen3XMLToolParser(XMLToolCallSpanParser):
     """
     Tool parser for qwen3_coder/qwen3.5 model.
     Adapted from https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct/blob/main/qwen3coder_tool_parser.py

@@ -203,6 +203,8 @@ class vLLMColocateWorkerExtension:
 
     # Set per instance in __new__ when the rollout uses per-token NVFP4 experts.
     _nvfp4_per_token_config = None
+    # Set per instance while a hidden-state teacher reload has started and not finished.
+    _hidden_teacher_reload_interrupted = False
 
     def __new__(cls, **kwargs):
         set_death_signal()
@@ -298,6 +300,30 @@ class vLLMColocateWorkerExtension:
             model = self.model_runner.get_model()
             attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
             clear_kv_cache(model)
+
+    def install_hidden_state_pooler(self):
+        from verl.experimental.teacher_loop.vllm_hidden_pooler import install_hidden_pooler
+
+        install_hidden_pooler(self)
+
+    def reload_hidden_teacher_weights(self, model_path: str, use_shm: bool):
+        from verl.utils.fs import copy_to_local
+
+        if self._hidden_teacher_reload_interrupted:
+            # vLLM keeps the layer progress of an interrupted reload. A later reload would
+            # finish those layers early and serve the unloaded part without an error.
+            return "RuntimeError: an earlier teacher reload stopped partway; recreate the teacher replica"
+        try:
+            # Each node has its own checkpoint cache. The filesystem helper locks copies across TP ranks.
+            weights_path = copy_to_local(model_path, use_shm=use_shm)
+            self._hidden_teacher_reload_interrupted = True
+            self.reload_weights(weights_path=weights_path)
+            self._hidden_teacher_reload_interrupted = False
+        except Exception as exc:
+            # Return an ordinary RPC result so vLLM consumes every rank's reply.
+            logger.exception("Teacher checkpoint reload failed for %s", model_path)
+            return f"{type(exc).__name__}: {exc}"
+        return None
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""

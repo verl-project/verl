@@ -1233,6 +1233,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         pad_to_length_bucket: int | None = None,
         cp_layout: str = "zigzag",
         local_cp_size: int | None = None,
+        opd_token_indices=None,
     ):
         assert logits.shape[:2] == label.shape[:2]
         # avoid non-positive temperature such as padding
@@ -1269,6 +1270,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
             from verl.models.mcore.util import get_thd_quant_align_size
 
             # the top-k tensors are packed like the student inputs: the same padding, CP layout and CP group
+            hidden_kwargs = {} if opd_token_indices is None else {"token_indices": opd_token_indices}
             ret.update(
                 logits_processor_func(
                     student_logits=logits_bak,
@@ -1278,6 +1280,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                     local_cp_size=local_cp_size,
+                    **hidden_kwargs,
                 )
             )
         if not distillation_only:
@@ -1382,6 +1385,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
             raise NotImplementedError(f"Pad mode {pad_mode} is not supported for megatron engine")
 
         if use_fused_kernels:
+            if distillation_use_topk and "teacher_hidden_handle" in batch:
+                raise ValueError("Hidden-state distillation requires full student logits. Disable fused kernels.")
             temperature_value = _resolve_fused_temperature(temperature)
 
         if use_fused_kernels:
@@ -1457,6 +1462,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 "loss_mask": loss_mask,
                 "response_attention_mask": response_attention_mask,
             }
+
+            if distillation_use_topk and "teacher_hidden_handle" in batch:
+                # Follow exactly the same THD/BSHD padding and CP layout as the model logits.
+                # Zero is reserved for padded tokens.
+                ordinal = torch.arange(1, input_ids.values().numel() + 1, device=input_ids.device)
+                logits_processor_args["opd_token_indices"] = torch.nested.nested_tensor_from_jagged(
+                    ordinal, input_ids.offsets()
+                )
 
             mtp_loss_normalization_factor = None
             if (

@@ -53,6 +53,7 @@ class _DummyWorker:
     _compute_position_ids = AgentLoopWorker._compute_position_ids
     _compute_score = AgentLoopWorker._compute_score
     _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+    _teacher_prefill_payload = AgentLoopWorker._teacher_prefill_payload
     distillation_enabled = False
 
     def __init__(self, topk_log_probs: int):
@@ -143,3 +144,44 @@ async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypa
 
     assert "rollout_topk_ids" not in fields.keys()
     assert "rollout_topk_log_probs" not in fields.keys()
+
+
+@pytest.mark.asyncio
+async def test_dedicated_hidden_state_keeps_each_trajectory_media(monkeypatch):
+    worker = _DummyWorker(topk_log_probs=0)
+    worker.distillation_enabled = True
+    worker.teacher_execution_mode = "dedicated_hidden_state"
+    image_output, text_output = _output({}), _output({})
+    image_output.multi_modal_data = {"images": ["first-image"]}
+    image_output.mm_processor_kwargs = {"max_pixels": 4096}
+    text_output.mm_processor_kwargs = {}
+    fields = await _postprocess(monkeypatch, worker, [image_output, text_output], validate=False)
+    assert fields[0]["teacher_prefill"] == {
+        "multi_modal_data": {"images": ["first-image"]},
+        "mm_processor_kwargs": {"max_pixels": 4096},
+    }
+    assert fields[1]["teacher_prefill"] == {}
+    assert "multi_modal_data" not in fields.keys()
+
+
+@pytest.mark.parametrize("mode", ["dedicated_hidden_state", "weight_swapped_hidden_state", None])
+def test_agent_loop_tq_custom_hidden_loss_mask(monkeypatch, mode):
+    worker = _DummyWorker(topk_log_probs=0)
+    worker.distillation_enabled = mode is not None
+    worker.teacher_execution_mode = mode
+    output = _output({})
+    output.response_ids = [11, 12, 13]
+    output.response_mask = [1, 0, 1]
+    output.loss_mask = [False, True, True]
+    default = _output({})
+    fields = asyncio.run(_postprocess(monkeypatch, worker, [output, default], validate=False))
+    assert fields["response_mask"][0].tolist() == [1, 0, 1]
+    assert fields["loss_mask"][0].tolist() == ([0, 0, 1] if mode else [1, 0, 1])
+    assert fields["loss_mask"][1].tolist() == [1, 1]
+
+
+def test_agent_output_requires_one_loss_mask_entry_per_response_token():
+    output = _output({})
+    output.loss_mask = [False]
+    with pytest.raises(ValueError, match="one entry per response token"):
+        output.as_dict()

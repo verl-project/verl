@@ -14,6 +14,7 @@
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -22,7 +23,7 @@ from verl.utils.config import omega_conf_to_dataclass
 
 from .rollout import RolloutConfig
 
-__all__ = ["DistillationLossConfig", "DistillationTeacherModelConfig", "DistillationConfig"]
+__all__ = ["DistillationLossConfig", "TeacherExecutionConfig", "DistillationTeacherModelConfig", "DistillationConfig"]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -87,6 +88,9 @@ class DistillationLossConfig(BaseConfig):
     # overhead (saved-tensor total stays constant either way).
     chunked_topk_chunk_size: int = 4096
 
+    # Number of active prediction positions per full-vocabulary KL projection.
+    hidden_state_chunk_size: int = 32
+
     use_policy_gradient: bool = False
     policy_loss_mode: str = "vanilla"
     clip_ratio: float = 0.2
@@ -109,6 +113,9 @@ class DistillationLossConfig(BaseConfig):
         from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
 
         self.loss_settings: DistillationLossSettings = get_distillation_loss_settings(self.loss_mode)
+
+        if self.hidden_state_chunk_size < 1:
+            raise ValueError("hidden_state_chunk_size must be positive.")
 
         if self.policy_loss_mode != "vanilla":
             raise NotImplementedError(
@@ -192,20 +199,22 @@ class DistillationTeacherModelConfig(BaseConfig):
         if self.num_replicas is None:
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
-    def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
+    def validate_and_prepare_for_distillation(
+        self, use_topk: bool, topk: Optional[int], prefill_only: bool = False
+    ) -> None:
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.inference.max_model_len
         student_prompt_length = self.inference.prompt_length
         student_response_length = self.inference.response_length
-        required_context_len = student_prompt_length + student_response_length + 1
+        required_context_len = student_prompt_length + student_response_length + int(not prefill_only)
         if max_model_len is not None and required_context_len > max_model_len:
             raise ValueError(
                 "Distillation teacher inference requires room for the student prompt, the full student "
-                f"response, and one generated token, but got {student_prompt_length=}, "
+                f"response, and any requested output token, but got {student_prompt_length=}, "
                 f"{student_response_length=}, {required_context_len=}, {max_model_len=}."
             )
         self.inference.prompt_length = self.inference.prompt_length + self.inference.response_length
-        self.inference.response_length = 1
+        self.inference.response_length = int(not prefill_only)
         self._validate_topk_logprobs(use_topk=use_topk, topk=topk)
 
     def _validate_topk_logprobs(self, use_topk: bool, topk: Optional[int]) -> None:
@@ -239,6 +248,39 @@ class DistillationTeacherModelConfig(BaseConfig):
                 raise NotImplementedError(
                     f"DistillationTeacherModelConfig does not support inference engine {engine_name}"
                 )
+
+
+@dataclass
+class TeacherExecutionConfig(BaseConfig):
+    """Choose dedicated logprob or hidden-state pools, or a shared hidden-state pool."""
+
+    mode: str = "dedicated"
+    # Send projected full-vocabulary logits instead of hidden states for a matched comparison.
+    transfer_signal: str = "hidden_states"
+    # Exclude assistant tool-call spans from the distillation targets of the tool agent.
+    skip_tool_call_tokens: bool = False
+    weight_cache: dict = field(default_factory=lambda: {"max_resident_teachers": 1})
+    hidden_state_transport: dict = field(
+        default_factory=lambda: {"backend": "transfer_queue", "storage_backend": "simple"}
+    )
+
+    def __post_init__(self):
+        if self.mode not in ("dedicated", "weight_swapped_hidden_state", "dedicated_hidden_state"):
+            raise ValueError(f"Unknown teacher execution mode {self.mode!r}.")
+        if self.transfer_signal not in ("hidden_states", "full_logits"):
+            raise ValueError(f"Unknown full-vocabulary transfer signal {self.transfer_signal!r}.")
+        if self.skip_tool_call_tokens and self.mode == "dedicated":
+            raise ValueError("Skipping assistant tool-call tokens requires hidden-state OPD execution.")
+        if self.transfer_signal == "full_logits" and self.mode != "dedicated_hidden_state":
+            raise ValueError("Full-logit transfer requires a dedicated_hidden_state teacher pool.")
+        if self.mode == "weight_swapped_hidden_state" and self.weight_cache.get("max_resident_teachers") != 1:
+            raise ValueError("A weight-swapped teacher pool requires one resident teacher.")
+        if self.mode != "dedicated":
+            if (self.hidden_state_transport.get("backend"), self.hidden_state_transport.get("storage_backend")) != (
+                "transfer_queue",
+                "simple",
+            ):
+                raise ValueError("Hidden-state OPD requires TransferQueue SimpleStorage.")
 
 
 @dataclass
@@ -287,6 +329,7 @@ class DistillationConfig(BaseConfig):
     nnodes: int = 0
     teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
     teacher_key: str = "data_source"
+    teacher_execution: TeacherExecutionConfig = field(default_factory=TeacherExecutionConfig)
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
     def __post_init__(self):
@@ -294,15 +337,72 @@ class DistillationConfig(BaseConfig):
             return
 
         self.teacher_models = self._resolve_teacher_models()
+        shared = self.teacher_execution.mode == "weight_swapped_hidden_state"
+        hidden_state = self.teacher_execution.mode != "dedicated"
+        if hidden_state != (self.distillation_loss.loss_mode == "forward_kl_hidden_state"):
+            raise ValueError(
+                "Hidden-state teacher execution and forward_kl_hidden_state loss must be selected together."
+            )
+        if hidden_state and (self.distillation_loss.use_policy_gradient or self.distillation_loss.use_task_rewards):
+            raise ValueError("Hidden-state OPD requires use_policy_gradient=False and use_task_rewards=False.")
+        total_pool_size = self.n_gpus_per_node * self.nnodes
+        if shared:
+            first = next(iter(self.teacher_models.values()))
+            for key, teacher in self.teacher_models.items():
+                if teacher.inference != first.inference:
+                    raise ValueError(f"Teacher {key!r} has incompatible serving or parallelism settings.")
+                size = teacher.per_replica_world_size
+                if size <= 0 or total_pool_size <= 0 or total_pool_size % size:
+                    raise ValueError(f"Teacher replica size {size} must divide the shared pool size {total_pool_size}.")
+                count = total_pool_size // size
+                if teacher.num_replicas not in (None, 0, count):
+                    raise ValueError(f"Teacher {key!r} needs {count} replicas to occupy the shared pool.")
+                teacher.num_replicas = count
         teacher_world_size_sum = 0
         for teacher_model in self.teacher_models.values():
+            if hidden_state:
+                inference = teacher_model.inference
+                if inference.name != "vllm" or inference.mode != "async":
+                    raise ValueError("Hidden-state OPD requires the async vLLM teacher backend.")
+                if inference.data_parallel_size != 1:
+                    raise ValueError("Use multiple teacher replicas with data_parallel_size=1 per vLLM engine.")
+                if not shared and not teacher_model.num_replicas:
+                    teacher_model.num_replicas = 1
+                engine = inference.engine_kwargs.get("vllm", {})
+                hf_overrides = engine.get("hf_overrides") or {}
+                head_fields = {
+                    "final_logit_softcapping",
+                    "logit_scale",
+                    "logits_scaling",
+                    "output_multiplier_scale",
+                    "logits_scale",
+                    "vocab_size",
+                    "tie_word_embeddings",
+                    "model_type",
+                    "architectures",
+                }
+                text_overrides = hf_overrides.get("text_config") or {}
+                if not isinstance(text_overrides, Mapping):
+                    raise ValueError("Hidden-state OPD requires text_config overrides to be a mapping.")
+                overridden = head_fields.intersection(hf_overrides) | head_fields.intersection(text_overrides)
+                if overridden:
+                    raise ValueError(f"Hidden-state OPD cannot reconstruct output-head overrides: {sorted(overridden)}")
+                if (
+                    inference.quantization.enabled
+                    or engine.get("quantization")
+                    or hf_overrides.get("quantization_config")
+                    or hf_overrides.get("quantization_config_file")
+                ):
+                    raise ValueError("Hidden-state OPD requires unquantized teacher weights for full-vocabulary KL.")
+                engine_kwargs = teacher_model.inference.engine_kwargs
+                engine_kwargs["vllm"] = {**engine_kwargs.get("vllm", {}), "hidden_state_opd": True}
             teacher_model.validate_and_prepare_for_distillation(
                 use_topk=self.distillation_loss.loss_settings.use_topk,
                 topk=self.distillation_loss.topk,
+                prefill_only=hidden_state,
             )
             teacher_world_size_sum += teacher_model.world_size
-        total_pool_size = self.n_gpus_per_node * self.nnodes
-        if teacher_world_size_sum != total_pool_size:
+        if not shared and teacher_world_size_sum != total_pool_size:
             raise ValueError(
                 f"Sum of teacher (num_replicas * per_replica_world_size) ({teacher_world_size_sum}) must match "
                 f"the distillation resource pool size "

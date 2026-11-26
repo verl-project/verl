@@ -54,20 +54,20 @@ class DistillationLossSettings(BaseConfig):
         names (str | list[str]): Name(s) to register the distillation loss function under.
         use_topk (bool): Whether the loss function uses top-k log probabilities.
         use_estimator (bool): Whether the loss function uses single-sample KL estimators.
+        use_hidden_states (bool): Whether the loss function consumes full-vocabulary teacher records.
     """
 
     names: str | list[str] = field(default_factory=list)
     use_topk: bool = False
     use_estimator: bool = False
+    use_hidden_states: bool = False
 
     _mutable_fields = {"names"}
 
     def __post_init__(self):
         self.names = [self.names] if isinstance(self.names, str) else self.names
-        if sum([self.use_topk, self.use_estimator]) != 1:
-            raise ValueError(
-                f"Expected only one of use_estimator, use_topk, but got {self.use_estimator=}, {self.use_topk=}."
-            )
+        if sum((self.use_topk, self.use_estimator, self.use_hidden_states)) != 1:
+            raise ValueError("Select exactly one teacher signal for the distillation loss")
 
 
 DISTILLATION_LOSS_REGISTRY: dict[str, DistillationLossFn] = {}
@@ -116,6 +116,8 @@ def compute_distillation_loss_range(
         distillation_losses_response = distillation_losses[response_mask.bool().to_padded_tensor(False)]
     else:
         distillation_losses_response = distillation_losses[response_mask.bool()]
+    if distillation_losses_response.numel() == 0:
+        return {}
     return {
         "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
         "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
@@ -217,6 +219,8 @@ def distillation_ppo_loss(
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
     pad_to_length_bucket: Optional[int] = None,
+    token_indices: torch.Tensor = None,
+    fsdp_group=None,
 ):
     """Loss function used both for logit processor and final policy loss.
     - student_logits is not None, compute the topk loss in logit processor.
@@ -251,6 +255,13 @@ def distillation_ppo_loss(
 
     # Called as logits processor
     if student_logits is not None or student_topk_log_probs is not None:
+        if distillation_config.distillation_loss.loss_settings.use_hidden_states:
+            from verl.trainer.distillation.hidden_state import hidden_state_kl
+
+            if student_logits is None:
+                raise ValueError("Hidden-state distillation requires full student logits. Disable fused kernels.")
+            losses = hidden_state_kl(config, distillation_config, data, student_logits, token_indices, fsdp_group)
+            return {"distillation_losses": losses}
         return compute_topk_loss(
             config,
             distillation_config,
@@ -311,6 +322,9 @@ def distillation_loss(
         data=data,
     )
     response_mask = data["response_mask"]
+    if loss_config.loss_mode == "forward_kl_hidden_state":
+        # The trainer finalized this mask before both teacher export and global token counting.
+        response_mask = data.get("loss_mask", response_mask)
     loss_agg_mode = config.loss_agg_mode
 
     distillation_metrics.update(
@@ -351,6 +365,10 @@ def distillation_loss(
         distillation_metrics.update(pg_metrics)
     else:
         # Directly backpropagate distillation loss as a supervised loss, as in https://arxiv.org/abs/2306.13649.
+        if loss_config.loss_mode == "forward_kl_hidden_state" and data["batch_num_tokens"] == 0:
+            # A truncated tool-only batch can have no targets on any DP rank.
+            # Summing an empty slice keeps backward connected with zero gradient.
+            return distillation_losses.reshape(-1)[:0].sum(), distillation_metrics
         if response_mask.is_nested:
             response_mask = response_mask.to_padded_tensor(False)
         distillation_loss = agg_loss(
@@ -361,6 +379,12 @@ def distillation_loss(
         )
 
     return distillation_loss, distillation_metrics
+
+
+@register_distillation_loss(DistillationLossSettings(names="forward_kl_hidden_state", use_hidden_states=True))
+def compute_hidden_state_loss(config, distillation_config, model_output, data):
+    """Select response predictions in their original order for the actor's masked reduction."""
+    return no_padding_2_padding(model_output["distillation_losses"], data), {}
 
 
 @register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk", "forward_kl_topk_tail"], use_topk=True))  # type: ignore[arg-type]

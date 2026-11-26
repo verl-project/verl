@@ -28,7 +28,7 @@ from verl.experimental.agent_loop.agent_loop import (
     ToolListWrap,
     register,
 )
-from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
+from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser, XMLToolCallSpanParser
 from verl.tools.function_tool import FunctionTool, normalize_function_tool_return
 from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, ToolResponse
 from verl.utils.profiler import simple_timer
@@ -121,6 +121,13 @@ class ToolAgentLoop(AgentLoopBase):
         self.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
         self.tool_parser = ToolParser.get_tool_parser(self.rollout_config.multi_turn.format, self.tokenizer)
         self.tool_parser_name = self.rollout_config.multi_turn.format
+
+        distillation = self.config.get("distillation") or {}
+        self.skip_tool_call_tokens = distillation.get("enabled", False) and distillation.get(
+            "teacher_execution", {}
+        ).get("skip_tool_call_tokens", False)
+        if self.skip_tool_call_tokens and not isinstance(self.tool_parser, XMLToolCallSpanParser):
+            raise ValueError(f"skip_tool_call_tokens requires a parser with token spans, got {self.tool_parser_name!r}")
 
         self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
@@ -284,6 +291,13 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.response_mask = response_mask
         if response_logprobs is not None:
             agent_data.response_logprobs = response_logprobs
+
+        if self.skip_tool_call_tokens:
+            # Continuous Token appends the sampled IDs as a suffix. Keep the call in the
+            # context for the next turn and mask its generated tokens from direct distillation.
+            offset = len(agent_data.response_mask) - len(agent_data.response_ids)
+            for start, stop in self.tool_parser.tool_call_token_spans(agent_data.response_ids):
+                agent_data.response_mask[offset + start : offset + stop] = [0] * (stop - start)
 
         if output.routed_experts is not None:
             agent_data.routed_experts = output.routed_experts
