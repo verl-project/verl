@@ -439,8 +439,8 @@ class VeOmniEngineConfig(EngineConfig):
     ulysses_parallel_size: int = 1
     expert_parallel_size: int = 1
     ple_parallel_size: int = 1
-    freeze_ple_embeddings: bool = True
-    frozen_ple_dtype: str = "bfloat16"
+    freeze_ple_embeddings: bool = False
+    frozen_ple_dtype: Optional[str] = None
     seed: int = 42
     full_determinism: bool = False
     mixed_precision: bool = False
@@ -499,7 +499,11 @@ class VeOmniEngineConfig(EngineConfig):
                 "ple_parallel_size > 1 requires broadcast_model_weights_from_rank0=False and "
                 "ep_sharded_stream_load=True."
             )
+        if self.freeze_ple_embeddings and self.frozen_ple_dtype is None:
+            object.__setattr__(self, "frozen_ple_dtype", "bfloat16")
         if self.frozen_ple_dtype is not None:
+            if not self.freeze_ple_embeddings:
+                raise ValueError("frozen_ple_dtype requires freeze_ple_embeddings=True.")
             if self.frozen_ple_dtype not in {"bfloat16", "float32"}:
                 raise ValueError(
                     f"frozen_ple_dtype must be one of None, 'bfloat16', 'float32'; got {self.frozen_ple_dtype!r}."

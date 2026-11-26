@@ -879,6 +879,14 @@ def test_veomni_engine_skips_frozen_ple_only_for_rollout_export(monkeypatch, tmp
         }
         assert shard0.weight.requires_grad is True  # VeOmniEngine itself did not mutate requires_grad
 
+        # The disabled default forwards no frozen-table dtype to VeOmni.
+        engine.engine_config = VeOmniEngineConfig(forward_only=True)
+        engine._build_model_optimizer()
+        assert captured_parallelize_kwargs == {
+            "freeze_ple_embeddings": False,
+            "frozen_ple_dtype": None,
+        }
+
         orig_full_tensor = torch.distributed.tensor.DTensor.full_tensor
         ple_full_tensor_calls = 0
 
@@ -922,10 +930,11 @@ def test_veomni_engine_skips_frozen_ple_only_for_rollout_export(monkeypatch, tmp
 
         # 6. Default config flags and PLE validation.
         default_cfg = VeOmniEngineConfig()
-        assert default_cfg.freeze_ple_embeddings is True
-        assert default_cfg.frozen_ple_dtype == "bfloat16"
+        assert default_cfg.freeze_ple_embeddings is False
+        assert default_cfg.frozen_ple_dtype is None
         assert default_cfg.broadcast_model_weights_from_rank0 is False
         assert default_cfg.ep_sharded_stream_load is True
+        assert VeOmniEngineConfig(freeze_ple_embeddings=True).frozen_ple_dtype == "bfloat16"
         with pytest.raises(ValueError, match="requires freeze_ple_embeddings=True"):
             VeOmniEngineConfig(freeze_ple_embeddings=False, frozen_ple_dtype="bfloat16")
         with pytest.raises(ValueError, match="frozen_ple_dtype must be one of"):

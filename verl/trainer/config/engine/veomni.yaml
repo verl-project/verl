@@ -18,7 +18,7 @@ ple_parallel_size: 1
 
 freeze_ple_embeddings: false
 
-frozen_ple_dtype: bfloat16
+frozen_ple_dtype: null
 
 mixed_precision: true
 
