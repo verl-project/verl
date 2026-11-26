@@ -18,6 +18,7 @@
 import random
 import re
 import string
+import unicodedata
 
 
 def normalize_answer(s):
@@ -28,8 +29,10 @@ def normalize_answer(s):
         return " ".join(text.split())
 
     def remove_punc(text):
+        # string.punctuation is ASCII only: also drop Unicode punctuation (category P*), so that
+        # typographic forms models often write (curly quotes, en dashes) match their ASCII spelling in the gold answer.
         exclude = set(string.punctuation)
-        return "".join(ch for ch in text if ch not in exclude)
+        return "".join(ch for ch in text if ch not in exclude and not unicodedata.category(ch).startswith("P"))
 
     def lower(text):
         return text.lower()
