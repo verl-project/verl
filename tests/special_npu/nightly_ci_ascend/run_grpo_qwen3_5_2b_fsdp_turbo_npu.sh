@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dependency: NPU vllm==0.18.0, vllm-ascend@<54879467>, transformers@<cc7ab9be>, fsdp_turbo
+# dependency: NPU vllm==0.18.0, vllm-ascend@<54879467>, transformers==5.21.0, fsdp_turbo
 # FSDP-Turbo smoke test for Qwen3.5-2B (dense) on Ascend NPU.
 
 set -xeuo pipefail
@@ -16,8 +16,8 @@ FSDP_SIZE=${FSDP_SIZE:-4}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.4}
 ROLLOUT_N=${ROLLOUT_N:-5}
 
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-16}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-16}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-2048}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-5}
@@ -33,11 +33,13 @@ export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-n_devices_per_node=8
+n_devices_per_node=16
 
 ########################### shared turbo config values ###########################
 ACTOR_TURBO="actor_rollout_ref.actor.fsdp_config.turbo_config"
 REF_TURBO="actor_rollout_ref.ref.fsdp_config.turbo_config"
+
+MODEL_NAME="qwen3_5"
 
 FSDP_APPLY_MODULES='{model.visual.blocks.\{*\}:{},'\
 'model.visual.patch_embed:{},'\
@@ -58,7 +60,7 @@ LOSS_FUNCTION_PATCHES="[{target_functions:['transformers.loss.loss_utils.ForCaus
 "type:causal_lm_loss}]"
 
 MODULE_PATCHES="[{target:transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Model.forward,"\
-"replacement:fsdp_turbo.models.qwen.qwen3_5.qwen3_5_model_forward}]"
+"replacement:fsdp_turbo.models.qwen.qwen3_5_moe.qwen3_5.qwen3_5_model_forward}]"
 
 ########################### parameter arrays ###########################
 
@@ -99,6 +101,7 @@ ACTOR=(
     "+${ACTOR_TURBO}.distributed.fsdp_plan.hook_modules=${HOOK_MODULES}"
     "+${ACTOR_TURBO}.memory.recompute=True"
     "+${ACTOR_TURBO}.memory.recompute_plan=${RECOMPUTE_PLAN}"
+    "+${ACTOR_TURBO}.model.model_name_or_path=${MODEL_NAME}"
     actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True
     actor_rollout_ref.actor.fsdp_config.entropy_checkpointing=True
     actor_rollout_ref.actor.entropy_from_logits_with_chunking=True
@@ -117,6 +120,7 @@ REF=(
     "+${REF_TURBO}.distributed.fsdp_plan.hook_modules=${HOOK_MODULES}"
     "+${REF_TURBO}.memory.recompute=True"
     "+${REF_TURBO}.memory.recompute_plan=${RECOMPUTE_PLAN}"
+    "+${REF_TURBO}.model.model_name_or_path=${MODEL_NAME}"
     actor_rollout_ref.ref.fsdp_config.reshard_after_forward=True
     actor_rollout_ref.ref.entropy_from_logits_with_chunking=True
     actor_rollout_ref.ref.use_torch_compile=False

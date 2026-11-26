@@ -54,7 +54,7 @@ Commands::
 Anything after ``--`` on ``lock`` / ``sync`` / ``prefetch`` is forwarded to
 the underlying ``uv`` invocation, e.g.::
 
-    python manage_envs.py sync megatron -- --reinstall -v
+    python manage_envs.py sync megatron native-cu130torch213 -- --reinstall -v
 
 Naming distinct venvs
 ---------------------
@@ -109,11 +109,12 @@ explicit ``sync <extras...>``) builds ``.venv`` from the baked cache, offline �
 instead of hard-coding one combo at build time. Do **not** use ``prefetch`` as a
 runtime sync.
 
-This driver exposes one GPU torch "world" plus a CPU slice, all in one lock:
-the cu13.0 / torch-2.13 backends (vllm, sglang, fsdp, megatron, veomni) and the
-GPU-free ``cpu`` slice. They never mix in one ``.venv`` (see the conflict
-sets). On top of whichever one you pick sit the conflict-free *add-ons*
-(``math``, ``ci``, ``veomni-sft``, ``torchtitan``) — extras that carry no torch of their own,
+This driver exposes two cu130 GPU torch worlds plus a CPU slice in one lock:
+vllm selects torch 2.14, while sglang and ``native-cu130torch213`` select torch
+2.13. Training backends take the inference engine's native world; trainer-only
+jobs explicitly add ``native-cu130torch213``. Incompatible worlds never mix in
+one ``.venv`` (see the conflict sets). On top sit the conflict-free *add-ons*
+(``math``, ``ci``, ``torchtitan``) — extras that carry no torch of their own,
 so CI composes them freely, e.g.::
 
     python manage_envs.py sync sglang megatron ci
@@ -123,10 +124,9 @@ Docker image bakes only its backends. DEFERRED (commented out in
 pyproject.toml until they support torch-2.13 / cu130): the cu12.9 /
 torch-2.9.1 world (nemoautomodel) and trtllm (a CUDA-13 RC sdist).
 VeOmni is a standalone cu130 training backend here — ``sync vllm veomni`` —
-which bundles the fsdp stack plus the deps-free veomni package; ``veomni-sft``
-remains only as the package-only add-on the multi-engine PPO/SFT tests layer on
-fsdp or megatron. Some VeOmni-generated models additionally need
-``uv run --with transformers==5.16.1``.
+which bundles the fsdp stack plus the deps-free veomni package. Multi-engine
+SFT tests combine ``veomni`` with ``megatron``. Some VeOmni-generated models
+additionally need ``uv run --with transformers==5.16.1``.
 TorchTitan likewise composes a cu130 training backend with the ``torchtitan``
 add-on.
 
@@ -164,14 +164,17 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Active extras in the universal lock. One GPU torch "world" + a CPU slice:
-#   * cu13.0 / torch 2.13  : vllm, sglang (inference) + fsdp, megatron, veomni (training)
+# Active extras in the universal lock:
+#   * cu13.0 / torch 2.14  : vllm + a selected training backend
+#   * cu13.0 / torch 2.13  : sglang + a selected training backend, or the
+#                            explicit trainer-only native stack
 #   * cpu   / torch 2.13   : GPU-free CI / unit-test / dev-sanity slice
 # DEFERRED and absent from the active lock: the cu12.9 / torch-2.9.1 world
 # (nemoautomodel) and trtllm (a CUDA-13 RC). Both stay commented out in
 # pyproject.toml until those packages support torch-2.13 / cu130.
 INFERENCE_BACKENDS: list[str] = ["vllm", "sglang"]
 TRAINING_BACKENDS: list[str] = ["fsdp", "megatron", "veomni"]
+NATIVE_STACK_EXTRAS: list[str] = ["native-cu130torch213"]
 # DEFERRED — cu12.9 / torch 2.9.1 training backends (["nemoautomodel"]).
 # Re-add the name here and re-enable its extra in pyproject.toml when it supports
 # torch-2.13 / cu130. (VeOmni used to live here on torch-2.9.1; it now rides the
@@ -180,27 +183,26 @@ CU129_BACKENDS: list[str] = []
 # `cpu` is the GPU-free CI / unit-test / dev-sanity slice.
 DEV_BACKENDS: list[str] = ["cpu"]
 # Conflict-free add-ons layered ON TOP of a backend combo, never synced alone:
-# `math` (math-verify reward), `ci` (GitHub-workflow-only helpers),
-# `veomni-sft` (the deps-free VeOmni package alone, for the PPO/SFT engine tests
-# that host several engines under one synced backend; it carries no torch, so it
-# rides on whichever cu130 backend the job synced — end users train via the
-# standalone `veomni` training backend instead) and
-# `torchtitan` (the deps-free TorchTitan engine package, same idea). They ride
+# `math` (math-verify reward), `ci` (GitHub-workflow-only helpers), and
+# `torchtitan` (the deps-free TorchTitan engine package). They ride
 # along with every `prefetch` combo, so a CI `sync <backend...> ci` resolves from the baked cache
 # offline just like a plain backend sync does.
-ADDON_EXTRAS: list[str] = ["math", "ci", "veomni-sft", "torchtitan"]
-ALL_EXTRAS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + CU129_BACKENDS + DEV_BACKENDS + ADDON_EXTRAS
+ADDON_EXTRAS: list[str] = ["math", "ci", "torchtitan"]
+ALL_EXTRAS: list[str] = (
+    INFERENCE_BACKENDS + TRAINING_BACKENDS + NATIVE_STACK_EXTRAS + CU129_BACKENDS + DEV_BACKENDS + ADDON_EXTRAS
+)
 
 # Mutually exclusive extras — must mirror [tool.uv].conflicts in pyproject.toml.
 # At most one member of each set may be synced into a single .venv. vllm / sglang
-# are competing inference engines; cpu is GPU-free. fsdp / megatron / veomni may
-# co-exist with one cu130 inference engine. (The flash-attn-* URL-routing sub-extras
-# also conflict in pyproject.toml, but they are internal and never synced directly,
-# so they are omitted here.)
+# are competing inference engines; cpu is GPU-free. The trainer-only torch-2.13
+# native stack conflicts with vllm's torch-2.14 stack and with cpu. fsdp /
+# megatron / veomni may coexist with one cu130 inference engine.
 # DEFERRED (cu12.9): re-add "nemoautomodel" to every set when the torch-2.9.1
 # world returns — it pins a different torch, so it conflicts with all.
 CONFLICT_SETS: list[set[str]] = [
     {"vllm", "sglang", "cpu"},
+    {"vllm", "native-cu130torch213"},
+    {"cpu", "native-cu130torch213"},
     {"fsdp", "cpu"},
     {"megatron", "cpu"},
     {"veomni", "cpu"},
@@ -221,11 +223,12 @@ GROUPS: dict[str, list[str]] = {
     "all": ALL_EXTRAS,
     "inference": INFERENCE_BACKENDS,
     "training": TRAINING_BACKENDS,
+    "native": NATIVE_STACK_EXTRAS,
     "dev": DEV_BACKENDS,
     "addons": ADDON_EXTRAS,
     # CUDA-world shortcuts, used to scope `prefetch` per Docker image so each
     # image bakes only the backends it can actually run on its CUDA base.
-    "cu130": INFERENCE_BACKENDS + TRAINING_BACKENDS,  # torch 2.13 GPU backends
+    "cu130": INFERENCE_BACKENDS + TRAINING_BACKENDS + NATIVE_STACK_EXTRAS,
     # DEFERRED (cu12.9): "cu129": CU129_BACKENDS,  # torch 2.9.1 GPU backends
 }
 
@@ -473,7 +476,7 @@ def _covering_combos(extras: list[str] | None = None) -> list[list[str]]:
     each trainer warms exactly those runtime forks.
 
     Backends with no counterpart role are warmed standalone: the GPU-free
-    ``cpu`` slice, mutually exclusive with everything else. The same fallback
+    ``cpu`` slice and the trainer-only torch-2.13 native stack. The same fallback
     emits singletons when a scope contains only one cu130 role (e.g.
     ``prefetch inference``). (DEFERRED: the cu12.9 trainer nemoautomodel was
     also warmed standalone; it returns with that world.)
@@ -485,9 +488,10 @@ def _covering_combos(extras: list[str] | None = None) -> list[list[str]]:
 
     Over ``cu130`` it yields ``[[vllm, fsdp], [vllm, megatron], [vllm, veomni],
     [sglang, fsdp], [sglang, megatron], [sglang, veomni]]``, each with the
-    add-ons appended; over ``ALL_EXTRAS`` it appends ``[cpu]``. (Inference-only
-    or training-only runs are not pre-warmed — sync one inference engine + one
-    trainer, per the RL flow.)
+    add-ons appended; over ``ALL_EXTRAS`` it also appends ``[cpu]`` and
+    ``[native-cu130torch213]``. Bare training bases are not pre-warmed — pair
+    them with an inference engine for RL or with the native stack for trainer-only
+    jobs.
     """
     pool = [e for e in (extras if extras is not None else ALL_EXTRAS) if e not in ADDON_EXTRAS]
     pset = set(pool)
@@ -504,7 +508,7 @@ def _covering_combos(extras: list[str] | None = None) -> list[list[str]]:
                     combos.append([inf, tr])
                     paired.update((inf, tr))
     # Whatever the cross-product didn't consume is warmed on its own: the
-    # cu12.9 trainers, the cpu slice, or a lone cu130 role with no partner.
+    # cu12.9 trainers, cpu/native slices, or a lone cu130 role with no partner.
     combos += [[e] for e in pool if e not in paired]
     # Ride-alongs last, so each warmed env mirrors a real `sync <backend...> ci`.
     # A scope of only add-ons (`prefetch addons`) still gets one env of its own.
@@ -669,11 +673,12 @@ def cmd_clean(args: argparse.Namespace) -> int:
 
 def cmd_list(args: argparse.Namespace) -> int:
     """Show available extras, conflict rules, venv state, and prefetch plan."""
-    print("extras (one universal uv.lock; cu130/torch-2.13 + cpu):")
-    print(f"  inference (cu130/torch-2.13) : {', '.join(INFERENCE_BACKENDS)}")
-    print(f"  training  (cu130/torch-2.13) : {', '.join(TRAINING_BACKENDS)}")
-    print(f"  dev       (cpu/torch-2.13)   : {', '.join(DEV_BACKENDS)}")
-    print(f"  addons    (any combo)        : {', '.join(ADDON_EXTRAS)}")
+    print("extras (one universal uv.lock; cu130/torch-2.13 + torch-2.14 + cpu):")
+    print(f"  inference (selects GPU ABI) : {', '.join(INFERENCE_BACKENDS)}")
+    print(f"  training  (takes GPU ABI)   : {', '.join(TRAINING_BACKENDS)}")
+    print(f"  native    (trainer-only)    : {', '.join(NATIVE_STACK_EXTRAS)}")
+    print(f"  dev       (cpu/torch-2.13)  : {', '.join(DEV_BACKENDS)}")
+    print(f"  addons    (any combo)       : {', '.join(ADDON_EXTRAS)}")
     print("  cu129     (torch-2.9.1)      : DEFERRED (nemoautomodel)")
 
     # Both halves of the environment markers, so a wrong OS is reported as
@@ -849,7 +854,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     extras_help = (
         "extra name(s); shortcuts: all, inference (vllm sglang), "
-        "training (fsdp megatron veomni), dev (cpu), addons (math ci veomni-sft torchtitan). "
+        "training (fsdp megatron veomni), dev (cpu), addons (math ci torchtitan). "
         "Linux + Python 3.12, x86_64 or aarch64 (same extras on both). "
         "Add-ons are conflict-free and layer "
         "on top of a backend combo. Mutually exclusive sets (at most one each per sync): "

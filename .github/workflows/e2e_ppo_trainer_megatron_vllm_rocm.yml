@@ -90,6 +90,16 @@ env:
   # This image is not the uv.cu130 one: it ships its own ROCm torch stack, so the
   # shared e2e scripts must launch with ambient python instead of `uv run`.
   VERL_USE_UV: 0
+  # With a rocprofiler client registered, idle GPU processes busy-poll in the ROCm
+  # runtime. vLLM >= 0.32 registers one in every worker, which saturates the 32
+  # cores these jobs are pinned to and roughly doubles the Megatron job. This keeps
+  # the runtime from registering, at the cost of GPU records in profiler traces.
+  HSA_TOOLS_DISABLE_REGISTER: "1"
+  # scikit-learn and joblib (imported via transformers) default KMP_INIT_AT_FORK to
+  # FALSE. The ROCm torch build uses LLVM OpenMP, which then skips its at-fork reset,
+  # and a fork-started dataloader worker can deadlock in torch.set_num_threads(1),
+  # hanging the step until the job timeout. Set it explicitly so the default is not applied.
+  KMP_INIT_AT_FORK: "TRUE"
 
 jobs:
   e2e_ppo_trainer_fsdp_vllm_rocm:
@@ -97,8 +107,8 @@ jobs:
     runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      # built from https://github.com/mingjielu/Training-dockerfile/blob/main/ubuntu/rocm7.14_verl_0810_py312/Dockerfile
-      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
+      # built from docker/rocm/Dockerfile.rocm
+      image: "verlai/verl:rocm7.14_torch2.12_release_1112"
       options: >-
         --device /dev/kfd
         --device /dev/dri
@@ -137,7 +147,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install --no-deps TransferQueue==0.1.11
+          pip install --no-deps TransferQueue==0.1.12
       - name: Check final pip list
         run: |
           pip list
@@ -191,7 +201,7 @@ jobs:
     runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
+      image: "verlai/verl:rocm7.14_torch2.12_release_1112"
       options: >-
         --device /dev/kfd
         --device /dev/dri
@@ -226,7 +236,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install --no-deps TransferQueue==0.1.11
+          pip install --no-deps TransferQueue==0.1.12
       - name: Check final pip list
         run: |
           pip list
@@ -267,7 +277,7 @@ jobs:
     if: ${{ always() && github.repository_owner == 'verl-project' }}
     runs-on: [rocm-mi300]
     container:
-      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
+      image: "verlai/verl:rocm7.14_torch2.12_release_1112"
     steps:
       - name: Clean up leftover checkpoints
         run: |

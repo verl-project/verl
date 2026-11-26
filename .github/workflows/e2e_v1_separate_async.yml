@@ -16,6 +16,7 @@ on:
       - "!verl/trainer/fsdp_sft_trainer.py"
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/ppo/v1/**"
+      - "verl/trainer/ppo/trainer_utils.py"
       - "verl/trainer/config/**"
       - "verl/checkpoint_engine/**"
       - "verl/experimental/separation/**"
@@ -42,6 +43,7 @@ on:
       - "!verl/trainer/fsdp_sft_trainer.py"
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/ppo/v1/**"
+      - "verl/trainer/ppo/trainer_utils.py"
       - "verl/trainer/config/**"
       - "verl/checkpoint_engine/**"
       - "verl/experimental/separation/**"
@@ -63,7 +65,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev4"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev5"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:

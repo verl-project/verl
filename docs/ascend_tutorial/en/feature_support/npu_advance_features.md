@@ -1,3 +1,8 @@
+---
+myst:
+  heading_anchors: 6
+---
+
 # NPU Advanced Feature Guide
 
 > This document introduces the advanced features and optimization capabilities of Ascend NPU in the verl ecosystem for developers' reference.

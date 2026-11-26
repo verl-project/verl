@@ -35,11 +35,9 @@ from verl.utils.vllm.vllm_quant_utils import (
     apply_vllm_quant_patches,
     configure_fp8_ignored_layers_match_mode,
     is_quantized_model,
-    load_quanted_weights,
-    prepare_quanted_weights_for_loading,
-    process_quanted_weights_after_loading,
+    refresh_rocm_attention_weight_caches,
+    reset_uncalibrated_kv_cache_scales,
 )
-from verl.utils.vllm.vllm_unquant_utils import fold_unquantized_moe_params, stage_unquantized_moe_params
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 from verl.workers.rollout.vllm_rollout.weight_update_utils import (
     apply_buffer_updates,
@@ -147,6 +145,48 @@ def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Option
     model.compute_logits = MethodType(compute_logits, model)
 
 
+def is_3d_moe_vllm_model(hf_config) -> bool:
+    """Whether the vLLM rollout target treats this model as a 3D-MoE LoRA model.
+
+    vLLM classifies a model as 3D-MoE when the model class sets
+    ``is_3d_moe_weight = True`` (a ``ClassVar`` on the vLLM model class, *not* an HF
+    config field) and ``enable_mixed_moe_lora_format`` is off — see
+    ``vllm/lora/model_manager.py``'s ``_is_3d_moe_model``. The flag is set on the class
+    definition (e.g. ``Qwen3_5MoeForConditionalGeneration``,
+    ``Qwen3VLMoeForConditionalGeneration``, ``GptOssForCausalLM``,
+    ``InternS1ProForConditionalGeneration``); pure-text MoE classes such as
+    ``Qwen3_5MoeForCausalLM`` do *not* set it.
+
+    The training/export side only has the HF config (no live vLLM model), so this
+    resolves the vLLM model class from the HF ``architectures`` field via vLLM's
+    registry and reads the static class attribute — no model instantiation. Returns
+    ``False`` for unknown architectures, non-vLLM setups, or any import failure.
+    """
+    architectures = getattr(hf_config, "architectures", None) or []
+    if not architectures:
+        return False
+    try:
+        import importlib
+
+        from vllm.model_executor.models.registry import _VLLM_MODELS
+    except Exception:
+        return False
+
+    for arch in architectures:
+        entry = _VLLM_MODELS.get(arch)
+        if entry is None:
+            continue
+        module_path, class_name = entry
+        try:
+            mod = importlib.import_module(f"vllm.model_executor.models.{module_path}")
+            cls = getattr(mod, class_name, None)
+        except Exception:
+            continue
+        if cls is not None and bool(getattr(cls, "is_3d_moe_weight", False)):
+            return True
+    return False
+
+
 class vLLMColocateWorkerExtension:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.
@@ -160,6 +200,9 @@ class vLLMColocateWorkerExtension:
     1. LoRA
     2. Online FP8 quantization
     """
+
+    # Set per instance in __new__ when the rollout uses per-token NVFP4 experts.
+    _nvfp4_per_token_config = None
 
     def __new__(cls, **kwargs):
         set_death_signal()
@@ -180,19 +223,16 @@ class vLLMColocateWorkerExtension:
         # 1. patch for Lora
         VLLMHijack.hijack()
         vllm_config = kwargs.get("vllm_config")
-        weight_transfer_config = getattr(vllm_config, "weight_transfer_config", None)
-        if getattr(weight_transfer_config, "backend", None) == "verl_delta_ipc":
-            from verl.workers.rollout.vllm_rollout.delta_weight_transfer import (
-                register_verl_delta_weight_transfer_engine,
-            )
-
-            register_verl_delta_weight_transfer_engine()
 
         # 2. patch the refit of quantized weights, whether the quantization_config comes
         # from the checkpoint (e.g. DeepSeek-V4) or from rollout.quantization via hf_overrides.
+        nvfp4_per_token_config = None
         if is_quantized_model(vllm_config):
+            from verl.utils.vllm.vllm_nvfp4_per_token_utils import nvfp4_per_token_quantization_config
+
             configure_fp8_ignored_layers_match_mode(vllm_config)
             apply_vllm_quant_patches()
+            nvfp4_per_token_config = nvfp4_per_token_quantization_config(vllm_config)
 
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
@@ -203,12 +243,19 @@ class vLLMColocateWorkerExtension:
                     os.environ[k] = VLLM_ASCEND_REQUIRED_ENV_VARS[k]
 
         instance = super().__new__(cls)
+        instance._nvfp4_per_token_config = nvfp4_per_token_config
         return instance
 
     def _get_drafter_model(self):
-        """Return the drafter's model object, or None if unavailable."""
-        drafter = getattr(self.model_runner, "drafter", None)
-        return drafter.model if drafter is not None and hasattr(drafter, "model") else None
+        """Return the V1 drafter or V2 speculator model, if available."""
+        # V2 renamed the draft-model owner to speculator. Resolve both so MTP
+        # weight loading, buffer updates, and post-processing include its model.
+        for attr in ("drafter", "speculator"):
+            owner = getattr(self.model_runner, attr, None)
+            model = getattr(owner, "model", None)
+            if model is not None:
+                return model
+        return None
 
     def _get_draft_model_config(self):
         """Return the draft model config from speculative_config, or None."""
@@ -244,6 +291,13 @@ class vLLMColocateWorkerExtension:
             monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
+        if self._nvfp4_per_token_config is not None:
+            from verl.utils.vllm.vllm_nvfp4_per_token_utils import attest_nvfp4_per_token_runtime, clear_kv_cache
+
+            # get_model() unwraps vLLM's CUDA-graph wrapper.
+            model = self.model_runner.get_model()
+            attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
+            clear_kv_cache(model)
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
@@ -253,9 +307,6 @@ class vLLMColocateWorkerExtension:
             self.device = torch.device(f"{get_device_name()}:{self.local_rank}")
 
         # =========================== step 1: prepare for weight loading ===========================
-        quant_reload_states = None
-        staged_moe_layers = []
-
         # The engine came up on dummy weights, whose init zeroes integer buffers on
         # ROCm -- including the expert-parallel routing maps, which no weight stream
         # restores. Repair them before the reload so the rollout routes correctly.
@@ -267,19 +318,12 @@ class vLLMColocateWorkerExtension:
             # Remove the old LoRA before the new one arrives (applied after is_last below).
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
-        elif is_quantized_model(self.model_runner.vllm_config):
-            quant_reload_states = [
-                (model, prepare_quanted_weights_for_loading(model)) for model in self._iter_all_models()
-            ]
-        else:
-            # TODO(wuxibin): not need anymore for newer vllm version.
+        elif not is_npu_available:
+            # vLLM views the live tensors back to the checkpoint layout the loaders expect (direct reload)
+            from vllm.model_executor.model_loader.reload import start_reload
+
             for model in self._iter_all_models():
-                patch_vllm_moe_model_weight_loader(model)
-            # A kernel prep that reshapes the expert weights (FlashInfer TRT-LLM, vLLM's default bf16 MoE
-            # backend on SM100) leaves nothing the checkpoint-layout loads fit (#7978): hand them a
-            # checkpoint-layout view over the live storage, folded back after the last bucket.
-            for model in self._iter_all_models():
-                staged_moe_layers.extend(stage_unquantized_moe_params(model))
+                start_reload(model)
 
         # =========================== step 2: receive weights and update ===========================
         receiver = BucketedWeightReceiver(
@@ -334,16 +378,22 @@ class vLLMColocateWorkerExtension:
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")
-        elif is_quantized_model(self.model_runner.vllm_config):
-            for model, reload_state in quant_reload_states:
-                process_quanted_weights_after_loading(model, reload_state)
-        else:
+        elif is_npu_available:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
-            with fold_unquantized_moe_params(staged_moe_layers):
-                for model, model_config in self._iter_all_models_with_config():
-                    process_weights_after_loading(model, model_config, self.device)
+            for model, model_config in self._iter_all_models_with_config():
+                process_weights_after_loading(model, model_config, self.device)
+        else:
+            # vLLM reruns post-load processing once, after the last bucket
+            from vllm.model_executor.model_loader.reload import finish_reload
+
+            for model, model_config in self._iter_all_models_with_config():
+                finish_reload(model, model_config, self.device)
+            if is_quantized_model(self.model_runner.vllm_config):
+                for model in self._iter_all_models():
+                    reset_uncalibrated_kv_cache_scales(model)
+                    refresh_rocm_attention_weight_caches(model)
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
@@ -377,35 +427,17 @@ class vLLMColocateWorkerExtension:
             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
         else:
             param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
-            # Add the FP8 related logic here as sharding manager has been deprecated.
-            # Check if FP8 quantization is enabled and apply appropriate weight loading
-            if is_quantized_model(self.model_runner.vllm_config):
-                logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
-                # Convert bf16 weights to fp8 format before loading
-                model_updates = drop_tied_alias_updates(self.model_runner.model, param_updates)
-                loaded_params = load_quanted_weights(model_updates, self.model_runner) if model_updates else []
-                # Keep the draft model in sync when present.
-                if self._use_mtp_drafter_weight_sync() and model_updates:
-                    load_quanted_weights(model_updates, self.model_runner, is_drafter=True)
-                loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
-                logger.info(
-                    f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
-                )
-            else:
-                if param_updates:
-                    for model in self._iter_all_models():
-                        model_updates = drop_tied_alias_updates(model, param_updates)
-                        if peft_config is None:
-                            model.load_weights(model_updates)
-                        else:
-                            names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
-                            names.update(n for n, _ in model.named_buffers())
-                            model.load_weights((resolve_weight_name(model, n, names), t) for n, t in model_updates)
-                loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
-                logger.info(
-                    f"Loading standard weights (non-FP8, async), "
-                    f"loaded_params: {len(param_updates)}, loaded_buffers: {loaded_buffers}"
-                )
+            if param_updates:
+                for model in self._iter_all_models():
+                    model_updates = drop_tied_alias_updates(model, param_updates)
+                    if peft_config is None:
+                        model.load_weights(model_updates)
+                    else:
+                        names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
+                        names.update(n for n, _ in model.named_buffers())
+                        model.load_weights((resolve_weight_name(model, n, names), t) for n, t in model_updates)
+            loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
+            logger.info(f"vLLM load weights, loaded_params: {len(param_updates)}, loaded_buffers: {loaded_buffers}")
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
@@ -423,12 +455,6 @@ class vLLMColocateWorkerExtension:
         trainer_rank_base = os.environ.get("VERL_ZMQ_BASE_TRAINER_RANK")
         trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
-
-    def update_verl_delta_weights(self, update_info: dict) -> None:
-        """Add this worker's IPC endpoint and forward the delta update to vLLM."""
-        worker_update_info = dict(update_info)
-        worker_update_info["zmq_handle"] = self._get_zmq_handle()
-        self.update_weights(worker_update_info)
 
 
 class SuppressSignalInThread:
@@ -537,8 +563,10 @@ def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional
         return
 
     prompt_logprobs_ls, prompt_ids_ls = [], []
-    # NOTE: logprob of first prompt token is None.
-    for logprobs_dict in output.prompt_logprobs[1:]:
+    # NOTE: logprob of first prompt token is None. Index instead of slicing [1:]: FlatLogprobs in vLLM < 0.29 raises
+    # IndexError on an empty slice, i.e. a one-token prompt.
+    for position in range(1, len(output.prompt_logprobs)):
+        logprobs_dict = output.prompt_logprobs[position]
         if num_prompt_logprobs == 0:
             token_id_str = list(logprobs_dict.keys())[0]
             logprob = logprobs_dict[token_id_str].logprob

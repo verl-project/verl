@@ -39,13 +39,16 @@ from verl.utils.device import get_device_name, get_torch_device, set_expandable_
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
+from verl.utils.megatron.low_precision import bf16_layers_at_start_end
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
 from verl.utils.py_functional import append_to_dict
 from verl.utils.qat import dispatch_rollout_weight_quantizer
+from verl.utils.real_nvfp4 import real_nvfp4_enabled
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import (
     ActorConfig,
     DistillationConfig,
@@ -179,6 +182,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             mesh_name="train",
             dp_rank=self.engine.get_data_parallel_rank(),
             is_collect=self.engine.is_mp_src_rank_with_outputs(),
+            is_mp_src=self.engine.is_mp_src_rank(),
         )
 
         if hasattr(self.model_config, "hf_config"):
@@ -687,6 +691,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
+            vllm_engine_kwargs = (self.config.rollout.get("engine_kwargs", {}) or {}).get("vllm", {}) or {}
+            # vLLM accepts hyphenated option names as well.
+            vllm_engine_kwargs = {str(key).replace("-", "_"): value for key, value in vllm_engine_kwargs.items()}
+            self.actor.engine.rollout_name = self.config.rollout.name
+            self.actor.engine.vllm_enable_moe_shared_loras = bool(
+                vllm_engine_kwargs.get("enable_moe_shared_loras", False)
+            )
+            self.actor.engine.vllm_enable_mixed_moe_lora_format = bool(
+                vllm_engine_kwargs.get("enable_mixed_moe_lora_format", False)
+            )
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
         # 3. build rollout engine
@@ -716,6 +730,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
+            # resync_base only applies to an active, unmerged LoRA adapter.
+            lora_active = model_config.lora_rank > 0 or model_config.lora.get("rank", 0) > 0
+            self.lora_resync_base: bool = (
+                bool(model_config.lora.get("resync_base", False)) and lora_active and not self.peft_merge
+            )
 
         # 4. build checkpoint engine
         if "actor" in self.role:
@@ -730,11 +749,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
             )
 
-            qat = getattr(getattr(self.actor.engine, "engine_config", None), "qat", None)
+            engine_config = getattr(self.actor.engine, "engine_config", None)
+            overrides = getattr(engine_config, "override_transformer_config", None) or {}
             weight_quantizer = dispatch_rollout_weight_quantizer(
                 model_config=model_config,
                 rollout_config=self.config.rollout,
-                qat_config=qat,
+                qat_config=getattr(engine_config, "qat", None),
+                real_nvfp4_bf16_layers=bf16_layers_at_start_end(overrides) if real_nvfp4_enabled(overrides) else None,
             )
             if weight_quantizer is not None:
                 self.actor.engine.set_rollout_weight_quantizer(weight_quantizer)
@@ -777,6 +798,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    @RLInsightLogger.trace_state_decorator(
+        "update_weight",
+        state_lane_id=lambda self: f"rank_{self.rank}",
+    )
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
@@ -806,17 +831,34 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # Resolve mode: "auto" falls back to config, explicit values take precedence
         effective_mode = mode if mode != "auto" else self.config.rollout.checkpoint_engine.backend
 
-        # 0. send_weights only for async training with disaggregated trainer and rollout
+        # 0. send_weights for disaggregated or vLLM-native checkpoint engines
         if effective_mode != "naive":
-            if effective_mode == "delta_sharded":
-                # the delta engine owns the sync state machine (seed vs steady,
-                # snapshot prime), so it drives the training engine itself.
-                metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
-            else:
-                per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
-                metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
-            if self.actor.engine.is_param_offload_enabled:
-                self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+            if getattr(self, "lora_resync_base", False):
+                raise ValueError(
+                    f"model.lora.resync_base needs the naive weight sync, got {effective_mode!r}: other modes never "
+                    "re-send the LoRA adapter, so discarding the rollout weights on sleep would lose it."
+                )
+            is_colocated = bool(getattr(self.checkpoint_engine, "is_colocated", False))
+            if is_colocated:
+                set_expandable_segments(False)
+                get_torch_device().empty_cache()
+            try:
+                if getattr(self.checkpoint_engine, "requires_engine", False) or effective_mode == "delta_sharded":
+                    # engines owning the sync state machine or vLLM WeightSource drive the training engine directly.
+                    metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
+                else:
+                    per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+                    metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+                if self.actor.engine.is_param_offload_enabled:
+                    self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+                if is_colocated:
+                    get_torch_device().synchronize()
+                    get_torch_device().empty_cache()
+                    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+                        await asyncio.to_thread(torch.distributed.barrier)
+            finally:
+                if is_colocated:
+                    set_expandable_segments(True)
             return metrics or {}
 
         set_expandable_segments(False)
@@ -841,13 +883,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             layered_summon=self.layered_summon, base_sync_done=True
         )
 
-        do_lora_base_sync = False
-        if not self.peft_merge and peft_config is not None:
-            self.rollout.sleep_level = 1
-            do_lora_base_sync = not self.base_sync_done
+        do_lora_base_sync = (
+            not self.peft_merge and peft_config is not None and (self.lora_resync_base or not self.base_sync_done)
+        )
 
         # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
         if do_lora_base_sync:
+            # The FSDP exporter rejects layered_summon for a base export; Megatron ignores the flag.
             per_tensor_param_base, _base_peft_config = self.actor.engine.get_per_tensor_param(
                 layered_summon=self.layered_summon, base_sync_done=False
             )

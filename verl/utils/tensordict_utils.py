@@ -244,6 +244,19 @@ def concat_tensordict_with_none_bsz(data: list[TensorDict]):
     return data[0]
 
 
+def _keep_first_non_tensor_data(output: TensorDict, first: TensorDict) -> TensorDict:
+    """Give ``output``, the concatenation of ``first`` and other TensorDicts, the NonTensorData values of ``first``.
+
+    NonTensorData is per-batch metadata (e.g. the ``metrics`` each data-parallel rank returns), and concatenation
+    keeps the first instance, as ``concat_tensordict_with_none_bsz`` does. ``TensorDict.cat`` does so in tensordict
+    <= 0.10; from tensordict 0.11 it stacks values that differ into a NonTensorStack with one value per sample.
+    """
+    for key, value in first.items():
+        if isinstance(value, NonTensorData) and not isinstance(output.get(key), NonTensorData):
+            output[key] = NonTensorData(value.data)
+    return output
+
+
 def concat_tensordict(data: list[TensorDict]) -> TensorDict:
     """Concatenate multiple TensorDicts along dimension zero.
 
@@ -264,6 +277,7 @@ def concat_tensordict(data: list[TensorDict]) -> TensorDict:
 
     Note:
         - For TensorDicts with empty batch_size, returns the first one
+        - NonTensorData (metadata) takes the value of the first TensorDict, with every tensordict version
         - Nested tensors are handled specially via concat_nested_tensors
         - Regular tensors use TensorDict.cat for efficient concatenation
     """
@@ -276,7 +290,7 @@ def concat_tensordict(data: list[TensorDict]) -> TensorDict:
         if len(data[0].batch_size) == 0:
             return concat_tensordict_with_none_bsz(data)
         # if batch size is None (only contain NonTensorData)
-        return TensorDict.cat(data, dim=0)
+        return _keep_first_non_tensor_data(TensorDict.cat(data, dim=0), data[0])
 
     # Create a list of tensordicts containing only non-nested tensors for concatenation
     regular_tds = []
@@ -289,7 +303,7 @@ def concat_tensordict(data: list[TensorDict]) -> TensorDict:
         regular_tds.append(TensorDict(regular_items, batch_size=td.batch_size, device=td.device))
 
     # Concatenate the regular tensordicts
-    output = TensorDict.cat(regular_tds, dim=0)
+    output = _keep_first_non_tensor_data(TensorDict.cat(regular_tds, dim=0), data[0])
 
     # Concatenate and add nested tensors to the output
     for key in nested_tensor_keys:

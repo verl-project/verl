@@ -159,6 +159,7 @@ def all_to_all_tensor(
 def all_gather_tensor(local_tensor: Tensor, group: Optional[dist.ProcessGroup] = None, async_op: bool = False):
     group = get_ulysses_sequence_parallel_group() if group is None else group
     sp_world_size = dist.get_world_size(group=group)
+    local_tensor = local_tensor.contiguous()
     output_shape = list(local_tensor.shape)
     output_shape[0] = output_shape[0] * sp_world_size
     output = torch.empty(output_shape, dtype=local_tensor.dtype, device=local_tensor.device)
