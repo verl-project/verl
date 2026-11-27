@@ -17,6 +17,7 @@ Bucketed weight transfer via ZMQ + IPC (or shared memory fallback).
 Not recommended depending on vllm for this file.
 """
 
+import errno
 import logging
 import os
 from multiprocessing import shared_memory
@@ -118,6 +119,11 @@ class BucketedWeightSender:
 
             # send bucket weights
             offset = 0
+            # CPython exposes the backing fd on POSIX. Other SHM implementations
+            # keep the existing demand-paged copies.
+            shm_fd = getattr(self.shm, "_fd", -1)
+            reserve = getattr(os, "posix_fallocate", None)
+            reserved_until = 0
             bucket_meta: dict[str, TensorMetadata] = {}
             # dtype = PrecisionType.to_dtype(self.config.dtype)
             async for name, weight in ensure_async_iterator(weights):
@@ -155,10 +161,23 @@ class BucketedWeightSender:
                     "offset": offset,
                     "handle": None,
                 }
-                self.buffer[offset : offset + weight.nbytes].view(dtype=weight.dtype).view(weight.shape).copy_(
-                    weight, non_blocking=True
-                )
-                offset += weight.nbytes
+                end = offset + weight.nbytes
+                if shm_fd >= 0 and reserve is not None and end > reserved_until:
+                    # Reserve just the new payload bytes. A short update can fit
+                    # even when the configured bucket is larger than /dev/shm.
+                    start = max(offset, reserved_until)
+                    if start < end:
+                        try:
+                            reserve(shm_fd, start, end - start)
+                        except OSError as exc:
+                            if exc.errno not in (errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL):
+                                # A previous device copy may still reference the mapping.
+                                get_torch_device().synchronize()
+                                raise
+                            reserve = None
+                        reserved_until = end
+                self.buffer[offset:end].view(dtype=weight.dtype).view(weight.shape).copy_(weight, non_blocking=True)
+                offset = end
 
             # send the last bucket
             name = weight = None
@@ -241,7 +260,7 @@ class BucketedWeightSender:
             self.shm.unlink()
             del self.shm
             self.shm = None
-        if is_support_ipc():
+        if not self.use_shm and is_support_ipc():
             get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
 
@@ -372,7 +391,7 @@ class BucketedWeightReceiver:
             self.shm.close()
             del self.shm
             self.shm = None
-        if is_support_ipc():
+        if not self.use_shm and is_support_ipc():
             get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
         # Ack last, after the buffer is released: the sender reclaims its bucket

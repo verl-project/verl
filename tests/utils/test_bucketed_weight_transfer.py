@@ -18,8 +18,11 @@ and because CUDA IPC requires distinct processes.
 """
 
 import asyncio
+import errno
 import multiprocessing as mp
+import os
 import uuid
+from multiprocessing import shared_memory
 
 import pytest
 import torch
@@ -67,6 +70,9 @@ class _FakeSocket:
 
     def recv(self):
         return b""
+
+    def close(self):
+        pass
 
 
 class _FakeTorchDevice:
@@ -143,7 +149,7 @@ def test_sender_accepts_strided_tensor(monkeypatch):
     assert torch.equal(recovered, weight)
 
 
-@pytest.mark.parametrize("fail_at", ["buffer", "stream", "reply", "last_reply"])
+@pytest.mark.parametrize("fail_at", ["buffer", "stream", "reply", "last_reply", "payload_space"])
 def test_sender_failure_aborts_receiver(monkeypatch, fail_at):
     """A sender that fails while setting up its buffer, mid-stream, or while a bucket's reply is owed
     must not leave the receiver waiting, where it would block the next update_weights on the same vLLM
@@ -163,9 +169,21 @@ def test_sender_failure_aborts_receiver(monkeypatch, fail_at):
         sender.socket = _BucketReplyFails(sender.socket, on_last=(fail_at == "last_reply"))
 
     monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
-    monkeypatch.setattr(bucketed_weight_transfer, "is_support_ipc", lambda: False)
+
+    def unexpected_ipc_query():
+        raise AssertionError("SHM cleanup should not query device IPC support")
+
+    monkeypatch.setattr(bucketed_weight_transfer, "is_support_ipc", unexpected_ipc_query)
     if fail_at == "buffer":
         monkeypatch.setattr(bucketed_weight_transfer, "create_shared_memory", no_buffer)
+    if fail_at == "payload_space":
+        if not hasattr(os, "posix_fallocate"):
+            pytest.skip("requires POSIX SHM reservation")
+
+        def no_space(fd, offset, length):
+            raise OSError(errno.ENOSPC, "producer failed")
+
+        monkeypatch.setattr(os, "posix_fallocate", no_space)
     if fail_at in {"reply", "last_reply"}:
         monkeypatch.setattr(sender_cls, "_init_socket", reply_fails)
     zmq_handle = _unique_zmq_handle()
@@ -187,14 +205,64 @@ def test_sender_failure_aborts_receiver(monkeypatch, fail_at):
     receiver_thread = threading.Thread(target=receive, daemon=True)
     receiver_thread.start()
     sender = sender_cls(zmq_handle, bucket_size_mb=1, use_shm=True)
-    with pytest.raises((MemoryError, ValueError), match="producer failed"):
+    with pytest.raises((MemoryError, ValueError, OSError), match="producer failed") as error:
         asyncio.run(sender.async_send_weights(weights()))
+    if fail_at == "payload_space":
+        assert isinstance(error.value, OSError) and error.value.errno == errno.ENOSPC
     receiver_thread.join(timeout=PROCESS_TIMEOUT)
     assert not receiver_thread.is_alive(), "receiver still waiting for the sender"
     if fail_at == "last_reply":
         assert not errors
     else:
         assert errors and "aborted" in errors[0]
+
+
+@pytest.mark.parametrize("mode", ["supported", "unsupported", "missing"])
+def test_shm_reserves_only_payload(monkeypatch, mode):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer as transfer
+
+    calls = []
+
+    def reserve(fd, offset, length):
+        calls.append((offset, length))
+        if mode == "unsupported":
+            raise OSError(errno.EOPNOTSUPP, "unsupported on this filesystem")
+
+    if mode == "missing":
+        monkeypatch.delattr(os, "posix_fallocate", raising=False)
+    elif not hasattr(os, "posix_fallocate"):
+        pytest.skip("requires POSIX SHM reservation")
+    else:
+        monkeypatch.setattr(os, "posix_fallocate", reserve)
+
+    monkeypatch.setattr(transfer, "get_torch_device", _FakeTorchDevice)
+    sender = transfer.BucketedWeightSender(_unique_zmq_handle(), bucket_size_mb=1, use_shm=True)
+    socket = _FakeSocket()
+    monkeypatch.setattr(sender, "_init_socket", lambda: setattr(sender, "socket", socket))
+
+    weight = torch.arange(32, dtype=torch.int32)
+    whole = torch.ones(sender.bucket_size, dtype=torch.uint8)
+    snapshots = []
+
+    def weights():
+        yield "first", weight
+        yield "second", weight
+        snapshots.append(sender.buffer[: 2 * weight.nbytes].view(torch.int32).clone())
+        yield "whole", whole
+        yield "reuse", weight
+
+    asyncio.run(sender.async_send_weights(weights()))
+    torch.testing.assert_close(snapshots[0], weight.repeat(2))
+    # Grow past the previous payload on rollover, then reuse already backed bytes.
+    expected = [
+        (0, weight.nbytes),
+        (weight.nbytes, weight.nbytes),
+        (2 * weight.nbytes, whole.nbytes - 2 * weight.nbytes),
+    ]
+    assert calls == {"supported": expected, "unsupported": expected[:1], "missing": []}[mode]
+    assert socket.messages[-1]["is_last"]
+    with pytest.raises(FileNotFoundError):
+        shared_memory.SharedMemory(name=socket.messages[0]["name"])
 
 
 # ---------------------------------------------------------------------------
