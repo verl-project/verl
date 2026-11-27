@@ -2082,12 +2082,17 @@ class PPOTrainer(ABC):
         data["prompt_length"] = prompt_length.float()
         data["response_length"] = response_length.float()
         batch = DataProto(batch=data, meta_info={"global_token_num": global_token_num})
-        metrics_batch = batch.select_idxs(non_padding_mask) if non_padding_mask.any() else batch
+        metrics_batch = batch
+        prompt_lengths_for_metrics = prompt_length
+        num_turns_for_metrics = num_turns
+        if non_padding_mask.any():
+            metrics_batch = batch.select_idxs(non_padding_mask)
+            prompt_lengths_for_metrics = prompt_length[non_padding_mask]
+            num_turns_for_metrics = num_turns[non_padding_mask]
         # Expose per-row turn counts under the V0 schema (agent_loop writes
         # ``__num_turns__`` into the non-tensor batch) so compute_data_metrics
         # emits the V0-compatible ``num_turns/{mean,max,min}`` tags in addition
         # to the ``training/num_turns/*`` names computed below.
-        num_turns_for_metrics = num_turns[non_padding_mask] if non_padding_mask.any() else num_turns
         metrics_batch.non_tensor_batch["__num_turns__"] = np.asarray(num_turns_for_metrics, dtype=np.int32)
 
         # 2. compute metrics
@@ -2100,6 +2105,7 @@ class PPOTrainer(ABC):
                 moe_lb_metrics_interval=moe_lb_metrics_interval,
                 global_steps=global_steps,
                 accumulator=self._rollout_moe_lb_metrics_accumulator,
+                prompt_lengths=prompt_lengths_for_metrics,
             )
         )
         metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))

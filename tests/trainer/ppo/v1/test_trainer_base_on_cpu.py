@@ -17,10 +17,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from omegaconf import OmegaConf
+from transfer_queue import KVBatchMeta
 
+from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput
+from verl.trainer.ppo.metric_utils import RolloutMoELoadBalanceMetricsAccumulator
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
+from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 
 def test_greedy_reward_baseline_does_not_request_score_centering_heads():
@@ -279,3 +284,55 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+
+
+def test_compute_metrics_counts_response_routes_after_filtering_padding_rows():
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create(
+        {
+            "algorithm": {"use_kl_in_reward": False},
+            "actor_rollout_ref": {"model": {}, "rollout": {"moe_load_balance_metrics_interval": 2}},
+        }
+    )
+    trainer.use_critic = False
+    trainer.resource_pool_manager = SimpleNamespace(get_n_gpus=lambda: 1)
+    trainer._rollout_moe_lb_metrics_accumulator = RolloutMoELoadBalanceMetricsAccumulator(
+        model_config={"num_experts": 10}
+    )
+
+    samples = []
+    for prompt_length, mask, expert_ids in (
+        (4, [1, 1], [9, 8, 7, 6, 4]),
+        (1, [1, 0, 1], [5, 3, 7]),
+    ):
+        sample = AgentLoopOutput(
+            prompt_ids=list(range(prompt_length)),
+            response_ids=list(range(len(mask))),
+            response_mask=mask,
+            routed_experts=[[[expert_id]] for expert_id in expert_ids],
+            reward_score=0.0,
+            num_turns=1,
+            metrics=AgentLoopMetrics(),
+        ).as_dict()
+        sample["advantages"] = torch.zeros(len(mask))
+        sample["returns"] = torch.zeros(len(mask))
+        samples.append(sample)
+
+    # The middle row duplicates the first sample to pad the training batch.
+    data = list_of_dict_to_tensordict([samples[0], samples[0], samples[1]])
+    batch = KVBatchMeta(
+        keys=["first", "padding", "second"],
+        partition_id="train",
+        tags=[
+            {"is_padding": is_padding, "min_global_steps": 0, "max_global_steps": 0}
+            for is_padding in (False, True, False)
+        ],
+    )
+    with patch(
+        "verl.trainer.ppo.v1.trainer_base.tq.kv_batch_get",
+        side_effect=lambda **kwargs: data.select(*kwargs["select_fields"]),
+    ):
+        trainer._compute_metrics(batch, {}, {"step": 1.0}, global_steps=1, epoch=0)
+
+    expected_counts = torch.tensor([[0, 0, 0, 1, 1, 0, 0, 0, 0, 0]])
+    torch.testing.assert_close(trainer._rollout_moe_lb_metrics_accumulator.load_counts, expected_counts)

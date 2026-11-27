@@ -206,12 +206,17 @@ def _compute_rollout_moe_load_counts(
     routed_experts: torch.Tensor | None,
     response_mask: torch.Tensor | None,
     num_experts: int | None,
+    *,
+    prompt_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor | None:
     """Count routed experts in response tokens as [num_layers, num_experts].
 
     Each sequence's last valid response position is excluded: that token is
     sampled but never fed back through the model, so it carries no routing
     record (its slot is filler, not data).
+
+    For right-padded full trajectories, prompt_lengths gives each response's
+    start in routed_experts. Otherwise, the response occupies the final columns.
     """
     if routed_experts is None or response_mask is None or num_experts is None or num_experts <= 0:
         return None
@@ -235,8 +240,7 @@ def _compute_rollout_moe_load_counts(
         )
         return None
 
-    response_routed_experts = routed_experts[:, -response_len:]
-    response_mask = response_mask.to(device=response_routed_experts.device, dtype=torch.bool)
+    response_mask = response_mask.to(device=routed_experts.device, dtype=torch.bool)
     # The final response token is sampled but never fed back through the model,
     # so it has no routing record; its slot holds filler from batch assembly
     # (zeros, see AgentLoopWorker._postprocess). Counting it would credit
@@ -248,7 +252,19 @@ def _compute_rollout_moe_load_counts(
     has_valid = last_valid >= 0
     is_last_valid = (positions.unsqueeze(0) == last_valid.unsqueeze(1)) & has_valid.unsqueeze(1)
     response_mask = response_mask & ~is_last_valid
-    selected = response_routed_experts[response_mask]
+    if prompt_lengths is None:
+        selected = routed_experts[:, -response_len:][response_mask]
+    else:
+        if prompt_lengths.shape != (routed_experts.shape[0],):
+            logger.warning("Expected one prompt length per trajectory, got %s", prompt_lengths.shape)
+            return None
+        rows, response_positions = response_mask.nonzero(as_tuple=True)
+        starts = prompt_lengths.to(device=routed_experts.device, dtype=torch.long)
+        route_positions = starts[rows] + response_positions
+        if ((route_positions < 0) | (route_positions >= routed_experts.shape[1])).any():
+            logger.warning("Skipping rollout MoE load-balance metrics because response routes are out of bounds")
+            return None
+        selected = routed_experts[rows, route_positions]
     selected = selected.detach().to(device="cpu", dtype=torch.long)
     if selected.numel() == 0:
         return None
@@ -315,6 +331,8 @@ def compute_moe_lb_metrics(
     moe_lb_metrics_interval: int,
     global_steps: int,
     accumulator: "RolloutMoELoadBalanceMetricsAccumulator",
+    *,
+    prompt_lengths: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     """Accumulate rollout MoE load-balance statistics and emit them at the configured interval."""
     if moe_lb_metrics_interval <= 0:
@@ -323,6 +341,7 @@ def compute_moe_lb_metrics(
     updated_moe_lb_metrics = accumulator.update(
         routed_experts=metrics_batch.batch.get("routed_experts", None),
         response_mask=metrics_batch.batch.get("response_mask", None),
+        prompt_lengths=prompt_lengths,
     )
     if global_steps % moe_lb_metrics_interval != 0:
         return {}
@@ -388,6 +407,8 @@ class RolloutMoELoadBalanceMetricsAccumulator:
         routed_experts: torch.Tensor | None,
         response_mask: torch.Tensor | None,
         num_experts: int | None = None,
+        *,
+        prompt_lengths: torch.Tensor | None = None,
     ) -> bool:
         if num_experts is None:
             num_experts = self._infer_num_experts()
@@ -395,6 +416,7 @@ class RolloutMoELoadBalanceMetricsAccumulator:
             routed_experts=routed_experts,
             response_mask=response_mask,
             num_experts=num_experts,
+            prompt_lengths=prompt_lengths,
         )
         if load_counts is None:
             return False
