@@ -100,11 +100,19 @@ encode all training settings.
 Replay behavior
 ---------------
 
-Replay loads and merges the inner batches, groups trajectories by their original
-prompt UID, and maps those groups onto the fresh prompt UIDs. If fewer groups or
-responses are cached than requested, they are reused cyclically; excess groups
-are omitted. Trajectory step tags are updated to the current training step, and
-prompt keys are marked ``finished`` so the replay buffer can sample them.
+Replay loads and merges the inner batches and maps cached prompt groups onto the
+fresh prompt UIDs. Every cached trajectory row of a mapped group is replayed
+exactly once with its original ``{session_id, index}`` identity: agentic
+sessions that emitted several rows keep all of them (the session's final output
+is the row with the largest index), rows are never relabelled, dropped,
+duplicated, or fabricated to satisfy ``rollout.n``, and groups with failed
+sessions simply replay fewer rows. Each row's TensorDict ``uid`` field is
+rewritten to the fresh prompt UID so that key-based GRPO grouping
+(``compute_advantage_for_multi_trajectories``) and field-based GRPO baselines
+(``data.non_tensor_batch["uid"]``) agree. If fewer groups are cached than
+requested, they are reused cyclically; excess groups are omitted. Trajectory
+step tags are updated to the current training step, and prompt keys are marked
+``finished`` so the replay buffer can sample them.
 
 Implementation
 --------------
