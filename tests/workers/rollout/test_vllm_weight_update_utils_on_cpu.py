@@ -272,6 +272,42 @@ def test_monkey_patch_model_still_patches_generative_model(monkeypatch):
     assert events == [("compute_logits", (model, 16, [3])), ("moe_loader", model)]
 
 
+@pytest.mark.parametrize(
+    "runner_type,expected_events",
+    [("pooling", []), ("generate", ["moe_loader"])],
+)
+def test_weight_update_applies_pooling_guard_to_moe_patch(monkeypatch, runner_type, expected_events):
+    """Runtime IPC reload follows the same generation-patch boundary as startup."""
+    events = []
+
+    class Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([], True)
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", Receiver)
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "patch_vllm_moe_model_weight_loader",
+        lambda model: events.append("moe_loader"),
+    )
+    loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
+    loader_utils.process_weights_after_loading = lambda *args: None
+    monkeypatch.setitem(sys.modules, loader_utils.__name__, loader_utils)
+
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.device = torch.device("cpu")
+    worker.model_runner = _FakeModelRunner(_ToyModel(), model_config=types.SimpleNamespace(runner_type=runner_type))
+    monkeypatch.setattr(worker, "_get_zmq_handle", lambda: "unused")
+    monkeypatch.setattr(worker, "_update_weights", lambda *args, **kwargs: None)
+
+    worker.update_weights_from_ipc()
+
+    assert events == expected_events
+
+
 def test_split_buffer_updates_routes_registered_buffers():
     model = _ToyModel()
     weights = [

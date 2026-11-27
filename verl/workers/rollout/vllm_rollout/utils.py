@@ -355,8 +355,11 @@ class vLLMColocateWorkerExtension:
             ]
         else:
             # TODO(wuxibin): not need anymore for newer vllm version.
-            for model in self._iter_all_models():
-                patch_vllm_moe_model_weight_loader(model)
+            # Pooling models do not expose the decoder/language_model MoE
+            # hierarchy assumed by this generation-only weight-loader patch.
+            if not self._is_pooling_model():
+                for model in self._iter_all_models():
+                    patch_vllm_moe_model_weight_loader(model)
             # A kernel prep that reshapes the expert weights (FlashInfer TRT-LLM, vLLM's default bf16 MoE
             # backend on SM100) leaves nothing the checkpoint-layout loads fit (#7978): hand them a
             # checkpoint-layout view over the live storage, folded back after the last bucket.
