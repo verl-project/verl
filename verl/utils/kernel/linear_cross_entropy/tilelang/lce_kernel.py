@@ -112,7 +112,10 @@ class LinearCrossEntropy(torch.autograd.Function):
         vocab_start = tp_rank * local_vocab_size
         topk = labels.shape[1]
 
-        if hidden.device.type == "cuda":
+        arch_tier = _cuda_arch_tier(hidden.device, hidden_size, hidden.dtype)
+        if arch_tier == "sm90":
+            vocab_per_cta = 128
+        elif hidden.device.type == "cuda":
             vocab_per_cta = 1024 if local_vocab_size > 262144 else 512
         else:
             vocab_per_cta = 1024 if num_tokens >= 8192 else 512
@@ -138,7 +141,6 @@ class LinearCrossEntropy(torch.autograd.Function):
             target_logits,
         )
 
-        arch_tier = _cuda_arch_tier(hidden.device, hidden_size, hidden.dtype)
         if arch_tier == "sm100":
             mainloop = backend_kernels.linear_cross_entropy_fwd_mainloop_sm100(
                 local_vocab_size,

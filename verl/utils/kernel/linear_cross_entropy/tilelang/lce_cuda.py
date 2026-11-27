@@ -219,15 +219,14 @@ def linear_cross_entropy_fwd_mainloop_sm90(
     BLOCK_M=128,
     BLOCK_N=128,
     BLOCK_K=64,
-    VOCAB_PER_CTA=512,
+    VOCAB_PER_CTA=128,
     num_threads=256,
     num_stages=3,
 ):
-    """Hopper SM90 TMA + WGMMA forward mainloop."""
-    assert VOCAB_PER_CTA % BLOCK_N == 0
+    """Hopper SM90 warp-specialized TMA + WGMMA forward mainloop (single vocab tile per CTA)."""
+    assert VOCAB_PER_CTA == BLOCK_N
     M = T.dynamic("M")
-    num_splits = (N + VOCAB_PER_CTA - 1) // VOCAB_PER_CTA
-    num_vocab_tiles = VOCAB_PER_CTA // BLOCK_N
+    num_splits = (N + BLOCK_N - 1) // BLOCK_N
 
     @T.prim_func
     def linear_cross_entropy_fwd_mainloop_sm90_kernel(
@@ -244,65 +243,48 @@ def linear_cross_entropy_fwd_mainloop_sm90(
             logits = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
             probs = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
 
-            local_max = T.alloc_fragment([BLOCK_M], T.float32)
             tile_max = T.alloc_fragment([BLOCK_M], T.float32)
-            new_max = T.alloc_fragment([BLOCK_M], T.float32)
-            local_sum = T.alloc_fragment([BLOCK_M], T.float32)
             tile_sum = T.alloc_fragment([BLOCK_M], T.float32)
-            local_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
             tile_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
 
             T.use_swizzle(8)
-            T.fill(local_max, -T.infinity(T.float32))
-            T.clear(local_sum)
-            T.clear(local_weighted_sum)
+            vocab_offset = by * BLOCK_N
+            T.clear(logits)
 
-            for vocab_tile in T.Serial(num_vocab_tiles):
-                vocab_offset = by * VOCAB_PER_CTA + vocab_tile * BLOCK_N
-                T.clear(logits)
+            for k_tile in T.Pipelined(T.ceildiv(K, BLOCK_K), num_stages=num_stages):
+                T.copy(hidden[bx * BLOCK_M, k_tile * BLOCK_K], hidden_shared)
+                T.copy(weight[vocab_offset, k_tile * BLOCK_K], weight_shared)
+                T.gemm(hidden_shared, weight_shared, logits, transpose_B=True)
 
-                for k_tile in T.Pipelined(T.ceildiv(K, BLOCK_K), num_stages=num_stages):
-                    T.copy(hidden[bx * BLOCK_M, k_tile * BLOCK_K], hidden_shared)
-                    T.copy(weight[vocab_offset, k_tile * BLOCK_K], weight_shared)
-                    T.gemm(hidden_shared, weight_shared, logits, transpose_B=True)
+            for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                logits[i, j] = T.if_then_else(
+                    (bx * BLOCK_M + i < M) & (vocab_offset + j < N),
+                    logits[i, j] * inv_temperature,
+                    -T.infinity(T.float32),
+                )
 
-                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
-                    logits[i, j] = T.if_then_else(
-                        (bx * BLOCK_M + i < M) & (vocab_offset + j < N),
-                        logits[i, j] * inv_temperature,
-                        -T.infinity(T.float32),
-                    )
+            T.reduce_max(logits, tile_max, dim=-1)
 
-                T.reduce_max(logits, tile_max, dim=-1)
-                for i in T.Parallel(BLOCK_M):
-                    new_max[i] = T.max(local_max[i], tile_max[i])
+            for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                is_valid = (bx * BLOCK_M + i < M) & (vocab_offset + j < N)
+                probs[i, j] = T.if_then_else(
+                    is_valid,
+                    T.exp(logits[i, j] - tile_max[i]),
+                    0.0,
+                )
+                logits[i, j] = T.if_then_else(
+                    is_valid,
+                    logits[i, j] * probs[i, j],
+                    0.0,
+                )
 
-                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
-                    is_valid = (bx * BLOCK_M + i < M) & (vocab_offset + j < N)
-                    probs[i, j] = T.if_then_else(
-                        is_valid,
-                        T.exp(logits[i, j] - new_max[i]),
-                        0.0,
-                    )
-                    logits[i, j] = T.if_then_else(
-                        is_valid,
-                        logits[i, j] * probs[i, j],
-                        0.0,
-                    )
-
-                T.reduce_sum(probs, tile_sum, dim=-1)
-                T.reduce_sum(logits, tile_weighted_sum, dim=-1)
-                for i in T.Parallel(BLOCK_M):
-                    rescale = T.exp(local_max[i] - new_max[i])
-                    local_sum[i] = local_sum[i] * rescale + tile_sum[i]
-                    local_weighted_sum[i] = local_weighted_sum[i] * rescale + tile_weighted_sum[i]
-                    local_max[i] = new_max[i]
-
+            T.reduce_sum(probs, tile_sum, dim=-1)
+            T.reduce_sum(logits, tile_weighted_sum, dim=-1)
             for i in T.Parallel(BLOCK_M):
                 if bx * BLOCK_M + i < M:
-                    partial_max[bx * BLOCK_M + i, by] = local_max[i]
-                    partial_sum[bx * BLOCK_M + i, by] = local_sum[i]
-                    partial_weighted_sum[bx * BLOCK_M + i, by] = local_weighted_sum[i]
+                    partial_max[bx * BLOCK_M + i, by] = tile_max[i]
+                    partial_sum[bx * BLOCK_M + i, by] = tile_sum[i]
+                    partial_weighted_sum[bx * BLOCK_M + i, by] = tile_weighted_sum[i]
 
     return linear_cross_entropy_fwd_mainloop_sm90_kernel
 
@@ -898,7 +880,7 @@ def linear_cross_entropy_bwd_dlogits_sm100(
                         idx = kt * lanes_per_row + lane
                         if (row < M) & (idx < topk):
                             col = labels[row, idx] - tile_global_vocab
-                            if (col >= 0) & (col < BLOCK_N):
+                            if (col >= 0) & (col < BLOCK_N) & (local_vocab_offset + col < N):
                                 T.atomic_add(dlogits_fp32_s[i, col], grad_logprobs[row, idx])
 
                 for i, j in T.Parallel(BLOCK_M, BLOCK_N):
@@ -1041,7 +1023,7 @@ def linear_cross_entropy_bwd_dlogits_sm90(
                         idx = kt * lanes_per_row + lane
                         if (row < M) & (idx < topk):
                             col = labels[row, idx] - tile_global_vocab
-                            if (col >= 0) & (col < BLOCK_N):
+                            if (col >= 0) & (col < BLOCK_N) & (local_vocab_offset + col < N):
                                 T.atomic_add(dlogits_fp32_s[i, col], grad_logprobs[row, idx])
 
                 for i, j in T.Parallel(BLOCK_M, BLOCK_N):
@@ -1204,7 +1186,7 @@ def linear_cross_entropy_bwd_dlogits(
                         idx = kt * lanes_per_row + lane
                         if (row < M) & (idx < topk):
                             col = labels[row, idx] - tile_global_vocab
-                            if (col >= 0) & (col < BLOCK_N):
+                            if (col >= 0) & (col < BLOCK_N) & (local_vocab_offset + col < N):
                                 T.atomic_add(dlogits_fp32_s[i, col], grad_logprobs[row, idx])
 
                 for i, j in T.Parallel(BLOCK_M, BLOCK_N):
