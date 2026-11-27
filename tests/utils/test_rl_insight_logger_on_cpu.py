@@ -169,6 +169,7 @@ def test_configure_vllm_tracing_discovers_endpoint(monkeypatch, mock_rl_insight)
     monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
     monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", raising=False)
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
     monkeypatch.setattr(
         RLInsightLogger,
         "discover_otlp_traces_endpoint",
@@ -181,13 +182,15 @@ def test_configure_vllm_tracing_discovers_endpoint(monkeypatch, mock_rl_insight)
 
     assert args["otlp_traces_endpoint"] == "http://127.0.0.1:4318/v1/traces"
     assert os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] == "http/protobuf"
-    assert os.environ["OTEL_RESOURCE_ATTRIBUTES"] == "replica=3"
+    assert os.environ["OTEL_SERVICE_NAME"] == "rl_insight_monitor"
+    assert os.environ["OTEL_RESOURCE_ATTRIBUTES"] == "service.name=rl_insight_monitor,replica=3"
 
 
 def test_configure_vllm_tracing_keeps_explicit_endpoint(monkeypatch, mock_rl_insight):
     monkeypatch.delenv(RLInsightLogger.ENABLE_ENV, raising=False)
     monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", raising=False)
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
     args = {"otlp_traces_endpoint": "http://collector:4318/v1/traces"}
     trace_config = SimpleNamespace(enable_otel=True)
 
@@ -195,7 +198,22 @@ def test_configure_vllm_tracing_keeps_explicit_endpoint(monkeypatch, mock_rl_ins
 
     assert args == {"otlp_traces_endpoint": "http://collector:4318/v1/traces"}
     assert os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] == "http/protobuf"
-    assert os.environ["OTEL_RESOURCE_ATTRIBUTES"] == "replica=1"
+    assert os.environ["OTEL_SERVICE_NAME"] == "rl_insight_monitor"
+    assert os.environ["OTEL_RESOURCE_ATTRIBUTES"] == "service.name=rl_insight_monitor,replica=1"
+
+
+def test_configure_vllm_tracing_respects_existing_service_name(monkeypatch, mock_rl_insight):
+    monkeypatch.delenv(RLInsightLogger.ENABLE_ENV, raising=False)
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "custom-service")
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", raising=False)
+    args = {"otlp_traces_endpoint": "http://collector:4318/v1/traces"}
+    trace_config = SimpleNamespace(enable_otel=True)
+
+    RLInsightLogger.configure_vllm_tracing(args, 2, trace_config)
+
+    assert os.environ["OTEL_SERVICE_NAME"] == "custom-service"
+    assert os.environ["OTEL_RESOURCE_ATTRIBUTES"] == "service.name=custom-service,replica=2"
 
 
 def test_trace_state_decorator_resolves_callable_lane(monkeypatch, mock_rl_insight):
