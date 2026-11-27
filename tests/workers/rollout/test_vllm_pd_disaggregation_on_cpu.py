@@ -348,6 +348,22 @@ def test_pd_server_gets_devices_only_through_runtime_env(patched_replica_cls):
     assert replica.server_class.options.call_args.kwargs["runtime_env"]["env_vars"]["VISIBLE_DEVICES"] == "2,3"
 
 
+def test_pd_replica_rejects_enabled_nsight_profiling(patched_replica_cls):
+    from verl.utils.profiler import ProfilerConfig
+
+    cfg = _make_pd_config(profiler=ProfilerConfig(tool="nsys", enable=True))
+    with pytest.raises(ValueError, match="PD.*Nsight"):
+        patched_replica_cls(0, cfg, None)
+
+
+@pytest.mark.parametrize("profiler", [None, {"tool": "nsys", "enable": False}, {"tool": "torch", "enable": True}])
+def test_pd_replica_preserves_other_profiler_configs(patched_replica_cls, profiler):
+    from verl.utils.profiler import ProfilerConfig
+
+    cfg = _make_pd_config(profiler=None if profiler is None else ProfilerConfig(**profiler))
+    patched_replica_cls(0, cfg, None)
+
+
 def test_pd_replica_init_happy_path_1p1d(patched_replica_cls):
     cfg = _make_pd_config()
     replica = patched_replica_cls(

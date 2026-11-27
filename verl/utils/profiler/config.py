@@ -521,14 +521,6 @@ def build_vllm_profiler_args(
     if not profiler_config or not tool_config:
         return {}
 
-    # Nsight wraps the rollout server process, while vLLM executes CUDA work in
-    # spawned engine workers. Configure vLLM's lightweight CUDA profiler so
-    # start_profile()/stop_profile() issue cudaProfilerStart/Stop in those
-    # worker processes and include their CUDA activity in the parent Nsight
-    # process-tree report.
-    if profiler_config.tool == "nsys":
-        return {"profiler_config": json.dumps({"profiler": "cuda"})}
-
     if not hasattr(tool_config, "contents"):
         return {}
 

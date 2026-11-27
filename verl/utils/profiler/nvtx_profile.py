@@ -215,10 +215,10 @@ class NsightSystemsProfiler(DistProfiler):
 
         os.makedirs(save_path, exist_ok=True)
         hostname = socket.gethostname()
-        prefix = f"{save_file_prefix}_" if save_file_prefix else ""
+        prefix = f"{save_file_prefix}." if save_file_prefix else ""
         moved: list[str] = []
         for src in matches:
-            dst = os.path.join(save_path, f"{prefix}{hostname}_{os.path.basename(src)}")
+            dst = os.path.join(save_path, f"{prefix}{hostname}.{os.path.basename(src)}")
             try:
                 shutil.move(src, dst)
                 moved.append(dst)

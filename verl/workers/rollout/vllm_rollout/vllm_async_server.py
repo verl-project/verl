@@ -1100,7 +1100,8 @@ class vLLMHttpServer:
         return (
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
-            and (self.profiler_controller._tool == "nsys" or self.profiler_controller.is_discrete_mode())
+            and self.profiler_controller._tool != "nsys"
+            and self.profiler_controller.is_discrete_mode()
         )
 
     async def start_profile(self, **kwargs):
@@ -1109,7 +1110,13 @@ class vLLMHttpServer:
             # Forwarding the same CUDA-profiler calls can discard repeated capture ranges.
             self.profiler_controller.start(**kwargs)
         elif self.node_rank == 0 and self._should_profile():
-            await self.engine.start_profile(**kwargs)
+            # Profiler context is open-ended; the engine accepts only its own options.
+            engine_kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in {"profile_prefix", "delay_iterations", "max_iterations", "profiler_kwargs"}
+            }
+            await self.engine.start_profile(**engine_kwargs)
 
     async def stop_profile(self):
         if self.profiler_controller._tool == "nsys":

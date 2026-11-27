@@ -16,7 +16,7 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, call, create_autospec, patch
 
 import pytest
 
@@ -361,17 +361,56 @@ class TestVllmProfiler:
         server.profiler_controller.check_enable.return_value = True
         server.profiler_controller.check_this_rank.return_value = True
         server.profiler_controller.is_discrete_mode.return_value = False
-        server.engine = AsyncMock()
+
+        # Match vLLM 0.33.0 rather than accepting arbitrary engine kwargs.
+        async def start_profile(
+            profile_prefix=None, *, delay_iterations=None, max_iterations=None, profiler_kwargs=None
+        ):
+            pass
+
+        server.engine = SimpleNamespace(start_profile=create_autospec(start_profile), stop_profile=AsyncMock())
         return server
+
+    @pytest.mark.parametrize(
+        "tool, discrete, expected",
+        [("nsys", False, False), ("nsys", True, False), ("torch", True, True), ("torch", False, False)],
+    )
+    def test_should_profile_selects_only_engine_profilers(self, server, tool, discrete, expected):
+        server.profiler_controller._tool = tool
+        server.profiler_controller.is_discrete_mode.return_value = discrete
+        assert server._should_profile() is expected
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "tool, discrete, expected_calls, collect_traces",
+        "tool, discrete, kwargs, expected_calls, collect_traces",
         [
-            ("torch", True, [call.engine_start(profile_step=3), call.engine_stop()], True),
+            ("torch", True, {"profile_step": 3, "role": "reward"}, [call.engine_start(), call.engine_stop()], True),
+            (
+                "torch",
+                True,
+                {
+                    "profile_step": 3,
+                    "role": "reward",
+                    "profile_prefix": "reward",
+                    "delay_iterations": 1,
+                    "max_iterations": 4,
+                    "profiler_kwargs": {"record_shapes": True},
+                },
+                [
+                    call.engine_start(
+                        profile_prefix="reward",
+                        delay_iterations=1,
+                        max_iterations=4,
+                        profiler_kwargs={"record_shapes": True},
+                    ),
+                    call.engine_stop(),
+                ],
+                True,
+            ),
             (
                 "nsys",
                 False,
+                {"profile_step": 3},
                 [
                     call.server_start(profile_step=3),
                     call.server_stop(run_command=False),
@@ -379,9 +418,9 @@ class TestVllmProfiler:
                 False,
             ),
         ],
-        ids=["torch", "nsys"],
+        ids=["torch-context", "torch-engine-options", "nsys"],
     )
-    async def test_start_stop_profile(self, backend, server, tool, discrete, expected_calls, collect_traces):
+    async def test_start_stop_profile(self, backend, server, tool, discrete, kwargs, expected_calls, collect_traces):
         server.profiler_controller._tool = tool
         server.profiler_controller.is_discrete_mode.return_value = discrete
         server.profiler_controller.config = ProfilerConfig(save_path="/tmp/test", tool_config=None)
@@ -395,7 +434,7 @@ class TestVllmProfiler:
         events.attach_mock(server.engine.stop_profile, "engine_stop")
 
         with patch.object(backend, "relocate_rollout_traces") as relocate:
-            await server.start_profile(profile_step=3)
+            await server.start_profile(**kwargs)
             await server.stop_profile()
 
         assert events.mock_calls == expected_calls

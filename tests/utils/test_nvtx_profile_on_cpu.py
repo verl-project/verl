@@ -255,9 +255,9 @@ class TestNsightRelocateResults:
             ),
             (
                 {},
-                "default_%h_pid%p",
-                ["default_node_pid42.nsys-rep", "default_node_pid42.1.nsys-rep"],
-                ["default_node_pid43.nsys-rep"],
+                "actor.rank2.%h.pid%p",
+                ["actor.rank2.node.pid42.nsys-rep", "actor.rank2.node.pid42.1.nsys-rep"],
+                ["actor.rank2.node.pid43.nsys-rep"],
             ),
             (
                 {"o": "template"},
@@ -296,7 +296,7 @@ class TestNsightRelocateResults:
 
         if options is not None:
             render_output.assert_any_call(options.get("o"), rank=2, role="actor")
-        expected = {f"actor_node_{name}" for name in moved_names}
+        expected = {f"actor.node.{name}" for name in moved_names}
         assert set(moved) == {str(dst / name) for name in expected}
         assert {path.name for path in dst.iterdir()} == expected
         assert {path.name for path in src.iterdir()} == set(retained_names)
@@ -337,7 +337,7 @@ class TestNsightRelocateResults:
                 profiler.stop()
 
             host = socket.gethostname()
-            assert os.path.exists(os.path.join(dst, f"{host}_worker_process_{pid}.nsys-rep"))
+            assert os.path.exists(os.path.join(dst, f"{host}.worker_process_{pid}.nsys-rep"))
             assert not os.path.exists(report)
 
 
