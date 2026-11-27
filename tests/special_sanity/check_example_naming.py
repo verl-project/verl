@@ -113,6 +113,11 @@ DEFAULT_IGNORE_FILES = (
     # does not yet carry a ROCm platform switch; migrate by folding ``_rocm``
     # into a platform/DEVICE env-var toggle rather than in this PR.
     "examples/grpo_trainer/run_deepseek_v4_flash_megatron_rocm.sh",
+    # ROCm (one node x 4 MI355X) sibling of examples/mxfp8/run_qwen3_30b_a3b_megatron.sh; it pins the
+    # docker/rocm/Dockerfile.rocm103 image and ROCm-specific defaults (TP1 x EP4 x ETP1, MXFP8 padding to 256,
+    # HipKittens / CK grouped GEMMs). Migrate by folding ``_rocm`` into a platform env-var toggle of the canonical
+    # script rather than in this PR.
+    "examples/mxfp8/run_qwen3_30b_a3b_megatron_rocm.sh",
 )
 
 
