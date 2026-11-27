@@ -7,10 +7,14 @@ allocations (cumem_allocator.cpp:274), and wake_up runs out of memory
 (cumem_allocator.cpp:187). Without HIP graphs, without the cudaHostRegister,
 or with a torch pinned tensor, two sleep / wake_up cycles pass. CUDA keeps the
 mmap backup.
+If the pinned allocation fails, the backup falls back to pageable memory with
+a warning, as vLLM 0.34 does when cudaHostRegister fails.
 
+diff --git a/vllm/device_allocator/cumem.py b/vllm/device_allocator/cumem.py
+index 0871075..9595dd1 100644
 --- a/vllm/device_allocator/cumem.py
 +++ b/vllm/device_allocator/cumem.py
-@@ -67,7 +67,18 @@
+@@ -67,7 +67,25 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
      python_unmap_and_release(*allocation_handle)
  
  
@@ -23,13 +27,20 @@ mmap backup.
 +
  def create_cpu_backup(size_in_bytes: int) -> torch.Tensor:
 +    if _TORCH_PINNED_BACKUP:
-+        return torch.empty(
-+            size_in_bytes, dtype=torch.uint8, device="cpu", pin_memory=PIN_MEMORY
-+        )
++        try:
++            return torch.empty(
++                size_in_bytes, dtype=torch.uint8, device="cpu", pin_memory=PIN_MEMORY
++            )
++        except RuntimeError:
++            logger.warning_once(
++                "Pinned sleep mode CPU backup allocation failed; "
++                "falling back to pageable memory."
++            )
++            return torch.empty(size_in_bytes, dtype=torch.uint8, device="cpu")
      backup = torch.frombuffer(
          mmap.mmap(-1, size_in_bytes, flags=mmap.MAP_PRIVATE), dtype=torch.uint8
      )
-@@ -84,6 +95,8 @@
+@@ -84,6 +102,8 @@ def create_cpu_backup(size_in_bytes: int) -> torch.Tensor:
  
  
  def release_cpu_backup(backup: torch.Tensor) -> None:

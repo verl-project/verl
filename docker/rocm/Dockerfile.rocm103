@@ -102,7 +102,7 @@ RUN cd /workspace/vllm \
 COPY docker/rocm/patches/vllm-0.34-rocm-*.patch /tmp/vllm-patches/
 RUN cd /workspace/vllm \
     && for p in vllm-0.34-rocm-mxfp8-block32-scales-switch vllm-0.34-rocm-cumem-pinned-backup \
-                vllm-0.34-rocm-mxfp8-linear-opaque-op; do git apply -v "/tmp/vllm-patches/${p}.patch"; done \
+                vllm-0.34-rocm-mxfp8-linear-opaque-op; do git apply -v "/tmp/vllm-patches/${p}.patch" || exit 1; done \
     && rm -rf /tmp/vllm-patches
 
 # ---------------------------------------------------------------------------------------------------------
