@@ -19,12 +19,14 @@ project_name='wuxibin_dapo'
 exp_name='qwen3_30b_score_centering_megatron_1112'
 
 # ===================================== Algorithm =====================================
-adv_estimator=grpo
+adv_estimator=rloo
 loss_mode=bypass_mode
 rollout_is=token
-rollout_is_threshold=2.0
+rollout_is_threshold=${ROLLOUT_IS_THRESHOLD:-2.0}
 bypass_mode=true
 loss_type=reinforce
+loss_agg_mode=token-mean
+loss_scale_factor=null
 score_centering=true
 
 # reference policy
@@ -32,6 +34,7 @@ use_kl_in_reward=False
 kl_coef=0.001
 use_kl_loss=False
 kl_loss_coef=0.001
+entropy_coeff=0.0
 
 clip_ratio_low=3e-4
 clip_ratio_high=4e-4
@@ -118,6 +121,8 @@ ACTOR_CONFIG=(
     actor_rollout_ref.actor.clip_ratio_c=10.0
     actor_rollout_ref.actor.policy_loss.loss_mode=${loss_mode}
     '+actor_rollout_ref.actor.policy_loss.rollout_correction=${algorithm.rollout_correction}'
+    actor_rollout_ref.actor.loss_agg_mode=$loss_agg_mode
+    actor_rollout_ref.actor.loss_scale_factor=$loss_scale_factor
     actor_rollout_ref.actor.use_dynamic_bsz=$use_dynamic_bsz
     actor_rollout_ref.actor.megatron.pad_to_length=True
     actor_rollout_ref.actor.ppo_mini_batch_size=$ppo_mini_batch_size

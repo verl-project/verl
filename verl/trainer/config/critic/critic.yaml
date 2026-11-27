@@ -154,6 +154,29 @@ profiler:
 
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: False
+
+      # Optional torch_npu.profiler.schedule. Supported only with discrete: False and active > 0;
+      # profiler.step() advances the schedule once per mini-batch. With discrete: True,
+      # each critic mini-batch is collected in full and the schedule is ignored.
+      schedule:
+
+        # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+        _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+
+        # Number of steps to skip before the first cycle
+        skip_first: 0
+
+        # Idle steps (no collection) at the start of each cycle
+        wait: 0
+
+        # Warmup steps (tracing on, data discarded) each cycle
+        warmup: 0
+
+        # Active steps to record each cycle; 0 disables scheduling
+        active: 0
+
+        # Number of cycles to repeat; 0 repeats until profiling stops
+        repeat: 0
     
     # torch profiler config
     torch:

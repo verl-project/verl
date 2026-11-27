@@ -173,9 +173,16 @@ class PPOTrainer(ABC):
         if not has_custom_sampler:
             filter_groups_metric = self._resolve_filter_groups_metric()
             sync_refill_failed_groups = bool(sampler_config.get("sync_refill_failed_groups", False))
+            poll_interval = float(sampler_config.get("poll_interval", 2.0))
+            # Fail here rather than in the poll loop, where time.sleep() raises on inf (OverflowError) and nan.
+            if not (math.isfinite(poll_interval) and poll_interval > 0):
+                raise ValueError(
+                    f"trainer.v1.sampler.poll_interval must be a finite number of seconds > 0, got {poll_interval}"
+                )
             replay_buffer_kwargs.update(
                 filter_groups_metric=filter_groups_metric,
                 sync_refill_failed_groups=sync_refill_failed_groups,
+                poll_interval=poll_interval,
             )
             if sampler_cls is ReplayBuffer:
                 filter_groups = self.config.algorithm.get("filter_groups", None)
@@ -393,7 +400,8 @@ class PPOTrainer(ABC):
 
         # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        checkpoint_engine_config.backend = "naive"
+        if checkpoint_engine_config.backend != "vllm_ipc":
+            checkpoint_engine_config.backend = "naive"
         self.checkpoint_manager: CheckpointEngineManager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,
@@ -505,19 +513,22 @@ class PPOTrainer(ABC):
                     logger.info("Custom training source exhausted at step %s; ending training.", self.global_steps)
                     source_exhausted = True
                     break
+                else:
+                    last_completed_step = self.global_steps
+
+                    # 2. save checkpoint
+                    if self.config.trainer.save_freq > 0 and (
+                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                    ):
+                        with marked_timer("save_checkpoint", self.timing_raw, color="green"):
+                            self._save_checkpoint()
+
+                    # Weight synchronization runs in this hook. Keep this step's profiler
+                    # and rank/step selection active until the update has completed.
+                    self.on_step_end()
+                    metrics.update(self._consume_sync_metrics())
                 finally:
                     self._stop_profiling()
-                last_completed_step = self.global_steps
-
-                # 2. save checkpoint
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
-                ):
-                    with marked_timer("save_checkpoint", self.timing_raw, color="green"):
-                        self._save_checkpoint()
-
-                self.on_step_end()
-                metrics.update(self._consume_sync_metrics())
 
             # 4. validate
             if self.config.trainer.test_freq > 0 and (

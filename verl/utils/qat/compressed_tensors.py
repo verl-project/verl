@@ -781,10 +781,17 @@ def dispatch_rollout_weight_quantizer(
                 "quantization_config or set rollout.quantization.linear / moe / config_file"
             )
         return None
-    if getattr(getattr(rollout_config, "checkpoint_engine", None), "backend", None) == "delta_sharded":
+    ce_backend = getattr(getattr(rollout_config, "checkpoint_engine", None), "backend", None)
+    if ce_backend in {"delta_sharded", "vllm_sparse_nccl"}:
         raise NotImplementedError(
-            "checkpoint_engine.backend='delta_sharded' does not support quantized rollouts: its steady-state "
+            f"checkpoint_engine.backend={ce_backend!r} does not support quantized rollouts: its steady-state "
             "deltas bypass the trainer-side rollout weight quantizer"
+        )
+
+    if getattr(getattr(rollout_config, "checkpoint_engine", None), "backend", None) == "sharded_nixl":
+        raise NotImplementedError(
+            "checkpoint_engine.backend='sharded_nixl' does not support quantized rollouts: its shard "
+            "export bypasses the trainer-side rollout weight quantizer"
         )
 
     quant_method = str(quantization_config.get("quant_method", "")).lower()

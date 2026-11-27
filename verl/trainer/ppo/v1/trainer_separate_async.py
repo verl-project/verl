@@ -66,8 +66,9 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         assert config.actor_rollout_ref.rollout.n_gpus_per_node > 0, (
             "n_gpus_per_node must be > 0 in separate async training"
         )
-        assert config.actor_rollout_ref.rollout.checkpoint_engine.backend != "naive", (
-            "please use nccl/nixl/mooncake, etc. backend for separate async training"
+        assert config.actor_rollout_ref.rollout.checkpoint_engine.backend not in ("naive", "vllm_ipc"), (
+            "please use nccl/nixl/mooncake/vllm_nccl/vllm_sparse_nccl/vllm_sharded_rdt/vllm_nccl_m2n, etc. "
+            "backend for separate async training"
         )
         if need_reward_model(config):
             assert config.reward.reward_model.enable_resource_pool, (
@@ -214,7 +215,10 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             return super()._compute_old_log_prob(batch, metrics)
 
         if self.local_trigger_step == 0:
-            self.actor_rollout_wg.save_model_to_cpu(0)
+            # With parameter_sync_step == 1, local_trigger_step never reaches >= 1, so the
+            # π_old snapshot is never restored; skip the redundant full-model D2H copy.
+            if self.parameter_sync_step > 1:
+                self.actor_rollout_wg.save_model_to_cpu(0)
             return super()._compute_old_log_prob(batch, metrics)
         else:
             self.actor_rollout_wg.save_model_to_cpu(self.local_trigger_step)
@@ -342,8 +346,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         )
 
     def on_step_end(self):
-        # _stop_profiling() already moved this step's flag to prev_step_profile.
-        if self.prev_step_profile:
+        # The current step stays selected until weight synchronization finishes.
+        if self.curr_step_profile:
             self._stop_rollout_profiling()
 
         config = self.hybrid_rollout_config

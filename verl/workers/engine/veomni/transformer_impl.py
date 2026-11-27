@@ -26,7 +26,7 @@ from veomni.arguments import AcceleratorConfig, FSDPConfig, MixedPrecisionConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
-from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
+from veomni.models.checkpoint import export_weights, get_checkpoint_tensor_converter
 from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
@@ -52,7 +52,6 @@ from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead, FSDPEngine
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
     VL_TYPE2INDEX,
-    get_moe_param_handler,
     load_safetensors_index,
     load_veomni_model_to_gpu,
     load_veomni_optimizer,
@@ -165,11 +164,30 @@ class VeOmniEngine(FSDPEngine):
             data_parallel_replicate_size = dp_size // fsdp_size
             data_parallel_shard_size = fsdp_size
 
+        extra_parallel_names = []
+        extra_parallel_sizes = []
+        extra_parallel_placement_innermost = []
+        if self.engine_config.ple_parallel_size > 1:
+            # VeOmni builds ExtraParallel over dp_shard_sp, which includes Ulysses
+            # but excludes the HSDP replicate axis.
+            dp_shard_sp_size = data_parallel_shard_size * self.engine_config.ulysses_parallel_size
+            if dp_shard_sp_size % self.engine_config.ple_parallel_size != 0:
+                raise ValueError(
+                    f"Parameter shard domain ({dp_shard_sp_size}) must be divisible by "
+                    f"ple_parallel_size ({self.engine_config.ple_parallel_size})."
+                )
+            extra_parallel_names.append("ple")
+            extra_parallel_sizes.append(self.engine_config.ple_parallel_size)
+            extra_parallel_placement_innermost.append(False)
+
         accelerator = AcceleratorConfig(
             dp_replicate_size=data_parallel_replicate_size,
             dp_shard_size=data_parallel_shard_size,
             ep_size=self.engine_config.expert_parallel_size,
             ulysses_size=self.engine_config.ulysses_parallel_size,
+            extra_parallel_sizes=extra_parallel_sizes,
+            extra_parallel_placement_innermost=extra_parallel_placement_innermost,
+            extra_parallel_names=extra_parallel_names,
             init_device=self.engine_config.init_device,
             fsdp_config=FSDPConfig(fsdp_mode=self.data_parallel_mode),
         )
@@ -405,6 +423,8 @@ class VeOmniEngine(FSDPEngine):
             broadcast_model_weights_from_rank0=self.engine_config.broadcast_model_weights_from_rank0,
             ep_sharded_stream_load=self.engine_config.ep_sharded_stream_load,
             fqn_to_index_mapping=load_safetensors_index(self.model_config.local_path),
+            freeze_ple_embeddings=self.engine_config.freeze_ple_embeddings,
+            frozen_ple_dtype=self.engine_config.frozen_ple_dtype,
         )
         log_gpu_memory_usage("After parallelize model", logger=logger)
 
@@ -663,60 +683,43 @@ class VeOmniEngine(FSDPEngine):
     # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
-        per_tensor_param, peft_config = self._get_hf_export_per_tensor_param()
+        per_tensor_param, peft_config = self._export_per_tensor_param(skip_frozen_ple=True)
         return self._quantize_for_rollout(per_tensor_param), peft_config
 
     def _get_hf_export_per_tensor_param(self):
         """Full HF-format weights without the rollout weight quantizer: the checkpoint 'hf_model' export."""
+        return self._export_per_tensor_param(skip_frozen_ple=False)
+
+    def _export_per_tensor_param(self, *, skip_frozen_ple: bool):
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
-        # per-DTensor .to(device).full_tensor() in param_generator() below stages each
-        # shard instead, so the manual whole-model move is unnecessary under CPU offload.
-        if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
+        # per-DTensor .to(device).full_tensor() in export_weights() stages each shard
+        # instead, so the manual whole-model move is unnecessary under CPU offload.
+        manual_offload = not getattr(self, "_uses_fsdp2_cpu_offload_policy", False)
+        if manual_offload:
             load_veomni_model_to_gpu(self.module)
 
-        # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
         converter = get_checkpoint_tensor_converter(self.module)
         if converter is not None and hasattr(converter, "export_weights"):
-            return converter.export_weights(self.module), None
+            exported = converter.export_weights(self.module)
+        else:
+            wrapped_module = getattr(self.module, "_fsdp_wrapped_module", self.module)
+            exported = (
+                (next(iter(convert_weight_keys({name: tensor}, wrapped_module))), tensor)
+                if hasattr(wrapped_module, "_checkpoint_conversion_mapping")
+                else (name, tensor)
+                for name, tensor in export_weights(self.module, skip_frozen_ple=skip_frozen_ple)
+            )
 
-        params = self.module.state_dict()
-        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-
-        if self._is_offload_param:
-            offload_veomni_model_to_cpu(self.module)
-
-        ps = parallel_state.get_parallel_state()
-        model_type = getattr(self.module.config, "model_type", "default")
-        process_func = get_moe_param_handler(model_type, ps.ep_enabled)
-
-        device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-
-        def param_generator():
-            for name, param in params.items():
-                unsharded_tensor = (
-                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
-                )
-
-                is_expert_layer = "mlp.experts." in name
-                is_proj = any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
-
-                if is_expert_layer and is_proj and ps.ep_enabled:
-                    ep_rank, ep_size = ps.ep_rank, ps.ep_size
-                    buffer = torch.empty_like(unsharded_tensor)  # [num_experts/ep_size, H, I]
-                    for src_ep_rank in range(ep_size):
-                        tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
-                        torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ps.ep_group)
-                        yield from process_func(name, tensor, expert_id_base=src_ep_rank * tensor.size(0))
-
-                else:
-                    if is_expert_layer:
-                        yield from process_func(name, unsharded_tensor, expert_id_base=0)
-                    else:
-                        yield name, unsharded_tensor
+        def _with_offload_back():
+            try:
+                yield from exported
+            finally:
+                if manual_offload and self._is_offload_param:
+                    offload_veomni_model_to_cpu(self.module)
 
         # TODO: support VeOmni LoRA
-        return param_generator(), None
+        return _with_offload_back(), None
 
     def set_rollout_weight_quantizer(self, quantizer) -> None:
         self._rollout_weight_quantizer = quantizer

@@ -26,6 +26,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=2 \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=delta_sharded \
+    +actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.delta_sharded.encoding=indices \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.use_torch_compile=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \

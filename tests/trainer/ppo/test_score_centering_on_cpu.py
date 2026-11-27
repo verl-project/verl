@@ -144,8 +144,9 @@ def test_score_centering_config_accepts_sampling_parameters_without_a_manual_cen
     )
 
 
-def test_score_centering_config_accepts_megatron_actor():
-    _validate_score_centering_config(_config(**{"actor_rollout_ref.actor.strategy": "megatron"}))
+@pytest.mark.parametrize("strategy", ["fsdp", "fsdp2", "veomni", "megatron"])
+def test_score_centering_config_accepts_supported_actor_strategies(strategy):
+    _validate_score_centering_config(_config(**{"actor_rollout_ref.actor.strategy": strategy}))
 
 
 def test_score_centering_config_skips_checks_when_off():
@@ -165,7 +166,7 @@ def test_score_centering_config_skips_checks_when_off():
         (dict(algorithm_rc={"score_centering": False}), "both"),
         (dict(actor_rc={"rollout_is": "sequence"}), "score_centering"),
         (dict(actor_rc={"rollout_is_threshold": 3.0}), "match"),
-        ({"actor_rollout_ref.actor.strategy": "veomni"}, "strategy"),
+        ({"actor_rollout_ref.actor.strategy": "torchtitan"}, "strategy"),
         ({"actor_rollout_ref.rollout.name": "sglang"}, "vllm"),
         ({"actor_rollout_ref.rollout.topk_log_probs": 0}, "topk_log_probs"),
         ({"actor_rollout_ref.rollout.temperature": 0}, "temperature"),
@@ -657,6 +658,85 @@ def test_logits_processor_accepts_precomputed_topk_log_probs_with_gradient():
     eager["sc_correction"].sum().backward()
     fused["sc_correction"].sum().backward()
     torch.testing.assert_close(fused_logits.grad, eager_logits.grad)
+
+
+def test_logits_processor_aligns_sampler_heads_with_static_padding():
+    torch.manual_seed(22)
+    lengths, k, vocab = [3, 5], 8, 17
+    total_nnz, bucket = sum(lengths), 16
+    data = _nested_batch(lengths, k, vocab, top_p=0.7)
+    config = _actor_config(_support_rollout_correction())
+    logits = torch.randn(1, bucket, vocab, requires_grad=True)
+
+    expected = score_centering_logits_processor(
+        student_logits=logits[:, :total_nnz],
+        data=data,
+        config=config,
+    )
+    padded = score_centering_logits_processor(
+        student_logits=logits,
+        data=data,
+        config=config,
+        pad_to_length_bucket=bucket,
+    )
+
+    for key in expected:
+        assert padded[key].shape == (1, bucket)
+        torch.testing.assert_close(padded[key][:, :total_nnz], expected[key])
+
+    padded_ids = torch.cat(
+        (
+            data["rollout_topk_ids"].values(),
+            torch.zeros(bucket - total_nnz, k, dtype=torch.int32),
+        )
+    )
+    precomputed = topk_log_probs_from_logits(logits.squeeze(0), padded_ids).unsqueeze(0)
+    fused = score_centering_logits_processor(
+        student_logits=None,
+        student_topk_log_probs=precomputed,
+        data=data,
+        config=config,
+        pad_to_length_bucket=bucket,
+    )
+    for key in padded:
+        torch.testing.assert_close(fused[key], padded[key])
+
+
+def test_logits_processor_slices_static_padding_with_ulysses():
+    torch.manual_seed(23)
+    lengths, k, vocab = [3, 5], 8, 17
+    total_nnz, bucket, sp_size = sum(lengths), 12, 2
+    data = _nested_batch(lengths, k, vocab, top_p=0.7)
+    config = _actor_config(_support_rollout_correction())
+    full_logits = torch.randn(1, bucket, vocab)
+    expected = score_centering_logits_processor(
+        student_logits=full_logits[:, :total_nnz],
+        data=data,
+        config=config,
+    )
+
+    def rank_one_slice(tensor, dim, padding):
+        assert dim == 1 and not padding and tensor.shape[1] == bucket
+        return tensor[:, bucket // sp_size :]
+
+    with (
+        patch(
+            "verl.trainer.ppo.score_centering.get_ulysses_sequence_parallel_world_size",
+            return_value=sp_size,
+        ),
+        patch("verl.trainer.ppo.score_centering.slice_input_tensor", side_effect=rank_one_slice),
+    ):
+        local = score_centering_logits_processor(
+            student_logits=full_logits[:, bucket // sp_size :],
+            data=data,
+            config=config,
+            pad_to_length_bucket=bucket,
+        )
+
+    for key in expected:
+        assert local[key].shape == (1, bucket // sp_size)
+        torch.testing.assert_close(local[key][:, : total_nnz - bucket // sp_size], expected[key][:, 6:])
+        assert torch.isfinite(local[key]).all()
 
 
 @pytest.mark.parametrize(

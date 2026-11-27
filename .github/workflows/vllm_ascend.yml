@@ -145,6 +145,14 @@ jobs:
       - name: Test vllm server abort functionality
         run: |
           pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
+      - name: Test vLLM sampling support and top-k evidence
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+          HCCL_HOST_SOCKET_PORT_RANGE: auto
+          HCCL_NPU_SOCKET_PORT_RANGE: auto
+        run: |
+          pytest tests/workers/rollout/rollout_vllm/test_vllm_topk_support.py -v -s
       - name: Test bucketed weight transfer
         run: |
           pytest -svvv tests/utils/test_bucketed_weight_transfer.py

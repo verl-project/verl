@@ -15,15 +15,39 @@
 import copy
 import dataclasses
 import functools
+import inspect
 import logging
 import os
 import subprocess
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 from ..tracking import RLInsightLogger
 from .config import ProfilerConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _wrap_with_profile_context(func, profile_context):
+    """Keep a profiling context open until a synchronous or asynchronous call finishes.
+
+    The context yields the callable to execute, allowing the dispatcher to select a
+    backend without catching exceptions raised by the actual worker method.
+    """
+    if inspect.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            with profile_context(*args, **kwargs) as wrapped:
+                return await wrapped(*args, **kwargs)
+    else:
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            with profile_context(*args, **kwargs) as wrapped:
+                return wrapped(*args, **kwargs)
+
+    return wrapper
 
 
 def _hook_print(msg: str) -> None:
@@ -346,17 +370,19 @@ class DistProfiler:
         """
 
         def decorator(func):
-            @functools.wraps(func)
-            def wrapper(self_instance, *args, **kwargs_inner):
+            @contextmanager
+            def profile_context(self_instance, *args, **kwargs_inner):
                 profiler = getattr(self_instance, "profiler", None)
                 if profiler is None:
-                    return func(self_instance, *args, **kwargs_inner)
+                    yield func
+                    return
 
                 with RLInsightLogger.trace_state(
                     kwargs_outer.get("role", func.__qualname__), state_lane_id=f"rank_{profiler.rank}"
                 ):
                     if not profiler.check_enable() or not profiler.check_this_step() or not profiler.check_this_rank():
-                        return func(self_instance, *args, **kwargs_inner)
+                        yield func
+                        return
 
                     impl = profiler._impl
                     if hasattr(impl, "annotate"):
@@ -371,10 +397,11 @@ class DistProfiler:
                             # swallow real stage errors and re-run func (executing the
                             # stage twice with duplicated side effects).
                             wrapped = func
-                        return wrapped(self_instance, *args, **kwargs_inner)
-                    return func(self_instance, *args, **kwargs_inner)
+                        yield wrapped
+                    else:
+                        yield func
 
-            return wrapper
+            return _wrap_with_profile_context(func, profile_context)
 
         return decorator
 

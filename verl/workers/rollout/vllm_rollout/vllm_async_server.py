@@ -55,13 +55,14 @@ from verl.utils.profiler import (
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, prefix_cache_salt
 from verl.workers.rollout.utils import (
+    dedup_image_tokens,
     extract_response_topk_logprobs_with_coverage,
+    extract_sampled_logprobs,
     get_max_position_embeddings,
     get_node_visible_devices,
     get_vision_placeholder_token_ids,
-    qwen2_5_vl_dedup_image_tokens,
     run_uvicorn,
     validate_topk_logprob_request,
     warn_topk_logprob_budget,
@@ -87,6 +88,7 @@ _VERL_MANAGED_VLLM_ARGS = {
     "enable_expert_parallel": "rollout.expert_parallel_size (= tensor_model_parallel_size * data_parallel_size)",
     "enable_lora": "actor_rollout_ref.model.lora",
     "max_lora_rank": "actor_rollout_ref.model.lora",
+    "enable_tower_connector_lora": "actor_rollout_ref.model.lora",
     "enable_return_routed_experts": "rollout.enable_rollout_routing_replay",
 }
 
@@ -121,6 +123,7 @@ class vLLMHttpServer:
         cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
+        placement_group: Any = None,
     ):
         """
         Args:
@@ -148,8 +151,10 @@ class vLLMHttpServer:
         self._pd_prefill_side_channel_port: Optional[int] = None
         self._pd_prefill_engine_id: Optional[str] = None
         self._pd_peer_idx: int = 0
+        self._placement_group = placement_group
 
-        os.environ[get_visible_devices_keyword()] = cuda_visible_devices
+        if placement_group is None:
+            os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
         # Forward the Ray job id into the vLLM worker subprocess so the
         # colocated weight-transfer IPC socket path is unique per Ray job.
@@ -277,6 +282,34 @@ class vLLMHttpServer:
             kwargs=kwargs,
         )
 
+    async def init_weight_transfer_engine(self, init_info: dict[str, Any]):
+        """Initialize vLLM's native weight transfer engine across all workers."""
+        from vllm.distributed.weight_transfer.base import WeightTransferInitRequest
+
+        return await self.engine.init_weight_transfer_engine(WeightTransferInitRequest(init_info=init_info))
+
+    async def shutdown_weight_transfer_engine(self):
+        """Release vLLM's native weight transfer engine resources."""
+        return await self.engine.shutdown_weight_transfer_engine()
+
+    async def start_weight_update(self):
+        """Begin a native weight update session."""
+        return await self.engine.start_weight_update()
+
+    async def start_draft_weight_update(self):
+        """Begin a native speculative draft weight update session."""
+        return await self.engine.start_draft_weight_update()
+
+    async def update_weights(self, update_info: dict[str, Any] | list[dict[str, Any]]):
+        """Deliver one native weight update payload."""
+        from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
+
+        return await self.engine.update_weights(WeightTransferUpdateRequest(update_info=update_info))
+
+    async def finish_weight_update(self, weight_version: str | None = None):
+        """Finalize the active native weight update session."""
+        return await self.engine.finish_weight_update(weight_version)
+
     async def set_pd_peer(
         self,
         decode_peers: list,
@@ -324,7 +357,9 @@ class vLLMHttpServer:
         effective_quantization_config = hf_overrides.get("quantization_config") or hf_quantization_config
         from verl.utils.vllm.vllm_quant_utils import set_default_vllm_quantization_backends
 
-        set_default_vllm_quantization_backends(effective_quantization_config, engine_kwargs)
+        set_default_vllm_quantization_backends(
+            effective_quantization_config, engine_kwargs, hf_config=self.model_config.hf_config
+        )
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
@@ -466,6 +501,8 @@ class vLLMHttpServer:
                 "max_loras": 1,
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
+            if self.model_config.lora.get("enable_tower_connector_lora", False):
+                lora_args["enable_tower_connector_lora"] = True
             if self.model_config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
             args.update(lora_args)
@@ -519,6 +556,8 @@ class vLLMHttpServer:
         usage_context = UsageContext.OPENAI_API_SERVER
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
         vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
+        if self._placement_group is not None and vllm_config.parallel_config.distributed_executor_backend == "ray":
+            vllm_config.parallel_config.placement_group = self._placement_group
 
         fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
         kwargs = {}
@@ -660,8 +699,8 @@ class vLLMHttpServer:
         )
         topk_log_probs = sampling_params.pop("topk_log_probs", 0)
         sampling_params["logprobs"] = (topk_log_probs or 0) if sampling_params.pop("logprobs", False) else None
-        if sampling_params["logprobs"]:
-            # the top-k head is read from flat lists, see extract_response_topk_logprobs
+        if sampling_params["logprobs"] is not None:
+            # log-probs are read from flat lists, see extract_sampled_logprobs and extract_response_topk_logprobs
             sampling_params["flat_logprobs"] = True
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
@@ -678,8 +717,9 @@ class vLLMHttpServer:
         # and numeric logprobs (never .text), so detokenizing every generated token into a
         # string is pure overhead. Skip it. Guard: string-based `stop` / `bad_words` need
         # detokenized text to match, so only skip when neither is used (`stop_token_ids`
-        # is unaffected). Teacher requests already set detokenize=False upstream, so this
-        # setdefault leaves them untouched.
+        # is unaffected). Teacher prompt-logprob requests get detokenize=False here too:
+        # they never set `stop` / `bad_words`, and the teacher manager leaves `detokenize`
+        # out of its sampling params because SGLang rejects it.
         if not sampling_params.get("stop") and not sampling_params.get("bad_words"):
             sampling_params.setdefault("detokenize", False)
 
@@ -689,7 +729,7 @@ class vLLMHttpServer:
         budget_warnings = getattr(self, "_topk_budget_warnings", set())
         warn_topk_logprob_budget(sampling_params, budget_warnings)
         self._topk_budget_warnings = budget_warnings
-        prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        prompt_ids = dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
@@ -719,6 +759,10 @@ class vLLMHttpServer:
         rejected = await self._park_until_admitted(request_id)
         if rejected is not None:
             return rejected
+
+        cache_salt = prefix_cache_salt(self.config, self.global_steps)
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
 
         with RLInsightLogger.trace_state(
             "vllm_generate",
@@ -792,7 +836,7 @@ class vLLMHttpServer:
                     warned.add(signature)
                     self._topk_coverage_warnings = warned
         elif sampling_params.logprobs is not None:
-            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
+            log_probs = extract_sampled_logprobs(final_res.outputs[0].logprobs)
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
@@ -934,15 +978,11 @@ class vLLMHttpServer:
             # processes across all DP shards (unlike collective_rpc which only reaches
             # TP workers within a single shard).
             await self.engine.wake_up(tags=tags or self._get_wake_up_tags())
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
-            # reset_connector=True drops any attached external KV store
-            # (e.g. MooncakeStoreConnector) whose entries were computed
-            # against the previous weights. No-op success when no connector
-            # is configured (vLLM scheduler treats it as such).
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
@@ -956,20 +996,39 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            # A colocated teacher or reward server can wake without an actor weight upload.
+            await self._engine_sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
+
+    async def _engine_sleep(self, level: int):
+        # Sleep discards the KV cache and, by default, resets the KV connector, which for a shared store
+        # (e.g. MooncakeStoreConnector) deletes entries other replicas still use. Under "salt" that is never
+        # needed: unchanged weights keep the current salt, and new weights get a new one.
+        if self.config.external_kv_cache_invalidation == "salt":
+            if "reset_connector" in inspect.signature(self.engine.sleep).parameters:
+                await self.engine.sleep(level=level, reset_connector=False)
+                return
+            logger.warning(
+                "external_kv_cache_invalidation='salt': this vLLM's sleep() cannot keep the KV connector's cache "
+                "(needs vllm-project/vllm#57810), so the external KV store is reset on sleep."
+            )
+        await self.engine.sleep(level=level)
+
+    async def _reset_prefix_cache(self):
+        # Under "reset", reset_connector=True also drops any attached external KV store
+        # (e.g. MooncakeStoreConnector) whose entries were computed against the previous
+        # weights; with no connector it is a no-op success. Under "salt" those entries
+        # are unreachable through their old salt, so the store, which other replicas may
+        # still be reading and writing, is left intact.
+        await self.engine.reset_prefix_cache(reset_connector=self.config.external_kv_cache_invalidation == "reset")
 
     @RLInsightLogger.trace_state_decorator(
         "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
     )
     async def clear_kv_cache(self):
         if self.node_rank == 0:
-            # reset_connector=True drops any attached external KV store
-            # (e.g. MooncakeStoreConnector) whose entries were computed
-            # against the previous model weights. With no connector it
-            # is a no-op success, so we can pass it unconditionally.
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self._reset_prefix_cache()
 
             await self.engine.reset_mm_cache()
             await self.engine.reset_encoder_cache()
@@ -984,7 +1043,8 @@ class vLLMHttpServer:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        # This sync path never re-sends LoRA adapters, so keep adapter-mode weights even with lora.resync_base.
+        await self._engine_sleep(level=1 if self.lora_as_adapter else self._resolve_sleep_level())
         await self.engine.wake_up(tags=["weights"])
 
     @RLInsightLogger.trace_state_decorator(
@@ -997,7 +1057,7 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
         await self.engine.wake_up(tags=["kv_cache"])
-        await self.engine.reset_prefix_cache(reset_connector=True)
+        await self._reset_prefix_cache()
 
     async def snapshot(self) -> dict[str, Any]:
         """Return live KV-cache and scheduler queue observations.
@@ -1179,6 +1239,12 @@ class vLLMHttpServer:
             deadline = time.monotonic() + _GATE_BARRIER_TIMEOUT_S
             while self._admitting > 0:
                 if time.monotonic() > deadline:
+                    if self.config.external_kv_cache_invalidation == "salt":
+                        # A straggler would run on the new weights under its old salt and write
+                        # into the kept KV store, so do not proceed with the weight update.
+                        raise RuntimeError(
+                            f"Submission gate barrier timed out with {self._admitting} admission(s) in flight"
+                        )
                     logger.warning(
                         "Submission gate barrier timed out with %d admission(s) in flight, proceeding",
                         self._admitting,
@@ -1198,14 +1264,20 @@ class vLLMHttpServer:
             #    on this path, so any attached external KV store (e.g.
             #    MooncakeStoreConnector) is invalidated along with the
             #    local prefix cache — RL-correct hard-reset at every
-            #    weight update boundary, no extra kwargs needed.
+            #    weight update boundary. pause_generation cannot keep the
+            #    connector, so "salt" pauses without clearing and then
+            #    clears only the local caches via clear_kv_cache().
+            reset_connector = self.config.external_kv_cache_invalidation == "reset"
+            clear_cache = reset_prefix_cache and reset_connector
             if _VLLM_VERSION >= version.parse("0.32.0"):
-                await self.engine.pause_generation(mode="abort", clear_cache=reset_prefix_cache)
+                await self.engine.pause_generation(mode="abort", clear_cache=clear_cache)
             else:
                 await self.engine.pause_generation(
                     wait_for_inflight_requests=False,
-                    clear_cache=reset_prefix_cache,
+                    clear_cache=clear_cache,
                 )
+            if reset_prefix_cache and not reset_connector:
+                await self.clear_kv_cache()
 
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
@@ -1429,53 +1501,43 @@ class vLLMHttpServer:
             # See: https://github.com/vllm-project/vllm/pull/43001/
             engine_kwargs.setdefault("mm_processor_cache_gb", 0)
 
+        from verl.checkpoint_engine.vllm_weight_transfer import resolve_vllm_weight_transfer_backend
+
         checkpoint_config = getattr(self.config, "checkpoint_engine", None)
-        if getattr(checkpoint_config, "backend", None) == "delta_sharded":
-            from verl.workers.rollout.vllm_rollout.delta_weight_transfer import (
-                VERL_DELTA_WEIGHT_TRANSFER_BACKEND,
-                is_moe_model,
-                require_vllm_delta_support,
-            )
-
-            require_vllm_delta_support()
-            delta_engine_kwargs = getattr(checkpoint_config, "engine_kwargs", {}).get("delta_sharded", {})
-            if int(delta_engine_kwargs.get("verify_every", 0)) > 0:
-                raise NotImplementedError("delta_sharded with vLLM does not support verify_every > 0")
-            if self.config.data_parallel_size != 1:
-                raise NotImplementedError("delta_sharded with vLLM requires data_parallel_size=1")
-            if self.config.disaggregation.enabled:
-                raise NotImplementedError("delta_sharded with vLLM does not support PD disaggregation")
-            # config.pipeline_model_parallel_size > 1 is already rejected globally and
-            # engine_kwargs cannot set TP/DP (see _VERL_MANAGED_VLLM_ARGS); close the
-            # remaining pipeline override that would bypass VERL's worker and IPC mapping.
-            if int(engine_kwargs.get("pipeline_parallel_size") or 1) > 1:
-                raise NotImplementedError("delta_sharded with vLLM requires pipeline_parallel_size=1")
-
-            if is_moe_model(self.model_config.hf_config):
-                moe_backend = engine_kwargs.get("moe_backend")
-                if moe_backend not in {None, "auto", "triton"}:
-                    raise NotImplementedError(
-                        f"delta_sharded with vLLM MoE requires moe_backend='triton'; got {moe_backend!r}"
+        wt_backend = resolve_vllm_weight_transfer_backend(
+            getattr(checkpoint_config, "backend", None),
+            engine_kwargs,
+            allow_delta_sharded=getattr(self, "rollout_mode", None) == RolloutMode.HYBRID,
+        )
+        if wt_backend is not None:
+            existing_wtc = dict(engine_kwargs.get("weight_transfer_config") or {})
+            existing_wtc["backend"] = wt_backend
+            engine_kwargs["weight_transfer_config"] = existing_wtc
+            if wt_backend == "ipc":
+                # CUDA IPC handles (reduce_tensor tuples) require pickle fallback on vLLM's ZMQ RPC.
+                os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+            if wt_backend == "sharded_rdt":
+                exec_backend = engine_kwargs.get("distributed_executor_backend")
+                if exec_backend not in {None, "ray"}:
+                    raise ValueError(
+                        f"weight_transfer_config backend='sharded_rdt' requires distributed_executor_backend='ray'; "
+                        f"got {exec_backend!r}"
                     )
-                engine_kwargs["moe_backend"] = "triton"
-                if engine_kwargs.get("enable_eplb", False):
-                    raise NotImplementedError("delta_sharded with vLLM MoE does not support EPLB")
+                engine_kwargs["distributed_executor_backend"] = "ray"
 
-            weight_transfer_config = engine_kwargs.get("weight_transfer_config")
-            if weight_transfer_config is None:
-                weight_transfer_backend = None
-            elif isinstance(weight_transfer_config, Mapping):
-                weight_transfer_backend = weight_transfer_config.get("backend")
-            else:
-                raise TypeError("weight_transfer_config must be a mapping when using delta_sharded")
+        if getattr(checkpoint_config, "backend", None) == "sharded_nixl":
+            if engine_kwargs.get("enable_eplb", False) or engine_kwargs.get("enable-eplb", False):
+                raise NotImplementedError("sharded_nixl with vLLM does not support EPLB")
 
-            if weight_transfer_backend not in {None, VERL_DELTA_WEIGHT_TRANSFER_BACKEND}:
-                raise ValueError(
-                    "checkpoint_engine.backend='delta_sharded' requires vLLM "
-                    f"weight transfer backend {VERL_DELTA_WEIGHT_TRANSFER_BACKEND!r}, "
-                    f"but got {weight_transfer_backend!r}"
-                )
-            engine_kwargs["weight_transfer_config"] = {"backend": VERL_DELTA_WEIGHT_TRANSFER_BACKEND}
+        lora_enabled = getattr(self, "lora_as_adapter", False) or bool(engine_kwargs.get("enable_lora"))
+        if (
+            not is_torch_npu_available(check_device=False)
+            and wt_backend != "sharded_rdt"
+            and not engine_kwargs.get("quantization")
+            and not lora_enabled
+        ):
+            # refits update the weights in place (direct reload); sharded_rdt, LoRA, and online quant use layerwise
+            os.environ.setdefault("VLLM_RELOAD_MODE", "direct")
 
     def _get_override_generation_config(self) -> dict:
         """Return the override_generation_config dict."""
@@ -1525,8 +1587,10 @@ class vLLMHttpServer:
 
         MTP drafter-only weights are initialized by vLLM and are not guaranteed
         to be restored by actor weight sync after level 2 sleep discards them.
-        lora only update adapter weights, so set sleep level to 1.
-        vllm-ascend < 0.30.0 requires sleep level 1 to avoid EP precision issues.
+        LoRA normally updates only adapter weights, so it requires level 1.
+        With resync_base, hybrid mode restores discarded base weights on every
+        update and can use level 2. vllm-ascend < 0.30.0 requires level 1 to
+        avoid EP precision issues.
         """
         mtp_config = getattr(self.config, "mtp", None)
         mtp_rollout_enabled = (
@@ -1534,10 +1598,23 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        if mtp_rollout_enabled or self.lora_as_adapter:
+        checkpoint_backend = getattr(getattr(self.config, "checkpoint_engine", None), "backend", None)
+        engine_kwargs = (
+            self.config.get("engine_kwargs", {})
+            if hasattr(self.config, "get")
+            else getattr(self.config, "engine_kwargs", None)
+        ) or {}
+        vllm_engine_kwargs = engine_kwargs.get(self._get_engine_kwargs_key(), {}) or {}
+        wtc = vllm_engine_kwargs.get("weight_transfer_config")
+        sparse_update = checkpoint_backend == "vllm_sparse_nccl" or (
+            isinstance(wtc, Mapping) and wtc.get("backend") == "sparse_nccl"
+        )
+        if mtp_rollout_enabled or sparse_update:
             return 1
         if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
             return 1
+        if self.lora_as_adapter:
+            return 2 if self.model_config.lora.get("resync_base", False) else 1
         return 2
 
     def _preprocess_sampling_params(self, sampling_params: dict[str, Any]) -> None:
@@ -1558,7 +1635,7 @@ class vLLMHttpServer:
         return output
 
     async def _sleep_hybrid(self):
-        """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
+        """Sleep before the hybrid trainer restores weights and adapters.
 
         Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
         that sleep is properly propagated to all data-parallel worker processes.
@@ -1566,7 +1643,7 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self._engine_sleep(level=self._resolve_sleep_level())
         await self.engine.reset_encoder_cache()
 
 
@@ -1621,6 +1698,32 @@ class vLLMReplica(RolloutReplica):
         # create server actor in each node with node affinity and cuda visible devices
         nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
         env_vars = self._get_server_env_vars(worker_node_ids[::gpus_per_replica_node])
+        placement_group = None
+        vllm_ek = (self.config.get("engine_kwargs", {}) or {}).get("vllm", {}) or {}
+        checkpoint_backend = getattr(getattr(self.config, "checkpoint_engine", None), "backend", None)
+        wtc_backend = (vllm_ek.get("weight_transfer_config") or {}).get("backend")
+        if checkpoint_backend == "vllm_ipc" or wtc_backend == "ipc":
+            # CUDA IPC handles (reduce_tensor tuples) require pickle fallback on vLLM's ZMQ RPC.
+            env_vars = {**env_vars, "VLLM_ALLOW_INSECURE_SERIALIZATION": "1"}
+        if checkpoint_backend == "vllm_nccl_m2n" or wtc_backend == "nccl_m2n":
+            # ncclDevCommCreate (NCCL Device API used by nccl_m2n) requires cuMem enabled.
+            env_vars = {**env_vars, "NCCL_CUMEM_ENABLE": "1"}
+        uses_ray_executor = (
+            checkpoint_backend == "vllm_sharded_rdt"
+            or wtc_backend == "sharded_rdt"
+            or vllm_ek.get("distributed_executor_backend") == "ray"
+        )
+        pgs = getattr(self.resource_pool, "pgs", None) if self.resource_pool is not None else None
+        if uses_ray_executor and pgs and len(pgs) == 1:
+            placement_group = pgs[0]
+            start_idx = int(getattr(self.resource_pool, "start_bundle_index", 0))
+            bundle_indices = list(range(start_idx, start_idx + self.world_size))
+            max_colocate = max(int(getattr(self.resource_pool, "max_colocate_count", 2)), 2)
+            env_vars = {
+                **env_vars,
+                "VLLM_RAY_BUNDLE_INDICES": ",".join(str(i) for i in bundle_indices),
+                "VLLM_RAY_PER_WORKER_GPUS": str(round(1.0 / max_colocate, 4)),
+            }
         for node_rank in range(nnodes):
             workers = self.workers[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             node_cuda_visible_devices = get_node_visible_devices(
@@ -1652,6 +1755,7 @@ class vLLMReplica(RolloutReplica):
                 gpus_per_node=gpus_per_replica_node,
                 nnodes=nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
+                placement_group=placement_group,
             )
             self.servers.append(server)
 
@@ -1761,6 +1865,10 @@ class vLLMReplica(RolloutReplica):
     # -----------------------------------------------------------------------
     # Hook methods for subclass overrides
     # -----------------------------------------------------------------------
+
+    def get_weight_transfer_targets(self) -> list[tuple[ActorHandle, int]]:
+        """Return (server_handle, world_size) pairs for native weight transfer."""
+        return [(self.servers[0], self.world_size)]
 
     def _get_server_name_prefix(self) -> str:
         """Return the Ray actor name prefix (e.g. 'vllm_')."""

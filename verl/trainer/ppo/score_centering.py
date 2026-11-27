@@ -334,6 +334,15 @@ def score_centering_auto_correction(
     )
 
 
+def _pad_packed_rows(tensor: torch.Tensor, pad_size: int, value: float | int | bool = 0) -> torch.Tensor:
+    if not pad_size:
+        return tensor
+    shape = list(tensor.shape)
+    shape[1] = pad_size
+    padding = torch.full(shape, value, dtype=tensor.dtype, device=tensor.device)
+    return torch.cat((tensor, padding), dim=1)
+
+
 def score_centering_logits_processor(
     student_logits: Optional[torch.Tensor],
     data: TensorDict,
@@ -394,11 +403,27 @@ def score_centering_logits_processor(
         topk_log_probs = data["rollout_topk_log_probs"].values().unsqueeze(0)
         if receipt is not None:
             support_complete = receipt.values().unsqueeze(0)
-        if get_ulysses_sequence_parallel_world_size() > 1:
-            topk_ids = slice_input_tensor(topk_ids, dim=1)
-            topk_log_probs = slice_input_tensor(topk_log_probs, dim=1)
+
+        if pad_to_length_bucket is not None:
+            static_pad_size = (-topk_ids.shape[1]) % pad_to_length_bucket
+            topk_ids = _pad_packed_rows(topk_ids, static_pad_size)
+            topk_log_probs = _pad_packed_rows(
+                topk_log_probs, static_pad_size, value=-math.log(topk_log_probs.shape[-1])
+            )
             if receipt is not None:
-                support_complete = slice_input_tensor(support_complete, dim=1)
+                support_complete = _pad_packed_rows(support_complete, static_pad_size, value=False)
+
+        sp_size = get_ulysses_sequence_parallel_world_size()
+        if sp_size > 1:
+            sp_pad_size = (-topk_ids.shape[1]) % sp_size
+            topk_ids = _pad_packed_rows(topk_ids, sp_pad_size)
+            topk_log_probs = _pad_packed_rows(topk_log_probs, sp_pad_size, value=-math.log(topk_log_probs.shape[-1]))
+            if receipt is not None:
+                support_complete = _pad_packed_rows(support_complete, sp_pad_size, value=False)
+            topk_ids = slice_input_tensor(topk_ids, dim=1, padding=False)
+            topk_log_probs = slice_input_tensor(topk_log_probs, dim=1, padding=False)
+            if receipt is not None:
+                support_complete = slice_input_tensor(support_complete, dim=1, padding=False)
     if receipt is None:
         support_complete = torch.zeros(topk_ids.shape[:2], device=topk_ids.device, dtype=torch.bool)
     rollout_correction = config.policy_loss.rollout_correction

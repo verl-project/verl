@@ -36,6 +36,9 @@ class _WorkerGroup:
     def execute_checkpoint_engine(self, *args, **kwargs):
         return []
 
+    def fetch_rollout_layout(self):
+        return None
+
 
 def _manager(*, support_publish_weights: bool, rollout_staging: bool):
     manager = object.__new__(CheckpointEngineManager)

@@ -40,6 +40,10 @@ VL_TYPE2INDEX = {
         "IMAGE_INPUT_INDEX": 248056,
         "VIDEO_INPUT_INDEX": 248057,
     },
+    "qwen4_exp": {
+        "IMAGE_INPUT_INDEX": 248056,
+        "VIDEO_INPUT_INDEX": 248057,
+    },
 }
 
 
@@ -323,6 +327,13 @@ def veomni_shard_export(module):
 
     from verl.utils.model import convert_weight_keys
 
+    try:
+        from veomni.models.frozen_ple import has_frozen_ple_embeddings, is_ple_table
+    except ImportError:
+        skip_frozen_ple = False
+    else:
+        skip_frozen_ple = has_frozen_ple_embeddings(module)
+
     params = module.state_dict()
     params = convert_weight_keys(params, getattr(module, "_fsdp_wrapped_module", module))
 
@@ -358,12 +369,14 @@ def veomni_shard_export(module):
             if si is not None:
                 from torch.distributed.tensor import Shard
 
-                return isinstance(si.placement, Shard)
+                return getattr(si, "para_name", "ep") == "ep" and isinstance(si.placement, Shard)
         # fallback: key conversion may have renamed the fqn; historical name match.
         return "mlp.experts." in name and any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
 
     def _gen():
         for name, param in params.items():
+            if skip_frozen_ple and is_ple_table(name):
+                continue
             # NOT gated on ep_enabled: the fused expert stack exists (and needs
             # the per-expert HF renaming, like the seed path does) even with
             # ep_size=1 -- that is just the degenerate ep_rank=0 geometry.

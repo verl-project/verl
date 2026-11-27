@@ -36,11 +36,11 @@ torch_npu 接口:  ``torch_npu.npu_rotary_mul(x, r1, r2)``
 
 参数说明: 
 
-- x: q，k，shape要求输入为4维，一般为 ``[B, N, S, D]`` 或 ``[B, S, N, D]`` 或 ``[S, B, N, D]`` 。
+- x: 必填的四维 Tensor，传入 q 或 k，常见形状为 ``[B, N, S, D]`` 或 ``[B, S, N, D]`` 或 ``[S, B, N, D]`` 。
 
-- r1: cos值 ，shape要求输入为4维，一般为 ``[1, 1, S, D]`` 或 ``[1, S, 1, D]`` 或 ``[S, 1, 1, D]`` 。
+- r1: 必填的四维 Tensor，表示余弦值，常见形状为 ``[1, 1, S, D]`` 或 ``[1, S, 1, D]`` 或 ``[S, 1, 1, D]`` 。
 
-- r2: sin 值，shape要求输入为4维，一般为 ``[1, 1, S, D]`` 或 ``[1, S, 1, D]`` 或 ``[S, 1, 1, D]`` 。
+- r2: 必填的四维 Tensor，表示正弦值，常见形状为 ``[1, 1, S, D]`` 或 ``[1, S, 1, D]`` 或 ``[S, 1, 1, D]`` 。
 
 `RmsNorm&RmsNormGrad <https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/%EF%BC%88beta%EF%BC%89torch_npu-npu_rms_norm.md>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
