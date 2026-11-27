@@ -119,7 +119,7 @@ python3 -m verl.trainer.main_ppo \
     ...
 ```
 
-Spans are reported under the `rl_insight_monitor` service (override with `OTEL_SERVICE_NAME`) with the rollout replica as resource attribute, and appear in the **vLLM request traces** row of the `verl_trainer_v1_with_vllm_engine` dashboard, scoped by the dashboard time range and replica (the engine cannot know the Run's execution-suffixed experiment name). They contain request metadata only, with no prompt or response text. To send spans to another OTLP collector, set `actor_rollout_ref.rollout.engine_kwargs.vllm.otlp_traces_endpoint`. Trace export never blocks rollout.
+Spans are reported under the `rl_insight_monitor` service (override with `OTEL_SERVICE_NAME`) with the rollout replica as resource attribute, and appear in the **vLLM request traces** row of the `verl_trainer_v1_with_vllm_engine` dashboard, scoped by the dashboard time range and replica (the engine cannot know the Run's execution-suffixed experiment name). They contain request metadata only, with no prompt or response text. An explicit `actor_rollout_ref.rollout.engine_kwargs.vllm.otlp_traces_endpoint` is ignored with a warning: request spans always use the RL-Insight OTLP endpoint so they appear in the managed dashboard. Trace export never blocks rollout.
 
 ## Step 5: Add Hardware Metrics (Optional)
 

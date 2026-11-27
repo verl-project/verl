@@ -348,7 +348,7 @@ trace:
 
   # Export vLLM request spans to the RL-Insight OTLP endpoint (vLLM only).
   # Automatic discovery requires `rl_insight` in trainer.logger and RL_INSIGHT_SERVER_URL;
-  # engine_kwargs.vllm.otlp_traces_endpoint overrides discovery.
+  # engine_kwargs.vllm.otlp_traces_endpoint is ignored with a warning.
   enable_otel: false
 
 

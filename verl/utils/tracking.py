@@ -26,7 +26,7 @@ from functools import partial, wraps
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 import orjson
 from packaging.version import Version
@@ -254,35 +254,17 @@ class RLInsightLogger:
 
     @classmethod
     def discover_otlp_traces_endpoint(cls) -> str | None:
-        """Discover the RL-Insight Tempo OTLP/HTTP traces endpoint from the server.
+        """Return the Run's OTLP/HTTP traces endpoint from the public Run context.
 
-        Returns ``None`` when RL-Insight is disabled, the server is unreachable,
-        or the installed RL-Insight version lacks the service-discovery helpers.
+        Returns ``None`` when RL-Insight is disabled or no Run context is
+        available (server unreachable or Tempo disabled).
         """
         if not cls.enabled():
             return None
-
-        try:
-            from rl_insight.server.http_api import get_server_services, server_url
-            from rl_insight.server.network import service_url_from_server_url
-        except ImportError as exc:
-            logger.warning(
-                "RL-Insight OTLP endpoint discovery is unavailable; engine tracing stays disabled: %s",
-                exc,
-            )
+        context = cls._get_rl_insight().get_context()
+        if context is None:
             return None
-
-        try:
-            otlp_port = get_server_services().get("otlp_port")
-            if not otlp_port:
-                return None
-            return service_url_from_server_url(server_url(), otlp_port, "/v1/traces") or None
-        except Exception as exc:
-            logger.warning(
-                "RL-Insight OTLP endpoint discovery failed; engine tracing stays disabled: %s",
-                exc,
-            )
-            return None
+        return context.otlp_endpoint or None
 
     @classmethod
     def _warn_unsupported_rl_insight(cls, feature: str) -> None:
@@ -306,33 +288,31 @@ class RLInsightLogger:
         """Configure vLLM request tracing from ``rollout.trace``.
 
         Mutates ``args`` and the process OTel env; no-op unless ``trace_config.enable_otel``.
+        Request spans always use the RL-Insight OTLP endpoint so the managed
+        dashboard can read them; an explicit engine endpoint is ignored with a warning.
         """
         if not trace_config.enable_otel:
             return
 
-        endpoint = args.get("otlp_traces_endpoint") or args.get("otlp-traces-endpoint")
-        if endpoint:
-            # An explicit engine_kwargs endpoint wins over RL-Insight discovery.
-            logger.info(
-                "rollout.trace.enable_otel=True with an explicit engine tracing endpoint; "
-                "keeping the user-provided endpoint"
+        explicit = args.get("otlp_traces_endpoint") or args.get("otlp-traces-endpoint")
+        if explicit:
+            logger.warning(
+                "rollout.trace.enable_otel=True ignores the explicit engine tracing endpoint %s; "
+                "request spans must use the RL-Insight OTLP endpoint to appear in the managed dashboard.",
+                explicit,
             )
-            # vLLM defaults to gRPC. Infer OTLP/HTTP only from a standard traces path.
-            endpoint_path = urlparse(endpoint).path.rstrip("/")
-            if endpoint_path.endswith("/v1/traces"):
-                os.environ.setdefault("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
-        else:
-            endpoint = cls.discover_otlp_traces_endpoint()
-            if not endpoint:
-                logger.warning(
-                    "rollout.trace.enable_otel=True but the RL-Insight OTLP endpoint is unavailable; "
-                    "engine request traces are disabled. Check that `rl_insight` is in trainer.logger, "
-                    "that RL_INSIGHT_SERVER_URL points to the RL-Insight server, and that Tempo is enabled."
-                )
-                return
-            # vLLM defaults to gRPC. RL-Insight's Tempo receiver speaks HTTP.
-            os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "http/protobuf"
-            args["otlp_traces_endpoint"] = endpoint
+        endpoint = cls.discover_otlp_traces_endpoint()
+        if not endpoint:
+            logger.warning(
+                "rollout.trace.enable_otel=True but the RL-Insight OTLP endpoint is unavailable; "
+                "engine request traces are disabled. Check that `rl_insight` is in trainer.logger, "
+                "that RL_INSIGHT_SERVER_URL points to the RL-Insight server, and that Tempo is enabled."
+            )
+            return
+        # vLLM defaults to gRPC. RL-Insight's Tempo receiver speaks HTTP.
+        os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "http/protobuf"
+        args.pop("otlp-traces-endpoint", None)
+        args["otlp_traces_endpoint"] = endpoint
 
         # Keep engine spans under the RL-Insight service so the dashboard's
         # resource.service.name filter can find them. An explicit user setting wins.

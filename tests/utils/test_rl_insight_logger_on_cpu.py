@@ -116,53 +116,25 @@ def test_log_uses_metric_log_with_step_when_available(monkeypatch, mock_rl_insig
     mock_rl_insight.metric_gauge.assert_not_called()
 
 
-def _install_fake_rl_insight_server(monkeypatch, services):
-    import sys
-    import types
-
-    package = types.ModuleType("rl_insight")
-    package.__path__ = []
-    server = types.ModuleType("rl_insight.server")
-    server.__path__ = []
-    http_api = types.ModuleType("rl_insight.server.http_api")
-    http_api.get_server_services = lambda: services
-    http_api.server_url = lambda: "http://127.0.0.1:18080"
-    network = types.ModuleType("rl_insight.server.network")
-    network.service_url_from_server_url = lambda base, port, path: (f"http://127.0.0.1:{port}{path}" if port else "")
-    monkeypatch.setitem(sys.modules, "rl_insight", package)
-    monkeypatch.setitem(sys.modules, "rl_insight.server", server)
-    monkeypatch.setitem(sys.modules, "rl_insight.server.http_api", http_api)
-    monkeypatch.setitem(sys.modules, "rl_insight.server.network", network)
-    return http_api
-
-
-def test_discover_otlp_traces_endpoint_uses_server_otlp_port(monkeypatch):
+def test_discover_otlp_traces_endpoint_uses_run_context(monkeypatch, mock_rl_insight):
     monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
-    _install_fake_rl_insight_server(monkeypatch, {"otlp_port": 4318})
+    mock_rl_insight.get_context.return_value = SimpleNamespace(otlp_endpoint="http://127.0.0.1:4318/v1/traces")
 
     assert RLInsightLogger.discover_otlp_traces_endpoint() == "http://127.0.0.1:4318/v1/traces"
 
 
-def test_discover_otlp_traces_endpoint_returns_none_without_otlp_port(monkeypatch):
+def test_discover_otlp_traces_endpoint_returns_none_without_context(monkeypatch, mock_rl_insight):
     monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
-    _install_fake_rl_insight_server(monkeypatch, {"otlp_port": None})
+    mock_rl_insight.get_context.return_value = None
 
     assert RLInsightLogger.discover_otlp_traces_endpoint() is None
 
 
-def test_discover_otlp_traces_endpoint_returns_none_when_discovery_raises(monkeypatch, caplog):
-    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
-    http_api = _install_fake_rl_insight_server(monkeypatch, {"otlp_port": 4318})
+def test_discover_otlp_traces_endpoint_returns_none_when_disabled(monkeypatch, mock_rl_insight):
+    monkeypatch.delenv(RLInsightLogger.ENABLE_ENV, raising=False)
 
-    def _raise():
-        raise RuntimeError("discovery boom")
-
-    http_api.get_server_services = _raise
-
-    with caplog.at_level("WARNING", logger="verl.utils.tracking"):
-        assert RLInsightLogger.discover_otlp_traces_endpoint() is None
-
-    assert "OTLP endpoint discovery failed" in caplog.text
+    assert RLInsightLogger.discover_otlp_traces_endpoint() is None
+    mock_rl_insight.get_context.assert_not_called()
 
 
 def test_configure_vllm_tracing_discovers_endpoint(monkeypatch, mock_rl_insight):
@@ -186,27 +158,39 @@ def test_configure_vllm_tracing_discovers_endpoint(monkeypatch, mock_rl_insight)
     assert os.environ["OTEL_RESOURCE_ATTRIBUTES"] == "service.name=rl_insight_monitor,replica=3"
 
 
-def test_configure_vllm_tracing_keeps_explicit_endpoint(monkeypatch, mock_rl_insight):
-    monkeypatch.delenv(RLInsightLogger.ENABLE_ENV, raising=False)
+def test_configure_vllm_tracing_ignores_explicit_endpoint(monkeypatch, mock_rl_insight, caplog):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
     monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", raising=False)
     monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.setattr(
+        RLInsightLogger,
+        "discover_otlp_traces_endpoint",
+        classmethod(lambda cls: "http://127.0.0.1:4318/v1/traces"),
+    )
     args = {"otlp_traces_endpoint": "http://collector:4318/v1/traces"}
     trace_config = SimpleNamespace(enable_otel=True)
 
-    RLInsightLogger.configure_vllm_tracing(args, 1, trace_config)
+    with caplog.at_level("WARNING", logger="verl.utils.tracking"):
+        RLInsightLogger.configure_vllm_tracing(args, 1, trace_config)
 
-    assert args == {"otlp_traces_endpoint": "http://collector:4318/v1/traces"}
+    assert args == {"otlp_traces_endpoint": "http://127.0.0.1:4318/v1/traces"}
+    assert "ignores the explicit engine tracing endpoint" in caplog.text
     assert os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] == "http/protobuf"
     assert os.environ["OTEL_SERVICE_NAME"] == "rl_insight_monitor"
     assert os.environ["OTEL_RESOURCE_ATTRIBUTES"] == "service.name=rl_insight_monitor,replica=1"
 
 
 def test_configure_vllm_tracing_respects_existing_service_name(monkeypatch, mock_rl_insight):
-    monkeypatch.delenv(RLInsightLogger.ENABLE_ENV, raising=False)
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
     monkeypatch.setenv("OTEL_SERVICE_NAME", "custom-service")
     monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", raising=False)
+    monkeypatch.setattr(
+        RLInsightLogger,
+        "discover_otlp_traces_endpoint",
+        classmethod(lambda cls: "http://127.0.0.1:4318/v1/traces"),
+    )
     args = {"otlp_traces_endpoint": "http://collector:4318/v1/traces"}
     trace_config = SimpleNamespace(enable_otel=True)
 
