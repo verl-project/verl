@@ -7,7 +7,8 @@ decoded natively by Blackwell tensor cores. This recipe trains with Transformer 
 serves the rollout in MXFP8, with the rollout's weights quantized on the trainer side with the learner's
 block rule.
 
-For FP8 on Hopper (the `blockwise` recipe), see [FP8 RL in verl](fp8.md). The rollout quantization
+For FP8 on Hopper (the `blockwise` recipe), see [FP8 RL in verl](fp8.md); for AMD Instinct MI350 / MI355,
+see [MXFP8 RL on AMD ROCm](mxfp8_rocm.md). The rollout quantization
 interface shared by all formats, and the vLLM and SGLang specifics, are described in
 [Low-Precision Rollout and Quantization-Aware Training](qat.md).
 
