@@ -32,6 +32,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+import transfer_queue
 from omegaconf import OmegaConf, open_dict
 from omegaconf.errors import ReadonlyConfigError
 
@@ -355,6 +356,10 @@ def replay_types():
         "KVBatchMeta": SimpleNamespace,
         "DataLoaderExhausted": bridge.DataLoaderExhausted,
         "SkipManager": SimpleNamespace(annotate_tq=lambda **kwargs: lambda fn: fn),
+        # Prompt sharing writes no key the replay decisions here read, so the partition it skips
+        # is the real one and freeing its keys is recorded rather than done.
+        "PUBLIC_PARTITION": transfer_queue.PUBLIC_PARTITION,
+        "release_public_prompts": Mock(),
     }
     exec(compile(ast.fix_missing_locations(tree), str(path), "exec"), namespace)
     return namespace
