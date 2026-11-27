@@ -38,18 +38,27 @@ def _unique_zmq_handle():
     return f"ipc:///tmp/test-bwt-{uuid.uuid4().hex}.sock"
 
 
-def _generate_weights(weight_specs, seed):
-    """Deterministically generate weights on the best available device from specs.
+def _generate_weights(weight_specs, seed, device=None):
+    """Deterministically generate weights on the requested device from specs.
 
     Args:
         weight_specs: list of (name, shape, dtype) tuples
         seed: random seed for reproducibility
+        device: optional source device; defaults to the best available device
     Returns:
         list of (name, tensor_on_device) tuples
     """
-    device_name = get_device_name()
-    device = torch.device(f"{device_name}:0")
-    get_torch_device().manual_seed(seed)
+    if device is None:
+        device_name = get_device_name()
+        device = torch.device(f"{device_name}:0")
+    else:
+        device = torch.device(device)
+
+    if device.type == "cpu":
+        torch.manual_seed(seed)
+    else:
+        get_torch_device().manual_seed(seed)
+
     weights = []
     for name, shape, dtype in weight_specs:
         # Generate in float32 then cast, since torch.randn doesn't support all dtypes
@@ -122,11 +131,11 @@ def test_sender_accepts_strided_tensor(monkeypatch):
 # ---------------------------------------------------------------------------
 # Process entry points (must be module-level for pickling with spawn)
 # ---------------------------------------------------------------------------
-def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
-    """Sender process: generate weights, move to device, send."""
+def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm, source_device=None):
+    """Sender process: generate weights on the requested device and send."""
     from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 
-    weights = _generate_weights(weight_specs, seed)
+    weights = _generate_weights(weight_specs, seed, device=source_device)
     sender = BucketedWeightSender(
         zmq_handle=zmq_handle,
         bucket_size_mb=bucket_size_mb,
@@ -158,7 +167,7 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
 # ---------------------------------------------------------------------------
 # Test helper
 # ---------------------------------------------------------------------------
-def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
+def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm, source_device=None):
     """Spawn sender + receiver processes, then validate received tensors."""
     zmq_handle = _unique_zmq_handle()
     seed = 42
@@ -167,7 +176,7 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
 
     sender_p = ctx.Process(
         target=_sender_fn,
-        args=(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm),
+        args=(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm, source_device),
     )
     receiver_p = ctx.Process(
         target=_receiver_fn,
@@ -186,8 +195,8 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
 
     summaries = result_queue.get(timeout=5)
 
-    # Regenerate expected weights on device with the same seed
-    expected = _generate_weights(weight_specs, seed)
+    # Regenerate expected weights on the source device with the same seed.
+    expected = _generate_weights(weight_specs, seed, device=source_device)
 
     assert len(summaries) == len(expected), f"Expected {len(expected)} weights, got {len(summaries)}"
 
@@ -201,6 +210,11 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
         assert exp_tensor.dtype == recv_dtype, (
             f"Dtype mismatch for {exp_name}: expected {exp_tensor.dtype}, got {recv_dtype}"
         )
+        # The receiver consumes IPC tensors on the accelerator. For CPU-source
+        # tests, compute the expected checksum on the same device to avoid
+        # backend-specific reduction-order differences.
+        if exp_tensor.device.type == "cpu" and HAS_ACCELERATOR:
+            exp_tensor = exp_tensor.to(torch.device(f"{get_device_name()}:0"))
         exp_sum = exp_tensor.float().sum().item()
         assert exp_sum == recv_cksum, f"Data mismatch for {exp_name}"
 
@@ -292,3 +306,9 @@ class TestBucketedWeightTransferIPC:
         specs.append(("lm_head", (1024, 1024), torch.float32))  # 4MB
 
         _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_large_cpu_weight(self):
+        # LoRA/base-weight collection can yield CPU tensors. A weight larger
+        # than the bucket must be moved to the IPC device before reduce_tensor().
+        specs = [("embedding", (1024, 1024), torch.float32)]  # 4MB > 1MB bucket
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, source_device="cpu")
