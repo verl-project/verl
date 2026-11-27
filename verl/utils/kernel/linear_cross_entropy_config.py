@@ -99,14 +99,17 @@ class Config:
 
     _backward: BackwardEnum = BackwardEnum._Split_Dlogits_N
     _use_triton: bool = True
+    _split_m_fp32_dw: bool = True
 
 
 _config = Config()
 
 
-def set_backward_method(backward_method: BackwardEnum):
+def set_backward_method(backward_method: BackwardEnum, *, split_m_fp32_dw: bool = True):
     """
-    Set the backward method.
+    Set the backward method. For cuTile split-M, accumulate dWeight in FP32 by default.
+    Set split_m_fp32_dw=False to store cross-chunk partial sums in the weight dtype.
     """
     global _config
     _config._backward = backward_method
+    _config._split_m_fp32_dw = split_m_fp32_dw

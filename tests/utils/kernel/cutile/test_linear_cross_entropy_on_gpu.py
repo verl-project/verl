@@ -17,7 +17,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
-from verl.utils.kernel.linear_cross_entropy_config import BackwardEnum, _config
+from verl.utils.kernel.linear_cross_entropy_config import BackwardEnum, _config, set_backward_method
 
 ct = pytest.importorskip("cuda.tile")
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -44,12 +44,22 @@ def _reference(x, w, labels, reduction):
 
 @pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
 @pytest.mark.parametrize(
-    "method", [BackwardEnum._Total_Fuse_MN, BackwardEnum._Total_Separate, BackwardEnum._Split_Dlogits_N]
+    "method",
+    [
+        BackwardEnum._Total_Fuse_MN,
+        BackwardEnum._Total_Separate,
+        BackwardEnum._Split_Dlogits_N,
+        BackwardEnum._Split_Dlogits_M,
+    ],
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_outputs_and_gradients(monkeypatch, method, reduction, dtype):
     monkeypatch.setattr(_config, "_backward", method)
     vocab = 9511 if method == BackwardEnum._Split_Dlogits_N else 1031
+    if method == BackwardEnum._Split_Dlogits_M:
+        from verl.utils.kernel.cutile import linear_cross_entropy as kernels
+
+        monkeypatch.setattr(kernels, "_TOKEN_CHUNK_BYTES", 8 * vocab * 2)  # Four full chunks and a seven-row tail.
     x, w, labels = _inputs(vocab, dtype)
     outputs = linear_cross_entropy(x, w, labels, 0.7, reduction, impl_backend="cutile")
     expected = _reference(x, w, labels, reduction)
@@ -209,3 +219,44 @@ def test_chunked_dhidden_rounds_only_after_final_chunk(monkeypatch):
     # Uniform softmax: the seven trailing chunks each add 1/1024, less than a BF16 half-ulp.
     expected = w[0].float() - w.float().mean(dim=0)
     torch.testing.assert_close(dx, expected.to(x.dtype).view_as(x), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("fp32_dw", [True, False])
+def test_token_split_dweight_accumulation(monkeypatch, dtype, fp32_dw):
+    from verl.utils.kernel import linear_cross_entropy_config as config
+    from verl.utils.kernel.cutile import linear_cross_entropy as kernels
+
+    monkeypatch.setattr(config, "_config", config.Config())
+    monkeypatch.setattr(kernels, "_config", config._config)
+    set_backward_method(BackwardEnum._Split_Dlogits_M, split_m_fp32_dw=fp32_dw)
+    x = torch.full((17, 128), torch.finfo(dtype).eps / 8, device="cuda", dtype=dtype)
+    x[0] = 1
+    x[1] = 0
+    w = torch.zeros(2, 128, device="cuda", dtype=dtype, requires_grad=True)
+    monkeypatch.setattr(kernels, "_TOKEN_CHUNK_BYTES", 2 * w.shape[0] * x.element_size())
+    labels = torch.zeros(x.shape[0], device=x.device, dtype=torch.long)
+    lp, _ = linear_cross_entropy(x, w, labels, impl_backend="cutile")
+    (dw,) = torch.autograd.grad(lp.sum(), w)
+    # Uniform softmax: each token contributes +/- half its hidden vector.
+    half_sum = torch.zeros_like(x[0], dtype=torch.float32 if fp32_dw else dtype)
+    for chunk in x.split(2):
+        half_sum = (half_sum.float() + chunk.float().sum(dim=0) * 0.5).to(half_sum.dtype)
+    torch.testing.assert_close(dw, torch.stack((half_sum, -half_sum)).to(dtype), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize(
+    ("tokens", "vocab", "element_size", "capability", "expected"),
+    [
+        (1937, 152064, 2, (10, 0), 646),
+        (65536, 608256, 2, (10, 0), 440),
+        (65536, 608256, 2, (9, 0), 220),
+        (32, 128, 2, (9, 0), 32),
+        (5, 2**28, 4, (10, 0), 1),
+    ],
+)
+def test_token_chunk_size(monkeypatch, tokens, vocab, element_size, capability, expected):
+    from verl.utils.kernel.cutile import linear_cross_entropy as kernels
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: capability)
+    assert kernels._token_chunk_size(tokens, vocab, element_size, torch.device("cuda")) == expected

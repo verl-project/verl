@@ -61,7 +61,14 @@ def _compare(rank, world_size, k, grad_mode):
 
 
 @pytest.mark.parametrize(("k", "grad_mode"), [(1, "selected"), (5, "both"), (129, "selected"), (5, "entropy")])
-def test_topk(k, grad_mode):
+@pytest.mark.parametrize("token_split", [False, True])
+def test_topk(k, grad_mode, token_split, monkeypatch):
+    if token_split:
+        from verl.utils.kernel import linear_cross_entropy_config as config
+        from verl.utils.kernel.cutile import linear_cross_entropy as kernels
+
+        monkeypatch.setattr(config._config, "_backward", config.BackwardEnum._Split_Dlogits_M)
+        monkeypatch.setattr(kernels, "_TOKEN_CHUNK_BYTES", 8 * 9511 * 2)
     _compare(0, 1, k, grad_mode)
 
 
@@ -94,20 +101,27 @@ def test_topk_backward_methods(method, monkeypatch):
     _compare(0, 1, 5, "both")
 
 
-def _tp_worker(rank, init_method):
+def _tp_worker(rank, init_method, token_split):
     torch.cuda.set_device(rank)
     dist.init_process_group(
         "nccl", init_method=init_method, rank=rank, world_size=2, device_id=torch.device("cuda", rank)
     )
     try:
+        from verl.utils.kernel import linear_cross_entropy_config as config
+        from verl.utils.kernel.cutile import linear_cross_entropy as kernels
+
+        if token_split:
+            config._config._backward = config.BackwardEnum._Split_Dlogits_M
+            kernels._TOKEN_CHUNK_BYTES = 8 * 9511 * 2  # 14 tokens, including a 6-row tail.
         _compare(rank, 2, 5, "both")
     finally:
         dist.destroy_process_group()
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="two GPUs required")
-def test_topk_tensor_parallel(tmp_path):
-    torch.multiprocessing.spawn(_tp_worker, args=((tmp_path / "init").as_uri(),), nprocs=2)
+@pytest.mark.parametrize("token_split", [False, True])
+def test_topk_tensor_parallel(tmp_path, token_split):
+    torch.multiprocessing.spawn(_tp_worker, args=((tmp_path / "init").as_uri(), token_split), nprocs=2)
 
 
 @pytest.mark.parametrize(

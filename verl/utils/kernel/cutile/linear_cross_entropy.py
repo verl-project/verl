@@ -28,6 +28,25 @@ from ..linear_cross_entropy_config import BackwardEnum, _config
 _BLOCK = 32
 _SPLIT = 1024
 _CHUNK = 9504
+_TOKEN_CHUNK_BYTES = 256 * 1024 * 1024
+
+
+def _token_chunk_size(tokens, local_vocab, element_size, device):
+    """Match Liger cuTile's default workspace budget and balance small tail chunks."""
+    budget = _TOKEN_CHUNK_BYTES
+    if element_size == 2 and tokens >= 4096 and local_vocab >= 131072:
+        if get_torch_device().get_device_capability(device) in ((10, 0), (10, 3), (12, 0)):
+            budget *= 2
+    capacity = max(1, budget // (local_vocab * element_size))
+    chunk = 1 << (capacity.bit_length() - 1)
+    if tokens <= chunk:
+        return tokens
+    count = (tokens + chunk - 1) // chunk
+    minimum = (tokens + capacity - 1) // capacity
+    tail = tokens - (count - 1) * chunk
+    if count > minimum or 2 * tail < chunk:
+        return (tokens + minimum - 1) // minimum
+    return chunk
 
 
 def _load(a, index, shape):
@@ -427,9 +446,48 @@ def efficient_entropy_backward(
         dw = torch.zeros_like(weight, dtype=torch.float32)
         ct.launch(stream, (_blocks(m), _blocks(v)), _fused_grad, (*args, dx, dw, *params))
         return dx, dw
-    if method == BackwardEnum._Split_Dlogits_M:
-        raise NotImplementedError("BackwardEnum._Split_Dlogits_M is not implemented yet")
     dtype = torch.float32 if fp32_grad else hidden.dtype
+    if method == BackwardEnum._Split_Dlogits_M:
+        chunk = _token_chunk_size(m, v, hidden.element_size(), hidden.device)
+        workspace = hidden.new_empty((chunk, v))
+        dx = torch.empty_like(hidden, dtype=dtype)
+        dw = torch.empty_like(weight, dtype=torch.float32 if _config._split_m_fp32_dw else weight.dtype)
+        if reduction == 2:
+            # The kernel sees only the local rows. Normalize by the full token count once.
+            g = g / m
+            reduction = 1
+        for first in range(0, m, chunk):
+            end = min(first + chunk, m)
+            tokens = slice(first, end)
+            grad = workspace[: end - first]
+            _launch_chunk(
+                stream,
+                hidden[tokens],
+                weight,
+                labels[tokens],
+                maximum[tokens],
+                total[tokens],
+                mean[tokens],
+                g[tokens] if reduction == 0 else g,
+                h[tokens],
+                grad,
+                offset,
+                inv_temp,
+                reduction,
+            )
+            if grad.dtype == dx.dtype:
+                torch.mm(grad, weight, out=dx[tokens])
+            else:
+                torch.mm(grad, weight, out_dtype=dtype, out=dx[tokens])
+            beta = int(first != 0)
+            if grad.dtype == dw.dtype:
+                dw.addmm_(grad.T, hidden[tokens], beta=beta)
+            else:
+                torch.addmm(dw, grad.T, hidden[tokens], beta=beta, out_dtype=torch.float32, out=dw)
+            del grad
+        del workspace
+        return dx, dw.to(dtype)
+
     dw = torch.empty_like(weight, dtype=dtype)
     if method == BackwardEnum._Total_Separate:
         dx = torch.empty_like(hidden, dtype=dtype)
