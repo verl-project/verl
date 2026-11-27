@@ -352,7 +352,7 @@ class RLInsightLogger:
         service_name = os.environ.get("OTEL_SERVICE_NAME") or cls.RL_INSIGHT_SERVICE_NAME
         attributes = ",".join(
             f"{key}={quote(str(value), safe='')}"
-            for key, value in {"service.name": service_name, "replica": replica_rank}.items()
+            for key, value in {"service.name": service_name, "replica": str(replica_rank)}.items()
             if value
         )
         existing_attributes = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "").strip()
