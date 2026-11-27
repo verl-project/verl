@@ -2,7 +2,11 @@
 # Intel GPU (XPU) image for verl: vLLM rollout + FSDP/FSDP2 training.
 #
 # Build (from the verl repo root):
-#   docker build -f docker/xpu/Dockerfile.stable.vllm -t verl:xpu-vllm032 .
+#   docker build -f docker/xpu/Dockerfile.stable.vllm -t verl:xpu-vllm034 .
+# Pick the Intel driver release with --build-arg OMIX_VERSION: 0.4.1 (default, what vLLM v0.34.0 ships) or 0.5.0 (newer,
+# see the known issue above `ARG OMIX_VERSION`).
+# Behind a proxy, pass it as build args (--build-arg http_proxy=... --build-arg https_proxy=...): the Intel apt repo
+# (repositories.intel.com) is fetched during the build.
 # Release builds: add --no-cache so ca-certificates, pip, certifi and uv are fetched fresh, not served from a stale layer
 # (Python security notice on the eMudhra emSign CA incident, Oct 2026).
 # Pin what goes in (recommended for a release):
@@ -15,32 +19,15 @@
 ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 
 # ---------------------------------------------------------------------------------------------------------------------
-# drivers: fetch the Intel GPU user-mode driver packages. Kept in its own stage so curl and the .debs are not in the image.
-# Versions match vLLM v0.32.0's docker/Dockerfile.xpu. compute-runtime >= 26.18 is required:
-# 26.09 reports free=0 from getMemoryInfo, which breaks vLLM's memory check.
+# drivers: fetch the signing key of Intel's GPU apt repository. Kept in its own stage so curl and gpg are not in the image.
+# The user-mode driver (compute-runtime, IGC, Level Zero) comes from the OMIX release repo, the same source vLLM v0.34.0's
+# docker/Dockerfile.xpu uses. Intel no longer publishes the newer .debs as GitHub release assets (compute-runtime 26.31 /
+# 26.35 and IGC 2.40.16 / 2.41.16 have none), so the old curl-the-.debs scheme cannot follow vLLM past v0.32.
+# compute-runtime >= 26.18 is required: 26.09 reports free=0 from getMemoryInfo, which breaks vLLM's memory check.
 FROM ${UBUNTU_IMAGE} AS drivers
-ARG IGC_VERSION=2.38.2
-ARG IGC_BUILD=22051
-ARG COMPUTE_RUNTIME_VERSION=26.27.39122.11
-ARG IGDGMM_VERSION=22.10.0
-ARG LEVEL_ZERO_VERSION=1.32.0+u24.04
-RUN apt-get update -y && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
-WORKDIR /debs
-RUN set -eu; \
-    igc="https://github.com/intel/intel-graphics-compiler/releases/download/v${IGC_VERSION}"; \
-    cr="https://github.com/intel/compute-runtime/releases/download/${COMPUTE_RUNTIME_VERSION}"; \
-    lz="https://github.com/oneapi-src/level-zero/releases/download/v${LEVEL_ZERO_VERSION%%+*}"; \
-    for u in \
-        "${igc}/intel-igc-core-2_${IGC_VERSION}+${IGC_BUILD}_amd64.deb" \
-        "${igc}/intel-igc-opencl-2_${IGC_VERSION}+${IGC_BUILD}_amd64.deb" \
-        "${cr}/intel-ocloc_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" \
-        "${cr}/intel-opencl-icd_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" \
-        "${cr}/libigdgmm12_${IGDGMM_VERSION}_amd64.deb" \
-        "${cr}/libze-intel-gpu1_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" \
-        "${lz}/libze1_${LEVEL_ZERO_VERSION}_amd64.deb" \
-        "${lz}/libze-dev_${LEVEL_ZERO_VERSION}_amd64.deb"; do \
-      curl -fsSLO "${u}"; \
-    done
+RUN apt-get update -y && apt-get install -y --no-install-recommends ca-certificates curl gpg && rm -rf /var/lib/apt/lists/*
+RUN mkdir /keys && curl -fsSLo /tmp/intel-graphics.key https://repositories.intel.com/gpu/intel-graphics.key && \
+    gpg --dearmor --output /keys/intel-graphics.gpg /tmp/intel-graphics.key
 
 # ---------------------------------------------------------------------------------------------------------------------
 # runtime-base: what the running container needs, shared by builder and runtime so the venv's interpreter path matches.
@@ -58,29 +45,35 @@ ARG APT_MIRROR=""
 RUN if [ -n "${APT_MIRROR}" ]; then \
         sed -i "s@http://.*archive.ubuntu.com@${APT_MIRROR}@g" /etc/apt/sources.list.d/ubuntu.sources; \
     fi
-RUN --mount=type=bind,from=drivers,source=/debs,target=/debs \
-    apt-get update -y && \
+# OMIX release repo (a versioned snapshot, so the driver set is fixed by OMIX_VERSION). The metapackage `intel-gpu-compute`
+# is not installed: it also pulls xpu-smi, intel-gsc and the ray-tracing library, which a training image does not use. The
+# packages below are the ones the old .deb list had, plus the Sysman / NUMA-discovery libraries (pyzes: PCI address ->
+# NUMA node -> CPU list) that used to come from the kobuk-team PPA; OMIX ships libigsc1 and intel-metrics-library itself.
+# The first apt-get installs ca-certificates from Ubuntu's archive, which the https repo needs.
+# Default 0.4.1, as in vLLM v0.34.0's docker/Dockerfile.xpu. OMIX 0.5.0 also works (the image was run on 2x Arc Pro B60 with it),
+# but Intel lists a known issue for it: when several GPUs copy large buffers to host memory at the same time, some copies
+# may fail with OUT_OF_DEVICE_MEMORY or DEVICE_LOST (seen on 8x Arc Pro B70; fix expected in the next OMIX release).
+# Move the default forward once that release is out.
+ARG OMIX_VERSION=0.4.1
+RUN --mount=type=bind,from=drivers,source=/keys,target=/keys \
+    apt-get update -y && apt-get install -y --no-install-recommends ca-certificates && \
+    install -m 0644 /keys/intel-graphics.gpg /usr/share/keyrings/intel-graphics.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble/intel-omix/${OMIX_VERSION} unified" \
+        > /etc/apt/sources.list.d/intel-gpu-noble.list && \
+    apt-get update -o APT::Update::Error-Mode=any && \
     apt-get install -y --no-install-recommends \
-        ca-certificates ffmpeg g++ gcc libc6-dev libnuma-dev numactl \
+        ffmpeg g++ gcc libc6-dev libnuma-dev numactl \
         python${PYTHON_VERSION} python${PYTHON_VERSION}-dev \
-        /debs/*.deb && \
-    rm -rf /var/lib/apt/lists/*
-# Sysman / NUMA-discovery libraries vLLM's image installs from Intel's PPA (pyzes: PCI address -> NUMA node -> CPU list).
-# The PPA tooling is removed again so only the four libraries stay.
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends software-properties-common gpg-agent && \
-    add-apt-repository -y ppa:kobuk-team/intel-graphics && \
-    apt-get update -y && \
-    apt-get install -y --no-install-recommends libhwloc15 libpciaccess0 libigsc1 intel-metrics-library && \
-    add-apt-repository --remove -y ppa:kobuk-team/intel-graphics && \
-    apt-get purge -y software-properties-common gpg-agent && apt-get autoremove -y && \
+        intel-opencl-icd intel-ocloc libze-intel-gpu1 libze1 libze-dev libigdgmm12 \
+        libhwloc15 libpciaccess0 libigsc1 intel-metrics-library && \
     rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------------------------------------------------
 # builder: git, uv and the whole install. Nothing from here ships except what `runtime` copies out.
 FROM runtime-base AS builder
 ARG PYTHON_VERSION=3.12
-ARG VLLM_VERSION=0.32.0
+ARG VLLM_VERSION=0.34.0
+ARG VLLM_XPU_KERNELS_INDEX=https://vllm-project.github.io/vllm-xpu-kernels/whl
 # uv >= 0.13.4 carries the fixed CA bundle (emSign incident); the installer is fetched for this exact version.
 ARG UV_VERSION=0.13.4
 ARG PIP_INDEX_URL=https://download.pytorch.org/whl/xpu
@@ -107,17 +100,18 @@ RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh && uv venv --p
 RUN git clone "${VERL_GIT_REPO}" /opt/verl && git -C /opt/verl checkout "${VERL_REF}"
 
 # - vLLM XPU wheel (the PyPI vllm wheel has no XPU kernels). --extra-index-url on the command line REPLACES
-#   UV_EXTRA_INDEX_URL, so PyPI is repeated; otherwise vllm's plain-PyPI deps do not resolve.
+#   UV_EXTRA_INDEX_URL, so PyPI is repeated; otherwise vllm's plain-PyPI deps do not resolve. vllm-xpu-kernels (pinned
+#   exactly by the vllm wheel) is only on its own index, as in vLLM's requirements/xpu.txt; without it the resolve fails.
 # - verl's requirements.txt + the XPU overlay. --no-config: from /opt/verl, uv would read verl's pyproject
 #   [tool.uv].override-dependencies (transformers==5.16.1, kernels<0.15 for the CUDA stack) and beat the XPU pins.
-#   transformers is NOT pinned here: it comes from verl's own requirements.txt window and vLLM's (>=5.16.1), and the
-#   transformers[kernels] extra brings the matching kernels release. If the two windows stop overlapping, the build
-#   can fail. This needs a verl checkout whose requirements.txt allows transformers >= 5.16.1 (verl main since PR #8390);
-#   an older VERL_REF would downgrade transformers below vLLM's floor, which the check at the end of this stage
-#   rejects. The override is limited to pyzes (torch pins pyzes==0.1.1); an unpinned entry would also erase torch's
-#   own triton-xpu pin.
-# - XPU pins (inline): torch 2.14.0+xpu is the version vLLM 0.32.0's XPU wheel requires;
-#   pyzes>=0.1.2 because the device-memory query needs it; triton-xpu follows torch's own pin; dpctl for device probing.
+#   transformers is NOT pinned here: it comes from the overlap of verl's own requirements.txt window (<5.19) and vLLM
+#   0.34's (>=5.16.1,<5.23), i.e. 5.18.x, and the transformers[kernels] extra brings the matching kernels release. If the
+#   two windows stop overlapping, the build can fail. This needs a verl checkout whose requirements.txt allows
+#   transformers >= 5.16.1 (verl main since PR #8390); an older VERL_REF would downgrade transformers below vLLM's
+#   floor, which the check at the end of this stage rejects.
+# - XPU pins (inline): torch 2.15.0+xpu is the version vLLM 0.34.0's XPU wheel requires; torch 2.15 itself pins
+#   pyzes==0.1.3 (>= 0.1.2 is needed for the device-memory query), so no pyzes override is required any more;
+#   triton-xpu follows torch's own pin; dpctl for device probing.
 #   pip>=26.2.2 and certifi>=2026.10.19 are the first releases with the corrected CA bundle (pip loads its vendored certifi
 #   in addition to the system store, so only upgrading pip fixes it). qwen_vl_utils and mathruler are declared in verl's
 #   verl-core extra but not in requirements.txt; multimodal datasets and Geo3K scoring import them.
@@ -126,15 +120,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install "vllm==${VLLM_VERSION}+xpu" \
         --extra-index-url "https://wheels.vllm.ai/${VLLM_VERSION}/xpu" \
         --extra-index-url https://wheels.vllm.ai/xpu \
+        --extra-index-url "${VLLM_XPU_KERNELS_INDEX}" \
         --extra-index-url "${PIP_EXTRA_INDEX_URL}" && \
-    echo 'pyzes>=0.1.2' > /tmp/override-pyzes.txt && \
     uv --no-config pip install -r /opt/verl/requirements.txt \
-        "torch==2.14.0+xpu" \
+        "torch==2.15.0+xpu" \
         "transformers[kernels]" \
         dpctl "pyzes>=0.1.2" triton-xpu \
         "pip>=26.2.2" "certifi>=2026.10.19" \
-        qwen_vl_utils mathruler \
-        --override /tmp/override-pyzes.txt && \
+        qwen_vl_utils mathruler && \
     uv --no-config pip install --no-deps -e /opt/verl && \
     TRITON_XPU="$(uv pip freeze | grep -i '^triton-xpu==')" && \
     (uv pip uninstall triton || true) && \
@@ -206,8 +199,8 @@ LABEL org.opencontainers.image.title="verl-xpu" \
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/verl /opt/verl
 COPY --from=builder /opt/verl-hardware-plugin /opt/verl-hardware-plugin
-# LD_LIBRARY_PATH mirrors vLLM's image (libccl.so.1 import error without it). The TMP_BUF variables stop oneCCL 2022.0.0
-# from caching IPC handles of freed buffers, which leaked host memory on 8-GPU runs.
+# LD_LIBRARY_PATH mirrors vLLM's image (libccl.so.1 import error without it). The TMP_BUF variables stop oneCCL 2022.x
+# (the 2022.1.2 wheel torch 2.15 pins) from caching IPC handles of freed buffers, which leaked host memory on 8-GPU runs.
 ENV PATH="/opt/venv/bin:${PATH}" \
     VIRTUAL_ENV=/opt/venv \
     LD_LIBRARY_PATH=/opt/venv/lib:/usr/local/lib \
