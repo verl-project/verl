@@ -202,7 +202,7 @@ async def test_server_adapter(init_config):
 
     # 3. create checkpoint engine manager
     checkpoint_manager = CheckpointEngineManager(
-        config=checkpoint_engine_config, actor_wg=actor_wg, replicas=llm_server_manager.get_replicas()
+        config=checkpoint_engine_config, actor_wg=actor_wg, replicas=await llm_server_manager.get_replicas.remote()
     )
 
     n = 4
@@ -215,7 +215,7 @@ async def test_server_adapter(init_config):
 
     # 4. test update_weights with global_steps=None
     await _run_update_weights_with_global_steps_none(
-        server_manager=llm_server_manager.get_client(),
+        server_manager=await llm_server_manager.get_client.remote(),
         checkpoint_manager=checkpoint_manager,
         tokenizer=model_config.tokenizer,
     )
@@ -225,7 +225,7 @@ async def test_server_adapter(init_config):
     await _run_server_manager_without_resume(
         initial_steps=1,
         train_steps=3,
-        server_manager=llm_server_manager.get_client(),
+        server_manager=await llm_server_manager.get_client.remote(),
         checkpoint_manager=checkpoint_manager,
         prompts=prompts,
         tokenizer=model_config.tokenizer,
@@ -235,7 +235,7 @@ async def test_server_adapter(init_config):
     await _run_server_manager_with_resume(
         initial_steps=4,
         train_steps=3,
-        server_manager=llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient),
+        server_manager=await llm_server_manager.get_client.remote(client_cls=FullyAsyncLLMServerClient),
         checkpoint_manager=checkpoint_manager,
         prompts=prompts,
         tokenizer=model_config.tokenizer,

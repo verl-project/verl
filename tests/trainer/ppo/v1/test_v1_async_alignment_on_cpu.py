@@ -43,11 +43,12 @@ def _make_trainer(
     trainer.current_mode = current_mode
     trainer.llm_server_manager = SimpleNamespace(
         get_replicas=lambda: ["hybrid"] * hybrid_replicas,
+        get_addresses=SimpleNamespace(remote=lambda: [f"hybrid-{i}" for i in range(hybrid_replicas)]),
         server_addresses=[f"hybrid-{i}" for i in range(hybrid_replicas)],
     )
     trainer.standalone_server_manager = SimpleNamespace(
         get_replicas=lambda: ["standalone"] * standalone_replicas,
-        global_load_balancer=MagicMock(),
+        remove_servers=MagicMock(remote=MagicMock(return_value=None)),
     )
     trainer.checkpoint_manager = MagicMock()
     return trainer
@@ -97,16 +98,20 @@ class TestUnconfiguredDefaultsPreserveBehavior:
         trainer.global_steps = 1
         trainer.current_mode = HybridEngineMode.ROLLOUT
         balancer_calls = []
-        monkeypatch.setattr(
-            separate_async_module.ray,
-            "get",
-            lambda ref: balancer_calls.append(ref),
-        )
+
+        def record_and_return(ref):
+            balancer_calls.append(ref)
+            return ref
+
+        monkeypatch.setattr(separate_async_module.ray, "get", record_and_return)
         trainer.switch_to_trainer()
         trainer.checkpoint_manager.abort_replicas.assert_called_once()
         trainer.checkpoint_manager.sleep_replicas.assert_called_once()
         assert trainer.current_mode == HybridEngineMode.TRAINER
-        assert len(balancer_calls) == 1  # balancer removal ran (original path)
+        # Balancer removal ran through the manager's load-balancing plane:
+        # one ray.get for the hybrid addresses, one for the removal.
+        assert len(balancer_calls) == 2
+        trainer.standalone_server_manager.remove_servers.remote.assert_called_once_with(["hybrid-0", "hybrid-1"])
 
 
 class TestHybridEngineDisabled:

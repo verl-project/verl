@@ -588,13 +588,16 @@ def _memory_budget_setup(monkeypatch, hybrid_enabled, standalone_memory, *, inte
     def base_setup(self):
         self.hybrid_config = self.config
         self.actor_rollout_wg = object()
-        self.llm_server_manager = SimpleNamespace(rollout_replicas=[0, 1] if hybrid_enabled else [])
+        self.llm_server_manager = SimpleNamespace(
+            rollout_replicas=[0, 1] if hybrid_enabled else [],
+            get_replicas=SimpleNamespace(remote=lambda: [0, 1] if hybrid_enabled else []),
+        )
 
     def create_standalone(*, config, start_rank):
         created_configs.append((config, start_rank))
         if fail_init:
             raise RuntimeError("standalone init failed")
-        return SimpleNamespace(get_replicas=lambda: ["standalone"])
+        return SimpleNamespace(get_replicas=SimpleNamespace(remote=lambda: ["standalone"]))
 
     def create_checkpoint_manager(**kwargs):
         checkpoint_calls.append(kwargs)
@@ -603,6 +606,9 @@ def _memory_budget_setup(monkeypatch, hybrid_enabled, standalone_memory, *, inte
     monkeypatch.setattr(trainer_module.PPOTrainer, "_setup", base_setup)
     monkeypatch.setattr(trainer_module.LLMServerManager, "create", create_standalone)
     monkeypatch.setattr(trainer_module, "CheckpointEngineManager", create_checkpoint_manager)
+    # No Ray runtime in these tests: the manager RPCs above return plain
+    # values, so ray.get must pass them through untouched.
+    monkeypatch.setattr(trainer_module.ray, "get", lambda ref: ref)
     trainer.add_replicas_to_balancer = lambda: None
     return trainer, created_configs, checkpoint_calls
 

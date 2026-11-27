@@ -405,7 +405,7 @@ class PPOTrainer(ABC):
         self.checkpoint_manager: CheckpointEngineManager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,
-            replicas=self.llm_server_manager.get_replicas(),
+            replicas=ray.get(self.llm_server_manager.get_replicas.remote()),
         )
         logger.info("checkpoint engine manager initialized")
 
@@ -417,7 +417,7 @@ class PPOTrainer(ABC):
 
     def get_llm_client(self) -> LLMServerClient:
         """Get the LLM server client for rollout generation."""
-        return self.llm_server_manager.get_client()
+        return ray.get(self.llm_server_manager.get_client.remote())
 
     def get_teacher_client(self) -> Optional[dict[str, LLMServerClient]]:
         """Get the On-Policy Distillation teacher server clients.
@@ -1503,12 +1503,12 @@ class PPOTrainer(ABC):
     def _start_rollout_profiling(self) -> None:
         """Start rollout profiling."""
         for manager in self._rollout_server_managers():
-            manager.start_profile()
+            ray.get(manager.start_profile.remote())
 
     def _stop_rollout_profiling(self) -> None:
         """Stop rollout profiling."""
         for manager in self._rollout_server_managers():
-            manager.stop_profile()
+            ray.get(manager.stop_profile.remote())
 
     def _start_profiling(self) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
