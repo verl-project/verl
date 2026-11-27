@@ -105,6 +105,10 @@ compilation (412 s for BF16, 483 s for MXFP8).
 | response length, steps 2–10 → 41–50 | 6226 → 5493 | 6218 → 5394 |
 | `rollout_corr/kl`, steps 2–10 → 41–50 | 0.0018 → 0.0038 | 0.0048 → 0.0097 |
 
+![Qwen3-30B-A3B on DAPO-Math-17k, 4×MI355X, BF16 vs MXFP8, per step](https://github.com/user-attachments/assets/0fb77c2a-a28d-45e8-9589-f77614a510ac)
+*Per step on one 4×MI355X machine. Blue: BF16, vermillion: MXFP8 end to end. W&B:
+[wei-cai/verl_mxfp8_rocm_mi355](https://wandb.ai/wei-cai/verl_mxfp8_rocm_mi355)*
+
 Results and observations:
 
 - MXFP8 is slightly faster than BF16 end to end on 4×MI355X: the step takes 1.5% less (the per-step ratio has a
