@@ -38,6 +38,7 @@ from verl.utils.dataset.dataset_utils import SFTTensorCollator
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 from verl.utils.device import auto_set_device, get_device_name
 from verl.utils.logger import log_with_rank
+from verl.utils.profiler.nsight import _resolve_nsight_capture_options
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions
 from verl.utils.tracking import Tracking
 from verl.workers.engine_workers import TrainingWorker
@@ -125,8 +126,12 @@ class SFTTrainer:
             wg_kwargs["profile_steps"] = list(range(self.start_profile_step, self.end_profile_step + 1))
             # Only require nsight worker options when tool is nsys
             if OmegaConf.select(self.config.profiler, "tool") == "nsys":
-                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
-                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                # SFT opens one interval; discrete mode captures each train_batch once.
+                discrete = OmegaConf.select(self.config.profiler, "tool_config.nsys.discrete", default=False)
+                wg_kwargs["worker_nsight_options"] = _resolve_nsight_capture_options(
+                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options"),
+                    wg_kwargs["profile_steps"],
+                    profile_continuous_steps=not discrete,
                 )
 
         # create resource pool and worker group
