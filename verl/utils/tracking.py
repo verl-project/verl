@@ -229,6 +229,7 @@ class RLInsightLogger:
     """Logger backend that exports scalar metrics and rl-insight runtime signals."""
 
     ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
+    RL_INSIGHT_SERVICE_NAME = "rl_insight_monitor"
     MINIMUM_RL_INSIGHT_VERSION = Version("0.4.0")
     _init_done = False
     _rl_insight_module = None
@@ -333,18 +334,27 @@ class RLInsightLogger:
             os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "http/protobuf"
             args["otlp_traces_endpoint"] = endpoint
 
+        # Keep engine spans under the RL-Insight service so the dashboard's
+        # resource.service.name filter can find them. An explicit user setting wins.
+        if not os.environ.get("OTEL_SERVICE_NAME"):
+            os.environ["OTEL_SERVICE_NAME"] = cls.RL_INSIGHT_SERVICE_NAME
         cls._set_otel_resource_attributes(replica_rank)
 
     @classmethod
     def _set_otel_resource_attributes(cls, replica_rank: int) -> None:
-        """Add replica metadata to ``OTEL_RESOURCE_ATTRIBUTES``.
+        """Add service and replica metadata to ``OTEL_RESOURCE_ATTRIBUTES``.
 
         Run identity is intentionally omitted: the engine cannot see the Hub's
         execution-suffixed experiment name, so request spans are scoped by the
         dashboard time range instead. Appended attributes take precedence over
         launcher-provided values with the same key.
         """
-        attributes = f"replica={quote(str(replica_rank), safe='')}"
+        service_name = os.environ.get("OTEL_SERVICE_NAME") or cls.RL_INSIGHT_SERVICE_NAME
+        attributes = ",".join(
+            f"{key}={quote(str(value), safe='')}"
+            for key, value in {"service.name": service_name, "replica": replica_rank}.items()
+            if value
+        )
         existing_attributes = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "").strip()
         os.environ["OTEL_RESOURCE_ATTRIBUTES"] = (
             f"{existing_attributes},{attributes}" if existing_attributes else attributes
