@@ -28,10 +28,8 @@ RUN cd /workspace \
     && cd .. \
     && rm -fr causal-conv1d
 
-# vLLM v0.32.0 — same version as verl's CUDA stack (pyproject.toml / uv.lock: vllm==0.32.0).
-# PR #44972 (ROCm cuMem zeroing), #46009 (MoE weight storage) and #60367 (host
-# access to sleep-mode cuMem; supersedes the unmerged #51369) are already in v0.32.0.
-ARG VLLM_TAG="5df63a7203cdb9328d824a27b682e77c7b9928be"
+# vLLM v0.34.0 — used by verl's weight-reload lifecycle.
+ARG VLLM_TAG="62d4bc3c7e33b1b6c906e233e6af2d3506c482ca"
 # [Bugfix][ROCm] Restore MoE weight padding dropped by #46009 (merged after v0.32.0)
 # Ref: https://github.com/vllm-project/vllm/pull/61872
 ARG VLLM_PR_61872="3b43d2b01c2fb667101746e1acd33b6a3c9d0863"
@@ -62,9 +60,8 @@ print(*[f'{p} {v(p)}' for p in ['vllm', 'tilelang', 'xgrammar', 'apache-tvm-ffi'
 
 
 FROM install_vllm AS install_verl
-# verl main as of 2026-11-13: transformers<5.17, so it stays compatible with
-# vLLM v0.32.0 (transformers>=5.16.1,<5.20).
-ARG VERL_TAG="3503bec3420dbb8ee67f8c9da6c0721570ae75ac"
+# verl main as of 2026-11-26: vllm==0.34.0 and transformers==5.18.0.
+ARG VERL_TAG="2d0283f89d7e368be0c502707c58a91f88173b0f"
 RUN cd /workspace && git clone https://github.com/verl-project/verl.git && \
     cd verl && git checkout ${VERL_TAG} && \
     git submodule update --init --recursive && \
@@ -73,14 +70,19 @@ RUN cd /workspace && git clone https://github.com/verl-project/verl.git && \
     pip install --no-cache-dir . 
     
 # for qwen3.5 — versions pinned for reproducibility. mcore_bridge 1.7.0: 1.5.x/1.6.x cap
-# transformers<5.13, which would downgrade below vLLM 0.32.0's transformers>=5.16.1.
+# transformers<5.13, which would downgrade below vLLM 0.34.0's transformers>=5.16.1.
+# pip does not use verl's uv lockfile; pin shared versions compatible with vLLM 0.34.
 RUN pip install --no-cache-dir \
     "git+https://github.com/ISEEKYAN/mbridge.git@a61943d7fcb34a190471cfeb0a0eb8bbda621ddf" \
     mcore_bridge==1.7.0 \
     megatron-core==0.18.0 \
     mathruler==0.1.0 \
     qwen_vl_utils==0.0.14 \
-    datasets==5.0.0 \
+    datasets==5.2.0 \
+    transformers==5.18.0 \
+    huggingface-hub==2.4.0 \
+    virtualenv==21.14.5 \
+    filelock==4.2.12 \
     accelerate==1.14.0 \
     TransferQueue==0.1.12 \
     flash-linear-attention==0.5.1
