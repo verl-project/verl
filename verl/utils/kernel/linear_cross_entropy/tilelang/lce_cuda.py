@@ -56,19 +56,271 @@ def linear_cross_entropy_fwd_target_logits(
 
 
 @tilelang.jit
+def linear_cross_entropy_fwd_mainloop_sm100(
+    N: int,
+    K: int,
+    dtype=T.bfloat16,
+    BLOCK_M=128,
+    BLOCK_N=256,
+    BLOCK_K=64,
+    VOCAB_PER_CTA=512,
+    num_threads=256,
+    num_stages=5,
+):
+    """Blackwell SM100 2-CTA warp-specialized TMA + tcgen05 forward mainloop."""
+    assert VOCAB_PER_CTA % BLOCK_N == 0
+    M = T.dynamic("M")
+    num_splits = (N + VOCAB_PER_CTA - 1) // VOCAB_PER_CTA
+    num_vocab_tiles = VOCAB_PER_CTA // BLOCK_N
+    k_iters = (K + BLOCK_K - 1) // BLOCK_K
+
+    @T.prim_func
+    def linear_cross_entropy_fwd_mainloop_sm100_kernel(
+        hidden: T.Tensor([M, K], dtype),
+        weight: T.Tensor([N, K], dtype),
+        inv_temperature: T.float32,
+        partial_max: T.Tensor([M, num_splits], T.float32),
+        partial_sum: T.Tensor([M, num_splits], T.float32),
+        partial_weighted_sum: T.Tensor([M, num_splits], T.float32),
+    ):
+        with T.ClusterKernel(
+            T.ceildiv(M, BLOCK_M * 2) * 2,
+            num_splits,
+            threads=num_threads,
+            cluster_dims=2,
+        ) as (bx, by):
+            hidden_shared = T.alloc_shared([num_stages, BLOCK_M, BLOCK_K], dtype)
+            weight_shared = T.alloc_shared([num_stages, BLOCK_N // 2, BLOCK_K], dtype)
+            logits_tmem = T.alloc_tmem([BLOCK_M, BLOCK_N], T.float32)
+            buf = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
+
+            local_max = T.alloc_fragment([BLOCK_M], T.float32)
+            tile_max = T.alloc_fragment([BLOCK_M], T.float32)
+            new_max = T.alloc_fragment([BLOCK_M], T.float32)
+            local_sum = T.alloc_fragment([BLOCK_M], T.float32)
+            tile_sum = T.alloc_fragment([BLOCK_M], T.float32)
+            local_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
+            tile_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
+
+            loaded = T.alloc_cluster_barrier([32 * 2] * num_stages)
+            consumed = T.alloc_cluster_barrier([1] * num_stages)
+            tmem_full = T.alloc_barrier([1])
+            if num_vocab_tiles > 1:
+                tmem_empty = T.alloc_cluster_barrier([num_threads * 2])
+
+            tx = T.get_thread_binding()
+            cta_id = T.block_rank_in_cluster()
+            T.assume(cta_id < 2)
+            T.use_swizzle(16)
+
+            T.fill(local_max, -T.infinity(T.float32))
+            T.clear(local_sum)
+            T.clear(local_weighted_sum)
+
+            for vocab_tile in T.Serial(num_vocab_tiles):
+                vocab_offset = by * VOCAB_PER_CTA + vocab_tile * BLOCK_N
+                weight_cta_offset = vocab_offset + cta_id * (BLOCK_N // 2)
+
+                if tx < 32:
+                    for k_tile in T.Serial(k_iters):
+                        step = vocab_tile * k_iters + k_tile
+                        stage = step % num_stages
+                        parity = (step // num_stages) & 1
+                        T.mbarrier_wait_parity(consumed[stage], parity ^ 1)
+                        T.tma_copy(
+                            hidden[
+                                bx * BLOCK_M : (bx + 1) * BLOCK_M,
+                                k_tile * BLOCK_K : (k_tile + 1) * BLOCK_K,
+                            ],
+                            hidden_shared[stage, :, :],
+                            barrier=loaded[stage],
+                        )
+                        T.tma_copy(
+                            weight[
+                                weight_cta_offset : weight_cta_offset + (BLOCK_N // 2),
+                                k_tile * BLOCK_K : (k_tile + 1) * BLOCK_K,
+                            ],
+                            weight_shared[stage, :, :],
+                            barrier=loaded[stage],
+                        )
+                        T.mbarrier_arrive(loaded[stage], 0)
+                elif cta_id == 0 and tx < 64:
+                    if num_vocab_tiles > 1 and vocab_tile > 0:
+                        T.mbarrier_wait_parity(tmem_empty, (vocab_tile - 1) & 1)
+                    for k_tile in T.Serial(k_iters):
+                        step = vocab_tile * k_iters + k_tile
+                        stage = step % num_stages
+                        parity = (step // num_stages) & 1
+                        T.mbarrier_wait_parity(loaded[stage], parity)
+                        T.tcgen05_gemm(
+                            hidden_shared[stage, :, :],
+                            weight_shared[stage, :, :],
+                            logits_tmem,
+                            transpose_B=True,
+                            mbar=consumed[stage],
+                            clear_accum=k_tile == 0,
+                            use_2cta=True,
+                        )
+                    T.tcgen05_mma_arrive(tmem_full, arrive_2cta=True)
+
+                T.mbarrier_wait_parity(tmem_full, vocab_tile & 1)
+
+                T.copy(logits_tmem, buf)
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    buf[i, j] = T.if_then_else(
+                        (bx * BLOCK_M + i < M) & (vocab_offset + j < N),
+                        buf[i, j] * inv_temperature,
+                        -T.infinity(T.float32),
+                    )
+                T.reduce_max(buf, tile_max, dim=-1)
+                for i in T.Parallel(BLOCK_M):
+                    new_max[i] = T.max(local_max[i], tile_max[i])
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    buf[i, j] = T.if_then_else(
+                        (bx * BLOCK_M + i < M) & (vocab_offset + j < N),
+                        T.exp(buf[i, j] - new_max[i]),
+                        0.0,
+                    )
+                T.reduce_sum(buf, tile_sum, dim=-1)
+
+                T.copy(logits_tmem, buf)
+                if num_vocab_tiles > 1 and vocab_tile + 1 < num_vocab_tiles:
+                    T.mbarrier_arrive(tmem_empty, 0)
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    is_valid = (bx * BLOCK_M + i < M) & (vocab_offset + j < N)
+                    scaled = buf[i, j] * inv_temperature
+                    buf[i, j] = T.if_then_else(
+                        is_valid,
+                        scaled * T.exp(scaled - new_max[i]),
+                        0.0,
+                    )
+                T.reduce_sum(buf, tile_weighted_sum, dim=-1)
+
+                for i in T.Parallel(BLOCK_M):
+                    rescale = T.exp(local_max[i] - new_max[i])
+                    local_sum[i] = local_sum[i] * rescale + tile_sum[i]
+                    local_weighted_sum[i] = local_weighted_sum[i] * rescale + tile_weighted_sum[i]
+                    local_max[i] = new_max[i]
+
+            for i in T.Parallel(BLOCK_M):
+                if bx * BLOCK_M + i < M:
+                    partial_max[bx * BLOCK_M + i, by] = local_max[i]
+                    partial_sum[bx * BLOCK_M + i, by] = local_sum[i]
+                    partial_weighted_sum[bx * BLOCK_M + i, by] = local_weighted_sum[i]
+
+    return linear_cross_entropy_fwd_mainloop_sm100_kernel
+
+
+@tilelang.jit
+def linear_cross_entropy_fwd_mainloop_sm90(
+    N: int,
+    K: int,
+    dtype=T.bfloat16,
+    BLOCK_M=128,
+    BLOCK_N=128,
+    BLOCK_K=64,
+    VOCAB_PER_CTA=512,
+    num_threads=256,
+    num_stages=3,
+):
+    """Hopper SM90 TMA + WGMMA forward mainloop."""
+    assert VOCAB_PER_CTA % BLOCK_N == 0
+    M = T.dynamic("M")
+    num_splits = (N + VOCAB_PER_CTA - 1) // VOCAB_PER_CTA
+    num_vocab_tiles = VOCAB_PER_CTA // BLOCK_N
+
+    @T.prim_func
+    def linear_cross_entropy_fwd_mainloop_sm90_kernel(
+        hidden: T.Tensor([M, K], dtype),
+        weight: T.Tensor([N, K], dtype),
+        inv_temperature: T.float32,
+        partial_max: T.Tensor([M, num_splits], T.float32),
+        partial_sum: T.Tensor([M, num_splits], T.float32),
+        partial_weighted_sum: T.Tensor([M, num_splits], T.float32),
+    ):
+        with T.Kernel(T.ceildiv(M, BLOCK_M), num_splits, threads=num_threads) as (bx, by):
+            hidden_shared = T.alloc_shared([BLOCK_M, BLOCK_K], dtype)
+            weight_shared = T.alloc_shared([BLOCK_N, BLOCK_K], dtype)
+            logits = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
+            probs = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
+
+            local_max = T.alloc_fragment([BLOCK_M], T.float32)
+            tile_max = T.alloc_fragment([BLOCK_M], T.float32)
+            new_max = T.alloc_fragment([BLOCK_M], T.float32)
+            local_sum = T.alloc_fragment([BLOCK_M], T.float32)
+            tile_sum = T.alloc_fragment([BLOCK_M], T.float32)
+            local_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
+            tile_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
+
+            T.use_swizzle(8)
+            T.fill(local_max, -T.infinity(T.float32))
+            T.clear(local_sum)
+            T.clear(local_weighted_sum)
+
+            for vocab_tile in T.Serial(num_vocab_tiles):
+                vocab_offset = by * VOCAB_PER_CTA + vocab_tile * BLOCK_N
+                T.clear(logits)
+
+                for k_tile in T.Pipelined(T.ceildiv(K, BLOCK_K), num_stages=num_stages):
+                    T.copy(hidden[bx * BLOCK_M, k_tile * BLOCK_K], hidden_shared)
+                    T.copy(weight[vocab_offset, k_tile * BLOCK_K], weight_shared)
+                    T.gemm(hidden_shared, weight_shared, logits, transpose_B=True)
+
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    logits[i, j] = T.if_then_else(
+                        (bx * BLOCK_M + i < M) & (vocab_offset + j < N),
+                        logits[i, j] * inv_temperature,
+                        -T.infinity(T.float32),
+                    )
+
+                T.reduce_max(logits, tile_max, dim=-1)
+                for i in T.Parallel(BLOCK_M):
+                    new_max[i] = T.max(local_max[i], tile_max[i])
+
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    is_valid = (bx * BLOCK_M + i < M) & (vocab_offset + j < N)
+                    probs[i, j] = T.if_then_else(
+                        is_valid,
+                        T.exp(logits[i, j] - new_max[i]),
+                        0.0,
+                    )
+                    logits[i, j] = T.if_then_else(
+                        is_valid,
+                        logits[i, j] * probs[i, j],
+                        0.0,
+                    )
+
+                T.reduce_sum(probs, tile_sum, dim=-1)
+                T.reduce_sum(logits, tile_weighted_sum, dim=-1)
+                for i in T.Parallel(BLOCK_M):
+                    rescale = T.exp(local_max[i] - new_max[i])
+                    local_sum[i] = local_sum[i] * rescale + tile_sum[i]
+                    local_weighted_sum[i] = local_weighted_sum[i] * rescale + tile_weighted_sum[i]
+                    local_max[i] = new_max[i]
+
+            for i in T.Parallel(BLOCK_M):
+                if bx * BLOCK_M + i < M:
+                    partial_max[bx * BLOCK_M + i, by] = local_max[i]
+                    partial_sum[bx * BLOCK_M + i, by] = local_sum[i]
+                    partial_weighted_sum[bx * BLOCK_M + i, by] = local_weighted_sum[i]
+
+    return linear_cross_entropy_fwd_mainloop_sm90_kernel
+
+
+@tilelang.jit
 def linear_cross_entropy_fwd_mainloop(
     N: int,
     K: int,
     dtype=T.bfloat16,
     BLOCK_M=64,
-    BLOCK_N=256,
+    BLOCK_N=128,
     BLOCK_K=64,
     VOCAB_PER_CTA=512,
     num_threads=128,
     num_stages=2,
     min_blocks_per_sm=1,
 ):
-    """Compute rank-local logits and online softmax statistics.
+    """Compute rank-local logits and online softmax statistics (generic CUDA fallback).
 
     Args:
         N: Local vocabulary size.
@@ -93,8 +345,7 @@ def linear_cross_entropy_fwd_mainloop(
             hidden_shared = T.alloc_shared([BLOCK_M, BLOCK_K], dtype)
             weight_shared = T.alloc_shared([BLOCK_N, BLOCK_K], dtype)
             logits = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
-            exp_logits = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
-            weighted_logits = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
+            probs = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
 
             local_max = T.alloc_fragment([BLOCK_M], T.float32)
             tile_max = T.alloc_fragment([BLOCK_M], T.float32)
@@ -148,19 +399,19 @@ def linear_cross_entropy_fwd_mainloop(
 
                 for i, j in T.Parallel(BLOCK_M, BLOCK_N):
                     is_valid = (bx * BLOCK_M + i < M) & (vocab_offset + j < N)
-                    exp_logits[i, j] = T.if_then_else(
+                    probs[i, j] = T.if_then_else(
                         is_valid,
                         T.exp(logits[i, j] - new_max[i]),
                         0.0,
                     )
-                    weighted_logits[i, j] = T.if_then_else(
+                    logits[i, j] = T.if_then_else(
                         is_valid,
-                        logits[i, j] * exp_logits[i, j],
+                        logits[i, j] * probs[i, j],
                         0.0,
                     )
 
-                T.reduce_sum(exp_logits, tile_sum, dim=-1)
-                T.reduce_sum(weighted_logits, tile_weighted_sum, dim=-1)
+                T.reduce_sum(probs, tile_sum, dim=-1)
+                T.reduce_sum(logits, tile_weighted_sum, dim=-1)
                 for i in T.Parallel(BLOCK_M):
                     rescale = T.exp(local_max[i] - new_max[i])
                     local_sum[i] = local_sum[i] * rescale + tile_sum[i]
@@ -479,6 +730,336 @@ def linear_cross_entropy_fwd_finalize(
 
 
 @tilelang.jit
+def linear_cross_entropy_bwd_dlogits_sm100(
+    N: int,
+    K: int,
+    topk: int,
+    VOCAB_CHUNK: int,
+    HAS_LOGPROBS_GRAD: bool,
+    HAS_ENTROPY_GRAD: bool,
+    dtype=T.bfloat16,
+    BLOCK_M=128,
+    BLOCK_N=256,
+    BLOCK_K=64,
+    num_threads=256,
+    num_stages=4,
+):
+    """Blackwell SM100 warp-specialized TMA + tcgen05 backward dlogits kernel."""
+    assert VOCAB_CHUNK % BLOCK_N == 0
+    M = T.dynamic("M")
+    k_iters = (K + BLOCK_K - 1) // BLOCK_K
+    lanes_per_row = num_threads // BLOCK_M
+    topk_iters = (topk + lanes_per_row - 1) // lanes_per_row
+    use_small_k = topk <= 8
+
+    @T.prim_func
+    def linear_cross_entropy_bwd_dlogits_sm100_kernel(
+        hidden: T.Tensor([M, K], dtype),
+        weight: T.Tensor([N, K], dtype),
+        labels: T.Tensor([M, topk], T.int64),
+        lse: T.Tensor([M], T.float32),
+        mean_logits: T.Tensor([M], T.float32),
+        grad_logprobs: T.Tensor([M, topk], T.float32),
+        grad_logprobs_sum: T.Tensor([M], T.float32),
+        grad_entropy: T.Tensor([M], T.float32),
+        inv_temperature: T.float32,
+        vocab_start: T.int32,
+        vocab_offset: T.int32,
+        dlogits: T.Tensor([M, VOCAB_CHUNK], dtype),
+    ):
+        with T.Kernel(
+            T.ceildiv(M, BLOCK_M),
+            VOCAB_CHUNK // BLOCK_N,
+            threads=num_threads,
+        ) as (bx, by):
+            hidden_shared = T.alloc_shared([num_stages, BLOCK_M, BLOCK_K], dtype)
+            weight_shared = T.alloc_shared([num_stages, BLOCK_N, BLOCK_K], dtype)
+            logits_tmem = T.alloc_tmem([BLOCK_M, BLOCK_N], T.float32)
+            buf = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
+
+            if not use_small_k and HAS_LOGPROBS_GRAD:
+                dlogits_fp32_s = T.alloc_shared([BLOCK_M, BLOCK_N], T.float32)
+            dlogits_s = T.alloc_shared([BLOCK_M, BLOCK_N], dtype)
+
+            lse_s = T.alloc_shared([BLOCK_M], T.float32)
+            mean_s = T.alloc_shared([BLOCK_M], T.float32)
+            grad_ent_s = T.alloc_shared([BLOCK_M], T.float32)
+            grad_lp_sum_s = T.alloc_shared([BLOCK_M], T.float32)
+            if use_small_k and HAS_LOGPROBS_GRAD:
+                label_col_s = T.alloc_shared([BLOCK_M, topk], T.int64)
+                grad_lp_s = T.alloc_shared([BLOCK_M, topk], T.float32)
+
+            loaded = T.alloc_barrier([32] * num_stages)
+            consumed = T.alloc_barrier([1] * num_stages)
+            tmem_full = T.alloc_barrier([1])
+
+            tx = T.get_thread_binding()
+            T.use_swizzle(8)
+
+            local_vocab_offset = vocab_offset + by * BLOCK_N
+            tile_global_vocab = vocab_start + local_vocab_offset
+
+            if tx < 32:
+                for k_tile in T.Serial(k_iters):
+                    stage = k_tile % num_stages
+                    parity = (k_tile // num_stages) & 1
+                    T.mbarrier_wait_parity(consumed[stage], parity ^ 1)
+                    T.tma_copy(
+                        hidden[
+                            bx * BLOCK_M : (bx + 1) * BLOCK_M,
+                            k_tile * BLOCK_K : (k_tile + 1) * BLOCK_K,
+                        ],
+                        hidden_shared[stage, :, :],
+                        barrier=loaded[stage],
+                    )
+                    T.tma_copy(
+                        weight[
+                            local_vocab_offset : local_vocab_offset + BLOCK_N,
+                            k_tile * BLOCK_K : (k_tile + 1) * BLOCK_K,
+                        ],
+                        weight_shared[stage, :, :],
+                        barrier=loaded[stage],
+                    )
+                    T.mbarrier_arrive(loaded[stage])
+            elif tx < 64:
+                for k_tile in T.Serial(k_iters):
+                    stage = k_tile % num_stages
+                    parity = (k_tile // num_stages) & 1
+                    T.mbarrier_wait_parity(loaded[stage], parity)
+                    T.tcgen05_gemm(
+                        hidden_shared[stage, :, :],
+                        weight_shared[stage, :, :],
+                        logits_tmem,
+                        transpose_B=True,
+                        mbar=consumed[stage],
+                        clear_accum=k_tile == 0,
+                    )
+                T.tcgen05_mma_arrive(tmem_full)
+
+            # Epilogue shared buffers alias input shared tiles; populate strictly after MMA completion.
+            T.mbarrier_wait_parity(tmem_full, 0)
+
+            for i in T.Parallel(BLOCK_M):
+                row = bx * BLOCK_M + i
+                lse_s[i] = T.if_then_else(row < M, lse[row], 0.0)
+                if HAS_LOGPROBS_GRAD:
+                    grad_lp_sum_s[i] = T.if_then_else(row < M, grad_logprobs_sum[row], 0.0)
+                else:
+                    grad_lp_sum_s[i] = 0.0
+                if HAS_ENTROPY_GRAD:
+                    mean_s[i] = T.if_then_else(row < M, mean_logits[row], 0.0)
+                    grad_ent_s[i] = T.if_then_else(row < M, grad_entropy[row], 0.0)
+                else:
+                    mean_s[i] = 0.0
+                    grad_ent_s[i] = 0.0
+
+            if use_small_k and HAS_LOGPROBS_GRAD:
+                for i, idx in T.Parallel(BLOCK_M, topk):
+                    row = bx * BLOCK_M + i
+                    label_col_s[i, idx] = T.if_then_else(row < M, labels[row, idx] - tile_global_vocab, -1)
+                    grad_lp_s[i, idx] = T.if_then_else(row < M, grad_logprobs[row, idx], 0.0)
+
+            T.copy(logits_tmem, buf)
+
+            if use_small_k or not HAS_LOGPROBS_GRAD:
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    row = bx * BLOCK_M + i
+                    local_vocab_id = local_vocab_offset + j
+                    is_valid = (row < M) & (local_vocab_id < N)
+                    logit = buf[i, j] * inv_temperature
+                    prob = T.if_then_else(is_valid, T.exp(logit - lse_s[i]), 0.0)
+                    grad = T.alloc_var(T.float32, init=-grad_lp_sum_s[i] * prob)
+                    if HAS_ENTROPY_GRAD:
+                        grad -= grad_ent_s[i] * prob * (logit - mean_s[i])
+                    if use_small_k and HAS_LOGPROBS_GRAD:
+                        for idx in T.unroll(topk):
+                            if j == label_col_s[i, idx]:
+                                grad += grad_lp_s[i, idx]
+                    dlogits_s[i, j] = T.if_then_else(
+                        is_valid,
+                        T.cast(grad * inv_temperature, dtype),
+                        T.cast(0.0, dtype),
+                    )
+            else:
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    row = bx * BLOCK_M + i
+                    local_vocab_id = local_vocab_offset + j
+                    is_valid = (row < M) & (local_vocab_id < N)
+                    logit = buf[i, j] * inv_temperature
+                    prob = T.if_then_else(is_valid, T.exp(logit - lse_s[i]), 0.0)
+                    grad = -grad_lp_sum_s[i] * prob
+                    if HAS_ENTROPY_GRAD:
+                        grad -= grad_ent_s[i] * prob * (logit - mean_s[i])
+                    dlogits_fp32_s[i, j] = T.if_then_else(is_valid, grad, 0.0)
+
+                for kt in T.Serial(topk_iters):
+                    for i, lane in T.Parallel(BLOCK_M, lanes_per_row):
+                        row = bx * BLOCK_M + i
+                        idx = kt * lanes_per_row + lane
+                        if (row < M) & (idx < topk):
+                            col = labels[row, idx] - tile_global_vocab
+                            if (col >= 0) & (col < BLOCK_N):
+                                T.atomic_add(dlogits_fp32_s[i, col], grad_logprobs[row, idx])
+
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    row = bx * BLOCK_M + i
+                    local_vocab_id = local_vocab_offset + j
+                    is_valid = (row < M) & (local_vocab_id < N)
+                    dlogits_s[i, j] = T.if_then_else(
+                        is_valid,
+                        T.cast(dlogits_fp32_s[i, j] * inv_temperature, dtype),
+                        T.cast(0.0, dtype),
+                    )
+
+            T.copy(dlogits_s, dlogits[bx * BLOCK_M, by * BLOCK_N])
+
+    return linear_cross_entropy_bwd_dlogits_sm100_kernel
+
+
+@tilelang.jit
+def linear_cross_entropy_bwd_dlogits_sm90(
+    N: int,
+    K: int,
+    topk: int,
+    VOCAB_CHUNK: int,
+    HAS_LOGPROBS_GRAD: bool,
+    HAS_ENTROPY_GRAD: bool,
+    dtype=T.bfloat16,
+    BLOCK_M=128,
+    BLOCK_N=128,
+    BLOCK_K=64,
+    num_threads=256,
+    num_stages=3,
+):
+    """Hopper SM90 TMA + WGMMA backward dlogits kernel."""
+    assert VOCAB_CHUNK % BLOCK_N == 0
+    M = T.dynamic("M")
+    lanes_per_row = num_threads // BLOCK_M
+    topk_iters = (topk + lanes_per_row - 1) // lanes_per_row
+    use_small_k = topk <= 8
+
+    @T.prim_func
+    def linear_cross_entropy_bwd_dlogits_sm90_kernel(
+        hidden: T.Tensor([M, K], dtype),
+        weight: T.Tensor([N, K], dtype),
+        labels: T.Tensor([M, topk], T.int64),
+        lse: T.Tensor([M], T.float32),
+        mean_logits: T.Tensor([M], T.float32),
+        grad_logprobs: T.Tensor([M, topk], T.float32),
+        grad_logprobs_sum: T.Tensor([M], T.float32),
+        grad_entropy: T.Tensor([M], T.float32),
+        inv_temperature: T.float32,
+        vocab_start: T.int32,
+        vocab_offset: T.int32,
+        dlogits: T.Tensor([M, VOCAB_CHUNK], dtype),
+    ):
+        with T.Kernel(
+            T.ceildiv(M, BLOCK_M),
+            VOCAB_CHUNK // BLOCK_N,
+            threads=num_threads,
+        ) as (bx, by):
+            hidden_shared = T.alloc_shared([BLOCK_M, BLOCK_K], dtype)
+            weight_shared = T.alloc_shared([BLOCK_N, BLOCK_K], dtype)
+            buf = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
+
+            if not use_small_k and HAS_LOGPROBS_GRAD:
+                dlogits_fp32_s = T.alloc_shared([BLOCK_M, BLOCK_N], T.float32)
+            dlogits_s = T.alloc_shared([BLOCK_M, BLOCK_N], dtype)
+
+            lse_s = T.alloc_shared([BLOCK_M], T.float32)
+            mean_s = T.alloc_shared([BLOCK_M], T.float32)
+            grad_ent_s = T.alloc_shared([BLOCK_M], T.float32)
+            grad_lp_sum_s = T.alloc_shared([BLOCK_M], T.float32)
+            if use_small_k and HAS_LOGPROBS_GRAD:
+                label_col_s = T.alloc_shared([BLOCK_M, topk], T.int64)
+                grad_lp_s = T.alloc_shared([BLOCK_M, topk], T.float32)
+
+            T.use_swizzle(8)
+            local_vocab_offset = vocab_offset + by * BLOCK_N
+            tile_global_vocab = vocab_start + local_vocab_offset
+
+            T.clear(buf)
+            for k_tile in T.Pipelined(T.ceildiv(K, BLOCK_K), num_stages=num_stages):
+                T.copy(hidden[bx * BLOCK_M, k_tile * BLOCK_K], hidden_shared)
+                T.copy(weight[local_vocab_offset, k_tile * BLOCK_K], weight_shared)
+                T.gemm(hidden_shared, weight_shared, buf, transpose_B=True)
+
+            for i in T.Parallel(BLOCK_M):
+                row = bx * BLOCK_M + i
+                lse_s[i] = T.if_then_else(row < M, lse[row], 0.0)
+                if HAS_LOGPROBS_GRAD:
+                    grad_lp_sum_s[i] = T.if_then_else(row < M, grad_logprobs_sum[row], 0.0)
+                else:
+                    grad_lp_sum_s[i] = 0.0
+                if HAS_ENTROPY_GRAD:
+                    mean_s[i] = T.if_then_else(row < M, mean_logits[row], 0.0)
+                    grad_ent_s[i] = T.if_then_else(row < M, grad_entropy[row], 0.0)
+                else:
+                    mean_s[i] = 0.0
+                    grad_ent_s[i] = 0.0
+
+            if use_small_k and HAS_LOGPROBS_GRAD:
+                for i, idx in T.Parallel(BLOCK_M, topk):
+                    row = bx * BLOCK_M + i
+                    label_col_s[i, idx] = T.if_then_else(row < M, labels[row, idx] - tile_global_vocab, -1)
+                    grad_lp_s[i, idx] = T.if_then_else(row < M, grad_logprobs[row, idx], 0.0)
+
+            if use_small_k or not HAS_LOGPROBS_GRAD:
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    row = bx * BLOCK_M + i
+                    local_vocab_id = local_vocab_offset + j
+                    is_valid = (row < M) & (local_vocab_id < N)
+                    logit = buf[i, j] * inv_temperature
+                    prob = T.if_then_else(is_valid, T.exp(logit - lse_s[i]), 0.0)
+                    grad = T.alloc_var(T.float32, init=-grad_lp_sum_s[i] * prob)
+                    if HAS_ENTROPY_GRAD:
+                        grad -= grad_ent_s[i] * prob * (logit - mean_s[i])
+                    if use_small_k and HAS_LOGPROBS_GRAD:
+                        for idx in T.unroll(topk):
+                            if j == label_col_s[i, idx]:
+                                grad += grad_lp_s[i, idx]
+                    dlogits_s[i, j] = T.if_then_else(
+                        is_valid,
+                        T.cast(grad * inv_temperature, dtype),
+                        T.cast(0.0, dtype),
+                    )
+            else:
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    row = bx * BLOCK_M + i
+                    local_vocab_id = local_vocab_offset + j
+                    is_valid = (row < M) & (local_vocab_id < N)
+                    logit = buf[i, j] * inv_temperature
+                    prob = T.if_then_else(is_valid, T.exp(logit - lse_s[i]), 0.0)
+                    grad = -grad_lp_sum_s[i] * prob
+                    if HAS_ENTROPY_GRAD:
+                        grad -= grad_ent_s[i] * prob * (logit - mean_s[i])
+                    dlogits_fp32_s[i, j] = T.if_then_else(is_valid, grad, 0.0)
+
+                for kt in T.Serial(topk_iters):
+                    for i, lane in T.Parallel(BLOCK_M, lanes_per_row):
+                        row = bx * BLOCK_M + i
+                        idx = kt * lanes_per_row + lane
+                        if (row < M) & (idx < topk):
+                            col = labels[row, idx] - tile_global_vocab
+                            if (col >= 0) & (col < BLOCK_N):
+                                T.atomic_add(dlogits_fp32_s[i, col], grad_logprobs[row, idx])
+
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    row = bx * BLOCK_M + i
+                    local_vocab_id = local_vocab_offset + j
+                    is_valid = (row < M) & (local_vocab_id < N)
+                    dlogits_s[i, j] = T.if_then_else(
+                        is_valid,
+                        T.cast(dlogits_fp32_s[i, j] * inv_temperature, dtype),
+                        T.cast(0.0, dtype),
+                    )
+
+            T.copy(dlogits_s, dlogits[bx * BLOCK_M, by * BLOCK_N])
+
+    return linear_cross_entropy_bwd_dlogits_sm90_kernel
+
+
+@tilelang.jit
 def linear_cross_entropy_bwd_dlogits(
     N: int,
     K: int,
@@ -487,16 +1068,19 @@ def linear_cross_entropy_bwd_dlogits(
     HAS_LOGPROBS_GRAD: bool,
     HAS_ENTROPY_GRAD: bool,
     dtype=T.bfloat16,
-    BLOCK_M=32,
+    BLOCK_M=64,
     BLOCK_N=128,
-    BLOCK_K=32,
+    BLOCK_K=64,
     num_threads=128,
     num_stages=2,
     min_blocks_per_sm=1,
 ):
-    """Recompute one vocabulary chunk and produce its dlogits."""
+    """Recompute one vocabulary chunk and produce its dlogits (generic CUDA fallback)."""
     assert VOCAB_CHUNK % BLOCK_N == 0
     M = T.dynamic("M")
+    lanes_per_row = max(1, num_threads // BLOCK_M)
+    topk_iters = (topk + lanes_per_row - 1) // lanes_per_row
+    use_small_k = topk <= 8
 
     @T.prim_func
     def linear_cross_entropy_bwd_dlogits_kernel(
@@ -520,44 +1104,23 @@ def linear_cross_entropy_bwd_dlogits(
             T.annotate_min_blocks_per_sm(min_blocks_per_sm)
             hidden_shared = T.alloc_shared([BLOCK_M, BLOCK_K], dtype)
             weight_shared = T.alloc_shared([BLOCK_N, BLOCK_K], dtype)
-            logits = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
-            probabilities = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
-            labels_local = T.alloc_fragment([BLOCK_M, topk], T.int64)
-            grad_logprobs_local = T.alloc_fragment([BLOCK_M, topk], T.float32)
-            grad_logprobs_sum = T.alloc_fragment([BLOCK_M], T.float32)
-            grad_entropy_local = T.alloc_fragment([BLOCK_M], T.float32)
-            lse_local = T.alloc_fragment([BLOCK_M], T.float32)
-            mean_logits_local = T.alloc_fragment([BLOCK_M], T.float32)
+            buf = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
 
-            for i in T.Parallel(BLOCK_M):
-                row = bx * BLOCK_M + i
-                lse_local[i] = T.if_then_else(row < M, lse[row], 0.0)
-                if HAS_ENTROPY_GRAD:
-                    mean_logits_local[i] = T.if_then_else(row < M, mean_logits[row], 0.0)
-                    grad_entropy_local[i] = T.if_then_else(row < M, grad_entropy[row], 0.0)
-                else:
-                    mean_logits_local[i] = 0.0
-                    grad_entropy_local[i] = 0.0
+            if not use_small_k and HAS_LOGPROBS_GRAD:
+                dlogits_fp32_s = T.alloc_shared([BLOCK_M, BLOCK_N], T.float32)
 
-            for i, label_idx in T.Parallel(BLOCK_M, topk):
-                row = bx * BLOCK_M + i
-                labels_local[i, label_idx] = T.if_then_else(row < M, labels[row, label_idx], 0)
-                if HAS_LOGPROBS_GRAD:
-                    grad_logprobs_local[i, label_idx] = T.if_then_else(
-                        row < M,
-                        grad_logprobs[row, label_idx],
-                        0.0,
-                    )
-                else:
-                    grad_logprobs_local[i, label_idx] = 0.0
-
-            T.clear(grad_logprobs_sum)
-            for label_idx in T.unroll(topk):
-                for i in T.Parallel(BLOCK_M):
-                    grad_logprobs_sum[i] += grad_logprobs_local[i, label_idx]
+            lse_s = T.alloc_shared([BLOCK_M], T.float32)
+            mean_s = T.alloc_shared([BLOCK_M], T.float32)
+            grad_ent_s = T.alloc_shared([BLOCK_M], T.float32)
+            grad_lp_sum_s = T.alloc_shared([BLOCK_M], T.float32)
+            if use_small_k and HAS_LOGPROBS_GRAD:
+                label_col_s = T.alloc_shared([BLOCK_M, topk], T.int64)
+                grad_lp_s = T.alloc_shared([BLOCK_M, topk], T.float32)
 
             local_vocab_offset = vocab_offset + by * BLOCK_N
-            T.clear(logits)
+            tile_global_vocab = vocab_start + local_vocab_offset
+
+            T.clear(buf)
             for k_tile in T.Pipelined(T.ceildiv(K, BLOCK_K), num_stages=num_stages):
                 for i, k in T.Parallel(BLOCK_M, BLOCK_K):
                     hidden_shared[i, k] = T.if_then_else(
@@ -571,43 +1134,89 @@ def linear_cross_entropy_bwd_dlogits(
                         weight[local_vocab_offset + j, k_tile * BLOCK_K + k],
                         0,
                     )
-                T.gemm(hidden_shared, weight_shared, logits, transpose_B=True)
+                T.gemm(hidden_shared, weight_shared, buf, transpose_B=True)
 
-            for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+            for i in T.Parallel(BLOCK_M):
                 row = bx * BLOCK_M + i
-                local_vocab_id = local_vocab_offset + j
-                is_valid = (row < M) & (local_vocab_id < N)
-                logits[i, j] = T.if_then_else(
-                    is_valid,
-                    logits[i, j] * inv_temperature,
-                    0.0,
-                )
-                probabilities[i, j] = T.if_then_else(
-                    is_valid,
-                    T.exp(logits[i, j] - lse_local[i]),
-                    0.0,
-                )
-                grad = -grad_logprobs_sum[i] * probabilities[i, j]
+                lse_s[i] = T.if_then_else(row < M, lse[row], 0.0)
+                grad_lp_sum_s[i] = 0.0
                 if HAS_ENTROPY_GRAD:
-                    grad -= grad_entropy_local[i] * probabilities[i, j] * (logits[i, j] - mean_logits_local[i])
-                probabilities[i, j] = grad
+                    mean_s[i] = T.if_then_else(row < M, mean_logits[row], 0.0)
+                    grad_ent_s[i] = T.if_then_else(row < M, grad_entropy[row], 0.0)
+                else:
+                    mean_s[i] = 0.0
+                    grad_ent_s[i] = 0.0
 
-            if HAS_LOGPROBS_GRAD:
-                for label_idx in T.unroll(topk):
-                    for i, j in T.Parallel(BLOCK_M, BLOCK_N):
-                        if labels_local[i, label_idx] == vocab_start + local_vocab_offset + j:
-                            probabilities[i, j] += grad_logprobs_local[i, label_idx]
+            if use_small_k and HAS_LOGPROBS_GRAD:
+                for i, idx in T.Parallel(BLOCK_M, topk):
+                    row = bx * BLOCK_M + i
+                    label_col_s[i, idx] = T.if_then_else(row < M, labels[row, idx] - tile_global_vocab, -1)
+                    grad_lp_s[i, idx] = T.if_then_else(row < M, grad_logprobs[row, idx], 0.0)
+                for i in T.Parallel(BLOCK_M):
+                    acc = T.alloc_var(T.float32, init=0.0)
+                    for idx in T.unroll(topk):
+                        acc += grad_lp_s[i, idx]
+                    grad_lp_sum_s[i] = acc
+            elif HAS_LOGPROBS_GRAD:
+                for kt in T.Serial(topk_iters):
+                    for i, lane in T.Parallel(BLOCK_M, lanes_per_row):
+                        row = bx * BLOCK_M + i
+                        idx = kt * lanes_per_row + lane
+                        if (row < M) & (idx < topk):
+                            T.atomic_add(grad_lp_sum_s[i], grad_logprobs[row, idx])
 
-            for i, j in T.Parallel(BLOCK_M, BLOCK_N):
-                row = bx * BLOCK_M + i
-                local_vocab_id = local_vocab_offset + j
-                chunk_vocab_id = by * BLOCK_N + j
-                is_valid = (row < M) & (local_vocab_id < N)
-                if row < M:
-                    dlogits[row, chunk_vocab_id] = T.if_then_else(
-                        is_valid,
-                        T.cast(probabilities[i, j] * inv_temperature, dtype),
-                        0,
-                    )
+            if use_small_k or not HAS_LOGPROBS_GRAD:
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    row = bx * BLOCK_M + i
+                    local_vocab_id = local_vocab_offset + j
+                    chunk_vocab_id = by * BLOCK_N + j
+                    is_valid = (row < M) & (local_vocab_id < N)
+                    logit = buf[i, j] * inv_temperature
+                    prob = T.if_then_else(is_valid, T.exp(logit - lse_s[i]), 0.0)
+                    grad = T.alloc_var(T.float32, init=-grad_lp_sum_s[i] * prob)
+                    if HAS_ENTROPY_GRAD:
+                        grad -= grad_ent_s[i] * prob * (logit - mean_s[i])
+                    if use_small_k and HAS_LOGPROBS_GRAD:
+                        for idx in T.unroll(topk):
+                            if j == label_col_s[i, idx]:
+                                grad += grad_lp_s[i, idx]
+                    if row < M:
+                        dlogits[row, chunk_vocab_id] = T.if_then_else(
+                            is_valid,
+                            T.cast(grad * inv_temperature, dtype),
+                            0,
+                        )
+            else:
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    row = bx * BLOCK_M + i
+                    local_vocab_id = local_vocab_offset + j
+                    is_valid = (row < M) & (local_vocab_id < N)
+                    logit = buf[i, j] * inv_temperature
+                    prob = T.if_then_else(is_valid, T.exp(logit - lse_s[i]), 0.0)
+                    grad = -grad_lp_sum_s[i] * prob
+                    if HAS_ENTROPY_GRAD:
+                        grad -= grad_ent_s[i] * prob * (logit - mean_s[i])
+                    dlogits_fp32_s[i, j] = T.if_then_else(is_valid, grad, 0.0)
+
+                for kt in T.Serial(topk_iters):
+                    for i, lane in T.Parallel(BLOCK_M, lanes_per_row):
+                        row = bx * BLOCK_M + i
+                        idx = kt * lanes_per_row + lane
+                        if (row < M) & (idx < topk):
+                            col = labels[row, idx] - tile_global_vocab
+                            if (col >= 0) & (col < BLOCK_N):
+                                T.atomic_add(dlogits_fp32_s[i, col], grad_logprobs[row, idx])
+
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    row = bx * BLOCK_M + i
+                    local_vocab_id = local_vocab_offset + j
+                    chunk_vocab_id = by * BLOCK_N + j
+                    is_valid = (row < M) & (local_vocab_id < N)
+                    if row < M:
+                        dlogits[row, chunk_vocab_id] = T.if_then_else(
+                            is_valid,
+                            T.cast(dlogits_fp32_s[i, j] * inv_temperature, dtype),
+                            0,
+                        )
 
     return linear_cross_entropy_bwd_dlogits_kernel

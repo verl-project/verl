@@ -11,9 +11,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from functools import lru_cache
+
 import torch
 
 from verl.utils.device import get_device_name
+
+
+@lru_cache(maxsize=16)
+def _get_cuda_sm_major(device_index: int) -> int:
+    major, _ = torch.cuda.get_device_capability(device_index)
+    return major
+
+
+def _cuda_arch_tier(device: torch.device, hidden_size: int, dtype: torch.dtype) -> str:
+    if device.type != "cuda" or hidden_size % 8 != 0 or dtype not in (torch.float16, torch.bfloat16):
+        return "generic"
+    device_index = torch.cuda.current_device() if device.index is None else device.index
+    major = _get_cuda_sm_major(device_index)
+    if major == 10:
+        return "sm100"
+    if major == 9:
+        return "sm90"
+    return "generic"
 
 
 def _get_backend_kernels(device_type: str):
@@ -91,7 +111,11 @@ class LinearCrossEntropy(torch.autograd.Function):
         local_vocab_size = weight.shape[0]
         vocab_start = tp_rank * local_vocab_size
         topk = labels.shape[1]
-        vocab_per_cta = 1024 if num_tokens >= 8192 else 512
+
+        if hidden.device.type == "cuda":
+            vocab_per_cta = 1024 if local_vocab_size > 262144 else 512
+        else:
+            vocab_per_cta = 1024 if num_tokens >= 8192 else 512
         num_splits = (local_vocab_size + vocab_per_cta - 1) // vocab_per_cta
 
         partial_shape = (num_tokens, num_splits)
@@ -114,18 +138,47 @@ class LinearCrossEntropy(torch.autograd.Function):
             target_logits,
         )
 
-        mainloop = backend_kernels.linear_cross_entropy_fwd_mainloop(
-            local_vocab_size,
-            hidden_size,
-            dtype=hidden.dtype,
-            BLOCK_M=64,
-            BLOCK_N=256,
-            BLOCK_K=64,
-            VOCAB_PER_CTA=vocab_per_cta,
-            num_threads=128,
-            num_stages=2,
-            min_blocks_per_sm=1,
-        )
+        arch_tier = _cuda_arch_tier(hidden.device, hidden_size, hidden.dtype)
+        if arch_tier == "sm100":
+            mainloop = backend_kernels.linear_cross_entropy_fwd_mainloop_sm100(
+                local_vocab_size,
+                hidden_size,
+                dtype=hidden.dtype,
+                VOCAB_PER_CTA=vocab_per_cta,
+            )
+        elif arch_tier == "sm90":
+            mainloop = backend_kernels.linear_cross_entropy_fwd_mainloop_sm90(
+                local_vocab_size,
+                hidden_size,
+                dtype=hidden.dtype,
+                VOCAB_PER_CTA=vocab_per_cta,
+            )
+        elif hidden.device.type == "cuda":
+            mainloop = backend_kernels.linear_cross_entropy_fwd_mainloop(
+                local_vocab_size,
+                hidden_size,
+                dtype=hidden.dtype,
+                BLOCK_M=64,
+                BLOCK_N=128,
+                BLOCK_K=64,
+                VOCAB_PER_CTA=vocab_per_cta,
+                num_threads=128,
+                num_stages=2,
+                min_blocks_per_sm=1,
+            )
+        else:
+            mainloop = backend_kernels.linear_cross_entropy_fwd_mainloop(
+                local_vocab_size,
+                hidden_size,
+                dtype=hidden.dtype,
+                BLOCK_M=64,
+                BLOCK_N=256,
+                BLOCK_K=64,
+                VOCAB_PER_CTA=vocab_per_cta,
+                num_threads=128,
+                num_stages=2,
+                min_blocks_per_sm=1,
+            )
         mainloop(
             hidden,
             weight,
@@ -253,75 +306,143 @@ class LinearCrossEntropy(torch.autograd.Function):
             # The no-entropy specialization does not read this argument.
             grad_entropy = lse
 
-        if num_tokens >= 8192 and topk <= 8:
+        arch_tier = _cuda_arch_tier(hidden.device, hidden_size, hidden.dtype)
+        if arch_tier == "sm100":
+            block_n = 256
+        elif arch_tier == "sm90":
+            block_n = 128
+        elif num_tokens >= 8192 and topk <= 8 and hidden.device.type != "cuda":
             block_m, block_n, block_k = 128, 256, 64
             num_threads, num_stages, min_blocks_per_sm = 256, 2, 1
         else:
             block_m, block_n, block_k = 64, 128, 64
-            num_threads, num_stages, min_blocks_per_sm = 128, 3, 2
+            num_threads, num_stages = 128, 3
+            min_blocks_per_sm = 1 if (hidden.device.type == "cuda" and topk > 8) else 2
 
-        max_vocab_chunk = 8192
         aligned_local_vocab_size = (local_vocab_size + block_n - 1) // block_n * block_n
+        if hidden.device.type == "cuda":
+            if aligned_local_vocab_size <= 32768 and num_tokens <= 8192:
+                max_vocab_chunk = 32768
+            elif num_tokens > 32768:
+                max_vocab_chunk = 4096
+            else:
+                max_vocab_chunk = 16384
+        else:
+            max_vocab_chunk = 8192
         vocab_chunk = min(max_vocab_chunk, aligned_local_vocab_size)
+
         dlogits = torch.empty(
             (num_tokens, vocab_chunk),
             dtype=hidden.dtype,
             device=hidden.device,
         )
-        grad_hidden_accum = torch.empty_like(hidden, dtype=torch.float32)
+        single_chunk = hidden.device.type == "cuda" and vocab_chunk >= local_vocab_size
+        if single_chunk:
+            grad_hidden_2d = torch.empty_like(hidden)
+        else:
+            grad_hidden_accum = torch.empty_like(hidden, dtype=torch.float32)
         grad_weight = torch.empty_like(weight)
 
-        dlogits_kernel = backend_kernels.linear_cross_entropy_bwd_dlogits(
-            local_vocab_size,
-            hidden_size,
-            topk,
-            vocab_chunk,
-            has_logprobs_grad,
-            has_entropy_grad,
-            dtype=hidden.dtype,
-            BLOCK_M=block_m,
-            BLOCK_N=block_n,
-            BLOCK_K=block_k,
-            num_threads=num_threads,
-            num_stages=num_stages,
-            min_blocks_per_sm=min_blocks_per_sm,
-        )
-        for vocab_offset in range(0, local_vocab_size, vocab_chunk):
-            dlogits_kernel(
-                hidden,
-                weight,
-                labels,
-                lse,
-                mean_logits,
-                grad_logprobs,
-                grad_entropy,
-                1.0 / temperature,
-                vocab_start,
-                vocab_offset,
-                dlogits,
+        use_fast_cuda_bwd = arch_tier in ("sm100", "sm90")
+        if use_fast_cuda_bwd:
+            if has_logprobs_grad:
+                grad_logprobs_sum = grad_logprobs[:, 0].contiguous() if topk == 1 else grad_logprobs.sum(dim=-1)
+            else:
+                grad_logprobs_sum = lse
+            bwd_fn = (
+                backend_kernels.linear_cross_entropy_bwd_dlogits_sm100
+                if arch_tier == "sm100"
+                else backend_kernels.linear_cross_entropy_bwd_dlogits_sm90
             )
+            dlogits_kernel = bwd_fn(
+                local_vocab_size,
+                hidden_size,
+                topk,
+                vocab_chunk,
+                has_logprobs_grad,
+                has_entropy_grad,
+                dtype=hidden.dtype,
+            )
+        else:
+            dlogits_kernel = backend_kernels.linear_cross_entropy_bwd_dlogits(
+                local_vocab_size,
+                hidden_size,
+                topk,
+                vocab_chunk,
+                has_logprobs_grad,
+                has_entropy_grad,
+                dtype=hidden.dtype,
+                BLOCK_M=block_m,
+                BLOCK_N=block_n,
+                BLOCK_K=block_k,
+                num_threads=num_threads,
+                num_stages=num_stages,
+                min_blocks_per_sm=min_blocks_per_sm,
+            )
+
+        inv_temperature = 1.0 / temperature
+        dlogits_valid = dlogits
+        for vocab_offset in range(0, local_vocab_size, vocab_chunk):
+            if use_fast_cuda_bwd:
+                dlogits_kernel(
+                    hidden,
+                    weight,
+                    labels,
+                    lse,
+                    mean_logits,
+                    grad_logprobs,
+                    grad_logprobs_sum,
+                    grad_entropy,
+                    inv_temperature,
+                    vocab_start,
+                    vocab_offset,
+                    dlogits,
+                )
+            else:
+                dlogits_kernel(
+                    hidden,
+                    weight,
+                    labels,
+                    lse,
+                    mean_logits,
+                    grad_logprobs,
+                    grad_entropy,
+                    inv_temperature,
+                    vocab_start,
+                    vocab_offset,
+                    dlogits,
+                )
 
             valid_vocab = min(vocab_chunk, local_vocab_size - vocab_offset)
             dlogits_valid = dlogits
             if valid_vocab != vocab_chunk:
-                dlogits_valid = dlogits[:, :valid_vocab].contiguous()
+                dlogits_valid = (
+                    dlogits[:, :valid_vocab] if hidden.device.type == "cuda" else dlogits[:, :valid_vocab].contiguous()
+                )
             weight_chunk = weight[vocab_offset : vocab_offset + valid_vocab]
 
-            torch.addmm(
-                grad_hidden_accum,
-                dlogits_valid,
-                weight_chunk,
-                beta=int(vocab_offset != 0),
-                out_dtype=torch.float32,
-                out=grad_hidden_accum,
-            )
+            if single_chunk:
+                torch.mm(dlogits_valid, weight_chunk, out=grad_hidden_2d)
+            else:
+                torch.addmm(
+                    grad_hidden_accum,
+                    dlogits_valid,
+                    weight_chunk,
+                    beta=int(vocab_offset != 0),
+                    out_dtype=torch.float32,
+                    out=grad_hidden_accum,
+                )
             torch.mm(
                 dlogits_valid.T,
                 hidden,
                 out=grad_weight[vocab_offset : vocab_offset + valid_vocab],
             )
 
-        grad_hidden = grad_hidden_accum.to(hidden.dtype).reshape(ctx.original_hidden_shape)
+        del dlogits, dlogits_valid
+        if single_chunk:
+            grad_hidden = grad_hidden_2d.reshape(ctx.original_hidden_shape)
+        else:
+            grad_hidden = grad_hidden_accum.to(hidden.dtype).reshape(ctx.original_hidden_shape)
         return grad_hidden, grad_weight, None, None, None
 
 
