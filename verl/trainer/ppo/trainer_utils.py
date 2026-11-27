@@ -15,6 +15,7 @@
 # limitations under the License.
 """Shared PPO batch computations."""
 
+import inspect
 from typing import Optional
 
 import torch
@@ -225,6 +226,9 @@ def compute_advantage(
             # Get pre-computed rollout IS weights if available
             rollout_is_weights = data.batch.get("rollout_is_weights", None)
             adv_kwargs["rollout_is_weights"] = rollout_is_weights
+
+        if "norm_adv_by_std_in_grpo" in inspect.signature(adv_estimator_fn).parameters:
+            adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
 
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)

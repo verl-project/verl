@@ -497,7 +497,7 @@ def compute_grpo_passk_outcome_advantage(
     """
     assert config is not None
     # if True, normalize advantage by std within group
-    norm_adv_by_std_in_grpo = config.get("norm_adv_by_std_in_grpo", True)
+    norm_adv_by_std_in_grpo = config.get("norm_adv_by_std_in_grpo", norm_adv_by_std_in_grpo)
     scores = token_level_rewards.sum(dim=-1)  # (bs,)
     advantages = torch.zeros_like(scores)
 

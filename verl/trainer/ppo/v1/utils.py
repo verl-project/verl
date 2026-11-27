@@ -146,6 +146,24 @@ class MetricsAggregator:
         self.step_count = 0
 
 
+_SESSION_REDUCTION_ADV_ESTIMATORS = frozenset(
+    {
+        core_algos.AdvantageEstimator.GRPO,
+        core_algos.AdvantageEstimator.GRPO_VECTORIZED,
+        core_algos.AdvantageEstimator.GRPO_PASSK,
+        core_algos.AdvantageEstimator.RLOO,
+        core_algos.AdvantageEstimator.RLOO_VECTORIZED,
+        core_algos.AdvantageEstimator.GPG,
+        core_algos.AdvantageEstimator.GRPO.value,
+        core_algos.AdvantageEstimator.GRPO_VECTORIZED.value,
+        core_algos.AdvantageEstimator.GRPO_PASSK.value,
+        core_algos.AdvantageEstimator.RLOO.value,
+        core_algos.AdvantageEstimator.RLOO_VECTORIZED.value,
+        core_algos.AdvantageEstimator.GPG.value,
+    }
+)
+
+
 def compute_advantage_for_multi_trajectories(
     data: DataProto,
     batch_keys: list[str],
@@ -156,16 +174,16 @@ def compute_advantage_for_multi_trajectories(
     norm_adv_by_std_in_grpo: bool = True,
     config: Any = None,
 ) -> DataProto:
-    """Compute GRPO advantages from each session's final output. For non-GRPO
-    estimators, such as GAE, are delegated to the original compute_advantage() unchanged.
+    """Compute session-level outcome advantages from each session's final output.
 
-    For GRPO, only the final output in each ``{uid}_{session_id}`` group participates
-    in advantage computation, and the result is broadcast to the other outputs in
-    the same session. Sessions whose AgentLoop returns ``None`` simply do not appear
-    in ``batch_keys``. Non-GRPO estimators, such as GAE, are delegated to the
-    original ``compute_advantage()`` unchanged.
+    For session-level group-outcome estimators (GRPO, GRPO_VECTORIZED, GRPO_PASSK,
+    RLOO, RLOO_VECTORIZED, GPG), only the final output in each ``{uid}_{session_id}``
+    group participates in advantage computation, and the resulting scalar advantage
+    is broadcast to all outputs in the same session. Sessions whose AgentLoop returns
+    ``None`` simply do not appear in ``batch_keys``. Other estimators, such as GAE,
+    are delegated to the original ``compute_advantage()`` unchanged.
     """
-    if adv_estimator != core_algos.AdvantageEstimator.GRPO:
+    if adv_estimator not in _SESSION_REDUCTION_ADV_ESTIMATORS:
         return compute_advantage(
             data,
             adv_estimator=adv_estimator,
