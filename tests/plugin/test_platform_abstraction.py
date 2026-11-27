@@ -131,40 +131,7 @@ class TestPlatformDetection:
 
     def test_empty_triggers_auto_detection(self):
         with mock.patch.dict(os.environ, {"VERL_PLATFORM": ""}):
-            assert _detect_platform_name() in ("nvidia", "huawei", "amd", "intel", "cpu")
-
-    def test_cpu_only_auto_detection_uses_cpu(self, monkeypatch):
-        import shutil
-
-        import torch
-
-        import verl.plugin.platform.platform_manager as pm
-        from verl.utils.device import get_device_name
-
-        pm._current_platform = None
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-        monkeypatch.setattr(torch.version, "hip", None)
-        monkeypatch.setattr(shutil, "which", lambda _: None)
-        monkeypatch.setattr("verl.plugin.platform.platform_npu._ensure_torch_npu", lambda: False)
-
-        assert _detect_platform_name() == "cpu"
-        assert get_device_name() == "cpu"
-
-    def test_cuda_auto_detection_is_preserved(self, monkeypatch):
-        import shutil
-
-        import torch
-
-        import verl.plugin.platform.platform_manager as pm
-        from verl.plugin.platform.platform_cuda import PlatformCUDA
-
-        pm._current_platform = None
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        monkeypatch.setattr(torch.version, "hip", None)
-        monkeypatch.setattr(shutil, "which", lambda _: "/fake/nvidia-smi")
-        monkeypatch.setattr(PlatformCUDA, "check_smi_command", staticmethod(lambda _: True))
-
-        assert _detect_platform_name() == "nvidia"
+            assert _detect_platform_name() in ("nvidia", "huawei", "amd", "intel")
 
 
 class TestPlatformCreation:
@@ -180,12 +147,6 @@ class TestPlatformCreation:
     def test_invalid_platform_raises(self):
         with pytest.raises(ValueError):
             _create_platform("invalid_platform")
-
-    def test_cpu_platform_uses_gloo(self):
-        platform = _create_platform("cpu")
-        assert platform.device_name == "cpu"
-        assert platform.communication_backend_name() == "gloo"
-        assert platform.ray_resource_name() == "CPU"
 
 
 class TestPlatformSingleton:
@@ -222,7 +183,6 @@ class TestPlatformRegistry:
         assert "nvidia" in names
         assert "huawei" in names
         assert "amd" in names
-        assert "cpu" in names
 
     def test_register_custom_platform(self):
         """External plugin registers a new platform via @PlatformRegistry.register()."""

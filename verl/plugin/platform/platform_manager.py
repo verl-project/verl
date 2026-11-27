@@ -86,7 +86,7 @@ def _detect_platform_name() -> str:
     Detection order:
     1. ``VERL_PLATFORM`` environment variable (explicit override)
     2. Probe registered platforms via ``is_platform_available(use_smi_check=True)``
-    3. Fall back to ``'cpu'``
+    3. Fall back to ``'nvidia'``
     """
 
     env_platform = os.environ.get("VERL_PLATFORM", "").strip().lower()
@@ -98,8 +98,6 @@ def _detect_platform_name() -> str:
     logger.debug("Registered platforms: %s", names)
 
     for name in names:
-        if name == "cpu":
-            continue
         platform_cls = PlatformRegistry.get(name)
         if platform_cls is None:
             continue
@@ -113,10 +111,10 @@ def _detect_platform_name() -> str:
             continue
 
     logger.warning(
-        "No supported accelerator detected. Registered: %s. Falling back to 'cpu'.",
+        "No supported accelerator detected. Registered: %s. Falling back to 'nvidia'.",
         names,
     )
-    return "cpu"
+    return "nvidia"
 
 
 def _create_platform(name: str) -> PlatformBase:
@@ -171,7 +169,6 @@ def set_platform(platform: PlatformBase) -> None:
 # references (platform_cuda/npu import PlatformBase from platform_base, not
 # from this module).
 # ---------------------------------------------------------------------------
-from .platform_cpu import PlatformCPU  # noqa: E402, F401
 from .platform_cuda import PlatformCUDA  # noqa: E402, F401
 from .platform_npu import PlatformNPU  # noqa: E402, F401
 from .platform_rocm import PlatformROCm  # noqa: E402, F401
