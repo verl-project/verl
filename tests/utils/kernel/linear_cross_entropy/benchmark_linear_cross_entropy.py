@@ -218,7 +218,10 @@ def _chunked_fp32_reference(
             mean_logits = (probs * logits_f).sum(dim=-1)
             ent_c = lse - mean_logits
 
-            dl_f = (-dlp_2d.float().sum(dim=-1, keepdim=True) - dent[start:end].float().unsqueeze(-1) * (logits_f - mean_logits.unsqueeze(-1))) * probs
+            dl_f = (
+                -dlp_2d.float().sum(dim=-1, keepdim=True)
+                - dent[start:end].float().unsqueeze(-1) * (logits_f - mean_logits.unsqueeze(-1))
+            ) * probs
             dl_f.scatter_add_(1, lbl_2d, dlp_2d.float())
             if temperature != 1.0:
                 dl_f.mul_(rcp_temp)
@@ -245,7 +248,10 @@ def _chunked_fp32_reference(
             lp_c = g_tl - lse.unsqueeze(-1)
 
             probs = exp_l / g_sum.unsqueeze(-1)
-            dl_f = (-dlp_2d.float().sum(dim=-1, keepdim=True) - dent[start:end].float().unsqueeze(-1) * (logits_f - mean_logits.unsqueeze(-1))) * probs
+            dl_f = (
+                -dlp_2d.float().sum(dim=-1, keepdim=True)
+                - dent[start:end].float().unsqueeze(-1) * (logits_f - mean_logits.unsqueeze(-1))
+            ) * probs
             dl_f.scatter_add_(
                 1,
                 local_lbl.clamp(0, local_vocab_size - 1),
@@ -298,7 +304,11 @@ def _build_fsdp_eager_runner(
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         logits_rmpad = F.linear(hidden, weight)
         temperature_is_one = temperature == 1.0
-        temp_t = None if temperature_is_one else torch.full((hidden.shape[0], 1), temperature, device=hidden.device, dtype=torch.float32)
+        temp_t = (
+            None
+            if temperature_is_one
+            else torch.full((hidden.shape[0], 1), temperature, device=hidden.device, dtype=torch.float32)
+        )
         logits_rmpad = _scale_logits_by_temperature(
             logits_rmpad,
             temp_t,
@@ -554,7 +564,8 @@ def _print_markdown_tables(perf_records: list[PerfRecord], err_records: list[Err
 
     print("\n### Performance & Memory Benchmark\n", flush=True)
     print(
-        "| Arch | TP | Shape (`M, V_local, H`) | `topk` | Backend | Fwd (ms) | Bwd CE (ms) | Bwd CE+Ent (ms) | Total (ms) | Peak Mem (GiB) | Speedup vs Eager |",
+        "| Arch | TP | Shape (`M, V_local, H`) | `topk` | Backend "
+        "| Fwd (ms) | Bwd CE (ms) | Bwd CE+Ent (ms) | Total (ms) | Peak Mem (GiB) | Speedup vs Eager |",
         flush=True,
     )
     print("| :--- | :-: | :--- | :-: | :--- | ---: | ---: | ---: | ---: | ---: | ---: |", flush=True)
@@ -567,7 +578,8 @@ def _print_markdown_tables(perf_records: list[PerfRecord], err_records: list[Err
             continue
         if r.oom:
             print(
-                f"| **{r.arch}** | {r.tp} | `{r.shape_str}` | {r.topk} | {r.backend_label} | OOM | OOM | OOM | OOM | OOM | - |",
+                f"| **{r.arch}** | {r.tp} | `{r.shape_str}` | {r.topk} | {r.backend_label} "
+                "| OOM | OOM | OOM | OOM | OOM | - |",
                 flush=True,
             )
             continue
@@ -581,20 +593,25 @@ def _print_markdown_tables(perf_records: list[PerfRecord], err_records: list[Err
         else:
             speedup_str = f"{eager_r.total_ms / r.total_ms:.2f}x"
         print(
-            f"| **{r.arch}** | {r.tp} | `{r.shape_str}` | {r.topk} | {r.backend_label} | {r.fwd_ms:.2f} | {r.bwd_ce_ms:.2f} | {r.bwd_cee_ms:.2f} | {r.total_ms:.2f} | {r.peak_gib:.2f} | {speedup_str} |",
+            f"| **{r.arch}** | {r.tp} | `{r.shape_str}` | {r.topk} | {r.backend_label} "
+            f"| {r.fwd_ms:.2f} | {r.bwd_ce_ms:.2f} | {r.bwd_cee_ms:.2f} "
+            f"| {r.total_ms:.2f} | {r.peak_gib:.2f} | {speedup_str} |",
             flush=True,
         )
 
     print("\n### Numerical Error vs Chunked FP32 Reference (`MaxAbs / RelL2`)\n", flush=True)
     print(
-        "| Arch | TP | Shape (`M, V_local, H`) | `topk` | Backend | `logprobs` MaxAbs / RelL2 | `entropy` MaxAbs / RelL2 | `d_hidden` MaxAbs / RelL2 | `d_weight` MaxAbs / RelL2 |",
+        "| Arch | TP | Shape (`M, V_local, H`) | `topk` | Backend "
+        "| `logprobs` MaxAbs / RelL2 | `entropy` MaxAbs / RelL2 "
+        "| `d_hidden` MaxAbs / RelL2 | `d_weight` MaxAbs / RelL2 |",
         flush=True,
     )
     print("| :--- | :-: | :--- | :-: | :--- | :---: | :---: | :---: | :---: |", flush=True)
     for e in err_records:
         if e.skipped:
             print(
-                f"| **{e.arch}** | {e.tp} | `{e.shape_str}` | {e.topk} | {e.backend_label} | - / - | - / - | - / - | - / - |",
+                f"| **{e.arch}** | {e.tp} | `{e.shape_str}` | {e.topk} | {e.backend_label} "
+                "| - / - | - / - | - / - | - / - |",
                 flush=True,
             )
         elif e.oom:
@@ -604,7 +621,8 @@ def _print_markdown_tables(perf_records: list[PerfRecord], err_records: list[Err
             )
         else:
             print(
-                f"| **{e.arch}** | {e.tp} | `{e.shape_str}` | {e.topk} | {e.backend_label} | `{e.lp_err}` | `{e.ent_err}` | `{e.dh_err}` | `{e.dw_err}` |",
+                f"| **{e.arch}** | {e.tp} | `{e.shape_str}` | {e.topk} | {e.backend_label} "
+                f"| `{e.lp_err}` | `{e.ent_err}` | `{e.dh_err}` | `{e.dw_err}` |",
                 flush=True,
             )
 
@@ -717,10 +735,14 @@ def _run_tp_worker(
             label_str = backend_display[backend]
             if not _backend_available(backend, device_name):
                 perf_records.append(
-                    PerfRecord(arch=arch, tp=tp_size, shape_str=shape_str, topk=topk, backend_label=label_str, skipped=True)
+                    PerfRecord(
+                        arch=arch, tp=tp_size, shape_str=shape_str, topk=topk, backend_label=label_str, skipped=True
+                    )
                 )
                 err_records.append(
-                    ErrorRecord(arch=arch, tp=tp_size, shape_str=shape_str, topk=topk, backend_label=label_str, skipped=True)
+                    ErrorRecord(
+                        arch=arch, tp=tp_size, shape_str=shape_str, topk=topk, backend_label=label_str, skipped=True
+                    )
                 )
                 continue
 
@@ -816,7 +838,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=1.0, help="Softmax temperature (default: 1.0).")
     parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations (default: 10).")
     parser.add_argument("--iters", type=int, default=20, help="Timed iterations (default: 20).")
-    parser.add_argument("--ref-chunk-size", type=int, default=2048, help="Chunk size for FP32 reference (default: 2048).")
+    parser.add_argument(
+        "--ref-chunk-size", type=int, default=2048, help="Chunk size for FP32 reference (default: 2048)."
+    )
     parser.add_argument("--entropy-with-chunking", action="store_true", help="Enable chunked entropy in Eager.")
     parser.add_argument(
         "--compile-entropy",
