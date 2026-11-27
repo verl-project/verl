@@ -241,7 +241,7 @@ class BucketedWeightSender:
             self.shm.unlink()
             del self.shm
             self.shm = None
-        if is_support_ipc():
+        if not self.use_shm and is_support_ipc():
             get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
 
@@ -372,7 +372,7 @@ class BucketedWeightReceiver:
             self.shm.close()
             del self.shm
             self.shm = None
-        if is_support_ipc():
+        if not self.use_shm and is_support_ipc():
             get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
         # Ack last, after the buffer is released: the sender reclaims its bucket
