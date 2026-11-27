@@ -19,10 +19,49 @@ from verl.utils.device import get_device_name
 
 
 @tilelang.jit
-def linear_cross_entropy_fwd_mainloop(
+def linear_cross_entropy_fwd_target_logits(
     N: int,
     K: int,
     topk: int,
+    dtype=T.bfloat16,
+    num_threads=128,
+):
+    """Compute selected logits without carrying labels through every vocab tile."""
+    M = T.dynamic("M")
+
+    @T.prim_func
+    def linear_cross_entropy_fwd_target_logits_kernel(
+        hidden: T.Tensor([M, K], dtype),
+        weight: T.Tensor([N, K], dtype),
+        labels: T.Tensor([M, topk], T.int64),
+        inv_temperature: T.float32,
+        vocab_start: T.int32,
+        target_logits: T.Tensor([M, topk], T.float32),
+    ):
+        with T.Kernel(M, topk, threads=num_threads) as (row, label_idx):
+            partial = T.alloc_fragment([num_threads], T.float32)
+            result = T.alloc_fragment([1], T.float32)
+            local_label = T.alloc_var(
+                T.int64,
+                init=labels[row, label_idx] - vocab_start,
+            )
+            T.clear(partial)
+            for k_block in T.Serial(T.ceildiv(K, num_threads)):
+                for lane in T.Parallel(num_threads):
+                    k = k_block * num_threads + lane
+                    if (local_label >= 0) & (local_label < N) & (k < K):
+                        partial[lane] += T.cast(hidden[row, k], T.float32) * T.cast(weight[local_label, k], T.float32)
+            T.reduce_sum(partial, result)
+            if (T.get_thread_binding() == 0) & (local_label >= 0) & (local_label < N):
+                target_logits[row, label_idx] = result[0] * inv_temperature
+
+    return linear_cross_entropy_fwd_target_logits_kernel
+
+
+@tilelang.jit
+def linear_cross_entropy_fwd_mainloop(
+    N: int,
+    K: int,
     dtype=T.bfloat16,
     BLOCK_M=64,
     BLOCK_N=256,
@@ -30,13 +69,13 @@ def linear_cross_entropy_fwd_mainloop(
     VOCAB_PER_CTA=512,
     num_threads=128,
     num_stages=2,
+    min_blocks_per_sm=1,
 ):
     """Compute rank-local logits and online softmax statistics.
 
     Args:
         N: Local vocabulary size.
         K: Hidden size.
-        topk: Number of label logprobs to compute.
     """
     assert VOCAB_PER_CTA % BLOCK_N == 0
     M = T.dynamic("M")
@@ -47,23 +86,19 @@ def linear_cross_entropy_fwd_mainloop(
     def linear_cross_entropy_fwd_mainloop_kernel(
         hidden: T.Tensor([M, K], dtype),
         weight: T.Tensor([N, K], dtype),
-        labels: T.Tensor([M, topk], T.int64),
         inv_temperature: T.float32,
-        vocab_start: T.int32,
         partial_max: T.Tensor([M, num_splits], T.float32),
         partial_sum: T.Tensor([M, num_splits], T.float32),
         partial_weighted_sum: T.Tensor([M, num_splits], T.float32),
-        target_logits: T.Tensor([M, topk], T.float32),
     ):
         with T.Kernel(T.ceildiv(M, BLOCK_M), num_splits, threads=num_threads) as (bx, by):
+            T.annotate_min_blocks_per_sm(min_blocks_per_sm)
             hidden_shared = T.alloc_shared([BLOCK_M, BLOCK_K], dtype)
             weight_shared = T.alloc_shared([BLOCK_N, BLOCK_K], dtype)
             logits = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
             exp_logits = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
             weighted_logits = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
 
-            labels_local = T.alloc_fragment([BLOCK_M, topk], T.int64)
-            target_logits_local = T.alloc_fragment([BLOCK_M, topk], T.float32)
             local_max = T.alloc_fragment([BLOCK_M], T.float32)
             tile_max = T.alloc_fragment([BLOCK_M], T.float32)
             new_max = T.alloc_fragment([BLOCK_M], T.float32)
@@ -71,15 +106,6 @@ def linear_cross_entropy_fwd_mainloop(
             tile_sum = T.alloc_fragment([BLOCK_M], T.float32)
             local_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
             tile_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
-            tile_target_logit = T.alloc_fragment([BLOCK_M], T.float32)
-
-            for i, label_idx in T.Parallel(BLOCK_M, topk):
-                labels_local[i, label_idx] = T.if_then_else(
-                    bx * BLOCK_M + i < M,
-                    labels[bx * BLOCK_M + i, label_idx],
-                    0,
-                )
-                target_logits_local[i, label_idx] = 0.0
 
             T.fill(local_max, -T.infinity(T.float32))
             T.clear(local_sum)
@@ -89,7 +115,10 @@ def linear_cross_entropy_fwd_mainloop(
                 vocab_offset = by * VOCAB_PER_CTA + vocab_tile * BLOCK_N
                 T.clear(logits)
 
-                for k_tile in T.Pipelined(T.ceildiv(K, BLOCK_K), num_stages=num_stages):
+                for k_tile in T.Pipelined(
+                    T.ceildiv(K, BLOCK_K),
+                    num_stages=num_stages,
+                ):
                     for i, k in T.Parallel(BLOCK_M, BLOCK_K):
                         hidden_shared[i, k] = T.if_then_else(
                             (bx * BLOCK_M + i < M) & (k_tile * BLOCK_K + k < K),
@@ -102,7 +131,12 @@ def linear_cross_entropy_fwd_mainloop(
                             weight[vocab_offset + j, k_tile * BLOCK_K + k],
                             0,
                         )
-                    T.gemm(hidden_shared, weight_shared, logits, transpose_B=True)
+                    T.gemm(
+                        hidden_shared,
+                        weight_shared,
+                        logits,
+                        transpose_B=True,
+                    )
 
                 for i, j in T.Parallel(BLOCK_M, BLOCK_N):
                     logits[i, j] = T.if_then_else(
@@ -111,24 +145,17 @@ def linear_cross_entropy_fwd_mainloop(
                         -T.infinity(T.float32),
                     )
 
-                for label_idx in T.unroll(topk):
-                    for i, j in T.Parallel(BLOCK_M, BLOCK_N):
-                        weighted_logits[i, j] = T.if_then_else(
-                            labels_local[i, label_idx] == vocab_start + vocab_offset + j,
-                            logits[i, j],
-                            0.0,
-                        )
-                    T.reduce_sum(weighted_logits, tile_target_logit, dim=-1)
-                    for i in T.Parallel(BLOCK_M):
-                        target_logits_local[i, label_idx] += tile_target_logit[i]
-
                 T.reduce_max(logits, tile_max, dim=-1)
                 for i in T.Parallel(BLOCK_M):
                     new_max[i] = T.max(local_max[i], tile_max[i])
 
                 for i, j in T.Parallel(BLOCK_M, BLOCK_N):
                     is_valid = (bx * BLOCK_M + i < M) & (vocab_offset + j < N)
-                    exp_logits[i, j] = T.if_then_else(is_valid, T.exp(logits[i, j] - new_max[i]), 0.0)
+                    exp_logits[i, j] = T.if_then_else(
+                        is_valid,
+                        T.exp(logits[i, j] - new_max[i]),
+                        0.0,
+                    )
                     weighted_logits[i, j] = T.if_then_else(
                         is_valid,
                         logits[i, j] * exp_logits[i, j],
@@ -149,24 +176,22 @@ def linear_cross_entropy_fwd_mainloop(
                     partial_sum[bx * BLOCK_M + i, by] = local_sum[i]
                     partial_weighted_sum[bx * BLOCK_M + i, by] = local_weighted_sum[i]
 
-            split_start = vocab_start + by * VOCAB_PER_CTA
-            split_end = vocab_start + T.min((by + 1) * VOCAB_PER_CTA, N)
-            for i, label_idx in T.Parallel(BLOCK_M, topk):
-                label = labels_local[i, label_idx]
-                if (bx * BLOCK_M + i < M) & (label >= split_start) & (label < split_end):
-                    target_logits[bx * BLOCK_M + i, label_idx] = target_logits_local[i, label_idx]
-
     return linear_cross_entropy_fwd_mainloop_kernel
 
 
 @tilelang.jit
 def linear_cross_entropy_fwd_local_reduce(
     num_splits: int,
-    BLOCK_M=128,
+    BLOCK_M=32,
+    BLOCK_S=32,
     num_threads=128,
 ):
     """Merge the vocabulary-split statistics produced on one rank."""
     M = T.dynamic("M")
+    split_layout = T.Fragment(
+        (BLOCK_M, BLOCK_S),
+        forward_thread_fn=lambda i, j: (i % (num_threads // 32)) * 32 + j,
+    )
 
     @T.prim_func
     def linear_cross_entropy_fwd_local_reduce_kernel(
@@ -181,40 +206,73 @@ def linear_cross_entropy_fwd_local_reduce(
             rank_max = T.alloc_fragment([BLOCK_M], T.float32)
             rank_sum = T.alloc_fragment([BLOCK_M], T.float32)
             rank_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
+            split_max_values = T.alloc_fragment([BLOCK_M, BLOCK_S], T.float32)
+            split_sum_values = T.alloc_fragment([BLOCK_M, BLOCK_S], T.float32)
+            split_weighted_sum_values = T.alloc_fragment([BLOCK_M, BLOCK_S], T.float32)
             split_max = T.alloc_fragment([BLOCK_M], T.float32)
             split_sum = T.alloc_fragment([BLOCK_M], T.float32)
             split_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
             new_max = T.alloc_fragment([BLOCK_M], T.float32)
+            T.annotate_layout(
+                {
+                    split_max_values: split_layout,
+                    split_sum_values: split_layout,
+                    split_weighted_sum_values: split_layout,
+                }
+            )
 
             T.fill(rank_max, -T.infinity(T.float32))
             T.clear(rank_sum)
             T.clear(rank_weighted_sum)
 
-            for split in T.Serial(num_splits):
-                for i in T.Parallel(BLOCK_M):
-                    is_valid = bx * BLOCK_M + i < M
-                    split_max[i] = T.if_then_else(
+            for split_block in T.Serial(T.ceildiv(num_splits, BLOCK_S)):
+                for i, j in T.Parallel(
+                    BLOCK_M,
+                    BLOCK_S,
+                    loop_layout=split_layout,
+                ):
+                    row = bx * BLOCK_M + i
+                    split = split_block * BLOCK_S + j
+                    is_valid = (row < M) & (split < num_splits)
+                    split_max_values[i, j] = T.if_then_else(
                         is_valid,
-                        partial_max[bx * BLOCK_M + i, split],
+                        partial_max[row, split],
                         -T.infinity(T.float32),
                     )
-                    split_sum[i] = T.if_then_else(
+                    split_sum_values[i, j] = T.if_then_else(
                         is_valid,
-                        partial_sum[bx * BLOCK_M + i, split],
+                        partial_sum[row, split],
                         0.0,
                     )
-                    split_weighted_sum[i] = T.if_then_else(
+                    split_weighted_sum_values[i, j] = T.if_then_else(
                         is_valid,
-                        partial_weighted_sum[bx * BLOCK_M + i, split],
+                        partial_weighted_sum[row, split],
                         0.0,
                     )
+
+                T.reduce_max(split_max_values, split_max, dim=-1)
+                for i in T.Parallel(BLOCK_M):
                     new_max[i] = T.max(rank_max[i], split_max[i])
 
+                for i, j in T.Parallel(
+                    BLOCK_M,
+                    BLOCK_S,
+                    loop_layout=split_layout,
+                ):
+                    coefficient = T.exp(split_max_values[i, j] - new_max[i])
+                    split_sum_values[i, j] *= coefficient
+                    split_weighted_sum_values[i, j] *= coefficient
+
+                T.reduce_sum(split_sum_values, split_sum, dim=-1)
+                T.reduce_sum(
+                    split_weighted_sum_values,
+                    split_weighted_sum,
+                    dim=-1,
+                )
                 for i in T.Parallel(BLOCK_M):
                     rank_rescale = T.exp(rank_max[i] - new_max[i])
-                    split_rescale = T.exp(split_max[i] - new_max[i])
-                    rank_sum[i] = rank_sum[i] * rank_rescale + split_sum[i] * split_rescale
-                    rank_weighted_sum[i] = rank_weighted_sum[i] * rank_rescale + split_weighted_sum[i] * split_rescale
+                    rank_sum[i] = rank_sum[i] * rank_rescale + split_sum[i]
+                    rank_weighted_sum[i] = rank_weighted_sum[i] * rank_rescale + split_weighted_sum[i]
                     rank_max[i] = new_max[i]
 
             for i in T.Parallel(BLOCK_M):
@@ -225,6 +283,131 @@ def linear_cross_entropy_fwd_local_reduce(
                     local_weighted_sum[row] = rank_weighted_sum[i]
 
     return linear_cross_entropy_fwd_local_reduce_kernel
+
+
+@tilelang.jit
+def linear_cross_entropy_fwd_finalize_local(
+    num_splits: int,
+    topk: int,
+    BLOCK_M=32,
+    BLOCK_S=32,
+    num_threads=128,
+):
+    """Merge rank-local statistics and produce single-device outputs."""
+    M = T.dynamic("M")
+    split_layout = T.Fragment(
+        (BLOCK_M, BLOCK_S),
+        forward_thread_fn=lambda i, j: (i % (num_threads // 32)) * 32 + j,
+    )
+
+    @T.prim_func
+    def linear_cross_entropy_fwd_finalize_local_kernel(
+        partial_max: T.Tensor([M, num_splits], T.float32),
+        partial_sum: T.Tensor([M, num_splits], T.float32),
+        partial_weighted_sum: T.Tensor([M, num_splits], T.float32),
+        target_logits: T.Tensor([M, topk], T.float32),
+        logprobs: T.Tensor([M, topk], T.float32),
+        entropy: T.Tensor([M], T.float32),
+        lse: T.Tensor([M], T.float32),
+        mean_logits: T.Tensor([M], T.float32),
+    ):
+        with T.Kernel(T.ceildiv(M, BLOCK_M), threads=num_threads) as bx:
+            rank_max = T.alloc_fragment([BLOCK_M], T.float32)
+            rank_sum = T.alloc_fragment([BLOCK_M], T.float32)
+            rank_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
+            split_max_values = T.alloc_fragment(
+                [BLOCK_M, BLOCK_S],
+                T.float32,
+            )
+            split_sum_values = T.alloc_fragment(
+                [BLOCK_M, BLOCK_S],
+                T.float32,
+            )
+            split_weighted_sum_values = T.alloc_fragment(
+                [BLOCK_M, BLOCK_S],
+                T.float32,
+            )
+            split_max = T.alloc_fragment([BLOCK_M], T.float32)
+            split_sum = T.alloc_fragment([BLOCK_M], T.float32)
+            split_weighted_sum = T.alloc_fragment([BLOCK_M], T.float32)
+            new_max = T.alloc_fragment([BLOCK_M], T.float32)
+            T.annotate_layout(
+                {
+                    split_max_values: split_layout,
+                    split_sum_values: split_layout,
+                    split_weighted_sum_values: split_layout,
+                }
+            )
+
+            T.fill(rank_max, -T.infinity(T.float32))
+            T.clear(rank_sum)
+            T.clear(rank_weighted_sum)
+
+            for split_block in T.Serial(T.ceildiv(num_splits, BLOCK_S)):
+                for i, j in T.Parallel(
+                    BLOCK_M,
+                    BLOCK_S,
+                    loop_layout=split_layout,
+                ):
+                    row = bx * BLOCK_M + i
+                    split = split_block * BLOCK_S + j
+                    is_valid = (row < M) & (split < num_splits)
+                    split_max_values[i, j] = T.if_then_else(
+                        is_valid,
+                        partial_max[row, split],
+                        -T.infinity(T.float32),
+                    )
+                    split_sum_values[i, j] = T.if_then_else(
+                        is_valid,
+                        partial_sum[row, split],
+                        0.0,
+                    )
+                    split_weighted_sum_values[i, j] = T.if_then_else(
+                        is_valid,
+                        partial_weighted_sum[row, split],
+                        0.0,
+                    )
+
+                T.reduce_max(split_max_values, split_max, dim=-1)
+                for i in T.Parallel(BLOCK_M):
+                    new_max[i] = T.max(rank_max[i], split_max[i])
+
+                for i, j in T.Parallel(
+                    BLOCK_M,
+                    BLOCK_S,
+                    loop_layout=split_layout,
+                ):
+                    coefficient = T.exp(split_max_values[i, j] - new_max[i])
+                    split_sum_values[i, j] *= coefficient
+                    split_weighted_sum_values[i, j] *= coefficient
+
+                T.reduce_sum(split_sum_values, split_sum, dim=-1)
+                T.reduce_sum(
+                    split_weighted_sum_values,
+                    split_weighted_sum,
+                    dim=-1,
+                )
+                for i in T.Parallel(BLOCK_M):
+                    rank_rescale = T.exp(rank_max[i] - new_max[i])
+                    rank_sum[i] = rank_sum[i] * rank_rescale + split_sum[i]
+                    rank_weighted_sum[i] = rank_weighted_sum[i] * rank_rescale + split_weighted_sum[i]
+                    rank_max[i] = new_max[i]
+
+            for i in T.Parallel(BLOCK_M):
+                row = bx * BLOCK_M + i
+                if row < M:
+                    row_lse = rank_max[i] + T.log(rank_sum[i])
+                    row_mean = rank_weighted_sum[i] / rank_sum[i]
+                    lse[row] = row_lse
+                    mean_logits[row] = row_mean
+                    entropy[row] = row_lse - row_mean
+
+            for i, label_idx in T.Parallel(BLOCK_M, topk):
+                row = bx * BLOCK_M + i
+                if row < M:
+                    logprobs[row, label_idx] = target_logits[row, label_idx] - rank_max[i] - T.log(rank_sum[i])
+
+    return linear_cross_entropy_fwd_finalize_local_kernel
 
 
 @tilelang.jit
@@ -312,6 +495,7 @@ def linear_cross_entropy_bwd_dlogits(
     BLOCK_K=32,
     num_threads=128,
     num_stages=2,
+    min_blocks_per_sm=1,
 ):
     """Recompute one vocabulary chunk and produce its dlogits."""
     assert VOCAB_CHUNK % BLOCK_N == 0
@@ -336,11 +520,11 @@ def linear_cross_entropy_bwd_dlogits(
             T.ceildiv(VOCAB_CHUNK, BLOCK_N),
             threads=num_threads,
         ) as (bx, by):
+            T.annotate_min_blocks_per_sm(min_blocks_per_sm)
             hidden_shared = T.alloc_shared([BLOCK_M, BLOCK_K], dtype)
             weight_shared = T.alloc_shared([BLOCK_N, BLOCK_K], dtype)
             logits = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
             probabilities = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
-            target_grad = T.alloc_fragment([BLOCK_M, BLOCK_N], T.float32)
             labels_local = T.alloc_fragment([BLOCK_M, topk], T.int64)
             grad_logprobs_local = T.alloc_fragment([BLOCK_M, topk], T.float32)
             grad_logprobs_sum = T.alloc_fragment([BLOCK_M], T.float32)
@@ -406,26 +590,26 @@ def linear_cross_entropy_bwd_dlogits(
                     T.exp(logits[i, j] - lse_local[i]),
                     0.0,
                 )
-                target_grad[i, j] = 0.0
+                grad = -grad_logprobs_sum[i] * probabilities[i, j]
+                if HAS_ENTROPY_GRAD:
+                    grad -= grad_entropy_local[i] * probabilities[i, j] * (logits[i, j] - mean_logits_local[i])
+                probabilities[i, j] = grad
 
             if HAS_LOGPROBS_GRAD:
                 for label_idx in T.unroll(topk):
                     for i, j in T.Parallel(BLOCK_M, BLOCK_N):
                         if labels_local[i, label_idx] == vocab_start + local_vocab_offset + j:
-                            target_grad[i, j] += grad_logprobs_local[i, label_idx]
+                            probabilities[i, j] += grad_logprobs_local[i, label_idx]
 
             for i, j in T.Parallel(BLOCK_M, BLOCK_N):
                 row = bx * BLOCK_M + i
                 local_vocab_id = local_vocab_offset + j
                 chunk_vocab_id = by * BLOCK_N + j
                 is_valid = (row < M) & (local_vocab_id < N)
-                grad = target_grad[i, j] - grad_logprobs_sum[i] * probabilities[i, j]
-                if HAS_ENTROPY_GRAD:
-                    grad -= grad_entropy_local[i] * probabilities[i, j] * (logits[i, j] - mean_logits_local[i])
                 if row < M:
                     dlogits[row, chunk_vocab_id] = T.if_then_else(
                         is_valid,
-                        T.cast(grad * inv_temperature, dtype),
+                        T.cast(probabilities[i, j] * inv_temperature, dtype),
                         0,
                     )
 
@@ -494,7 +678,7 @@ class LinearCrossEntropy(torch.autograd.Function):
         local_vocab_size = weight.shape[0]
         vocab_start = tp_rank * local_vocab_size
         topk = labels.shape[1]
-        vocab_per_cta = 512
+        vocab_per_cta = 1024 if num_tokens >= 8192 else 512
         num_splits = (local_vocab_size + vocab_per_cta - 1) // vocab_per_cta
 
         partial_shape = (num_tokens, num_splits)
@@ -502,69 +686,107 @@ class LinearCrossEntropy(torch.autograd.Function):
         partial_sum = torch.empty_like(partial_max)
         partial_weighted_sum = torch.empty_like(partial_max)
         target_logits = torch.zeros((num_tokens, topk), dtype=torch.float32, device=hidden.device)
-
-        mainloop = linear_cross_entropy_fwd_mainloop(
+        target_logits_kernel = linear_cross_entropy_fwd_target_logits(
             local_vocab_size,
             hidden_size,
             topk,
             dtype=hidden.dtype,
-            VOCAB_PER_CTA=vocab_per_cta,
         )
-        mainloop(
+        target_logits_kernel(
             hidden,
             weight,
             labels,
             1.0 / temperature,
             vocab_start,
-            partial_max,
-            partial_sum,
-            partial_weighted_sum,
             target_logits,
         )
 
-        local_max = torch.empty((num_tokens,), dtype=torch.float32, device=hidden.device)
-        local_sum = torch.empty_like(local_max)
-        local_weighted_sum = torch.empty_like(local_max)
-        local_reduce = linear_cross_entropy_fwd_local_reduce(num_splits)
-        local_reduce(
+        mainloop = linear_cross_entropy_fwd_mainloop(
+            local_vocab_size,
+            hidden_size,
+            dtype=hidden.dtype,
+            BLOCK_M=64,
+            BLOCK_N=256,
+            BLOCK_K=64,
+            VOCAB_PER_CTA=vocab_per_cta,
+            num_threads=128,
+            num_stages=2,
+            min_blocks_per_sm=1,
+        )
+        mainloop(
+            hidden,
+            weight,
+            1.0 / temperature,
             partial_max,
             partial_sum,
             partial_weighted_sum,
-            local_max,
-            local_sum,
-            local_weighted_sum,
         )
-
-        global_max = local_max.clone()
-        if tp_world_size > 1:
-            torch.distributed.all_reduce(global_max, op=torch.distributed.ReduceOp.MAX, group=dist_process_group)
-
-        reduced = torch.empty((num_tokens, topk + 2), dtype=torch.float32, device=hidden.device)
-        prepare_reduce = linear_cross_entropy_fwd_prepare_reduce(topk)
-        prepare_reduce(
-            local_max,
-            global_max,
-            local_sum,
-            local_weighted_sum,
-            target_logits,
-            reduced,
-        )
-        if tp_world_size > 1:
-            torch.distributed.all_reduce(reduced, op=torch.distributed.ReduceOp.SUM, group=dist_process_group)
 
         logprobs = torch.empty_like(target_logits)
         entropy = torch.empty((num_tokens,), dtype=torch.float32, device=hidden.device)
         lse = torch.empty_like(entropy)
         mean_logits = torch.empty_like(entropy)
-        finalize = linear_cross_entropy_fwd_finalize(topk)
-        finalize(
-            global_max,
-            reduced,
-            logprobs,
-            entropy,
-            lse,
-            mean_logits,
-        )
+        if tp_world_size == 1:
+            finalize_local = linear_cross_entropy_fwd_finalize_local(
+                num_splits,
+                topk,
+            )
+            finalize_local(
+                partial_max,
+                partial_sum,
+                partial_weighted_sum,
+                target_logits,
+                logprobs,
+                entropy,
+                lse,
+                mean_logits,
+            )
+        else:
+            local_max = torch.empty(
+                (num_tokens,),
+                dtype=torch.float32,
+                device=hidden.device,
+            )
+            local_sum = torch.empty_like(local_max)
+            local_weighted_sum = torch.empty_like(local_max)
+            local_reduce = linear_cross_entropy_fwd_local_reduce(num_splits)
+            local_reduce(
+                partial_max,
+                partial_sum,
+                partial_weighted_sum,
+                local_max,
+                local_sum,
+                local_weighted_sum,
+            )
+
+            global_max = local_max.clone()
+            torch.distributed.all_reduce(global_max, op=torch.distributed.ReduceOp.MAX, group=dist_process_group)
+
+            reduced = torch.empty(
+                (num_tokens, topk + 2),
+                dtype=torch.float32,
+                device=hidden.device,
+            )
+            prepare_reduce = linear_cross_entropy_fwd_prepare_reduce(topk)
+            prepare_reduce(
+                local_max,
+                global_max,
+                local_sum,
+                local_weighted_sum,
+                target_logits,
+                reduced,
+            )
+            torch.distributed.all_reduce(reduced, op=torch.distributed.ReduceOp.SUM, group=dist_process_group)
+
+            finalize = linear_cross_entropy_fwd_finalize(topk)
+            finalize(
+                global_max,
+                reduced,
+                logprobs,
+                entropy,
+                lse,
+                mean_logits,
+            )
 
         ctx.set_materialize_grads(False)
         ctx.save_for_backward(hidden, weight, labels, lse, mean_logits)
@@ -617,7 +839,13 @@ class LinearCrossEntropy(torch.autograd.Function):
             # The no-entropy specialization does not read this argument.
             grad_entropy = lse
 
-        block_n = 128
+        if num_tokens >= 8192 and topk <= 8:
+            block_m, block_n, block_k = 128, 256, 64
+            num_threads, num_stages, min_blocks_per_sm = 256, 2, 1
+        else:
+            block_m, block_n, block_k = 64, 128, 64
+            num_threads, num_stages, min_blocks_per_sm = 128, 3, 2
+
         max_vocab_chunk = 8192
         aligned_local_vocab_size = (local_vocab_size + block_n - 1) // block_n * block_n
         vocab_chunk = min(max_vocab_chunk, aligned_local_vocab_size)
@@ -626,7 +854,7 @@ class LinearCrossEntropy(torch.autograd.Function):
             dtype=hidden.dtype,
             device=hidden.device,
         )
-        grad_hidden_accum = torch.zeros_like(hidden, dtype=torch.float32)
+        grad_hidden_accum = torch.empty_like(hidden, dtype=torch.float32)
         grad_weight = torch.empty_like(weight)
 
         dlogits_kernel = linear_cross_entropy_bwd_dlogits(
@@ -637,7 +865,12 @@ class LinearCrossEntropy(torch.autograd.Function):
             has_logprobs_grad,
             has_entropy_grad,
             dtype=hidden.dtype,
+            BLOCK_M=block_m,
             BLOCK_N=block_n,
+            BLOCK_K=block_k,
+            num_threads=num_threads,
+            num_stages=num_stages,
+            min_blocks_per_sm=min_blocks_per_sm,
         )
         for vocab_offset in range(0, local_vocab_size, vocab_chunk):
             dlogits_kernel(
@@ -660,7 +893,14 @@ class LinearCrossEntropy(torch.autograd.Function):
                 dlogits_valid = dlogits[:, :valid_vocab].contiguous()
             weight_chunk = weight[vocab_offset : vocab_offset + valid_vocab]
 
-            grad_hidden_accum.add_(torch.mm(dlogits_valid, weight_chunk, out_dtype=torch.float32))
+            torch.addmm(
+                grad_hidden_accum,
+                dlogits_valid,
+                weight_chunk,
+                beta=int(vocab_offset != 0),
+                out_dtype=torch.float32,
+                out=grad_hidden_accum,
+            )
             torch.mm(
                 dlogits_valid.T,
                 hidden,

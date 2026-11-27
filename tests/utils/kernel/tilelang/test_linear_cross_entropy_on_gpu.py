@@ -23,10 +23,56 @@ pytest.importorskip("tilelang")
 
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy as dispatched_linear_cross_entropy
-from verl.utils.kernel.tilelang.linear_cross_entropy import linear_cross_entropy
+from verl.utils.kernel.tilelang.linear_cross_entropy import (
+    linear_cross_entropy,
+    linear_cross_entropy_fwd_local_reduce,
+)
 from verl.utils.torch_functional import entropy_from_logits, logprobs_from_logits_v2
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+
+
+@pytest.mark.parametrize("num_splits", [1, 31, 32, 33, 297])
+def test_local_reduce_matches_pytorch(num_splits: int):
+    torch.manual_seed(num_splits)
+    num_tokens = 65
+    partial_max = torch.randn(
+        num_tokens,
+        num_splits,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    partial_sum = torch.rand_like(partial_max)
+    partial_weighted_sum = torch.randn_like(partial_max)
+    actual_max = torch.empty(num_tokens, device="cuda")
+    actual_sum = torch.empty_like(actual_max)
+    actual_weighted_sum = torch.empty_like(actual_max)
+
+    kernel = linear_cross_entropy_fwd_local_reduce(num_splits)
+    kernel(
+        partial_max,
+        partial_sum,
+        partial_weighted_sum,
+        actual_max,
+        actual_sum,
+        actual_weighted_sum,
+    )
+
+    expected_max = partial_max.max(dim=-1).values
+    coefficients = torch.exp(partial_max - expected_max[:, None])
+    expected_sum = torch.sum(coefficients * partial_sum, dim=-1)
+    expected_weighted_sum = torch.sum(
+        coefficients * partial_weighted_sum,
+        dim=-1,
+    )
+    torch.testing.assert_close(actual_max, expected_max)
+    torch.testing.assert_close(actual_sum, expected_sum, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(
+        actual_weighted_sum,
+        expected_weighted_sum,
+        atol=1e-5,
+        rtol=1e-5,
+    )
 
 
 def test_linear_cross_entropy_forward_matches_pytorch():
