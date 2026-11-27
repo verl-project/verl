@@ -1,3 +1,7 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,16 +15,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Ascend NPU backend for fused linear cross-entropy (CANN)."""
 
-from .cann_linear_ce import (
-    CannLinearCrossEntropy,
-    is_cann_linear_ce_available,
-    should_use_cann_linear_ce,
-)
+from .lce_kernel import LinearCrossEntropy, _get_backend_kernels, linear_cross_entropy
 
-__all__ = [
-    "CannLinearCrossEntropy",
-    "is_cann_linear_ce_available",
-    "should_use_cann_linear_ce",
-]
+__all__ = ["LinearCrossEntropy", "_get_backend_kernels", "linear_cross_entropy"]

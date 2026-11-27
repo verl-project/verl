@@ -34,7 +34,7 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/utils/profiler/torch_profile.py",  # appear in TorchProfiler
     "verl/utils/profiler/torch_memory_profile.py",  # explicitly limit OOM observers to CUDA/NPU
     "verl/utils/profiler/config.py",  # appear in TorchProfilerToolConfig
-    "verl/utils/kernel/linear_cross_entropy.py",  # appear in nvidia nvtx
+    "verl/utils/kernel",  # appear in nvidia nvtx
     "verl/utils/rendezvous/ray_backend.py",  # appear in cupy importance
     "verl/single_controller/ray/base.py",  # appear in default device_name
     "verl/experimental/transfer_queue/ray_trainer.py",  # appear in docstring as default device_name
