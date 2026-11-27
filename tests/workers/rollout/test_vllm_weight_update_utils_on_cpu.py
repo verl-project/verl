@@ -717,3 +717,133 @@ def test_engram_safetensors_requires_local_index_json(tmp_path):
     )
     with pytest.raises(FileNotFoundError, match="model.safetensors.index.json"):
         list(iter_engram_safetensors_batches(str(tmp_path)))
+
+
+@pytest.mark.parametrize("rank_local", [False, True])
+def test_rank_local_weights_use_vllm_reload_lifecycle(monkeypatch, rank_local):
+    """A refit loads baked TP slices and full tensors inside vLLM's reload lifecycle."""
+    module_name = "verl.workers.rollout.vllm_rollout.rank_local_bake"
+    spec = importlib.util.spec_from_file_location(
+        module_name, _REPO_ROOT / "verl/workers/rollout/vllm_rollout/rank_local_bake.py"
+    )
+    bake = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, bake)
+    spec.loader.exec_module(bake)
+    package = types.ModuleType("verl.workers.rollout.vllm_rollout")
+    package.rank_local_bake = bake
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+
+    events = []
+    _install_fake_reload(monkeypatch, events)
+    model = _ToyModel()
+    param = model.model.layers[0].linear.weight
+    param.data.zero_()
+    name = "model.layers.0.linear.weight"
+    shape = (2, 4) if rank_local else (4, 4)
+    weights = [
+        (name, torch.ones(shape)),
+        ("model.layers.0.e_score_correction_bias", torch.arange(4, dtype=torch.float32)),
+    ]
+
+    def load_weights(updates):
+        events.append("load_full")
+        for key, tensor in updates:
+            assert key == name and tensor.shape == (4, 4)
+            param.data.copy_(tensor)
+
+    model.load_weights = load_weights
+
+    class Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received(weights, True)
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", Receiver)
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.device = torch.device("cpu")
+    worker.model_runner = _FakeModelRunner(model)
+    worker.model_runner.vllm_config.model_config = None
+    worker._rank_local_plan = bake.RankLocalPlan(scatters={name: bake.Scatter(name, 0, (2, 4), (4, 1))})
+    monkeypatch.setattr(worker, "_get_zmq_handle", lambda: "unused")
+    worker.update_weights_from_ipc()
+
+    expected = torch.ones(4, 4)
+    if rank_local:
+        expected[2:] = 0
+    torch.testing.assert_close(param, expected)
+    torch.testing.assert_close(model.model.layers[0].e_score_correction_bias, torch.arange(4, dtype=torch.float32))
+    assert events == (
+        ["start_reload", "finish_reload"] if rank_local else ["start_reload", "load_full", "finish_reload"]
+    )
+
+
+def test_get_weight_ownership_rejects_eplb():
+    """EPLB maps ``expert_map`` to physical slots and rebalances them at runtime; reject it rather
+    than treating physical slot indices as logical checkpoint expert IDs."""
+    import pytest
+
+    class _FakeMoe(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            # 4 logical + 2 redundant physical slots; EP rank 1 holds physical slots [3, 4, 5]
+            self.expert_map = torch.tensor([-1, -1, -1, 0, 1, 2], dtype=torch.int32)
+            self.ep_size = 2
+            self.ep_rank = 1
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    layer0 = torch.nn.Module()
+    layer0.mlp = _FakeMoe()
+    model.model.layers = torch.nn.ModuleList([layer0])
+
+    fake_dist = types.ModuleType("vllm.distributed")
+    fake_ps = types.ModuleType("vllm.distributed.parallel_state")
+    fake_ps.get_tensor_model_parallel_rank = lambda: 0
+    fake_ps.get_pp_group = lambda: types.SimpleNamespace(rank_in_group=0)
+    fake_dist.parallel_state = fake_ps
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.distributed = fake_dist
+
+    def _make_worker(*, enable_eplb: bool):
+        pc = types.SimpleNamespace(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            enable_expert_parallel=True,
+            enable_eplb=enable_eplb,
+        )
+        worker = object.__new__(vLLMColocateWorkerExtension)
+        worker._rank_local_plan = None
+        worker.model_runner = types.SimpleNamespace(
+            model=model,
+            vllm_config=types.SimpleNamespace(parallel_config=pc),
+        )
+        return worker
+
+    saved = {k: sys.modules.get(k) for k in ("vllm", "vllm.distributed", "vllm.distributed.parallel_state")}
+    try:
+        sys.modules["vllm"] = fake_vllm
+        sys.modules["vllm.distributed"] = fake_dist
+        sys.modules["vllm.distributed.parallel_state"] = fake_ps
+
+        with pytest.raises(NotImplementedError, match="EPLB"):
+            _make_worker(enable_eplb=True).get_weight_ownership()
+
+        ownership = _make_worker(enable_eplb=False).get_weight_ownership()
+        assert ownership["local_experts"] == {0: [3, 4, 5]}
+        assert (ownership["ep_size"], ownership["ep_rank"]) == (2, 1)
+
+        # Newer vLLM with an AITER kernel: the module's expert_map is the 0/1 expert_mask (with a
+        # trailing sentinel), and only the manager holds the canonical -1/local-slot map.
+        canonical = layer0.mlp.expert_map
+        layer0.mlp.expert_map = torch.tensor([0, 0, 0, 1, 1, 1, 0], dtype=torch.int32)
+        layer0.mlp.expert_map_manager = types.SimpleNamespace(expert_map=canonical, ep_size=2, ep_rank=1)
+        ownership = _make_worker(enable_eplb=False).get_weight_ownership()
+        assert ownership["local_experts"] == {0: [3, 4, 5]}
+    finally:
+        for k, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = prev

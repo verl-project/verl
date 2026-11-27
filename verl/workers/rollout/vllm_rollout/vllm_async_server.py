@@ -1525,6 +1525,10 @@ class vLLMHttpServer:
                     )
                 engine_kwargs["distributed_executor_backend"] = "ray"
 
+        if getattr(checkpoint_config, "backend", None) == "sharded_nixl":
+            if engine_kwargs.get("enable_eplb", False) or engine_kwargs.get("enable-eplb", False):
+                raise NotImplementedError("sharded_nixl with vLLM does not support EPLB")
+
         lora_enabled = getattr(self, "lora_as_adapter", False) or bool(engine_kwargs.get("enable_lora"))
         if (
             not is_torch_npu_available(check_device=False)

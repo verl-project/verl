@@ -104,3 +104,11 @@ try:
 except ImportError as e:
     CheckpointEngineRegistry.record_import_error("vllm_weight_transfer", e)
     VLLMWeightTransferCheckpointEngine = None
+
+try:
+    from .sharded_nixl_checkpoint_engine import ShardedNixlCheckpointEngine
+
+    __all__ += ["ShardedNixlCheckpointEngine"]
+except ImportError as e:
+    CheckpointEngineRegistry.record_import_error("sharded_nixl_checkpoint_engine", e)
+    ShardedNixlCheckpointEngine = None

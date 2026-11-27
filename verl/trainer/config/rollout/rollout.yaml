@@ -297,7 +297,7 @@ checkpoint_engine:
   # Target class for checkpoint engine config
   _target_: verl.workers.config.CheckpointEngineConfig
 
-  # Backend for checkpoint engine: naive, nccl, nixl, hccl, delta_sharded,
+  # Backend for checkpoint engine: naive, nccl, nixl, hccl, delta_sharded, sharded_nixl,
   # vllm_ipc, vllm_nccl, vllm_sparse_nccl, vllm_sharded_rdt, vllm_nccl_m2n
   backend: naive
 

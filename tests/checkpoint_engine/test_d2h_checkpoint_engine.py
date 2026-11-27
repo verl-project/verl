@@ -81,12 +81,40 @@ async def test_manager_waits_for_strong_sync_commit():
 
 
 @pytest.mark.asyncio
+async def test_strong_sync_retry_after_failed_commit():
+    """A failed coupled update raises to its caller once; a retry of the same step must not raise it
+    again while waiting for the previous update."""
+
+    class FailedTicket(_FakeTicket):
+        async def wait_committed(self):
+            raise RuntimeError("commit failed")
+
+    manager = object.__new__(CheckpointEngineManager)
+    manager.backend = "nccl"
+    manager.backend_cls = _StrongSyncBackend
+    manager._update_ticket = None
+    tickets = [FailedTicket(), _FakeTicket()]
+
+    async def submit_update(global_steps):
+        return tickets.pop(0)
+
+    manager.submit_update = submit_update
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await manager.update_weights(global_steps=5)
+    assert await manager.update_weights(global_steps=5) == {"rollout_commit_seconds": 2.0}
+
+
+@pytest.mark.asyncio
 async def test_strong_sync_quiesces_rollout_before_build_and_publish(monkeypatch):
     calls = []
 
     class FakeRayWorkerGroup:
         def __init__(self, **kwargs):
             calls.append("create_rollout_group")
+
+        def fetch_rollout_layout(self):
+            calls.append("fetch_rollout_layout")
 
     class FakeActorWorkerGroup:
         world_size = 1
@@ -130,6 +158,7 @@ async def test_strong_sync_quiesces_rollout_before_build_and_publish(monkeypatch
         "abort",
         "release_kv_cache",
         "build_process_group",
+        "fetch_rollout_layout",
         "publish",
         "schedule_commit",
     ]

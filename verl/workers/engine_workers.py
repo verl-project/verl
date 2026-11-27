@@ -844,7 +844,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 set_expandable_segments(False)
                 get_torch_device().empty_cache()
             try:
-                if getattr(self.checkpoint_engine, "requires_engine", False) or effective_mode == "delta_sharded":
+                if getattr(self.checkpoint_engine, "requires_engine", False) or getattr(
+                    self.checkpoint_engine, "send_weights_takes_engine", False
+                ):
                     # engines owning the sync state machine or vLLM WeightSource drive the training engine directly.
                     metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
                 else:

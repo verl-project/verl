@@ -628,6 +628,16 @@ def test_vllm_server_preprocess_engine_kwargs_and_sleep_level(monkeypatch):
     hybrid_server.rollout_mode = mod.RolloutMode.HYBRID
     hybrid_server._preprocess_engine_kwargs({})
 
+    # sharded_nixl keeps direct reload and rejects dynamically rebalanced expert ownership.
+    monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
+    ek = {}
+    _make_server("sharded_nixl")._preprocess_engine_kwargs(ek)
+    assert "weight_transfer_config" not in ek
+    assert os.environ.get("VLLM_RELOAD_MODE") == "direct"
+    for key in ("enable_eplb", "enable-eplb"):
+        with pytest.raises(NotImplementedError, match="EPLB"):
+            _make_server("sharded_nixl")._preprocess_engine_kwargs({key: True})
+
 
 def test_vllm_pd_replica_lifecycle_fans_out_to_all_servers(monkeypatch):
     import importlib.util
