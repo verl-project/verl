@@ -54,7 +54,7 @@ def _select_block_k(K: int) -> int:
 
 
 @tilelang.jit(target="ascend")
-def linear_cross_entropy_fwd_target_logits_ascend(
+def linear_cross_entropy_fwd_target_logits(
     N: int,
     K: int,
     topk: int,
@@ -175,7 +175,7 @@ def linear_cross_entropy_fwd_target_logits_ascend(
 
 
 @tilelang.jit(target="ascend")
-def linear_cross_entropy_fwd_mainloop_ascend(
+def linear_cross_entropy_fwd_mainloop(
     N: int,
     K: int,
     dtype=T.bfloat16,
@@ -347,7 +347,7 @@ def linear_cross_entropy_fwd_mainloop_ascend(
 
 
 @tilelang.jit(target="ascend")
-def linear_cross_entropy_fwd_local_reduce_ascend(
+def linear_cross_entropy_fwd_local_reduce(
     num_splits: int,
     BLOCK_M=8,
     BLOCK_S=32,
@@ -429,7 +429,7 @@ def linear_cross_entropy_fwd_local_reduce_ascend(
 
 
 @tilelang.jit(target="ascend")
-def linear_cross_entropy_fwd_finalize_local_ascend(
+def linear_cross_entropy_fwd_finalize_local(
     num_splits: int,
     topk: int,
     BLOCK_M=8,
@@ -531,7 +531,7 @@ def linear_cross_entropy_fwd_finalize_local_ascend(
 
 
 @tilelang.jit(target="ascend")
-def linear_cross_entropy_fwd_prepare_reduce_ascend(
+def linear_cross_entropy_fwd_prepare_reduce(
     topk: int,
     BLOCK_M=64,
     num_threads=128,
@@ -598,7 +598,7 @@ def linear_cross_entropy_fwd_prepare_reduce_ascend(
 
 
 @tilelang.jit(target="ascend")
-def linear_cross_entropy_fwd_finalize_ascend(
+def linear_cross_entropy_fwd_finalize(
     topk: int,
     BLOCK_M=64,
     num_threads=128,
@@ -673,7 +673,7 @@ def linear_cross_entropy_fwd_finalize_ascend(
 
 
 @tilelang.jit(target="ascend")
-def _bwd_dlogits_dense_ascend(
+def _bwd_dlogits_dense(
     N: int,
     K: int,
     VOCAB_CHUNK: int,
@@ -809,7 +809,7 @@ def _bwd_dlogits_dense_ascend(
 
 
 @tilelang.jit(target="ascend")
-def _bwd_dlogits_scatter_top1_ascend(
+def _bwd_dlogits_scatter_top1(
     N: int,
     VOCAB_CHUNK: int,
     dtype=T.bfloat16,
@@ -864,7 +864,7 @@ def _bwd_dlogits_scatter_top1_ascend(
 
 
 @tilelang.jit(target="ascend")
-def _bwd_dlogits_prep_multi_ascend(N: int, topk: int):
+def _bwd_dlogits_prep_multi(N: int, topk: int):
     """One-time pass per backward: compute row sum of `grad_logprobs` and deduplicate in-shard labels."""
     M = T.dynamic("M")
     num_cores = _num_vector_cores()
@@ -965,7 +965,7 @@ def _bwd_dlogits_prep_multi_ascend(N: int, topk: int):
 
 
 @tilelang.jit(target="ascend")
-def _bwd_dlogits_scatter_multi_ascend(
+def _bwd_dlogits_scatter_multi(
     N: int,
     VOCAB_CHUNK: int,
     topk: int,
@@ -1025,7 +1025,7 @@ def _bwd_dlogits_scatter_multi_ascend(
     return kernel
 
 
-def linear_cross_entropy_bwd_dlogits_ascend(
+def linear_cross_entropy_bwd_dlogits(
     N: int,
     K: int,
     topk: int,
@@ -1048,7 +1048,7 @@ def linear_cross_entropy_bwd_dlogits_ascend(
     """
     del BLOCK_M, BLOCK_N, BLOCK_K, num_threads, num_stages, min_blocks_per_sm
     norm_dtype = _normalize_dtype(dtype)
-    dense_kernel = _bwd_dlogits_dense_ascend(
+    dense_kernel = _bwd_dlogits_dense(
         N,
         K,
         VOCAB_CHUNK,
@@ -1059,10 +1059,10 @@ def linear_cross_entropy_bwd_dlogits_ascend(
     if HAS_LOGPROBS_GRAD:
         if topk == 1:
             prep_kernel = None
-            scatter_kernel = _bwd_dlogits_scatter_top1_ascend(N, VOCAB_CHUNK, dtype=norm_dtype)
+            scatter_kernel = _bwd_dlogits_scatter_top1(N, VOCAB_CHUNK, dtype=norm_dtype)
         else:
-            prep_kernel = _bwd_dlogits_prep_multi_ascend(N, topk)
-            scatter_kernel = _bwd_dlogits_scatter_multi_ascend(N, VOCAB_CHUNK, topk, dtype=norm_dtype)
+            prep_kernel = _bwd_dlogits_prep_multi(N, topk)
+            scatter_kernel = _bwd_dlogits_scatter_multi(N, VOCAB_CHUNK, topk, dtype=norm_dtype)
     else:
         prep_kernel = None
         scatter_kernel = None
@@ -1145,12 +1145,3 @@ def linear_cross_entropy_bwd_dlogits_ascend(
                     state["scaled_glp"] = None
 
     return run
-
-
-linear_cross_entropy_fwd_target_logits = linear_cross_entropy_fwd_target_logits_ascend
-linear_cross_entropy_fwd_mainloop = linear_cross_entropy_fwd_mainloop_ascend
-linear_cross_entropy_fwd_local_reduce = linear_cross_entropy_fwd_local_reduce_ascend
-linear_cross_entropy_fwd_finalize_local = linear_cross_entropy_fwd_finalize_local_ascend
-linear_cross_entropy_fwd_prepare_reduce = linear_cross_entropy_fwd_prepare_reduce_ascend
-linear_cross_entropy_fwd_finalize = linear_cross_entropy_fwd_finalize_ascend
-linear_cross_entropy_bwd_dlogits = linear_cross_entropy_bwd_dlogits_ascend
