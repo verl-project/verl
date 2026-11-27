@@ -13,7 +13,6 @@
 # limitations under the License.
 
 # Inspired from https://gitee.com/ascend/MindSpeed-RL/blob/master/mindspeed_rl/utils/utils.py
-import functools
 import logging
 import os
 from contextlib import contextmanager
@@ -24,7 +23,7 @@ from packaging import version
 from torch_npu.npu import mstx
 
 from .config import NPUToolConfig
-from .profile import DistProfiler, ProfilerConfig
+from .profile import DistProfiler, ProfilerConfig, _wrap_with_profile_context
 
 
 def mark_start_range(message: Optional[str] = None) -> None:
@@ -269,8 +268,8 @@ class NPUProfiler(DistProfiler):
         scheduled = bool(kwargs_outer.get("scheduled", False))
 
         def decorator(func):
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs_inner):
+            @contextmanager
+            def profile_context(*args, **kwargs_inner):
                 # Prefer the stage label (`role`, e.g. "actor_compute_log_prob"): it names both the
                 # role and the function, which the method name alone cannot do for a colocated
                 # worker. Fall back to the method name for stages that declare no role.
@@ -280,7 +279,7 @@ class NPUProfiler(DistProfiler):
                 if not discrete_mode:
                     mark_range = mark_start_range(message=profile_name)
                 else:
-                    self.profile_npu = get_npu_profiler(
+                    profile_npu = get_npu_profiler(
                         contents=self.profile_contents,
                         profile_level=self.profile_level,
                         profile_save_path=self.profile_save_path,
@@ -288,22 +287,21 @@ class NPUProfiler(DistProfiler):
                         schedule=self._schedule_kwargs if scheduled else None,
                         role=role,
                     )
-                    self.profile_npu.start()
-                    NPUProfiler._active_prof = self.profile_npu
+                    profile_npu.start()
+                    NPUProfiler._active_prof = profile_npu
                     mark_range = mark_start_range(message=profile_name)
 
-                result = func(*args, **kwargs_inner)
-
-                if not discrete_mode:
+                try:
+                    yield func
+                finally:
                     mark_end_range(mark_range)
-                else:
-                    mark_end_range(mark_range)
-                    self.profile_npu.stop()
-                    self.profile_npu = None
-                    NPUProfiler._active_prof = None
+                    if discrete_mode:
+                        try:
+                            profile_npu.stop()
+                        finally:
+                            if NPUProfiler._active_prof is profile_npu:
+                                NPUProfiler._active_prof = None
 
-                return result
-
-            return wrapper
+            return _wrap_with_profile_context(func, profile_context)
 
         return decorator

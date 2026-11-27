@@ -346,8 +346,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         )
 
     def on_step_end(self):
-        # _stop_profiling() already moved this step's flag to prev_step_profile.
-        if self.prev_step_profile:
+        # The current step stays selected until weight synchronization finishes.
+        if self.curr_step_profile:
             self._stop_rollout_profiling()
 
         config = self.hybrid_rollout_config
