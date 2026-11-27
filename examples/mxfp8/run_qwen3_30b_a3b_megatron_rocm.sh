@@ -13,7 +13,7 @@
 #   - expert tensor parallel 1 (ACTOR_ETP): with the default ETP = TP = 2 each rank holds 768 / 2 = 384 columns of
 #     every expert, and the expert dgrad / wgrad GEMMs go to rocRoller whatever the token padding;
 #   - each expert's tokens padded to 256 (moe_router_padding_for_fp8; verl raises Megatron's MXFP8 alignment from
-#     32 to 256 on ROCm, apply_patch_rocm_mxfp8_expert_alignment in verl/models/mcore/patch.py);
+#     32 to 256 on ROCm, apply_patch_rocm_mxfp8_expert_alignment in verl/models/mcore/rocm_patch.py);
 #   - the packed sequence padded to a multiple of PAD_TO_LENGTH_BUCKET tokens (actor pad_to_length) for the dense
 #     attention GEMMs; verl alone pads it to 128;
 #   - experts on HipKittens' grouped MXFP8 GEMM (NVTE_USE_HIPKITTENS_GROUPED_GEMM=1) instead of one GEMM per expert.

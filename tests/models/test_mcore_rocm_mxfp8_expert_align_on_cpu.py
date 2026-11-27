@@ -22,9 +22,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-# Load patch.py by path: importing the verl.models.mcore package pulls in megatron, which CI CPU hosts do not have.
+# Load rocm_patch.py by path: importing the verl.models.mcore package pulls in megatron, which CI CPU hosts do not
+# have.
 _spec = importlib.util.spec_from_file_location(
-    "mcore_patch_rocm_mxfp8", Path(__file__).parents[2] / "verl" / "models" / "mcore" / "patch.py"
+    "mcore_rocm_patch", Path(__file__).parents[2] / "verl" / "models" / "mcore" / "rocm_patch.py"
 )
 _patch = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_patch)

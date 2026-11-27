@@ -245,7 +245,7 @@ class MegatronEngine(BaseEngine):
             apply_patch_megatron_recomputation_backward()
 
         # ROCm: pad MXFP8 routed-expert tokens to the 256 Transformer Engine's HipKittens GEMMs need (no-op elsewhere)
-        from verl.models.mcore.patch import apply_patch_rocm_mxfp8_expert_alignment
+        from verl.models.mcore.rocm_patch import apply_patch_rocm_mxfp8_expert_alignment
 
         apply_patch_rocm_mxfp8_expert_alignment()
 
