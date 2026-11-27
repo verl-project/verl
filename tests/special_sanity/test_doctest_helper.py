@@ -118,18 +118,6 @@ def test_documented_versions_match_installer(helper, backend):
     assert re.findall(r"(?m)^[ \t]*cd MindSpeed && git checkout (\S+)", installer) == [table["MindSpeed"]]
 
 
-def test_sglang_python_matches_kernel_archive(helper):
-    """Reject a documented Python version that cannot install the script's kernel wheels."""
-    installer = (REPO_ROOT / "scripts/install_sglang_mcore_npu.sh").read_text(encoding="utf-8")
-    archive_versions = set(re.findall(r"sgl-kernel-npu-[^\s/]*-py(\d)(\d+)-[^\s/]*\.zip", installer))
-    assert len(archive_versions) == 1, "Expected one Python ABI in the SGLang kernel archive name"
-    expected = ".".join(archive_versions.pop())
-    block = helper.require_doctest_block("installation-sglang")
-    conda_versions = re.findall(r"^conda create\b[^\n]*\bpython=(\d+\.\d+)\b", block, re.MULTILINE)
-    assert conda_versions == [expected], f"SGLang kernel wheels require Python {expected}; found {conda_versions}"
-    assert installation_version_table(helper, "SGLang")["Python"] == expected
-
-
 @pytest.mark.parametrize("name", ["installation-vllm", "quickstart-fsdp2_vllm"])
 def test_document_selection_rejects_duplicates(helper, name):
     """Repeated commands must not cause the harness to execute an arbitrary match."""

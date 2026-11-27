@@ -109,8 +109,9 @@ jobs:
       NDEVICES_PER_NODE: "8"
       HF_ENDPOINT: https://hf-mirror.com
       HF_HUB_ENABLE_HF_TRANSFER: "0"
-      # Shared inputs may be read-only. Datasets writes locks and Arrow files here.
+      # Keep dataset caches and Megatron configuration locks in writable directories.
       HF_DATASETS_CACHE: /tmp/verl-doctest/huggingface/datasets
+      MEGATRON_CONFIG_LOCK_DIR: /tmp/verl-doctest/megatron-locks
       TRANSFORMERS_VERBOSITY: error
       MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B
       GSM8K_DATASET_PATH: /root/.cache/modelscope/dataset/openai/gsm8k
