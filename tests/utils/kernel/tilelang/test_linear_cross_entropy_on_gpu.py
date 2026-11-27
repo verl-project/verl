@@ -21,34 +21,44 @@ import torch.nn.functional as F
 
 pytest.importorskip("tilelang")
 
-from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
-from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy as dispatched_linear_cross_entropy
-from verl.utils.kernel.tilelang.linear_cross_entropy import (
-    linear_cross_entropy,
-    linear_cross_entropy_fwd_local_reduce,
+from verl.utils.device import (
+    get_device_name,
+    get_nccl_backend,
+    get_torch_device,
+    is_device_available,
 )
+from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+from verl.utils.kernel.linear_cross_entropy.tilelang import _get_backend_kernels
 from verl.utils.torch_functional import entropy_from_logits, logprobs_from_logits_v2
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+DEVICE_NAME = get_device_name()
+if DEVICE_NAME == "npu":
+    import megatron_adaptor  # noqa: F401
+
+pytestmark = pytest.mark.skipif(
+    DEVICE_NAME not in ("cuda", "npu") or not is_device_available(),
+    reason="A supported accelerator (CUDA GPU or Ascend NPU) is required",
+)
 
 
-@pytest.mark.parametrize("num_splits", [1, 31, 32, 33, 297])
+@pytest.mark.parametrize("num_splits", [1, 5, 31, 32, 33, 297])
 def test_local_reduce_matches_pytorch(num_splits: int):
     torch.manual_seed(num_splits)
     num_tokens = 65
     partial_max = torch.randn(
         num_tokens,
         num_splits,
-        device="cuda",
+        device=DEVICE_NAME,
         dtype=torch.float32,
     )
     partial_sum = torch.rand_like(partial_max)
     partial_weighted_sum = torch.randn_like(partial_max)
-    actual_max = torch.empty(num_tokens, device="cuda")
+    actual_max = torch.empty(num_tokens, device=DEVICE_NAME)
     actual_sum = torch.empty_like(actual_max)
     actual_weighted_sum = torch.empty_like(actual_max)
 
-    kernel = linear_cross_entropy_fwd_local_reduce(num_splits)
+    backend_kernels = _get_backend_kernels(DEVICE_NAME)
+    kernel = backend_kernels.linear_cross_entropy_fwd_local_reduce(num_splits)
     kernel(
         partial_max,
         partial_sum,
@@ -84,7 +94,7 @@ def test_linear_cross_entropy_forward_matches_pytorch():
         torch.randn(
             num_tokens,
             hidden_size,
-            device="cuda",
+            device=DEVICE_NAME,
             dtype=torch.bfloat16,
         )
         * 0.1
@@ -93,20 +103,24 @@ def test_linear_cross_entropy_forward_matches_pytorch():
         hidden_size,
         vocab_size,
         bias=False,
-        device="cuda",
+        device=DEVICE_NAME,
         dtype=torch.bfloat16,
     )
-    labels = torch.randint(vocab_size, (num_tokens, topk), device="cuda")
+    labels = torch.randint(
+        vocab_size,
+        (num_tokens, topk),
+        device=DEVICE_NAME,
+    )
     labels[0, :] = labels[0, 0]
 
-    actual_logprobs, actual_entropy = dispatched_linear_cross_entropy(
+    actual_logprobs, actual_entropy = linear_cross_entropy(
         hidden,
         linear.weight,
         labels,
         temperature,
         impl_backend="tilelang",
     )
-    single_logprobs, single_entropy = dispatched_linear_cross_entropy(
+    single_logprobs, single_entropy = linear_cross_entropy(
         hidden,
         linear.weight,
         labels[:, 0],
@@ -166,7 +180,7 @@ def test_linear_cross_entropy_backward_matches_pytorch(use_entropy_grad: bool):
         torch.randn(
             num_tokens,
             hidden_size,
-            device="cuda",
+            device=DEVICE_NAME,
             dtype=torch.bfloat16,
         )
         * 0.1
@@ -175,15 +189,19 @@ def test_linear_cross_entropy_backward_matches_pytorch(use_entropy_grad: bool):
         torch.randn(
             vocab_size,
             hidden_size,
-            device="cuda",
+            device=DEVICE_NAME,
             dtype=torch.bfloat16,
         )
         * 0.1
     ).requires_grad_()
-    labels = torch.randint(vocab_size, (num_tokens, topk), device="cuda")
+    labels = torch.randint(
+        vocab_size,
+        (num_tokens, topk),
+        device=DEVICE_NAME,
+    )
     labels[0, :] = labels[0, 0]
-    grad_logprobs = torch.randn(num_tokens, topk, device="cuda")
-    grad_entropy = torch.randn(num_tokens, device="cuda")
+    grad_logprobs = torch.randn(num_tokens, topk, device=DEVICE_NAME)
+    grad_entropy = torch.randn(num_tokens, device=DEVICE_NAME)
 
     hidden_actual = hidden.detach().reshape(1, num_tokens, hidden_size).requires_grad_()
     weight_actual = weight.detach().clone().requires_grad_()
@@ -192,6 +210,7 @@ def test_linear_cross_entropy_backward_matches_pytorch(use_entropy_grad: bool):
         weight_actual,
         labels.unsqueeze(0),
         temperature,
+        impl_backend="tilelang",
     )
     assert actual_logprobs.shape == (1, num_tokens, topk)
     assert actual_entropy.shape == (1, num_tokens)
@@ -226,7 +245,12 @@ def test_linear_cross_entropy_backward_matches_pytorch(use_entropy_grad: bool):
         atol=3e-2,
         rtol=1e-2,
     )
-    torch.testing.assert_close(actual_grad_weight, expected_grad_weight, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(
+        actual_grad_weight,
+        expected_grad_weight,
+        atol=1e-2,
+        rtol=1e-2,
+    )
 
 
 def _run_tensor_parallel_test(rank: int, world_size: int, init_file: str):
@@ -265,7 +289,11 @@ def _run_tensor_parallel_test(rank: int, world_size: int, init_file: str):
             )
             * 0.1
         )
-        labels = torch.randint(global_vocab_size, (num_tokens, topk), device=hidden.device)
+        labels = torch.randint(
+            global_vocab_size,
+            (num_tokens, topk),
+            device=hidden.device,
+        )
         labels[0, :] = local_vocab_size + 7
         dist.broadcast(hidden, src=0, group=tp_group)
         dist.broadcast(labels, src=0, group=tp_group)
@@ -286,7 +314,7 @@ def _run_tensor_parallel_test(rank: int, world_size: int, init_file: str):
             gather_output=False,
             tp_group=tp_group,
         )
-        torch.manual_seed(5678 + dist.get_rank(tp_group))
+        torch.manual_seed(5678 + rank)
         with torch.no_grad():
             linear.weight.normal_(mean=0.0, std=0.02)
         local_logits, _ = linear(hidden)
@@ -302,11 +330,22 @@ def _run_tensor_parallel_test(rank: int, world_size: int, init_file: str):
             linear.weight,
             labels,
             temperature,
-            tp_group,
+            dist_process_group=tp_group,
+            impl_backend="tilelang",
         )
 
-        torch.testing.assert_close(actual_logprobs, expected_logprobs.float(), atol=2e-2, rtol=5e-3)
-        torch.testing.assert_close(actual_entropy, expected_entropy.float(), atol=5e-2, rtol=5e-3)
+        torch.testing.assert_close(
+            actual_logprobs,
+            expected_logprobs.float(),
+            atol=2e-2,
+            rtol=5e-3,
+        )
+        torch.testing.assert_close(
+            actual_entropy,
+            expected_entropy.float(),
+            atol=5e-2,
+            rtol=5e-3,
+        )
         torch.testing.assert_close(
             actual_logprobs[0],
             actual_logprobs[0, 0].expand(topk),
@@ -327,7 +366,13 @@ def _run_tensor_parallel_test(rank: int, world_size: int, init_file: str):
             local_logits_ref = local_logits_ref / temperature
             entropy_ref = vocab_parallel_entropy(local_logits_ref)
             logprobs_ref = torch.stack(
-                [vocab_parallel_log_probs_from_logits(local_logits_ref, labels[:, i]) for i in range(topk)],
+                [
+                    vocab_parallel_log_probs_from_logits(
+                        local_logits_ref,
+                        labels[:, i],
+                    )
+                    for i in range(topk)
+                ],
                 dim=-1,
             )
             outputs_ref = (logprobs_ref, entropy_ref) if use_entropy_grad else (logprobs_ref,)
@@ -344,7 +389,8 @@ def _run_tensor_parallel_test(rank: int, world_size: int, init_file: str):
                 weight_actual,
                 labels,
                 temperature,
-                tp_group,
+                dist_process_group=tp_group,
+                impl_backend="tilelang",
             )
             outputs_actual = (logprobs_actual, entropy_actual) if use_entropy_grad else (logprobs_actual,)
             actual_grad_hidden, actual_grad_weight = torch.autograd.grad(
@@ -354,8 +400,18 @@ def _run_tensor_parallel_test(rank: int, world_size: int, init_file: str):
             )
             dist.all_reduce(actual_grad_hidden, group=tp_group)
 
-            torch.testing.assert_close(actual_grad_hidden, expected_grad_hidden, atol=1e-2, rtol=1e-2)
-            torch.testing.assert_close(actual_grad_weight, expected_grad_weight, atol=1e-2, rtol=1e-2)
+            torch.testing.assert_close(
+                actual_grad_hidden,
+                expected_grad_hidden,
+                atol=1e-2,
+                rtol=1e-2,
+            )
+            torch.testing.assert_close(
+                actual_grad_weight,
+                expected_grad_weight,
+                atol=1e-2,
+                rtol=1e-2,
+            )
     finally:
         mpu.destroy_model_parallel()
         dist.destroy_process_group()

@@ -86,7 +86,7 @@ def test_single_label_reductions(reduction):
 
 @pytest.mark.parametrize("method", ["_Total_Fuse_MN", "_Total_Separate"])
 def test_topk_backward_methods(method, monkeypatch):
-    from verl.utils.kernel import kernels
+    from verl.utils.kernel.linear_cross_entropy.triton import kernels
 
     monkeypatch.setattr(kernels._config, "_backward", getattr(kernels.BackwardEnum, method))
     _compare(0, 1, 5, "both")
