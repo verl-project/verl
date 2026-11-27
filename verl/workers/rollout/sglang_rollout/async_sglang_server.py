@@ -348,6 +348,10 @@ class SGLangHttpServer:
             "custom_weight_loader": custom_weight_loader or None,
             **engine_kwargs,
         }
+        if (self.config.get("checkpoint_engine", None) or {}).get("rollout_staging", False):
+            # Passed only when set: an SGLang without the staging copy does not know the argument, and
+            # must fail here rather than be loaded into while it generates.
+            args["weight_update_staging"] = True
         # bf16 weight updates crash SGLang's default MoE runner on Blackwell (see default_moe_runner_backend)
         moe_runner_backend = default_moe_runner_backend(quantization_config, engine_kwargs, self.model_config.hf_config)
         if moe_runner_backend is not None:
@@ -431,11 +435,18 @@ class SGLangHttpServer:
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
         server_args = ServerArgs(**args)
-        self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
+        launched = Engine._launch_subprocesses(
             server_args=server_args,
             init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
             run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
             run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
+        )
+        self.tokenizer_manager, self.template_manager = launched[0], launched[1]
+        # Older SGLang returns the scheduler info third; newer returns the port args there and a
+        # SchedulerInitResult after it, which holds one info per scheduler.
+        self.scheduler_info = next(
+            (result.scheduler_infos[0] for result in launched[2:] if hasattr(result, "scheduler_infos")),
+            launched[2],
         )
 
         # In multi-node cases, non-zero rank nodes should not launch http server.
@@ -781,6 +792,8 @@ class SGLangHttpServer:
 
 
 class SGLangReplica(RolloutReplica):
+    supports_weight_staging = True
+
     def __init__(
         self,
         replica_rank: int,

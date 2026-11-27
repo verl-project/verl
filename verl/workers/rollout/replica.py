@@ -85,6 +85,10 @@ class RolloutReplica(ABC):
         gpus_per_node: int, number of gpus per node.
     """
 
+    # Whether the servers of this replica can load a weight update into a staging copy while generating
+    # and install it between two decode steps (checkpoint_engine.rollout_staging).
+    supports_weight_staging = False
+
     def __init__(
         self,
         replica_rank: int,

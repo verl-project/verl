@@ -311,6 +311,12 @@ checkpoint_engine:
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}
 
+  # Keep the rollout generating during a weight update: it loads the new weights into a staging copy
+  # (one more copy of the weights in device memory) and installs them between two decode steps, so its
+  # requests are not aborted and its KV cache is not released. In-flight requests continue on the KV
+  # cache the old weights produced. Currently only supported in SGLang rollout implementations.
+  rollout_staging: false
+
   # If set, this Python module is imported on every worker process before the
   # backend is instantiated, allowing custom backends to register themselves
   # in CheckpointEngineRegistry.
