@@ -21,7 +21,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 from omegaconf import OmegaConf
-from tensordict import TensorDict
+from tensordict import NonTensorData, NonTensorStack, TensorDict
 
 from verl.utils.skip import RolloutTqSkip, SkipManager, SkipManagerConfig
 from verl.utils.skip.base_skip import SKIP_REGISTRY
@@ -68,9 +68,13 @@ def tq(monkeypatch):
     return module
 
 
-def save_batch(cache, tq, step, uid):
-    tq.kv_batch_get.return_value = TensorDict({"value": torch.tensor([[1], [2]])}, batch_size=[2])
-    batch = SimpleNamespace(keys=[f"{uid}_0_0", f"{uid}_1_0"], tags=[{"global_steps": 0}] * 2, partition_id="train")
+def save_batch(cache, tq, step, uid, keys=None, data=None):
+    if keys is None:
+        keys = [f"{uid}_0_0", f"{uid}_1_0"]
+    if data is None:
+        data = TensorDict({"value": torch.arange(1, len(keys) + 1).unsqueeze(1)}, batch_size=[len(keys)])
+    tq.kv_batch_get.return_value = data
+    batch = SimpleNamespace(keys=keys, tags=[{"global_steps": 0}] * len(keys), partition_id="train")
     cache.prepare_data(step, batch, global_steps=step)
     return batch
 
@@ -118,6 +122,85 @@ def test_cached_trajectories_remapped_and_injected(cache, tq, sync_steps):
     assert all(tag["min_global_steps"] == tag["max_global_steps"] == 1 for tag in args["tags"])
     assert prompt_call.kwargs["keys"] == [f"new-{i}" for i in range(sync_steps)]
     assert all(tag["status"] == "finished" for tag in prompt_call.kwargs["tags"])
+
+
+def test_multi_output_rows_replayed_with_original_identity(cache, tq):
+    """Cached rows with index > 0 must be replayed once with their original {session_id, index}."""
+    cache.parameter_sync_step = 1
+    # session 0 emitted 3 outputs, session 1 emitted 1
+    save_batch(cache, tq, 1, "old", keys=["old_0_0", "old_0_1", "old_0_2", "old_1_0"])
+    assert cache.maybe_load_and_inject(1, ["new"])
+    trajectory_call, _ = tq.kv_batch_put.call_args_list
+    args = trajectory_call.kwargs
+    assert args["keys"] == ["new_0_0", "new_0_1", "new_0_2", "new_1_0"]
+    assert len(args["tags"]) == 4
+    assert args["fields"]["value"].flatten().tolist() == [1, 2, 3, 4]
+
+
+def test_replay_sorts_rows_within_group(cache, tq):
+    """Replay order within a group is deterministic (session_id, index) regardless of dump order."""
+    cache.parameter_sync_step = 1
+    save_batch(cache, tq, 1, "old", keys=["old_1_0", "old_0_2", "old_0_0", "old_0_1"])
+    assert cache.maybe_load_and_inject(1, ["new"])
+    trajectory_call, _ = tq.kv_batch_put.call_args_list
+    args = trajectory_call.kwargs
+    assert args["keys"] == ["new_0_0", "new_0_1", "new_0_2", "new_1_0"]
+    # selected rows follow the reordered indices
+    assert args["fields"]["value"].flatten().tolist() == [3, 4, 2, 1]
+
+
+def test_partial_group_replayed_without_fabrication(cache, tq):
+    """A group whose sessions partially failed replays only its cached rows; none are fabricated."""
+    cache.parameter_sync_step = 1
+    save_batch(cache, tq, 1, "old", keys=["old_1_0"])
+    assert cache.maybe_load_and_inject(1, ["new"])
+    trajectory_call, _ = tq.kv_batch_put.call_args_list
+    assert trajectory_call.kwargs["keys"] == ["new_1_0"]
+
+
+def test_uid_field_consistent_with_new_keys(cache, tq):
+    """The TensorDict uid field is rewritten to the fresh prompt uid so GRPO grouping paths agree."""
+    cache.parameter_sync_step = 1
+    data = TensorDict(
+        {
+            "value": torch.tensor([[1], [2], [3]]),
+            "uid": NonTensorStack.from_list([NonTensorData("old")] * 3),
+        },
+        batch_size=[3],
+    )
+    save_batch(cache, tq, 1, "old", keys=["old_0_0", "old_0_1", "old_1_0"], data=data)
+    # one cached group cycled onto two fresh prompts
+    assert cache.maybe_load_and_inject(1, ["new-a", "new-b"])
+    trajectory_call, _ = tq.kv_batch_put.call_args_list
+    args = trajectory_call.kwargs
+    assert args["keys"] == ["new-a_0_0", "new-a_0_1", "new-a_1_0", "new-b_0_0", "new-b_0_1", "new-b_1_0"]
+    assert args["fields"]["uid"].tolist() == ["new-a", "new-a", "new-a", "new-b", "new-b", "new-b"]
+
+
+def test_malformed_cached_key_fails_closed(cache, tq):
+    cache.parameter_sync_step = 1
+    save_batch(cache, tq, 1, "old", keys=["not-a-trajectory-key"])
+    with pytest.raises(ValueError, match="Unexpected trajectory key format"):
+        cache.maybe_load_and_inject(1, ["new"])
+
+
+def test_non_numeric_key_fails_closed(cache, tq):
+    """A key whose session_id/index are not integers is rejected with a clear error."""
+    cache.parameter_sync_step = 1
+    save_batch(cache, tq, 1, "old", keys=["old_0_x"])
+    with pytest.raises(ValueError, match="Non-numeric session_id/index"):
+        cache.maybe_load_and_inject(1, ["new"])
+
+
+def test_single_session_rows_not_relabelled_as_new_sessions(cache, tq):
+    """Rows of one session keep their session_id even when the row count equals rollout.n."""
+    cache.parameter_sync_step = 1
+    # rollout.n == 2 and one session emitted two rows: the old code relabelled
+    # the second row as the final output of a fabricated session 1.
+    save_batch(cache, tq, 1, "old", keys=["old_0_0", "old_0_1"])
+    assert cache.maybe_load_and_inject(1, ["new"])
+    trajectory_call, _ = tq.kv_batch_put.call_args_list
+    assert trajectory_call.kwargs["keys"] == ["new_0_0", "new_0_1"]
 
 
 def test_repeat_prefers_exact_then_previous_then_future(cache, tq):

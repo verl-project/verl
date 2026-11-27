@@ -20,6 +20,21 @@ from omegaconf import OmegaConf
 from verl.utils.skip.base_skip import BaseSkip, SkipAction, register_skip
 
 
+def _parse_trajectory_key(key: str) -> tuple[str, int, int]:
+    """Parse a TransferQueue trajectory key ``{uid}_{session_id}_{index}``.
+
+    Must stay in sync with ``compute_advantage_for_multi_trajectories``.
+    """
+    fields = key.rsplit("_", 2)
+    if len(fields) != 3:
+        raise ValueError(f"Unexpected trajectory key format: {key!r}, expected '{{uid}}_{{session_id}}_{{index}}'")
+    uid, session_id, index = fields
+    try:
+        return uid, int(session_id), int(index)
+    except ValueError as e:
+        raise ValueError(f"Non-numeric session_id/index in trajectory key: {key!r}") from e
+
+
 @register_skip("rollout_tq")
 class RolloutTqSkip(BaseSkip):
     """Rollout skip for V1 TransferQueue-based trainer (``skip.rollout_tq``).
@@ -174,7 +189,6 @@ class RolloutTqSkip(BaseSkip):
         self.load_dump_data(
             step=step,
             new_prompt_uids=new_prompt_uids,
-            n=self.n,
             global_steps=step,
             partition_id=partition_id,
         )
@@ -224,20 +238,23 @@ class RolloutTqSkip(BaseSkip):
         self,
         step: int,
         new_prompt_uids: list[str],
-        n: int,
         global_steps: int,
         partition_id: str = "train",
     ) -> None:
         """Phase two: load cached data from disk and inject into TransferQueue.
 
-        Maps saved trajectories to new prompt uids in order, preserving the
-        original key structure (``{uid}_{session_id}_{index}``) and GRPO group
-        composition (each prompt gets *n* trajectories from the same original group).
+        Maps cached prompt groups onto the fresh prompt uids in order.  Every
+        cached trajectory row of a mapped group is replayed exactly once with its
+        original ``{session_id, index}`` identity preserved (agentic sessions may
+        emit several ``AgentLoopOutput`` rows; the session's final output is the
+        one with the largest index).  Rows are never relabelled, dropped, or
+        fabricated to satisfy ``rollout.n``, and each row's TensorDict ``uid``
+        field is rewritten to the fresh prompt uid so key-based and field-based
+        GRPO grouping agree.
 
         Args:
             step: Current training step.
             new_prompt_uids: Freshly generated uids for the current batch.
-            n: Number of trajectories per prompt (``rollout.n``).
             global_steps: Current ``global_steps``, used to override staleness tags.
             partition_id: TQ partition (``"train"`` or ``"val"``).
         """
@@ -271,11 +288,14 @@ class RolloutTqSkip(BaseSkip):
         # Key format: {uid}_{session_id}_{index}, uid is UUID4 (no underscores).
         # ReplayBuffer.sample() does NOT guarantee keys are sorted by uid prefix,
         # so we use a dict to group regardless of key ordering.
+        parsed_rows = [_parse_trajectory_key(key) for key in old_keys]
         uid_to_indices: dict[str, list[int]] = {}
-        for idx, key in enumerate(old_keys):
-            parent_uid = key.split("_")[0]
+        for idx, (parent_uid, _, _) in enumerate(parsed_rows):
             uid_to_indices.setdefault(parent_uid, []).append(idx)
-        groups = list(uid_to_indices.values())
+        # Deterministic replay order within each group: by original (session_id, index).
+        groups = [
+            sorted(indices, key=lambda i: (parsed_rows[i][1], parsed_rows[i][2])) for indices in uid_to_indices.values()
+        ]
 
         if not groups:
             raise RuntimeError(
@@ -298,18 +318,23 @@ class RolloutTqSkip(BaseSkip):
             )
 
         # Build new keys/tags: map each new uid to a cached group.
-        # If group has fewer than *n* trajectories (some sessions failed),
-        # cycle within the group to fill *n* trajectories.
         # If cached groups < new prompts, cycle through groups (modulo).
+        # Inside a group, every cached trajectory row is replayed exactly once with
+        # its original {session_id, index}; no row is relabelled to index 0,
+        # dropped, duplicated, or fabricated to satisfy rollout.n.  Groups with
+        # failed sessions simply replay fewer rows (downstream padding handles
+        # the missing sessions).
         new_keys = []
         new_tags = []
+        new_row_uids = []
         traj_indices: list[int] = []
         for prompt_idx, new_uid in enumerate(new_prompt_uids):
             group = groups[prompt_idx % num_cached_groups]
-            for session_id in range(n):
-                traj_idx = group[session_id % len(group)]
+            for traj_idx in group:
+                _, session_id, index = parsed_rows[traj_idx]
                 traj_indices.append(traj_idx)
-                new_keys.append(f"{new_uid}_{session_id}_0")
+                new_keys.append(f"{new_uid}_{session_id}_{index}")
+                new_row_uids.append(new_uid)
                 tag = dict(old_tags[traj_idx])
                 tag["global_steps"] = global_steps
                 tag["min_global_steps"] = global_steps
@@ -322,6 +347,14 @@ class RolloutTqSkip(BaseSkip):
         from verl.utils.tensordict_utils import index_select_tensor_dict
 
         new_fields = index_select_tensor_dict(data, traj_indices)
+
+        # ``index_select_tensor_dict`` returns the *old* uids, but ``new_keys``
+        # are built from ``new_uid``. Both grouping paths (GRPO baseline reading
+        # this field, and key parsing) must see the same uid.
+        if "uid" in new_fields:
+            from tensordict import NonTensorData, NonTensorStack
+
+            new_fields["uid"] = NonTensorStack.from_list([NonTensorData(uid) for uid in new_row_uids])
 
         # Write trajectory data to TQ
         tq.kv_batch_put(
@@ -341,7 +374,7 @@ class RolloutTqSkip(BaseSkip):
 
         print(
             f"{self.print_mark}\033[33mInjected {len(new_keys)} cached trajectories "
-            f"from step {load_step} ({len(new_prompt_uids)} prompts x {n}) "
+            f"({len(new_prompt_uids)} prompts) from step {load_step} "
             f"into TQ partition '{partition_id}' at current step {step}\033[0m",
             flush=True,
         )
