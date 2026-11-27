@@ -364,10 +364,8 @@ def test_lce_non_divisible_vocab_padding():
     Reproducing construction: one token-logit at +3, all others at -15
     → denominator ≈ 20, phantom adds ≈ 25 → error ≈ 0.82 per token.
     """
-    # linear_cross_entropy sends NPU tensors to the CANN backend, not this Triton kernel;
-    # CANN is covered by test_cann_linear_ce_on_npu.py.
-    if not is_device_available() or get_device_name() == "npu":
-        pytest.skip("requires a non-NPU accelerator running the Triton kernel")
+    if not is_device_available():
+        pytest.skip("requires an accelerator running the Triton kernel")
 
     torch.manual_seed(0)
 

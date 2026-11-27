@@ -16,6 +16,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .lce_kernel import LinearCrossEntropy, linear_cross_entropy
+from .lce_kernel import LinearCrossEntropy, _get_backend_kernels, linear_cross_entropy
 
-__all__ = ["LinearCrossEntropy", "linear_cross_entropy"]
+__all__ = ["LinearCrossEntropy", "_get_backend_kernels", "linear_cross_entropy"]

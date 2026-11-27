@@ -24,6 +24,18 @@ import torch.distributed as dist
 from verl.plugin.platform import get_platform
 
 
+def _get_backend_kernels(device_type: str):
+    if device_type == "cuda":
+        from . import kernels
+
+        return kernels
+    if device_type == "npu":
+        from . import lce_asc
+
+        return lce_asc
+    raise ValueError(f"Unsupported device type: {device_type}")
+
+
 class LinearCrossEntropy(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -39,9 +51,9 @@ class LinearCrossEntropy(torch.autograd.Function):
         assert isinstance(temperature, float), f"temperature must be a float, but got {type(temperature)}"
         assert isinstance(reduction, str), f"reduction must be a str, but got {type(reduction)}"
         with get_platform().nvtx_range("LinearCrossEntropy-forward"):
-            from . import kernels
+            backend_kernels = _get_backend_kernels(hidden.device.type)
 
-            reduction_enum = kernels.get_entropy_reduction_enum_number(reduction.lower())
+            reduction_enum = backend_kernels.get_entropy_reduction_enum_number(reduction.lower())
 
             original_hidden_shape = hidden.shape
             multi_label = labels.ndim == hidden.ndim and labels.shape[:-1] == hidden.shape[:-1]
@@ -56,10 +68,11 @@ class LinearCrossEntropy(torch.autograd.Function):
                 weight = weight.contiguous()
                 labels = labels.reshape(hidden.shape[0], labels.shape[-1]).contiguous()
             else:
-                hidden = hidden.view(-1, hidden.shape[-1])
+                hidden = hidden.reshape(-1, hidden.shape[-1]).contiguous()
+                weight = weight.contiguous()
                 labels = labels.reshape(-1).contiguous()
 
-            logprobs, entropy, maximum, accumulate, entropy_b = kernels.efficient_entropy_forward(
+            logprobs, entropy, maximum, accumulate, entropy_b = backend_kernels.efficient_entropy_forward(
                 hidden,
                 weight,
                 labels,
@@ -82,12 +95,11 @@ class LinearCrossEntropy(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dlogprobs: torch.Tensor, dentropy: torch.Tensor) -> list[torch.Tensor]:
-        from . import kernels
-
         with get_platform().nvtx_range("LinearCrossEntropy-backward"):
             hidden, weight, labels, maximum, accumulate, entropy_b = ctx.saved_tensors
+            backend_kernels = _get_backend_kernels(hidden.device.type)
 
-            d_hidden, d_weight = kernels.efficient_entropy_backward(
+            d_hidden, d_weight = backend_kernels.efficient_entropy_backward(
                 dlogprobs.reshape_as(labels).contiguous() if labels.ndim == 2 else dlogprobs.contiguous(),
                 dentropy.reshape(-1).contiguous(),
                 hidden,
