@@ -194,6 +194,9 @@ class SGLangHttpServer:
         # Cleared before the tokenizer manager pauses, set after it resumes.
         self._generation_allowed = asyncio.Event()
         self._generation_allowed.set()
+        # Set by abort_all_requests(reject_request=True) when no resume is coming soon.
+        self._rejecting = False
+        self._generation_control_lock = asyncio.Lock()
 
         # PD peer linkage populated post-launch by SGLangPDReplica.set_pd_peer.
         self._pd_decode_peers: list[ActorHandle] = []
@@ -568,6 +571,10 @@ class SGLangHttpServer:
         bootstrap_room: Optional[int] = None,
         session_id: Optional[str] = None,
     ) -> TokenOutput:
+        rejected = await self._park_until_allowed(request_id)
+        if rejected is not None:
+            return rejected
+
         # PD top-level dispatch: prefill mints a bootstrap_room and fans out
         # paired local-prefill + remote-decode calls; decode returns the tokens
         # (prefill only materialises KV and pushes via NIXL). Random peer
@@ -575,28 +582,41 @@ class SGLangHttpServer:
         if self._disaggregation_role == "prefill" and self._pd_decode_peers and bootstrap_room is None:
             room = secrets.randbits(63)
             decode_peer = self._pd_decode_peers[secrets.randbelow(len(self._pd_decode_peers))]
-            prefill_coro = self.generate(
+            decode_rid = f"{request_id}_D"
+            prefill_task = asyncio.create_task(
+                self.generate(
+                    prompt_ids,
+                    dict(sampling_params),
+                    f"{request_id}_P",
+                    image_data=image_data,
+                    video_data=video_data,
+                    bootstrap_host=self._pd_bootstrap_host,
+                    bootstrap_port=self._disaggregation_bootstrap_port,
+                    bootstrap_room=room,
+                )
+            )
+            decode_ref = decode_peer.generate.remote(
                 prompt_ids,
                 dict(sampling_params),
-                f"{request_id}_P",
+                decode_rid,
                 image_data=image_data,
                 video_data=video_data,
                 bootstrap_host=self._pd_bootstrap_host,
                 bootstrap_port=self._disaggregation_bootstrap_port,
                 bootstrap_room=room,
             )
-            decode_coro = decode_peer.generate.remote(
-                prompt_ids,
-                dict(sampling_params),
-                f"{request_id}_D",
-                image_data=image_data,
-                video_data=video_data,
-                bootstrap_host=self._pd_bootstrap_host,
-                bootstrap_port=self._disaggregation_bootstrap_port,
-                bootstrap_room=room,
-            )
-            _, decode_output = await asyncio.gather(prefill_coro, decode_coro)
-            return decode_output
+            decode_task = asyncio.ensure_future(decode_ref)
+            prefill_output = await prefill_task
+            if prefill_output.stop_reason == "aborted":
+                if hasattr(decode_peer, "abort_request"):
+                    try:
+                        await decode_peer.abort_request.remote(decode_rid)
+                    except Exception:
+                        logger.debug("failed to abort paired PD decode request %s", decode_rid, exc_info=True)
+                decode_task.cancel()
+                await asyncio.gather(decode_task, return_exceptions=True)
+                return prefill_output
+            return await decode_task
 
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
         max_possible_tokens = self.config.max_model_len - len(prompt_ids) - 1
@@ -673,12 +693,9 @@ class SGLangHttpServer:
             generate_request.lora_path = SGLANG_LORA_NAME
 
         if self.config.external_kv_cache_invalidation == "salt":
-            # A request submitted while paused waits inside generate_request() and then runs on
-            # the updated weights, so wait out the pause here and salt it with those weights.
-            # The gate closes before the tokenizer manager pauses, so a request that passes it
-            # either reaches the engine first and is aborted, or waits behind this gate. This
-            # relies on generate_request() not yielding before its own pause check (SGLang 0.5.20).
-            await self._generation_allowed.wait()
+            # Requests already waited out any pause in _park_until_allowed() above, so global_steps
+            # reflects the weights this request will run on. This relies on generate_request() not
+            # yielding before its own pause check (SGLang 0.5.20).
             generate_request.cache_salt = prefix_cache_salt(self.config, self.global_steps)
 
         with RLInsightLogger.trace_state(
@@ -757,22 +774,76 @@ class SGLangHttpServer:
         """Set the global steps of the model weights."""
         self.global_steps = global_steps
 
-    async def abort_all_requests(self):
+    def _get_generation_control_lock(self) -> asyncio.Lock:
+        lock = getattr(self, "_generation_control_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._generation_control_lock = lock
+        return lock
+
+    async def _park_until_allowed(self, request_id: str) -> Optional[TokenOutput]:
+        """Wait out a closed gate, or fail the request when the gate rejects late arrivals.
+
+        Returns None once generation is allowed, or an aborted TokenOutput telling the client
+        to re-route. Rejection is checked before waiting and again on wake-up so a temporary
+        pause that turns into a deactivation immediately fails parked requests.
+        """
+        while not self._generation_allowed.is_set() or getattr(self, "_rejecting", False):
+            if getattr(self, "_rejecting", False):
+                logger.debug("rejecting request %s: SGLang replica left rotation while paused", request_id)
+                return TokenOutput(
+                    token_ids=[],
+                    log_probs=None,
+                    stop_reason="aborted",
+                    extra_fields={"global_steps": self.global_steps},
+                )
+            await self._generation_allowed.wait()
+        return None
+
+    async def abort_all_requests(self, reject_request: bool = False):
         if self.node_rank != 0:
             return
-        self._generation_allowed.clear()
-        try:
-            await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
-        except Exception:
-            # Not paused, so do not hold requests behind the gate.
-            self._generation_allowed.set()
-            raise
+        async with self._get_generation_control_lock():
+            was_allowed = self._generation_allowed.is_set()
+            was_rejecting = getattr(self, "_rejecting", False)
+            self._rejecting = reject_request
+            if reject_request:
+                # Wake requests parked behind an earlier plain pause so they observe _rejecting.
+                self._generation_allowed.set()
+            else:
+                self._generation_allowed.clear()
+            try:
+                await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
+            except Exception:
+                if was_allowed and not was_rejecting and not reject_request:
+                    # pause_generation may have set native is_pause=True before raising;
+                    # undo that side effect before reopening the gate.
+                    try:
+                        await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
+                    except Exception:
+                        self._rejecting = True
+                        self._generation_allowed.set()
+                    else:
+                        self._generation_allowed.set()
+                else:
+                    self._rejecting = True
+                    self._generation_allowed.set()
+                raise
+
+    async def abort_request(self, request_id: str) -> None:
+        if self.node_rank != 0:
+            return
+        abort_fn = getattr(self.tokenizer_manager, "abort_request", None)
+        if abort_fn is not None:
+            abort_fn(rid=request_id)
 
     async def resume_generation(self):
         if self.node_rank != 0:
             return
-        await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
-        self._generation_allowed.set()
+        async with self._get_generation_control_lock():
+            await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
+            self._rejecting = False
+            self._generation_allowed.set()
 
     async def start_profile(self, **kwargs):
         if (
@@ -939,16 +1010,7 @@ class SGLangReplica(RolloutReplica):
         SGLang control RPCs are only served by the node-rank 0 server for a
         multi-node replica, so avoid broadcasting this call to every server.
         """
-        if reject_request:
-            # SGLang blocks new requests inside its own tokenizer manager, so verl has no
-            # admission point to fail them at. Requests routed here after the pause wait
-            # until continue_generation(). TODO: add a verl-side gate in front of
-            # tokenizer_manager.pause_generation() so this replica can reject them too.
-            logger.warning(
-                "SGLang rollout ignores reject_request=True: requests arriving while generation "
-                "is paused will wait for the next resume_generation() instead of failing over."
-            )
-        await self.servers[0].abort_all_requests.remote()
+        await self.servers[0].abort_all_requests.remote(reject_request=reject_request)
 
     async def resume_generation(self):
         """Resume generation on the primary server after abort_all_requests."""
