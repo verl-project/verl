@@ -13,14 +13,18 @@
 # limitations under the License.
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import torch
 from omegaconf import OmegaConf
 
+import verl.experimental.agent_loop.agent_loop as agent_loop_module
 import verl.trainer.ppo.v1.agent_loop_tq as agent_loop_tq_module
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput, AgentLoopWorker
 from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ, _settle_session_tasks, apply_greedy_sampling_params
+from verl.utils.tokenizer.deepseek import expand_image_tokens
 
 
 def test_settle_session_tasks_waits_for_siblings_after_failure():
@@ -86,6 +90,16 @@ async def _postprocess(monkeypatch, worker: _DummyWorker, output: AgentLoopOutpu
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_tq_keeps_padded_text_routes(monkeypatch):
+    output = _output({})
+    output.routed_experts = torch.tensor([10, 20, 30], dtype=torch.int16).reshape(-1, 1, 1).numpy()
+
+    fields = await _postprocess(monkeypatch, _DummyWorker(topk_log_probs=0), output, validate=False)
+
+    assert fields["routed_experts"][0].flatten().tolist() == [10, 20, 30, 0, 0]
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_tq_postprocess_stores_unpadded_rollout_topk(monkeypatch):
     output = _output(
         {"response_topk_ids": [[11, 13], [12, 14]], "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]]}
@@ -101,6 +115,87 @@ async def test_agent_loop_tq_postprocess_stores_unpadded_rollout_topk(monkeypatc
     assert ids[0].tolist() == [0, 1] and ids[4].tolist() == [0, 1]
     assert "response_topk_ids" not in fields["extra_fields"][0]
     assert fields["rollout_support_complete"][0].tolist() == [True, True, False, False, True]
+
+
+@pytest.mark.asyncio
+async def test_expanded_prompt_realigns_rollout_heads_and_coverage(monkeypatch):
+    """Response predictions stay at prompt_length - 1 after adopting the expanded image prompt."""
+    prompt = [101, 129264, 129264, 129264, 129264, 103]
+    worker = _DummyWorker(topk_log_probs=2)
+    worker._compute_multi_modal_inputs = lambda output, ids: {
+        "_expanded_input_ids": torch.tensor([prompt + output.response_ids]),
+        "_image_source_rows": torch.tensor([0, 1, 5, 6, 7]),
+    }
+    output = _output(
+        {
+            "response_topk_ids": [[11, 13], [12, 14]],
+            "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]],
+            "response_support_complete": [True, False],
+        }
+    )
+    fields = await _postprocess(monkeypatch, worker, output, validate=False)
+    ids, log_probs, complete = (
+        fields[key][0] for key in ("rollout_topk_ids", "rollout_topk_log_probs", "rollout_support_complete")
+    )
+    start = len(prompt) - 1
+    assert ids.shape == log_probs.shape == (len(prompt) + 2, 2)
+    assert ids[start : start + 2].tolist() == [[11, 13], [12, 14]]
+    torch.testing.assert_close(log_probs[start : start + 2], torch.tensor([[-0.1, -2.0], [-0.2, -1.5]]))
+    assert complete.tolist() == [True] * start + [True, False, True]
+    assert ids[:start].tolist() == [[0, 1]] * start
+    assert ids[-1].tolist() == [0, 1]
+    assert log_probs[:start].exp().tolist() == [[0.5, 0.5]] * start
+    torch.testing.assert_close(fields["responses"][0], torch.tensor([11, 12]))
+
+
+@pytest.mark.asyncio
+async def test_tool_image_expansion_realigns_response_metadata_and_routes(monkeypatch):
+    worker = _DummyWorker(topk_log_probs=2)
+
+    def compute_multimodal_inputs(output, input_ids):
+        grids = torch.tensor([[1, 1], [1, 1]])
+        ids, types, source_rows = expand_image_tokens(input_ids, grids, 99, 1)
+        return {
+            "_expanded_input_ids": ids,
+            "image_grid_hws": grids,
+            "vision_token_types": types,
+            "_image_source_rows": source_rows,
+        }
+
+    worker._compute_multi_modal_inputs = compute_multimodal_inputs
+    teacher = AsyncMock(return_value=(torch.arange(12).unsqueeze(-1), torch.zeros(12, 1)))
+    worker.distillation_enabled = True
+    worker.teacher_key = "teacher"
+    worker.teacher_server_manager = SimpleNamespace(compute_teacher_logprobs_single=teacher)
+    output = AgentLoopOutput(
+        prompt_ids=[101, 99, 99, 99, 99, 102],
+        response_ids=[11, 99, 12],
+        response_mask=[1, 0, 1],
+        response_logprobs=[-0.1, 0.0, -0.2],
+        routed_experts=torch.tensor([10, 21, 30, 40, 51]).reshape(-1, 1, 1).numpy(),
+        reward_score=0.5,
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "response_topk_ids": [[11, 13], [99, 98], [12, 14]],
+            "response_topk_log_probs": [[-0.1, -2.0], [-0.3, -1.0], [-0.2, -1.5]],
+            "response_support_complete": [False, True, False],
+        },
+    )
+
+    fields = await _postprocess(monkeypatch, worker, output, validate=False)
+
+    assert fields["prompts"][0].tolist() == output.prompt_ids
+    assert fields["responses"][0].tolist() == [11, 99, 99, 99, 99, 12]
+    assert fields["response_mask"][0].tolist() == [1, 0, 0, 0, 0, 1]
+    assert fields["rollout_log_probs"][0].tolist() == pytest.approx([-0.1, 0, 0, 0, 0, -0.2])
+    assert fields["rm_scores"][0].tolist() == [0, 0, 0, 0, 0, 0.5]
+    assert fields["rollout_topk_ids"][0][[5, 6, 7, 10]].tolist() == [[11, 13], [99, 98], [0, 1], [12, 14]]
+    assert fields["rollout_support_complete"][0].logical_not().nonzero().flatten().tolist() == [5, 10]
+    assert fields["routed_experts"][0].flatten().tolist() == [10, 0, 0, 0, 0, 30, 40, 0, 0, 0, 0, 0]
+    assert teacher.call_args.kwargs["sequence_ids"] == output.prompt_ids + [11, 99, 99, 99, 99, 12]
+    assert teacher.call_args.kwargs["vision_token_types"] == [-1, 0, 1, 2, 3, -1, -1, 0, 1, 2, 3, -1]
+    assert fields["teacher_ids"][0].flatten().tolist() == list(range(12))
 
 
 @pytest.mark.asyncio
@@ -143,3 +238,35 @@ async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypa
 
     assert "rollout_topk_ids" not in fields.keys()
     assert "rollout_topk_log_probs" not in fields.keys()
+
+
+@pytest.mark.parametrize("first_span, second_span", [(1, 1), (4, 5), (4, 1), (1, 5)])
+def test_deepseek_processor_accepts_compact_and_expanded_images(monkeypatch, first_span, second_span):
+    """DeepSeek-V4.1 prompts with one placeholder or a full span per image expand to the same tokens."""
+    from transformers import BatchFeature
+
+    worker = object.__new__(_WorkerTQ)
+    worker.processor = SimpleNamespace(
+        config=SimpleNamespace(
+            model_type="deepseek_v41",
+            image_token_id=129264,
+            vision_config=SimpleNamespace(patch_size=14, downsample_ratio=3),
+        )
+    )
+    monkeypatch.setattr(
+        agent_loop_module,
+        "build_multimodal_processor_inputs",
+        lambda *args, **kwargs: BatchFeature({"image_grid_hws": torch.tensor([[3, 3], [3, 6]])}),
+    )
+    input_ids = [10] + [129264] * (first_span + second_span) + [12]
+    result = worker._compute_multi_modal_inputs(
+        SimpleNamespace(multi_modal_data={"images": [object(), object()]}, mm_processor_kwargs={}),
+        torch.tensor(input_ids),
+    )
+    assert result["_expanded_input_ids"].tolist() == [[10] + [129264] * 9 + [12]]
+    assert result["vision_token_types"].tolist() == [[-1, 0, 1, 2, 3, 0, 1, 1, 2, 3, -1]]
+
+
+def test_deepseek_processor_rejects_ambiguous_adjacent_image_boundaries():
+    with pytest.raises(ValueError, match="ambiguous compact/expanded span boundaries"):
+        expand_image_tokens(torch.tensor([10] + [99] * 5 + [12]), torch.tensor([[1, 1], [1, 1]]), 99, 1)

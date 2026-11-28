@@ -26,6 +26,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AgentLoopBase,
     AgentLoopOutput,
     ToolListWrap,
+    _deepseek_v41_processor_inputs,
     register,
 )
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
@@ -33,6 +34,11 @@ from verl.tools.function_tool import FunctionTool, normalize_function_tool_retur
 from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, ToolResponse
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.tokenizer.deepseek import (
+    DeepSeekV41ContinuousTokenBuilder,
+    DeepSeekV41VLContinuousTokenBuilder,
+    expand_image_tokens,
+)
 from verl.workers.rollout.replica import TokenOutput
 
 logger = logging.getLogger(__file__)
@@ -83,6 +89,7 @@ class AgentData:
         self.mm_processor_output: Optional[list[dict[str, Any]]] = None
         self.response_ids: list[int] = []
         self.response_mask: list[int] = []
+        self.response_image_expansion = 0
         self.response_logprobs: list[float] = []
         self.turn_scores: list[float] = []
         self.tool_rewards: list[float] = []
@@ -119,8 +126,12 @@ class ToolAgentLoop(AgentLoopBase):
         tool_list = tools.tools if tools else []
         self.tools = {tool.name: tool for tool in tool_list}
         self.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
-        self.tool_parser = ToolParser.get_tool_parser(self.rollout_config.multi_turn.format, self.tokenizer)
         self.tool_parser_name = self.rollout_config.multi_turn.format
+        if isinstance(
+            self.continuous_token_builder, DeepSeekV41ContinuousTokenBuilder | DeepSeekV41VLContinuousTokenBuilder
+        ) and self.tool_parser_name in ("deepseek_v4", "hermes"):
+            self.tool_parser_name = "deepseek_v41"
+        self.tool_parser = ToolParser.get_tool_parser(self.tool_parser_name, self.tokenizer)
 
         self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
@@ -182,8 +193,9 @@ class ToolAgentLoop(AgentLoopBase):
                 state = AgentState.TERMINATED
 
         # Finalize output
-        response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
-        prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
+        prompt_length = len(agent_data.prompt_ids) - len(agent_data.response_mask)
+        prompt_ids = agent_data.prompt_ids[:prompt_length]
+        response_ids = agent_data.prompt_ids[prompt_length:]
         multi_modal_data = {}
         if agent_data.image_data is not None:
             multi_modal_data["images"] = agent_data.image_data
@@ -191,6 +203,16 @@ class ToolAgentLoop(AgentLoopBase):
             multi_modal_data["videos"] = agent_data.video_data
         if agent_data.audio_data is not None:
             multi_modal_data["audios"] = agent_data.audio_data
+
+        routed_experts = agent_data.routed_experts
+        if routed_experts is not None:
+            model_type = getattr(getattr(self.processor, "config", None), "model_type", None)
+            if agent_data.image_data and model_type == "deepseek_v41":
+                # Route buffers can already include full image spans. Trim only the discarded response suffix.
+                dropped_tokens = max(0, len(response_ids) - self.response_length)
+                routed_experts = routed_experts[: max(0, len(routed_experts) - dropped_tokens)]
+            else:
+                routed_experts = routed_experts[: len(prompt_ids) + self.response_length]
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
@@ -204,11 +226,7 @@ class ToolAgentLoop(AgentLoopBase):
             else None,
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
-            routed_experts=(
-                agent_data.routed_experts[: len(prompt_ids) + self.response_length]
-                if agent_data.routed_experts is not None
-                else None
-            ),
+            routed_experts=routed_experts,
             extra_fields=agent_data.extra_fields,
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
@@ -241,6 +259,14 @@ class ToolAgentLoop(AgentLoopBase):
         if self.tool_parser.stop_token_ids:
             stop_token_ids = list(set((sampling_params.get("stop_token_ids") or []) + self.tool_parser.stop_token_ids))
             sampling_params = {**sampling_params, "stop_token_ids": stop_token_ids}
+
+        if agent_data.response_image_expansion:
+            remaining = self.response_length - len(agent_data.response_mask) - agent_data.response_image_expansion
+            if remaining <= 0:
+                return AgentState.TERMINATED
+            sampling_params = dict(sampling_params)
+            limit = sampling_params.pop("max_tokens", sampling_params.pop("max_new_tokens", remaining))
+            sampling_params["max_tokens"] = min(limit, remaining)
 
         with simple_timer("generate_sequences", agent_data.metrics):
             output: TokenOutput = await self.server_manager.generate(
@@ -285,11 +311,14 @@ class ToolAgentLoop(AgentLoopBase):
         if response_logprobs is not None:
             agent_data.response_logprobs = response_logprobs
 
-        if output.routed_experts is not None:
-            agent_data.routed_experts = output.routed_experts
+        # Each generation describes the latest trajectory. An aborted turn may have no routes.
+        agent_data.routed_experts = output.routed_experts
+        if output.stop_reason in ("abort", "aborted"):
+            return AgentState.TERMINATED
 
         # Check termination conditions
-        if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
+        response_length = len(agent_data.response_mask) + agent_data.response_image_expansion
+        if not ignore_termination and response_length >= self.response_length:
             return AgentState.TERMINATED
         if self.max_assistant_turns and agent_data.assistant_turns >= self.max_assistant_turns:
             return AgentState.TERMINATED
@@ -382,32 +411,56 @@ class ToolAgentLoop(AgentLoopBase):
         # so a failure never leaves a half-built prompt behind.
         self._assert_mm_supported(bool(new_images_this_turn))
 
-        agent_data.messages.extend(add_messages)
+        updated_messages = agent_data.messages + add_messages
 
         schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
         merge_result, response_mask, response_logprobs = await self.ct_merge_context_msg(
             previous_messages,
-            agent_data.messages,
+            updated_messages,
             agent_data.prompt_ids,
             agent_data.response_mask,
             agent_data.response_logprobs if agent_data.response_logprobs else None,
             tools=schemas,
         )
-        if len(response_mask) >= self.response_length:
+        response_image_expansion = agent_data.response_image_expansion
+        if len(response_mask) + response_image_expansion >= self.response_length:
             return AgentState.TERMINATED
+
+        images = agent_data.image_data
+        if new_images_this_turn:
+            previous_images = images if isinstance(images, list) else [] if images is None else [images]
+            images = previous_images + new_images_this_turn
+            config = getattr(self.processor, "config", None)
+            if getattr(config, "model_type", None) == "deepseek_v41":
+                features = await asyncio.to_thread(
+                    _deepseek_v41_processor_inputs,
+                    self.processor,
+                    images,
+                    agent_data.video_data,
+                    agent_data.audio_data,
+                    agent_data.mm_processor_kwargs,
+                )
+                ids, _, source_rows = expand_image_tokens(
+                    torch.tensor(merge_result.token_ids),
+                    features.convert_to_tensors("pt")["image_grid_hws"],
+                    config.image_token_id,
+                    config.vision_config.downsample_ratio,
+                )
+                response_start = source_rows[-len(response_mask)].item()
+                expanded_response_length = ids.numel() - response_start
+                if expanded_response_length >= self.response_length:
+                    return AgentState.TERMINATED
+                response_image_expansion = expanded_response_length - len(response_mask)
+
+        agent_data.messages = updated_messages
         agent_data.prompt_ids = merge_result.token_ids
         agent_data.response_mask = response_mask
+        agent_data.response_image_expansion = response_image_expansion
         if agent_data.response_logprobs:
             agent_data.response_logprobs = response_logprobs or []
 
         # Keep original image objects for rollout and final multimodal postprocessing.
-        if new_images_this_turn:
-            if agent_data.image_data is None:
-                agent_data.image_data = []
-            elif not isinstance(agent_data.image_data, list):
-                agent_data.image_data = [agent_data.image_data]
-            for img in new_images_this_turn:
-                agent_data.image_data.append(img)
+        agent_data.image_data = images
 
         agent_data.user_turns += 1
         return AgentState.GENERATING

@@ -24,6 +24,10 @@ class Qwen2_5_VLProcessor(SimpleNamespace):
     """Stands in for transformers' Qwen2_5_VLProcessor, which the dedup matches by class name."""
 
 
+class Glm5NextProcessor(SimpleNamespace):
+    """Stands in for the GLM-5.3-Flash processor."""
+
+
 class Gemma4Processor(SimpleNamespace):
     """Stands in for transformers' Gemma4Processor, which the dedup matches by class name."""
 
@@ -42,6 +46,13 @@ def test_qwen_image_and_video_pads_collapse_to_one_pad():
     prompt_ids = [1, START, IMAGE_PAD, IMAGE_PAD, IMAGE_PAD, END, START, VIDEO_PAD, VIDEO_PAD, END, 2]
 
     assert dedup_image_tokens(prompt_ids, processor) == [1, START, IMAGE_PAD, END, START, VIDEO_PAD, END, 2]
+
+
+def test_glm_collapses_repeated_pads_and_keeps_distinct_adjacent_pads():
+    processor = Glm5NextProcessor(image_token_id=IMAGE_PAD, video_token_id=VIDEO_PAD)
+    prompt_ids = [1, START, IMAGE_PAD, IMAGE_PAD, VIDEO_PAD, VIDEO_PAD, END, 2]
+
+    assert dedup_image_tokens(prompt_ids, processor) == [1, START, IMAGE_PAD, VIDEO_PAD, END, 2]
 
 
 def test_each_gemma4_image_block_collapses_to_one_image_token():

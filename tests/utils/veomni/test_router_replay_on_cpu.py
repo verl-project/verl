@@ -276,6 +276,12 @@ def test_begin_microbatch_replay_without_targets_raises(ctrl):
         ctrl.begin_microbatch()
 
 
+def test_replay_rejects_single_expert_targets(ctrl):
+    ctrl.begin_replay()
+    with pytest.raises(ValueError, match="top-k greater than 1"):
+        ctrl.begin_microbatch(targets=[torch.zeros((_NNZ, 1), dtype=torch.int64)])
+
+
 def test_begin_microbatch_record_with_targets_raises(ctrl):
     ctrl.begin_record()
     with pytest.raises(RuntimeError, match="RECORD does not take targets"):

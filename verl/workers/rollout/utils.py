@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import os
+from itertools import groupby, zip_longest
 
 import numpy as np
 import ray
@@ -108,11 +109,54 @@ async def ensure_async_iterator(iterable):
             yield item
 
 
+def routing_replay_prompts_match(
+    actor_ids: list[int],
+    rollout_ids: list[int],
+    *,
+    image_token_id: int | None = None,
+    image_count: int = 0,
+) -> bool:
+    """Compare replay prompts, allowing V4.1 image expansion from a compact prompt only."""
+    if actor_ids == rollout_ids:
+        return True
+    if image_token_id is None or image_count <= 0:
+        return False
+    compact, expanded = sorted((actor_ids, rollout_ids), key=len)
+    if compact.count(image_token_id) != image_count:
+        return False
+
+    runs = zip_longest(groupby(compact), groupby(expanded), fillvalue=(None, ()))
+    for (token, compact_run), (other_token, expanded_run) in runs:
+        if token != other_token:
+            return False
+        compact_len = sum(1 for _ in compact_run)
+        expanded_len = sum(1 for _ in expanded_run)
+        if token == image_token_id:
+            # A V4.1 image spans 2 + height * (width + 1) tokens, at least four per image.
+            if expanded_len < 4 * compact_len:
+                return False
+        elif expanded_len != compact_len:
+            return False
+    return True
+
+
+def validate_deepseek_v41_route_count(route_rows: int, model_prompt_tokens: int | None, generated_tokens: int) -> None:
+    """Require routes to cover the rollout model's token order, including its expanded prompt."""
+    if model_prompt_tokens is None:
+        raise ValueError("DeepSeek-V4.1 routing replay requires the rollout model's prompt token count")
+    sequence_length = model_prompt_tokens + generated_tokens
+    if route_rows not in (sequence_length, sequence_length - 1):
+        raise ValueError(
+            "DeepSeek-V4.1 routing replay requires one route row per rollout token "
+            f"(apart from the optional final row), got {route_rows} route rows for {sequence_length} tokens"
+        )
+
+
 def dedup_image_tokens(prompt_ids: list[int], processor):
     """Deduplicate image tokens in prompt_ids, since vLLM will expand each image placeholder by image_data.
     For example,
     ```
-    Qwen2-VL, Qwen2.5-VL and Qwen3-VL (the same for <|video_pad|>):
+    Qwen2-VL, Qwen2.5-VL, Qwen3-VL and GLM-5.3-Flash (the same for <|video_pad|>):
     <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
     =>
     <|vision_start|><|image_pad|><|vision_end|>
@@ -124,11 +168,11 @@ def dedup_image_tokens(prompt_ids: list[int], processor):
     ```
     """
     match processor.__class__.__name__:
-        case "Qwen2VLProcessor" | "Qwen2_5_VLProcessor" | "Qwen3VLProcessor":
+        case "Qwen2VLProcessor" | "Qwen2_5_VLProcessor" | "Qwen3VLProcessor" | "Glm5NextProcessor":
             prompt_ids = np.array(prompt_ids)
             mask = np.ones(len(prompt_ids), dtype=bool)
             is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
-            mask[1:] &= ~(is_value[1:] & is_value[:-1])
+            mask[1:] &= ~(is_value[1:] & (prompt_ids[1:] == prompt_ids[:-1]))
             return prompt_ids[mask].tolist()
         case "Gemma4Processor":
             prompt_ids = np.array(prompt_ids)

@@ -31,8 +31,10 @@ from verl.experimental.agent_loop import (
     AgentLoopWorker,
     get_trajectory_info,
 )
+from verl.experimental.agent_loop.agent_loop import _expand_deepseek_v41_output
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
+from verl.utils.tokenizer.deepseek import align_deepseek_v41_routes
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -165,15 +167,6 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         await self._compute_score(outputs, kwargs=kwargs)
 
         final_output = outputs[-1]
-        # TODO: Support output:list[AgentLoopOutput]
-        await self._compute_teacher_logprobs(
-            final_output,
-            prompt_ids=final_output.prompt_ids,
-            response_ids=final_output.response_ids,
-            validate=validate,
-            sample_kwargs=kwargs,
-        )
-
         if final_output.reward_score is not None:
             for output in outputs[:-1]:
                 output.reward_score = final_output.reward_score
@@ -189,17 +182,66 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
             responses = torch.tensor(output.response_ids, dtype=torch.int64)
             input_ids = torch.cat([prompts, responses], dim=0)
-            attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
             multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
+            expanded, response_rows = _expand_deepseek_v41_output(output, multi_modal_inputs)
+            vision_types = None
+            if "image_grid_hws" in multi_modal_inputs and multi_modal_inputs["image_grid_hws"].numel():
+                vision_types = multi_modal_inputs.get("vision_token_types")
+            aligned_routes = None
+            if output.routed_experts is not None and vision_types is not None:
+                experts = torch.as_tensor(output.routed_experts, dtype=torch.int16).detach().cpu()
+                if experts.ndim != 3:
+                    raise ValueError(
+                        f"routed_experts must have shape [sequence, layers, topk], got {tuple(experts.shape)}"
+                    )
+                aligned_routes = align_deepseek_v41_routes(experts, vision_types[0].tolist())
+            if i == len(outputs) - 1:
+                await self._compute_teacher_logprobs(
+                    output,
+                    prompt_ids=expanded.prompt_ids,
+                    response_ids=expanded.response_ids,
+                    validate=validate,
+                    sample_kwargs=kwargs,
+                    vision_token_types=vision_types,
+                )
+
+            keys.append(f"{uid}_{session_id}_{i}")
+            field = output.as_dict(aligned_routes=aligned_routes)
+            field.update(kwargs)
+            # do not store raw image/video
+            field.pop("multi_modal_data", None)
+            # Adopt the actor image expansion while preserving response token boundaries.
+            if response_rows is not None:
+                field["prompts"] = torch.tensor(expanded.prompt_ids, dtype=torch.int64)
+                field["responses"] = torch.tensor(expanded.response_ids, dtype=torch.int64)
+                field["response_mask"] = torch.tensor(expanded.response_mask, dtype=torch.int64)
+                input_ids = torch.cat([field["prompts"], field["responses"]], dim=0)
+                if expanded.response_logprobs is not None:
+                    field["rollout_log_probs"] = torch.tensor(expanded.response_logprobs, dtype=torch.float32)
+                if "rollout_topk_ids" in field:
+                    from verl.trainer.ppo.score_centering import dummy_rollout_topk
+
+                    old_rows = slice(prompts.size(0) - 1, prompts.size(0) - 1 + responses.size(0))
+                    # A token is predicted by the preceding logits row.
+                    prediction_rows = response_rows - 1
+                    ids, logprobs = dummy_rollout_topk(input_ids.numel(), field["rollout_topk_ids"].size(-1))
+                    ids[prediction_rows] = field["rollout_topk_ids"][old_rows]
+                    logprobs[prediction_rows] = field["rollout_topk_log_probs"][old_rows]
+                    field["rollout_topk_ids"] = ids
+                    field["rollout_topk_log_probs"] = logprobs
+                    complete = torch.ones(input_ids.size(0), dtype=torch.bool)
+                    complete[prediction_rows] = field["rollout_support_complete"][old_rows]
+                    field["rollout_support_complete"] = complete
+                if "rm_scores" in field:
+                    expanded_scores = field["rm_scores"].new_zeros(len(expanded.response_ids))
+                    expanded_scores[response_rows - field["prompts"].numel()] = field["rm_scores"]
+                    field["rm_scores"] = expanded_scores
+
+            attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
             position_ids = self._compute_position_ids(
                 input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
             ).squeeze(0)
 
-            keys.append(f"{uid}_{session_id}_{i}")
-            field = output.as_dict()
-            field.update(kwargs)
-            # do not store raw image/video
-            field.pop("multi_modal_data", None)
             # TODO: uniform response_mask and loss_mask
             field["loss_mask"] = field["response_mask"]
             field["input_ids"] = input_ids

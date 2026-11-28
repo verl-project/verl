@@ -34,6 +34,8 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+import torch
+
 from .continuous_token import ContinuousTokenBuilder, MergeResult, require_token_id
 from .tokenizer import normalize_token_ids
 
@@ -45,9 +47,10 @@ LATEST_REMINDER_TOKEN = "<｜latest_reminder｜>"
 THINK_START_TOKEN = "<think>"
 THINK_END_TOKEN = "</think>"
 DSML_TOKEN = "｜DSML｜"
+SYSTEM_TOKEN = "<｜System｜>"
 
-TOOL_CALLS_START_TOKEN = f"<{DSML_TOKEN}tool_calls>"
-TOOL_CALLS_END_TOKEN = f"</{DSML_TOKEN}tool_calls>"
+V4_TOOL_TAGS = ("tool_calls", "invoke", "parameter")
+V41_TOOL_TAGS = (" calls", " invoke", " parameter")
 
 # Quick instruction tokens, selected per message through the optional ``task`` field.
 TASK_TOKENS = {
@@ -93,20 +96,125 @@ _REASONING_EFFORT_ALIASES = {
     "ultra": "max",
 }
 
+# vLLM expands one placeholder per image into its image-token span.
+IMAGE_PLACEHOLDER = "<｜deepseek_image｜>"
+
+
+def expand_image_tokens(
+    input_ids: torch.Tensor, image_grid_hws: torch.Tensor, image_token_id: int, downsample_ratio: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return expanded IDs, vision types and the expanded position of each source token."""
+    raw_ids = input_ids.reshape(-1).tolist()
+    image_positions = [pos for pos, token in enumerate(raw_ids) if token == image_token_id]
+    spans = []
+    for height, width in image_grid_hws.tolist():
+        height = (height + downsample_ratio - 1) // downsample_ratio
+        width = (width + downsample_ratio - 1) // downsample_ratio
+        spans.append([0] + ([1] * width + [2]) * height + [3])
+
+    # Adjacent placeholders are identical tokens. Track valid ways to consume each
+    # grid in order, keeping a linked path only when the source offsets are unique.
+    source_count = len(image_positions)
+    remaining_expanded = sum(map(len, spans))
+    layouts: dict[int, tuple | None] = {0: ()}
+    for index, span in enumerate(spans):
+        remaining_expanded -= len(span)
+        remaining_images = len(spans) - index - 1
+        next_layouts = {}
+        for offset, layout in layouts.items():
+            for size in (1, len(span)):
+                end = offset + size
+                if not remaining_images <= source_count - end <= remaining_expanded:
+                    continue
+                if image_positions[end - 1] - image_positions[offset] != size - 1:
+                    continue
+                next_layouts[end] = (layout, size) if layout is not None and end not in next_layouts else None
+        layouts = next_layouts
+    if source_count not in layouts:
+        raise ValueError("DeepSeek-V4.1 image tokens do not match the processor grids")
+    layout = layouts[source_count]
+    if layout is None:
+        raise ValueError("DeepSeek-V4.1 adjacent image tokens have ambiguous compact/expanded span boundaries")
+    source_sizes = []
+    while layout:
+        layout, size = layout
+        source_sizes.append(size)
+
+    ids, types, source_rows = [], [], []
+    cursor = image_offset = 0
+    for span, size in zip(spans, reversed(source_sizes), strict=True):
+        start = image_positions[image_offset]
+        text = raw_ids[cursor:start]
+        source_rows.extend(range(len(ids), len(ids) + len(text) + size))
+        ids.extend(text)
+        types.extend([-1] * len(text))
+        ids.extend([image_token_id] * len(span))
+        types.extend(span)
+        cursor = start + size
+        image_offset += size
+    suffix = raw_ids[cursor:]
+    source_rows.extend(range(len(ids), len(ids) + len(suffix)))
+    ids.extend(suffix)
+    types.extend([-1] * len(suffix))
+    return (
+        input_ids.new_tensor([ids]),
+        input_ids.new_tensor([types]),
+        input_ids.new_tensor(source_rows, dtype=torch.long),
+    )
+
+
+def align_deepseek_v41_routes(routes: torch.Tensor, vision_types: list[int]) -> torch.Tensor:
+    """Align token-order R3 rows with either full image spans or one row per image.
+
+    Callers must validate route length against the producer token sequence before
+    alignment. A producer may omit the final autoregressive row. Visual
+    rows stay native in replay, and intermediate layouts need explicit producer
+    positions to be aligned safely.
+    """
+    expanded_len = len(vision_types)
+    route_len = routes.shape[0]
+    if route_len == expanded_len:
+        return routes
+    aligned = routes.new_zeros((expanded_len, *routes.shape[1:]))
+    if route_len == expanded_len - 1:
+        aligned[:route_len] = routes
+        return aligned
+
+    compact_rows = [index for index, kind in enumerate(vision_types) if kind <= 0]
+    compact_len = len(compact_rows)
+    if route_len in (compact_len, compact_len - 1):
+        text_routes = [(i, row) for i, row in enumerate(compact_rows[:route_len]) if vision_types[row] == -1]
+        if text_routes:
+            source, destination = zip(*text_routes, strict=False)
+            aligned[list(destination)] = routes[list(source)]
+        return aligned
+
+    raise RuntimeError(
+        "R3 router replay cannot align DeepSeek-V4.1 multimodal routes: "
+        f"{route_len} route rows for {expanded_len} expanded or {compact_len} compact tokens. "
+        "Expected one row per token in either layout, with an optional missing final row."
+    )
+
+
+REASONING_EFFORT_TEMPLATE = (
+    "Reasoning Effort: {budget} (range 1-100, the higher the value, the more thorough the reasoning)\n\n"
+)
+REASONING_EFFORT_MAPPINGS = {"low": 50, "high": 75, "xhigh": 75, "max": 100}
+
 TOOLS_TEMPLATE = """## Tools
 
 You have access to a set of tools to help answer the user's question. You can invoke tools by \
-writing a "<{dsml}tool_calls>" block like the following:
+writing a "<{dsml}{calls}>" block like the following:
 
-<{dsml}tool_calls>
-<{dsml}invoke name="$TOOL_NAME">
-<{dsml}parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{dsml}parameter>
+<{dsml}{calls}>
+<{dsml}{invoke} name="$TOOL_NAME">
+<{dsml}{parameter} name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{dsml}{parameter}>
 ...
-</{dsml}invoke>
-<{dsml}invoke name="$TOOL_NAME2">
+</{dsml}{invoke}>
+<{dsml}{invoke} name="$TOOL_NAME2">
 ...
-</{dsml}invoke>
-</{dsml}tool_calls>
+</{dsml}{invoke}>
+</{dsml}{calls}>
 
 String parameters should be specified as is and set `string="true"`. For all other types (numbers, \
 booleans, arrays, objects), pass the value in JSON format and set `string="false"`.
@@ -163,18 +271,22 @@ def _resolve_reasoning_effort(reasoning_effort: Optional[str]) -> Optional[str]:
     return resolved
 
 
-def render_tools(tools: list[dict[str, Any]]) -> str:
+def render_tools(tools: list[dict[str, Any]], *, tool_tags: tuple[str, str, str] = V4_TOOL_TAGS) -> str:
     """Render OpenAI-format tool schemas into the DSML tool prompt."""
     schemas = [_to_json(tool.get("function", tool)) for tool in tools]
+    calls, invoke, parameter = tool_tags
     return TOOLS_TEMPLATE.format(
         dsml=DSML_TOKEN,
+        calls=calls,
+        invoke=invoke,
+        parameter=parameter,
         think_start=THINK_START_TOKEN,
         think_end=THINK_END_TOKEN,
         schemas="\n".join(schemas),
     )
 
 
-def _render_tool_call(tool_call: dict[str, Any]) -> str:
+def _render_tool_call(tool_call: dict[str, Any], invoke: str, parameter: str) -> str:
     function = tool_call.get("function", tool_call)
     arguments = function.get("arguments")
     if isinstance(arguments, str):
@@ -187,11 +299,11 @@ def _render_tool_call(tool_call: dict[str, Any]) -> str:
         arguments = {"arguments": arguments}
 
     params = [
-        f'<{DSML_TOKEN}parameter name="{name}" string="{"true" if isinstance(value, str) else "false"}">'
-        f"{value if isinstance(value, str) else _to_json(value)}</{DSML_TOKEN}parameter>"
+        f'<{DSML_TOKEN}{parameter} name="{name}" string="{"true" if isinstance(value, str) else "false"}">'
+        f"{value if isinstance(value, str) else _to_json(value)}</{DSML_TOKEN}{parameter}>"
         for name, value in arguments.items()
     ]
-    return f'<{DSML_TOKEN}invoke name="{function.get("name")}">\n' + "\n".join(params) + f"\n</{DSML_TOKEN}invoke>"
+    return f'<{DSML_TOKEN}{invoke} name="{function.get("name")}">\n' + "\n".join(params) + f"\n</{DSML_TOKEN}{invoke}>"
 
 
 def encode_messages(
@@ -202,7 +314,8 @@ def encode_messages(
     add_bos_token: bool = True,
     enable_thinking: bool = False,
     drop_thinking: bool = True,
-    reasoning_effort: Optional[str] = None,
+    reasoning_effort: Optional[str | int] = None,
+    v41_reasoning_effort: bool = False,
     previous_role: Optional[str] = None,
 ) -> str:
     """Encode a conversation into a DeepSeek-V4 prompt.
@@ -219,7 +332,9 @@ def encode_messages(
         drop_thinking: Drop reasoning from assistant turns before the last user turn. Automatically
             disabled when tools are present, because tool calling needs the full reasoning trace.
         reasoning_effort: Canonical ``"low"``/``"high"``/``"max"`` effort.
-            Compatibility aliases are normalized, and ``"none"`` disables thinking.
+            Compatibility aliases are normalized for V4. V4.1 accepts its named
+            effort levels or an integer budget in [1, 100]. ``"none"`` disables thinking.
+        v41_reasoning_effort: Use the V4.1 prompt protocol, including numeric budgets and spaced DSML tags.
         previous_role: Role immediately preceding ``messages`` when rendering
             an incremental continuation. Consecutive user/tool messages share
             one DeepSeek-V4 user turn across request boundaries.
@@ -227,8 +342,15 @@ def encode_messages(
     Returns:
         The encoded prompt.
     """
-    resolved_reasoning_effort = _resolve_reasoning_effort(reasoning_effort)
-    think = enable_thinking and resolved_reasoning_effort is not None
+    resolved_reasoning_effort = None
+    if v41_reasoning_effort:
+        think = enable_thinking and reasoning_effort != "none"
+    else:
+        if isinstance(reasoning_effort, int):
+            raise ValueError(f"Invalid DeepSeek-V4 reasoning effort: {reasoning_effort!r}; expected a string")
+        resolved_reasoning_effort = _resolve_reasoning_effort(reasoning_effort)
+        think = enable_thinking and resolved_reasoning_effort is not None
+    tool_tags = V41_TOOL_TAGS if v41_reasoning_effort else V4_TOOL_TAGS
     has_tools = bool(tools) or any(message.get("tools") for message in messages)
     drop = drop_thinking and not has_tools
     last_user = max(
@@ -242,7 +364,16 @@ def encode_messages(
     # Reasoning effort is a conversation-level prefix. Incremental Continuous
     # Token appends set ``add_bos_token=False`` and must not inject it between
     # assistant and tool turns.
-    if add_bos_token and think and resolved_reasoning_effort is not None:
+    if add_bos_token and think and v41_reasoning_effort:
+        effort = "high" if reasoning_effort is None else reasoning_effort
+        if isinstance(effort, str):
+            if effort not in REASONING_EFFORT_MAPPINGS:
+                raise ValueError(f"Invalid DeepSeek-V4.1 reasoning_effort: {effort!r}")
+            effort = REASONING_EFFORT_MAPPINGS[effort]
+        if isinstance(effort, bool) or not isinstance(effort, int) or not 1 <= effort <= 100:
+            raise ValueError("DeepSeek-V4.1 reasoning_effort must be an int in [1, 100]")
+        out.extend((SYSTEM_TOKEN, REASONING_EFFORT_TEMPLATE.format(budget=effort)))
+    elif add_bos_token and think and resolved_reasoning_effort is not None:
         out.append(REASONING_EFFORT_PROMPTS[resolved_reasoning_effort])
 
     # The reference DeepSeek-V4 encoder appends tool schemas to the leading
@@ -253,7 +384,9 @@ def encode_messages(
         None,
     )
     if tools and top_level_tools_target is None:
-        out.append("\n\n" + render_tools(tools))
+        if v41_reasoning_effort and not (add_bos_token and think):
+            out.append(SYSTEM_TOKEN)
+        out.append("\n\n" + render_tools(tools, tool_tags=tool_tags))
 
     for index, message in enumerate(messages):
         role = message["role"]
@@ -262,11 +395,13 @@ def encode_messages(
             # A developer message is a system prompt carried inside a user turn.
             if role == "developer":
                 out.append(USER_TOKEN)
+            elif v41_reasoning_effort and not (index == 0 and add_bos_token and think):
+                out.append(SYSTEM_TOKEN)
             out.append(_text_of(message.get("content")))
             if tools and index == top_level_tools_target:
-                out.append("\n\n" + render_tools(tools))
+                out.append("\n\n" + render_tools(tools, tool_tags=tool_tags))
             if message.get("tools"):
-                out.append("\n\n" + render_tools(message["tools"]))
+                out.append("\n\n" + render_tools(message["tools"], tool_tags=tool_tags))
             if message.get("response_format"):
                 out.append("\n\n" + RESPONSE_FORMAT_TEMPLATE.format(schema=_to_json(message["response_format"])))
 
@@ -295,8 +430,11 @@ def encode_messages(
                 out.append(THINK_END_TOKEN)
             out.append(_text_of(message.get("content")))
             if message.get("tool_calls"):
-                calls = "\n".join(_render_tool_call(tool_call) for tool_call in message["tool_calls"])
-                out.append(f"\n\n{TOOL_CALLS_START_TOKEN}\n{calls}\n{TOOL_CALLS_END_TOKEN}")
+                block, invoke, parameter = tool_tags
+                calls = "\n".join(
+                    _render_tool_call(tool_call, invoke, parameter) for tool_call in message["tool_calls"]
+                )
+                out.append(f"\n\n<{DSML_TOKEN}{block}>\n{calls}\n</{DSML_TOKEN}{block}>")
             out.append(EOS_TOKEN)
 
         else:
@@ -326,6 +464,8 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
     Assistant turns end with ``<｜end▁of▁sentence｜>``, so that token is inserted when generation
     stopped before emitting it.
     """
+
+    _v41_reasoning_effort = False
 
     def __init__(self, tokenizer: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
@@ -389,6 +529,7 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
             drop_thinking=self._drop_thinking if drop_thinking is None else drop_thinking,
             reasoning_effort=self._reasoning_effort,
             previous_role=previous_role,
+            v41_reasoning_effort=self._v41_reasoning_effort,
         )
         return normalize_token_ids(self.tokenizer.encode(text, add_special_tokens=False))
 
@@ -437,3 +578,66 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
             kind="context",
             inserted_token_ids=inserted_token_ids,
         )
+
+
+class DeepSeekV4VLContinuousTokenBuilder(DeepSeekV4ContinuousTokenBuilder):
+    """Use DeepSeek text formatting with one placeholder per image."""
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        processor: Any,
+        *,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ):
+        """Initialize the text builder and retain the multimodal processor and its keyword arguments."""
+        super().__init__(tokenizer, **kwargs)
+        self.processor = processor
+        self.mm_processor_kwargs = mm_processor_kwargs if mm_processor_kwargs is not None else {}
+
+    @classmethod
+    def supports_multimodal(cls) -> bool:
+        """Report that this builder supports multimodal inputs."""
+        return True
+
+    def _encode(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None,
+        add_bos_token: bool,
+        drop_thinking: bool | None = None,
+        previous_role: str | None = None,
+    ) -> list[int]:
+        """Encode copied messages after replacing image blocks with DeepSeek image placeholders."""
+        messages = [dict(message) for message in messages]
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            message["content"] = [
+                {"type": "text", "text": IMAGE_PLACEHOLDER}
+                if isinstance(block, dict) and block.get("type") in ("image", "image_url")
+                else block
+                for block in content
+            ]
+        return super()._encode(
+            messages,
+            tools=tools,
+            add_bos_token=add_bos_token,
+            drop_thinking=drop_thinking,
+            previous_role=previous_role,
+        )
+
+
+class DeepSeekV41ContinuousTokenBuilder(DeepSeekV4ContinuousTokenBuilder):
+    """DeepSeek-V4.1 text protocol, including its numeric reasoning prefix."""
+
+    _v41_reasoning_effort = True
+
+
+class DeepSeekV41VLContinuousTokenBuilder(DeepSeekV4VLContinuousTokenBuilder):
+    """DeepSeek-V4.1 vision-language protocol."""
+
+    _v41_reasoning_effort = True

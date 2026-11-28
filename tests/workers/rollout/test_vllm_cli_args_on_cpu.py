@@ -277,6 +277,37 @@ class TestEngineKwargsManagedArgs:
             self._preprocess({key: True}, backend="sharded_nixl")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clear_top_level", [False, True])
+async def test_launch_server_validates_nested_nvfp4_override(clear_top_level):
+    from verl.utils.qat.compressed_tensors import build_compressed_tensors_config
+    from verl.workers.config import RolloutConfig
+    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+
+    nested = build_compressed_tensors_config(
+        linear=None, moe="NVFP4", moe_activation="nvfp4_per_token", ignore=[], config_file=None
+    )
+    hf_overrides = {"text_config": {"quantization_config": nested}}
+    top_level = None
+    if clear_top_level:
+        top_level = {"quant_method": "fp8"}
+        hf_overrides["quantization_config"] = None
+
+    server = object.__new__(vLLMHttpServer)
+    server.node_rank = 0
+    server.config = RolloutConfig(
+        name="vllm",
+        data_parallel_size=2,
+        enable_sleep_mode=True,
+        engine_kwargs={"vllm": {"hf_overrides": hf_overrides}},
+    )
+    server.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(quantization_config=top_level, text_config=SimpleNamespace(quantization_config=None))
+    )
+    with pytest.raises(ValueError, match="Per-token NVFP4 rollout requires data_parallel_size=1"):
+        await server.launch_server()
+
+
 class TestVllmColocateZmqHandle:
     def test_dp_local_rank_offsets_tensor_parallel_rank(self):
         """DP workers on the same node must not reuse the same TP-local socket."""

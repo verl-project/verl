@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import torch
 from msgspec import field
 from packaging import version as vs
 
@@ -126,7 +127,21 @@ class VLLMHijack:
         def do_hijack(target_cls, target_method_name, hooking_method):
             setattr(target_cls, target_method_name, hooking_method)
 
-        do_hijack(LRUCacheWorkerLoRAManager, "_load_adapter", hijack__load_adapter)
+        try:
+            from vllm.lora.worker_manager import WorkerLoRAManager as _WLM
+        except ImportError:
+            _WLM = None
+        _owner = None
+        for _c in (LRUCacheWorkerLoRAManager, _WLM):
+            if _c is not None and hasattr(_c, "_load_adapter"):
+                _owner = _c
+                break
+        if _owner is None:
+            raise RuntimeError(
+                "Cannot hijack vLLM LoRA loading: neither LRUCacheWorkerLoRAManager nor WorkerLoRAManager "
+                "provides _load_adapter."
+            )
+        do_hijack(_owner, "_load_adapter", hijack__load_adapter)
 
 
 def is_version_ge(pkg: str = "vllm", minver: str = "0.7.3"):
@@ -149,24 +164,109 @@ except ImportError:
     pass
 
 
-def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
+# Whether the installed vLLM threads a ``lora_base_layer_prefix`` through
+# ``RoutedExperts`` (vLLM #31104). On such builds the canonical per-expert
+# checkpoint name keeps ``.base_layer.`` in leaf position.
+_HAS_LORA_BASE_LAYER_PREFIX = False
+
+try:
+    import inspect as _inspect
+
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+    _HAS_LORA_BASE_LAYER_PREFIX = (
+        "lora_base_layer_prefix" in _inspect.signature(RoutedExperts.build_expert_params_mapping).parameters
+    )
+except (ImportError, AttributeError, ValueError):
+    pass
+
+
+# Per-class cache: the live (vLLM-namespace) param prefix of the deepest
+# *strict* ``load_weights`` in the model stack. ``""`` = the top model is
+# strict; ``"language_model.model."`` = a VLM's flat wrappers
+# delegate to an inner strict *Model; ``None`` = no strict loader (all flat).
+_inner_load_weights_is_strict_cache: dict = {}
+_STRICT_PREFIX_MISS = object()
+
+
+def _inner_load_weights_is_strict(model) -> str | None:
+    """Live param prefix of the deepest strict ``load_weights`` in the stack.
+
+    Descends ``.model`` / ``.language_model`` through flat ``AutoWeightsLoader``
+    wrappers until it reaches a strict loader (one whose ``load_weights`` does
+    not reference ``AutoWeightsLoader``), recording the attribute path from the
+    top model. Returns the path joined by ``"."`` plus a trailing dot, ``""``
+    when the top model is itself strict, or ``None`` when no strict loader is
+    found. Cached per class. Callers wanting a bool use ``... is not None``.
+    """
+    cls = type(model)
+    cached = _inner_load_weights_is_strict_cache.get(cls)
+    if cached is not None:
+        return None if cached is _STRICT_PREFIX_MISS else cached
+
+    load_fn = getattr(model, "load_weights", None)
+    code = getattr(load_fn, "__code__", None)
+    result: str | None = None
+    if code is not None and "AutoWeightsLoader" not in code.co_names:
+        result = ""
+    else:
+        attr = "model" if getattr(model, "model", None) is not None else "language_model"
+        deeper = getattr(model, attr, None)
+        if deeper is not None and deeper is not model:
+            inner_prefix = _inner_load_weights_is_strict(deeper)
+            if inner_prefix is not None:
+                result = attr + "." + inner_prefix
+    _inner_load_weights_is_strict_cache[cls] = result if result is not None else _STRICT_PREFIX_MISS
+    return result
+
+
+def _name_reaches_strict_loader(model, name: str) -> bool:
+    """Whether ``name`` (HF namespace) resolves into the strict loader's scope.
+
+    Only names whose live (mapped) form falls under the strict loader's prefix
+    reach its ``params_dict`` lookup and need a ``.base_layer.`` suffix;
+    top-level modules (``lm_head``, ``visual.*``) short-circuit at a flat
+    ``AutoWeightsLoader`` / ``BaseLayerWithLoRA`` and want the suffix stripped.
+    Returns True when the top model itself is the strict loader (DSV4).
+    """
+    prefix = _inner_load_weights_is_strict(model)
+    if prefix is None:
+        return False
+    if prefix == "":
+        return True
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+    live = name
+    if mapper is not None:
+        mapped = mapper.apply_list([name])
+        if mapped:
+            live = mapped[0]
+    return live.startswith(prefix)
+
+
+def resolve_weight_name(
+    model, name: str, model_weight_names: set[str], *, routed_expert_prefixes: set[str] | None = None
+) -> str:
     """Reconcile an incoming weight-sync name with the live vLLM namespace.
 
-    Toggles one ``.base_layer`` segment (strip it for non-LoRA-wrapped modules
-    on all vLLM versions and for LoRA-wrapped modules on newer vLLM; add it for
-    LoRA-wrapped leaves on released vLLM) and routes packed routed-expert
-    aliases under the LoRA ``base_layer`` so ``AutoWeightsLoader`` reaches
-    ``MoERunner.load_weights``.
+    Toggles one ``.base_layer`` segment: STRIP for flat loaders (Llama/Qwen3.5)
+    and non-LoRA modules, KEEP for strict loaders (DeepseekV2/DSV3/DSV4) and
+    released vLLM. Loader style is probed per inner-model class at runtime, not
+    by model_type. The mapper / packed_modules_mapping decide the toggle only;
+    the return is always the *unmapped* name — vLLM does the stacking, and a
+    mapped name would double-map and corrupt shard_id.
 
-    The mapper / ``packed_modules_mapping`` are consulted only to *decide* the
-    toggle; the return is always the unmapped name (vLLM's ``load_weights`` does
-    the stacking -- returning a mapped name would double-map, e.g.
-    ``in_proj_qkvz`` -> ``in_proj_qkvzz``, corrupting shard_id).
+    Bucket loaders may precompute ``routed_expert_prefixes`` to avoid scanning
+    the live namespace for every routed expert weight.
     """
     mapper = getattr(model, "hf_to_vllm_mapper", None)
     packed = getattr(model, "packed_modules_mapping", None) or {}
     leaf = name.rsplit(".", 1)[-1]
     is_leaf = leaf in {"weight", "bias"} or leaf.endswith(("_weight", "_bias"))
+
+    def _has_routed_experts(prefix: str) -> bool:
+        if routed_expert_prefixes is not None:
+            return prefix in routed_expert_prefixes
+        return any(f"{prefix}base_layer." in n for n in model_weight_names)
 
     def _exists(candidate: str) -> bool:
         if candidate in model_weight_names:
@@ -176,52 +276,101 @@ def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
             mapped = mapped[0] if mapped else candidate
             if mapped != candidate and mapped in model_weight_names:
                 return True
-        # Packed-owner lookup (q/k/v -> qkv) via packed_modules_mapping.
-        # Hoisted out of the mapper guard so models with
-        # packed_modules_mapping but no hf_to_vllm_mapper (e.g. Llama) also
-        # reach it.
+        # Packed-owner lookup (shard -> owner, e.g. q/k/v -> qkv). Shards may be
+        # multi-segment (DSV4 ``compressor.wkv``), so match as a tail-sequence
+        # over the non-leaf segments, not a single one.
         if packed and "." in candidate:
-            parts = candidate.split(".")
-            mi = -3 if len(parts) >= 3 and parts[-2] == "base_layer" else -2
-            if -mi <= len(parts):
-                # packed is {owner: [unpacked,...]}; invert to {unpacked: owner}.
-                rev = {u: p for p, us in packed.items() for u in us}
-                owner = rev.get(parts[mi])
-                for pn in (owner,) if owner else ():
-                    pp = parts.copy()
-                    pp[mi] = pn
-                    joined = ".".join(pp)
-                    if joined in model_weight_names:
-                        return True
-                    if mapper is not None:
-                        mp = mapper.apply_list([joined])
-                        mp = mp[0] if mp else joined
-                        if mp != candidate and mp in model_weight_names:
+            csegs = candidate.split(".")
+            cleaf = csegs[-1]
+            stem = csegs[:-1]
+            # Drop an injected ``base_layer`` so a LoRA-suffixed shard still matches.
+            suffix = []
+            if stem and stem[-1] == "base_layer":
+                suffix = ["base_layer"]
+                stem = stem[:-1]
+            for owner, shards in packed.items():
+                osegs = owner.split(".")
+                for shard in shards:
+                    ssegs = shard.split(".")
+                    if len(stem) >= len(ssegs) and stem[-len(ssegs) :] == ssegs:
+                        fused = ".".join(stem[: -len(ssegs)] + osegs + suffix + [cleaf])
+                        if fused in model_weight_names:
                             return True
+                        if mapper is not None:
+                            mp = mapper.apply_list([fused])
+                            mp = mp[0] if mp else fused
+                            if mp != candidate and mp in model_weight_names:
+                                return True
         return False
 
-    # Strip ``.base_layer.``: the check is *per-name*, not model-wide. A mixed
-    # model (e.g. Qwen3.5-VL with LoRA) has ``.base_layer.`` params on the
-    # LoRA-wrapped language layers but NOT on the vision merger. The suffix
-    # must be stripped when this name's ``base_layer`` isn't a real child, and
-    # kept on released vLLM when it is (the loader recurses into ``base_layer``);
-    # ``_exists`` consults the mapper's prefix rewrites so a Bridge-exported
-    # prefix (``model.language_model.``) is reconciled against the live vLLM
-    # namespace (``language_model.model.``) before checking.
+    # Per-expert routed leaf: ``{mlp,ffn}.experts.<id>.<proj>[.base_layer].<leaf>``.
+    # The numeric ``<id>`` is not a child module, so the leaf needs the
+    # loader-specific form below; strict loaders keep the suffix verbatim.
+    # Scale companions (weight_scale/weight_scale_inv) must carry the same
+    # .base_layer suffix as their weight so the expert mapping matches both.
+    marker = next((m for m in (".mlp.experts.", ".ffn.experts.") if m in name), None)
+    idx = name.find(marker) if marker is not None else -1
+    if marker is not None:
+        tail = name[idx + len(marker) :]
+        is_per_expert_leaf = (
+            tail
+            and tail.split(".", 1)[0].isdigit()
+            and (is_leaf or leaf in ("scale", "weight_scale", "weight_scale_inv"))
+            and _has_routed_experts(marker[1:])
+        )
+        if is_per_expert_leaf:
+            if _name_reaches_strict_loader(model, name):
+                if ".base_layer." not in tail:
+                    head = name[: idx + len(marker)] + tail
+                    prefix, lf = head.rsplit(".", 1)
+                    alt = f"{prefix}.base_layer.{lf}"
+                    if alt in model_weight_names:
+                        return alt
+                    # lora_base_layer_prefix appends .base_layer. to
+                    # checkpoint-side expert names. The live fused expert param is
+                    # not a per-expert path, so alt isn't a live name — but the
+                    # mapping needs the suffix to substring-match. Inject it.
+                    if _HAS_LORA_BASE_LAYER_PREFIX:
+                        return alt
+                return name
+            # Flat loaders match the checkpoint-side ``weight_name`` of the
+            # expert mapping: leaf-position ``base_layer.`` on new vLLM, no
+            # ``base_layer`` segment at all on old.
+            if _HAS_LORA_BASE_LAYER_PREFIX:
+                if ".base_layer." not in tail:
+                    head = name[: idx + len(marker)] + tail
+                    prefix, lf = head.rsplit(".", 1)
+                    return f"{prefix}.base_layer.{lf}"
+                return name
+            if ".base_layer." in tail:
+                tail = tail.replace(".base_layer.", ".", 1)
+            return name[: idx + len(marker)] + tail
+
+    # Reconcile a merge=False ``.base_layer.`` suffix against the live namespace.
+    # ``parent_has_base_layer`` marks a real LoRA-wrapped module: strip for flat
+    # loaders, keep for strict/released. Without it the suffix was injected by
+    # the expert mapping -- strip unless strict and the stripped name isn't live.
     if ".base_layer." in name:
+        stripped = name.replace(".base_layer.", ".", 1)
         parent, _, _ = name.partition(".base_layer.")
         parent_has_base_layer = _exists(parent + ".base_layer.weight") or any(
             n.startswith(parent + ".base_layer.") for n in model_weight_names
         )
-        if not parent_has_base_layer or _HAS_LORA_LOAD_WEIGHTS:
-            return name.replace(".base_layer.", ".", 1)
+        if parent_has_base_layer:
+            if _HAS_LORA_LOAD_WEIGHTS and not _name_reaches_strict_loader(model, name):
+                return stripped
+        else:
+            if not (_HAS_LORA_LOAD_WEIGHTS and _name_reaches_strict_loader(model, name)) or _exists(stripped):
+                return stripped
 
     if _exists(name):
         return name
 
-    # Packed routed-expert alias: route under the LoRA base_layer so
-    # AutoWeightsLoader reaches MoERunner.load_weights (FusedMoE3DWithLoRA has no
-    # load_weights itself). Only for non-leaf, non-routed names.
+    # Route a per-expert routed alias under base_layer so AutoWeightsLoader
+    # reaches MoERunner.load_weights. The ``isdigit`` guard excludes the fused
+    # 3D-MoE alias (``experts.gate_up_proj`` / ``experts.down_proj``) which must
+    # NOT receive a ``.base_layer.`` injection — it matches vLLM's
+    # ``fused_mapping`` directly and injecting would silently drop every expert.
     marker = ".mlp.experts."
     idx = name.find(marker)
     if idx != -1:
@@ -230,23 +379,137 @@ def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
             tail
             and ".base_layer." not in tail
             and not is_leaf
-            and any("mlp.experts.base_layer." in n for n, _ in model.named_parameters(remove_duplicate=False))
+            and tail.split(".", 1)[0].isdigit()
+            and _has_routed_experts("mlp.experts.")
         ):
             return name.replace(marker, marker + "base_layer.", 1)
 
-    if ".mlp.experts.base_layer." in name and not is_leaf:
-        stripped = name.replace(".base_layer.", ".", 1)
-        if _exists(stripped):
-            return stripped
-
-    # Leaf weight/bias: on vLLM versions without BaseLayerWithLoRA.load_weights,
-    # add ``.base_layer.`` so AutoWeightsLoader recurses into the base_layer
-    # child; on newer vLLM, the strip above already handled it.
-    if is_leaf:
-        if not _HAS_LORA_LOAD_WEIGHTS and ".base_layer." not in name:
-            prefix, lf = name.rsplit(".", 1)
-            alt = f"{prefix}.base_layer.{lf}"
-            if alt != name and _exists(alt):
-                return alt
+    # Re-add ``.base_layer.`` for non-LoRA params on a wrapped module (e.g. DSV4
+    # ``gate.tid2eid``). Only strict loaders and released vLLM need it; the
+    # ``_exists`` gate keeps it from firing when the live key isn't suffixed.
+    _needs_suffix = (not _HAS_LORA_LOAD_WEIGHTS) or _name_reaches_strict_loader(model, name)
+    if _needs_suffix and "." in name and ".base_layer." not in name:
+        prefix, last = name.rsplit(".", 1)
+        alt = f"{prefix}.base_layer.{last}"
+        if alt != name and _exists(alt):
+            return alt
 
     return name
+
+
+class LoRABaseWeightNormalizer:
+    """Normalize a quantized LoRA base stream for one vLLM reload transaction."""
+
+    def __init__(self, model, block_shape):
+        self.model = model
+        self.block_shape = block_shape
+        parameters = dict(model.named_parameters(remove_duplicate=False))
+        self.live_names = set(parameters)
+        self.live_names.update(name for name, _ in model.named_buffers())
+        self.routed_expert_prefixes = {
+            prefix
+            for prefix in ("mlp.experts.", "ffn.experts.")
+            if any(f"{prefix}base_layer." in name for name in self.live_names)
+        }
+        self.packed_modules = getattr(model, "packed_modules_mapping", None) or {}
+        self.mapper = getattr(model, "hf_to_vllm_mapper", None)
+        self.suffix_dtypes = {}
+        for name, parameter in parameters.items():
+            segments = name.split(".")
+            for index in range(len(segments)):
+                self.suffix_dtypes.setdefault(".".join(segments[index:]), set()).add(parameter.dtype)
+        self.scale_leaves = ("weight_scale", "weight_scale_inv")
+        config = getattr(model, "config", None)
+        if any(
+            getattr(candidate, "model_type", None) in ("deepseek_v4", "deepseek_v41")
+            for candidate in (model, config, getattr(model, "hf_config", None), getattr(config, "text_config", None))
+        ):
+            self.scale_leaves += ("scale",)
+        self.pending_fp8: dict[str, dict] = {}
+
+    def _match_dtype(self, name):
+        dtypes = self.suffix_dtypes.get(name, ())
+        return next(iter(dtypes)) if len(dtypes) == 1 else None
+
+    def _live_weight_dtype(self, name):
+        if ".base_layer." in name:
+            alternate = name.replace(".base_layer.", ".", 1)
+        else:
+            prefix, leaf = name.rsplit(".", 1)
+            alternate = f"{prefix}.base_layer.{leaf}"
+        candidates = []
+        for candidate in (name, alternate):
+            candidates.append(candidate)
+            if self.mapper is not None:
+                mapped = self.mapper.apply_list([candidate])
+                if mapped and mapped[0] != candidate:
+                    candidates.append(mapped[0])
+        for candidate in candidates:
+            dtype = self._match_dtype(candidate)
+            if dtype is not None:
+                return dtype
+
+        # Checkpoint shards can be owned by a single packed live parameter.
+        for owner, shards in self.packed_modules.items():
+            for shard in shards:
+                for candidate in candidates:
+                    prefix, leaf = candidate.rsplit(".", 1)
+                    base_prefix = prefix.removesuffix(".base_layer")
+                    if not base_prefix.endswith(f".{shard}"):
+                        continue
+                    packed_prefix = base_prefix[: -len(shard)] + owner
+                    suffixes = (".base_layer",) if prefix != base_prefix else ("", ".base_layer")
+                    for suffix in suffixes:
+                        dtype = self._match_dtype(f"{packed_prefix}{suffix}.{leaf}")
+                        if dtype is not None:
+                            return dtype
+        return None
+
+    def normalize(self, weights):
+        """Return loader-ready weights, retaining incomplete FP8 pairs across transport buckets."""
+        updated = []
+        bucket_parts = set()
+        fp8_dtypes = {torch.float8_e4m3fn, torch.float8_e5m2}
+        float_dtypes = {torch.bfloat16, torch.float16, torch.float32}
+        for name, tensor in weights:
+            resolved = resolve_weight_name(
+                self.model, name, self.live_names, routed_expert_prefixes=self.routed_expert_prefixes
+            )
+            prefix, separator, leaf = resolved.rpartition(".")
+            if separator and ((leaf == "weight" and tensor.dtype in fp8_dtypes) or leaf in self.scale_leaves):
+                weight_name = f"{prefix}.weight"
+                dtype = self._live_weight_dtype(weight_name)
+                if dtype in float_dtypes:
+                    key = weight_name.replace(".base_layer.", ".")
+                    pair = self.pending_fp8.setdefault(key, {})
+                    pair[leaf] = tensor
+                    if leaf == "weight":
+                        pair["weight_name"] = resolved
+                    scale = next((pair[scale_leaf] for scale_leaf in self.scale_leaves if scale_leaf in pair), None)
+                    if "weight" in pair and scale is not None:
+                        weight = pair["weight"]
+                        rows, cols = weight.shape
+                        scale = scale.float().repeat_interleave(self.block_shape[0], 0)
+                        scale = scale.repeat_interleave(self.block_shape[1], 1)
+                        updated.append(
+                            (pair["weight_name"], (weight.float() * scale[:rows, :cols]).to(dtype).contiguous())
+                        )
+                        del self.pending_fp8[key]
+                    else:
+                        bucket_parts.add((key, leaf))
+                    continue
+            updated.append((resolved, tensor))
+
+        # Only unpaired parts survive the callback. IPC reuses the receive buffer.
+        for key, leaf in bucket_parts:
+            pair = self.pending_fp8.get(key)
+            if pair is not None and leaf in pair:
+                pair[leaf] = pair[leaf].clone()
+        return updated
+
+    def validate_complete(self):
+        """Report FP8 weights missing their scale after vLLM restores the live layout."""
+        orphaned_weights = sorted(name for name, pair in self.pending_fp8.items() if "weight" in pair)
+        if orphaned_weights:
+            names = ", ".join(orphaned_weights)
+            raise ValueError(f"Incomplete FP8 weight/scale pairs during LoRA base sync: {names}")

@@ -150,6 +150,30 @@ def test_r3_replay_uses_transformer_engine_padding_for_nvfp4(monkeypatch):
     assert not target["mask"][95:].any()
 
 
+def test_r3_alignment_expands_deepseek_v41_compact_image_routes():
+    """DeepSeek-V4.1: compact rollout routes expand around actor image spans, which replay masks out."""
+    input_ids = _nested([torch.arange(9)])
+    routes = _nested(
+        [
+            torch.arange(10, 15, dtype=torch.int16).reshape(5, 1, 1),
+        ]
+    )
+    multimodal = {
+        "vision_token_types": torch.tensor([[-1, -1, 0, 1, 2, 3, -1, -1, -1]], dtype=torch.int64),
+    }
+
+    aligned = router_utils.align_r3_router_replay_data(routes, input_ids, multimodal)
+    aligned_part = aligned.unbind()[0].squeeze(-1).squeeze(-1).tolist()
+    assert aligned_part == [10, 11, 0, 0, 0, 0, 13, 14, 0]
+
+    mask = router_utils.build_r3_replay_mask(
+        input_ids,
+        torch.tensor([[1, 1, 1]], dtype=torch.bool),
+        multimodal,
+    )
+    assert mask.unbind()[0].tolist() == [True, True, False, False, False, False, True, True, False]
+
+
 def test_pp_gather_normalizes_nested_routes_to_cpu(monkeypatch):
     # The nested branch rides all_gather_object, which pickles the tensor, so int16
     # needs no uint8 reinterpretation here.
@@ -208,3 +232,21 @@ def test_reorder_and_merge_vpp_layers_keeps_dense_chunk_placeholder(monkeypatch)
 
     assert routes.shape == moe_chunk.shape
     torch.testing.assert_close(routes, moe_chunk)
+
+
+@pytest.mark.parametrize("has_vision", [False, True])
+@pytest.mark.parametrize("routes_available", [[True, False], [False, True], [False, False]])
+def test_r3_mask_routes_missing_samples_natively(has_vision, routes_available):
+    input_ids = _nested([torch.arange(7), torch.arange(7)])
+    multimodal = {"vision_token_types": torch.tensor([[-1, 0, 1, 2, 3, -1, -1]] * 2)} if has_vision else None
+    replay_mask = router_utils.build_r3_replay_mask(
+        input_ids,
+        torch.ones((2, 2), dtype=torch.bool),
+        multi_modal_inputs=multimodal,
+        routed_experts_available=torch.tensor(routes_available),
+    )
+
+    replayable = [True, False, False, False, False, True, False] if has_vision else [True] * 6 + [False]
+    assert [row.tolist() for row in replay_mask.unbind()] == [
+        replayable if available else [False] * 7 for available in routes_available
+    ]

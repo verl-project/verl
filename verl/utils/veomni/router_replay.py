@@ -79,7 +79,9 @@ the pad suffix the engine appends, and the trailing rows the rollout
 backend leaves at zero in R3. They all arrive as all-zero target rows,
 and :meth:`VeOmniRouterReplay.on_router_forward` routes any row with a
 duplicate top-k natively -- which covers them without a separate mask.
-The engine rejects topk=1 models, where that check cannot fire.
+Captured targets must have top-k greater than one so this check can
+distinguish a zero-filled row from a route to expert 0. A micro-batch
+explicitly marked as missing all captures can use native routing without targets.
 """
 
 from __future__ import annotations
@@ -119,6 +121,7 @@ class VeOmniRouterReplay:
         self._recorded: list[torch.Tensor] = []
         # REPLAY: one [nnz, topk] target per layer position.
         self._targets: list[torch.Tensor] = []
+        self._native_only = False
         # Env-gated shape sanity check.
         self._debug: bool = os.environ.get("VERL_ROUTER_REPLAY_DEBUG") == "1"
         self._installed: bool = False
@@ -186,7 +189,7 @@ class VeOmniRouterReplay:
         etc.). ``routing_scores`` is accepted for optional debug inspection
         but NOT used to derive weights.
         """
-        if self._action is RouterReplayAction.DISABLED:
+        if self._action is RouterReplayAction.DISABLED or self._native_only:
             return top_indices
 
         mid = id(module)
@@ -256,9 +259,8 @@ class VeOmniRouterReplay:
         # recorded routing at all: the pad suffix the engine appends, and the
         # trailing rows the rollout backend leaves at zero in R3 (the final
         # generated token, tool-response tokens in a multi-turn trajectory).
-        # All of those are all-zero rows, hence duplicates. It is why the
-        # engine rejects topk=1 models, where a single slot can never be a
-        # duplicate and those rows would silently all route to expert 0.
+        # All of those are all-zero rows, hence duplicates. begin_microbatch
+        # validates that replay targets have more than one slot per row.
         #
         # Native indices are always distinct top-k choices, so falling back to
         # them is correct regardless of what the rollout produced.
@@ -285,8 +287,9 @@ class VeOmniRouterReplay:
         self._id_to_pos = {}
         self._recorded = []
         self._targets = []
+        self._native_only = False
 
-    def begin_microbatch(self, targets: list[torch.Tensor] | None = None) -> None:
+    def begin_microbatch(self, targets: list[torch.Tensor] | None = None, *, native_only: bool = False) -> None:
         """Arm the controller for one micro-batch forward.
 
         Must be called from the engine before every forward, once RECORD or
@@ -299,17 +302,24 @@ class VeOmniRouterReplay:
         order routers fire in during forward). ``nnz`` must match what the
         routers will see on this rank, i.e. the engine has already applied
         the same padding and Ulysses slicing it applied to ``input_ids``.
+        Set ``native_only=True`` for a replay micro-batch without any captures.
         """
         if self._action is RouterReplayAction.RECORD:
-            if targets is not None:
-                raise RuntimeError("begin_microbatch: RECORD does not take targets.")
+            if targets is not None or native_only:
+                raise RuntimeError("begin_microbatch: RECORD does not take targets or native_only.")
         elif self._action is RouterReplayAction.REPLAY:
-            if targets is None:
+            if native_only:
+                if targets is not None:
+                    raise RuntimeError("begin_microbatch: native-only REPLAY does not take targets.")
+            elif targets is None:
                 raise RuntimeError("begin_microbatch: REPLAY requires per-layer targets.")
+            elif any(target.size(-1) < 2 for target in targets):
+                raise ValueError("VeOmni router replay requires top-k greater than 1 for captured targets.")
         else:
             raise RuntimeError(f"begin_microbatch requires RECORD or REPLAY action, got {self._action}")
 
         self._reset_microbatch()
+        self._native_only = native_only
         if targets is not None:
             self._targets = list(targets)
 

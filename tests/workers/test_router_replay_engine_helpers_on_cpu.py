@@ -172,15 +172,54 @@ class TestPrepareRouterReplayInputs:
         assert controller._recorded == []
         assert controller._targets == []
 
-    def test_replay_missing_routed_experts_raises(self, controller):
-        """Strict mode: REPLAY without routed_experts is a plumbing bug
-        (compute_log_prob → update_actor lost the field), not a soft
-        fallback."""
+    @pytest.mark.parametrize(
+        "mode,available", [("R2", None), ("R2", [False, False]), ("R3", None), ("R3", [True, False])]
+    )
+    def test_replay_missing_routed_experts_raises(self, controller, mode, available):
+        """Without an explicit all-missing R3 marker, a missing field is an error."""
         controller.begin_replay()
-        engine = _make_engine(controller)
+        engine = _make_engine(controller, mode=mode)
         td = TensorDict({"input_ids": _make_jagged_input_ids([3, 5])}, batch_size=[2])
+        if available is not None:
+            td["routed_experts_available"] = torch.tensor(available)
         with pytest.raises(RuntimeError, match="missing 'routed_experts'"):
             engine._prepare_router_replay_inputs(td, {"pad_size": 0})
+
+    @pytest.mark.parametrize("available", [[True, False], [False, True]])
+    @pytest.mark.parametrize("use_ulysses_sp", [False, True])
+    def test_r3_only_replays_available_samples(self, controller, available, use_ulysses_sp):
+        controller.begin_replay()
+        engine = _make_engine(controller, mode="R3")
+        engine.use_ulysses_sp = use_ulysses_sp
+        seq_lens = [2, 3]
+        routed = torch.nested.as_nested_tensor(
+            [torch.tensor([[1, 2]] * size).unsqueeze(1) for size in seq_lens], layout=torch.jagged
+        )
+        td = TensorDict(
+            {
+                "input_ids": _make_jagged_input_ids(seq_lens),
+                "routed_experts": routed,
+                "routed_experts_available": torch.tensor(available),
+            },
+            batch_size=[2],
+        )
+        with patch(
+            "verl.workers.engine.veomni.transformer_impl.slice_input_tensor",
+            side_effect=lambda tensor, **kwargs: tensor[3:],
+        ) as slice_inputs:
+            engine._prepare_router_replay_inputs(td, {"pad_size": 1})
+        assert slice_inputs.call_count == int(use_ulysses_sp)
+
+        native = torch.tensor([[3, 4]] * (3 if use_ulysses_sp else 6))
+        expected = torch.tensor(
+            [[1, 2] if found else [3, 4] for found, size in zip(available, seq_lens, strict=True) for _ in range(size)]
+            + [[3, 4]]
+        )
+        if use_ulysses_sp:
+            expected = expected[3:]
+        actual = controller.on_router_forward(torch.nn.Linear(1, 1), torch.zeros(len(native), 5), native)
+        torch.testing.assert_close(actual, expected)
+        assert routed.values().squeeze(1).tolist() == [[1, 2]] * sum(seq_lens)
 
     def test_replay_unbinds_targets_per_layer(self, controller):
         """``routed_experts`` covers prompt + response for every token, so with
@@ -344,6 +383,31 @@ class TestPrepareModelOutputs:
             output=None, output_args={"pad_size": 0}, micro_batch=td, logits_processor_func=None
         )
         assert torch.equal(model_output["routed_experts"].values(), idx.unsqueeze(1))
+
+    def test_r3_all_missing_uses_native_routes_and_clears_previous_targets(self, controller):
+        controller.begin_replay()
+        engine = _make_engine(controller, mode="R3")
+        router = torch.nn.Linear(1, 1)
+        input_ids = _make_jagged_input_ids([2, 3])
+        valid_routes = torch.tensor([[1, 2]] * 5)
+        native = torch.tensor([[3, 4]] * 5)
+        controller.begin_microbatch(targets=[valid_routes])
+        torch.testing.assert_close(controller.on_router_forward(router, torch.zeros(5, 5), native), valid_routes)
+
+        td = TensorDict(
+            {"input_ids": input_ids, "routed_experts_available": torch.tensor([False, False])},
+            batch_size=[2],
+        )
+        output_args = {"pad_size": 0}
+        engine._prepare_router_replay_inputs(td, output_args)
+        # Forward and checkpoint recompute both bypass the stale capture.
+        for _ in range(2):
+            torch.testing.assert_close(controller.on_router_forward(router, torch.zeros(5, 5), native), native)
+        assert controller.num_targets == controller.num_fired == 0
+        assert "routed_experts" not in engine.prepare_model_outputs(None, output_args, td, None)
+
+        controller.begin_microbatch(targets=[valid_routes])
+        torch.testing.assert_close(controller.on_router_forward(router, torch.zeros(5, 5), native), valid_routes)
 
     def test_replay_output_carries_no_routed_experts(self, controller):
         """REPLAY consumes routing, it doesn't produce it."""

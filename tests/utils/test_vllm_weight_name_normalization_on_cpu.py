@@ -253,6 +253,17 @@ class _FakeMapper:
         return out
 
 
+class AutoWeightsLoader:
+    """Stand-in for vLLM's flat loader that records what the resolver passes it."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def load_weights(self, weights):
+        self.model.loaded = list(weights)
+        return {name for name, _ in self.model.loaded}
+
+
 class _FakeModel:
     """A fake vLLM model exposing only the introspection surface the resolver uses."""
 
@@ -275,8 +286,7 @@ class _FakeModel:
         return iter(())
 
     def load_weights(self, weights):
-        # Record resolved names for assertions.
-        self.loaded = [name for name, _ in weights]
+        return AutoWeightsLoader(self).load_weights(weights)
 
 
 class _FakeVllmConfig:
@@ -483,13 +493,9 @@ def test_expert_alias_base_layer_gets_stripped():
     assert _resolve(worker, model, name) == "language_model.model.layers.0.mlp.experts.gate_up_proj"
 
 
-def test_packed_routed_expert_alias_routed_through_base_layer():
-    """Qwen3.5 routed experts: Bridge exports packed ``experts.gate_up_proj``
-    (non-leaf). vLLM's LoRA-wrapped MoE (``FusedMoE3DWithLoRA``) has no
-    ``load_weights``, so AutoWeightsLoader can't dispatch it -- route it under
-    ``experts.base_layer.gate_up_proj`` so the loader recurses into ``base_layer``
-    (MoERunner.load_weights -> routed_experts.load_weights). The ``lora_base_layer_prefix``
-    clear (see patch_vllm_moe_model_weight_loader) then makes the mapping resolve."""
+def test_packed_routed_expert_alias_not_routed_with_lora():
+    """Qwen3.5 routed experts: the packed ``experts.gate_up_proj`` alias matches
+    ``MoERunner.load_weights`` directly, so it must not gain a ``.base_layer.``."""
     model = _FakeModel(
         {
             "language_model.model.layers.0.mlp.experts.base_layer.routed_experts.w13_weight": torch.empty(0),
@@ -499,9 +505,9 @@ def test_packed_routed_expert_alias_routed_through_base_layer():
     worker = _make_worker(model)
 
     incoming = "language_model.model.layers.0.mlp.experts.gate_up_proj"
-    assert _resolve(worker, model, incoming) == ("language_model.model.layers.0.mlp.experts.base_layer.gate_up_proj")
+    assert _resolve(worker, model, incoming) == incoming
     assert _resolve(worker, model, "language_model.model.layers.0.mlp.experts.down_proj") == (
-        "language_model.model.layers.0.mlp.experts.base_layer.down_proj"
+        "language_model.model.layers.0.mlp.experts.down_proj"
     )
 
 
@@ -656,7 +662,7 @@ def test_update_weights_resolves_names_before_load(monkeypatch):
 
     worker._update_weights(weights, peft_config={"r": 1}, base_sync_done=False)
 
-    assert model.loaded == [
+    assert [name for name, _ in model.loaded] == [
         "merger.linear_fc1.weight",
         "language_model.model.layers.0.self_attn.q_proj.weight",
     ]
@@ -904,3 +910,250 @@ def test_lora_adapter_sync_skips_the_reload(monkeypatch):
     worker.update_weights_from_ipc(peft_config={"r": 1}, base_sync_done=True)
 
     assert events == ["add_lora"]
+
+
+def test_adapter_sync_runs_model_post_process(monkeypatch):
+    """Adapter-only refits still run the model's own post-load processing."""
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "BucketedWeightReceiver",
+        lambda *a, **k: _FakeBucketReceiver([([("lora.A.weight", torch.ones(1))], True)]),
+    )
+    model = _FakeModel({"q.base_layer.weight": torch.empty(0)})
+    post_process_calls = []
+    model.process_weights_after_loading = lambda: post_process_calls.append(True)
+    worker = _make_worker(model)
+    worker.add_lora = lambda request: None
+    worker.remove_lora = lambda lora_id: None
+    worker.device = torch.device("cpu")
+    worker._get_zmq_handle = lambda: "ipc:///tmp/test-adapter-post-process.sock"
+
+    worker.update_weights_from_ipc(peft_config={"r": 1}, base_sync_done=True)
+
+    assert post_process_calls == [True]
+
+
+# ---------------------------------------------------------------------------
+# Loader-style-aware ``.base_layer.`` handling: strict inner loaders (DeepseekV2
+# ``params_dict[name]``) keep the suffix; flat loaders (``AutoWeightsLoader``) strip it.
+# ---------------------------------------------------------------------------
+
+
+class _FakeStrictInner:
+    """Strict inner transformer: its ``load_weights`` does not use ``AutoWeightsLoader``."""
+
+    def load_weights(self, weights):
+        params_dict = {}
+        return {name for name, _ in weights if params_dict[name] is not None}
+
+
+class _OuterModel(_FakeModel):
+    """Wraps an inner transformer under ``.model`` (the ForCausalLM layout)."""
+
+    def __init__(self, inner, params):
+        super().__init__(params)
+        self.model = inner
+
+
+def _strict_outer(params):
+    _vllm_utils_real._inner_load_weights_is_strict_cache.clear()
+    return _OuterModel(_FakeStrictInner(), params)
+
+
+def test_strict_child_keeps_base_layer_suffix_only_inside_its_prefix(monkeypatch):
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+    inner = "model.layers.0.self_attn.q_proj.base_layer.weight"
+    sibling = "lm_head.base_layer.weight"
+    model = _strict_outer({inner: torch.empty(0), sibling: torch.empty(0)})
+    worker = _make_worker(model)
+    assert _resolve(worker, model, inner) == inner
+    assert _resolve(worker, model, sibling) == "lm_head.weight"
+
+
+def test_vlm_strict_child_uses_the_mapped_language_model_prefix(monkeypatch):
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+
+    class Vlm(_FakeModel):
+        language_model = _strict_outer({})
+
+    key = "model.language_model.layers.0.self_attn.q_proj.base_layer.weight"
+    live = "language_model.model.layers.0.self_attn.q_proj.base_layer.weight"
+    sibling = "language_model.lm_head.base_layer.weight"
+    model = Vlm(
+        {live: torch.empty(0), sibling: torch.empty(0)},
+        mapper=_FakeMapper({"model.language_model.": "language_model.model."}),
+    )
+    worker = _make_worker(model)
+    assert _resolve(worker, model, key) == key
+    assert _resolve(worker, model, sibling) == "language_model.lm_head.weight"
+
+
+def test_strict_root_keeps_top_level_base_layer_suffix(monkeypatch):
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+
+    class StrictRoot(_FakeStrictInner, _FakeModel):
+        pass
+
+    name = "lm_head.base_layer.weight"
+    model = StrictRoot({name: torch.empty(0)})
+    assert _resolve(_make_worker(model), model, name) == name
+
+
+def test_strict_drafter_keeps_unqualified_main_model_weight_names(monkeypatch):
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+
+    class StrictDrafter(_FakeStrictInner, _FakeModel):
+        pass
+
+    model = StrictDrafter({"model.layers.0.mtp_block.weight": torch.empty(0)})
+    worker = _make_worker(model)
+    for name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
+        assert _resolve(worker, model, name) == name
+
+
+def test_strict_loader_non_lora_param_on_wrapped_module_re_suffixed(monkeypatch):
+    """DSV4 router params (``gate.tid2eid``) move under ``.base_layer.`` once the router is wrapped."""
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", False)
+    live_tid = "model.layers.0.mlp.gate.base_layer.tid2eid"
+    live_bias = "model.layers.0.mlp.gate.base_layer.e_score_correction_bias"
+    model = _strict_outer({live_tid: torch.empty(0), live_bias: torch.empty(0)})
+    worker = _make_worker(model)
+    assert _resolve(worker, model, "model.layers.0.mlp.gate.tid2eid") == live_tid
+    assert _resolve(worker, model, "model.layers.0.mlp.gate.e_score_correction_bias") == live_bias
+
+
+def test_strict_loader_multi_segment_shard_strips_to_unfused_leaf(monkeypatch):
+    """DSV4 ``compressor.fused_wkv_wgate`` is not LoRA-wrapped: its multi-segment shards lose the suffix."""
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+    model = _strict_outer({"model.layers.0.attn.compressor.fused_wkv_wgate.weight": torch.empty(0)})
+    model.packed_modules_mapping = {"compressor.fused_wkv_wgate": ["compressor.wkv", "compressor.wgate"]}
+    worker = _make_worker(model)
+    for shard in ("wkv", "wgate"):
+        name = f"model.layers.0.attn.compressor.{shard}.base_layer.weight"
+        assert _resolve(worker, model, name) == f"model.layers.0.attn.compressor.{shard}.weight"
+
+
+def test_per_expert_leaf_routed_through_base_layer(monkeypatch):
+    """With vLLM's ``lora_base_layer_prefix``, per-expert leaves take the ``<proj>.base_layer.<leaf>`` form."""
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_BASE_LAYER_PREFIX", True)
+    model = _FakeModel({"model.layers.0.mlp.experts.base_layer.routed_experts.w13_weight": torch.empty(0)})
+    worker = _make_worker(model)
+    suffixed = "model.layers.0.mlp.experts.0.gate_proj.base_layer.weight"
+    assert _resolve(worker, model, suffixed) == suffixed
+    assert _resolve(worker, model, "model.layers.0.mlp.experts.0.gate_proj.weight") == suffixed
+
+
+def test_lora_base_normalizer_preserves_unqualified_deepseek_head_names():
+    names = ("hc_head_fn", "hc_head_base", "hc_head_scale")
+    weights = [(name, torch.ones(2, dtype=torch.float32)) for name in names]
+    model = _FakeModel(
+        {f"model.{name}": torch.empty_like(tensor) for name, tensor in weights},
+        mapper=_FakeMapper({"hc_head": "model.hc_head"}),
+    )
+    normalizer = _vllm_utils_real.LoRABaseWeightNormalizer(model, (32, 32))
+
+    normalized = normalizer.normalize(weights)
+
+    normalizer.validate_complete()
+    assert [name for name, _ in normalized] == list(names)
+    assert all(actual is original for (_, actual), (_, original) in zip(normalized, weights, strict=True))
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("block_shape", [(128, 128), (32, 32), (32, 64)])
+@pytest.mark.parametrize("scale_first", [False, True])
+def test_fp8_lora_base_sync_preserves_values_across_reused_buckets(dtype, block_shape, scale_first):
+    model = _FakeModel({"proj.weight": torch.empty((81, 61), dtype=dtype)})
+    normalizer = _vllm_utils_real.LoRABaseWeightNormalizer(model, block_shape)
+    rows, cols = 81, 61
+    scale_rows = (rows + block_shape[0] - 1) // block_shape[0]
+    scale_cols = (cols + block_shape[1] - 1) // block_shape[1]
+    scales = torch.arange(1, scale_rows * scale_cols + 1).reshape(scale_rows, scale_cols).float()
+    expanded = scales.repeat_interleave(block_shape[0], 0).repeat_interleave(block_shape[1], 1)[:rows, :cols]
+    weight = torch.full((rows, cols), 2.0, dtype=torch.float8_e4m3fn)
+    updates = [("proj.weight", weight), ("proj.weight_scale_inv", scales)]
+    if scale_first:
+        updates.reverse()
+
+    assert normalizer.normalize(updates[:1]) == []
+    updates[0][1].fill_(4.0)
+    normalized = normalizer.normalize(updates[1:])
+    normalizer.validate_complete()
+
+    assert [name for name, _ in normalized] == ["proj.weight"]
+    torch.testing.assert_close(normalized[0][1], (2 * expanded).to(dtype), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("live_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_dsv41_native_fp8_scale_when_live_projection_is_quantized_or_float(live_dtype):
+    from verl.utils.qat.compressed_tensors import Fp8ConfigWeightQuantizer
+
+    prefix = "layers.0.attn.wq_a"
+    model = _FakeModel({f"{prefix}.weight": torch.empty(64, 96, dtype=live_dtype)})
+    model.model_type = "deepseek_v41"
+    config = {"quant_method": "fp8", "activation_scheme": "dynamic", "weight_block_size": [32, 32]}
+    quantizer = Fp8ConfigWeightQuantizer(config, model_types=[model.model_type])
+    blocks = torch.tensor([[1, 2, 4], [8, 16, 32]], dtype=torch.bfloat16)
+    updates = list(
+        quantizer(
+            [
+                (f"{prefix}.weight", torch.ones(64, 96, dtype=torch.float8_e4m3fn)),
+                (f"{prefix}.scale", blocks.to(torch.float8_e8m0fnu)),
+            ]
+        )
+    )
+    normalizer = _vllm_utils_real.LoRABaseWeightNormalizer(model, (32, 32))
+
+    normalized = normalizer.normalize(updates)
+    normalizer.validate_complete()
+
+    if live_dtype is torch.bfloat16:
+        assert [name for name, _ in normalized] == [f"{prefix}.weight"]
+        torch.testing.assert_close(normalized[0][1], blocks.repeat_interleave(32, 0).repeat_interleave(32, 1))
+    else:
+        assert [name for name, _ in normalized] == [f"{prefix}.weight", f"{prefix}.scale"]
+        assert all(actual is original for (_, actual), (_, original) in zip(normalized, updates, strict=True))
+
+
+@pytest.mark.parametrize("live_dtype", [torch.bfloat16, torch.int8])
+def test_lora_base_sync_keeps_scales_only_for_quantized_packed_weights(live_dtype):
+    model = _FakeModel(
+        {"layers.0.qkv_proj.base_layer.weight": torch.empty(2, 2, dtype=live_dtype)},
+        packed={"qkv_proj": ["q_proj", "k_proj", "v_proj"]},
+    )
+    normalizer = _vllm_utils_real.LoRABaseWeightNormalizer(model, (32, 32))
+    scale = ("layers.0.q_proj.weight_scale", torch.full((1, 1), 3.0))
+
+    normalized = normalizer.normalize([scale])
+
+    normalizer.validate_complete()
+    if live_dtype is torch.int8:
+        assert normalized == [scale]
+    else:
+        assert normalized == []
+
+
+def test_quantized_lora_base_sync_finishes_native_reload_before_report_and_retry(monkeypatch):
+    events = []
+    _install_fake_reload(monkeypatch, events)
+    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda _: True)
+    monkeypatch.setitem(sys.modules, "verl.utils.vllm.utils", _vllm_utils_real)
+    model = _FakeModel({"proj.weight": torch.empty(2, 2, dtype=torch.bfloat16)})
+    model.loaded = []
+    worker = _staging_sync_worker(model)
+    worker.model_runner.vllm_config.quant_config = types.SimpleNamespace(weight_block_size=(32, 32))
+    weight = ("proj.weight", torch.full((2, 2), 2.0, dtype=torch.float8_e4m3fn))
+    scale = ("proj.weight_scale_inv", torch.full((1, 1), 3.0))
+    _install_fake_receiver(monkeypatch, [([weight], True)])
+
+    with pytest.raises(ValueError, match="Incomplete FP8.*proj.weight"):
+        worker.update_weights_from_ipc(peft_config={"r": 1})
+    assert events == ["start_reload", "finish_reload"]
+    assert model.loaded == []
+
+    _install_fake_receiver(monkeypatch, [([scale], False), ([weight], True)])
+    worker.update_weights_from_ipc(peft_config={"r": 1})
+
+    assert events == ["start_reload", "finish_reload"] * 2
+    assert [name for name, _ in model.loaded] == ["proj.weight"]
+    torch.testing.assert_close(model.loaded[0][1], torch.full((2, 2), 6.0, dtype=torch.bfloat16))

@@ -138,22 +138,29 @@ def is_compressed_tensors_model(vllm_config) -> bool:
 
 
 def configure_fp8_ignored_layers_match_mode(vllm_config) -> None:
-    """Apply verl's optional native-FP8 ignore matching extension."""
+    """Configure FP8 exclusions before vLLM maps them into its model namespace."""
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+    from verl.utils.qat.compressed_tensors import (
+        _as_quantization_config,
+        _resolve_quantization_config,
+        get_fp8_ignored_layers,
+    )
 
     quant_config = getattr(vllm_config, "quant_config", None)
     if not isinstance(quant_config, Fp8Config):
         return
     hf_config = getattr(getattr(vllm_config, "model_config", None), "hf_config", None)
-    serialized = getattr(hf_config, "quantization_config", None)
-    if hasattr(serialized, "to_dict"):
-        serialized = serialized.to_dict()
-    if not isinstance(serialized, dict):
+    serialized = _as_quantization_config(_resolve_quantization_config(hf_config, {})[1])
+    if serialized is None:
         return
     match_mode = serialized.get("ignored_layers_match_mode", "exact")
     if match_mode not in ("exact", "substring", "suffix"):
         raise ValueError(f"Unsupported ignored_layers_match_mode={match_mode!r}")
     quant_config.ignored_layers_match_mode = match_mode
+    quant_config.ignored_layers = get_fp8_ignored_layers(
+        serialized, is_multimodal=getattr(hf_config, "text_config", None) is not None
+    )
 
 
 def refresh_rocm_attention_weight_caches(model):
