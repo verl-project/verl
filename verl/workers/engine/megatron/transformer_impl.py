@@ -80,7 +80,7 @@ from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizer
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import detach_tree, postprocess_batch_func, prepare_micro_batches
-from .utils import set_random_seed
+from .utils import enable_megatron_full_determinism, set_random_seed
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -191,6 +191,8 @@ class MegatronEngine(BaseEngine):
         self.checkpoint_config = checkpoint_config
         assert self.engine_config.use_mbridge, "use_mbridge must be True"
         _check_dcp_unsupported_features(self.engine_config, self.model_config)
+        if getattr(self.engine_config, "full_determinism", False):
+            enable_megatron_full_determinism(seed=self.engine_config.seed)
         self._init_device_mesh()
 
         set_random_seed(seed=self.engine_config.seed)

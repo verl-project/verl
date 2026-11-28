@@ -119,6 +119,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def __init__(self, config: TrainingWorkerConfig):
         Worker.__init__(self)
 
+        engine_cfg = getattr(config, "engine_config", None)
+        strategy = getattr(config, "strategy", None) or getattr(engine_cfg, "strategy", None)
+        if strategy == "megatron" and getattr(engine_cfg, "full_determinism", False):
+            from verl.workers.engine.megatron.utils import enable_megatron_full_determinism
+
+            enable_megatron_full_determinism(seed=getattr(engine_cfg, "seed", 42))
+
         from verl.workers.engine import BaseEngine, EngineRegistry
 
         initialize_global_process_group_ray(timeout_second=None)
@@ -591,6 +598,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 )
                 self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
                 self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
+                if hasattr(self.config.actor, "megatron") and hasattr(self.config.ref, "megatron"):
+                    if getattr(self.config.actor.megatron, "full_determinism", False):
+                        self.config.ref.megatron.full_determinism = True
             ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
 
             # The ref model does not need to enable MTP; force it to false.
