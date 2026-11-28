@@ -905,6 +905,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             model_sharded_state_dict = self._build_model_sharded_state_dict(metadata)
 
         # ── Load model weights ──────────────────────────────────────────────
+        model_loaded = False
         if self.should_load_dist_ckpt_model or (self.should_load_hf_model and self.peft_cls is not None):
             model_sd = self._maybe_filter_peft_state_dict(dict(model_sharded_state_dict))
             loaded_model = load_dist_checkpointing(
@@ -926,11 +927,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 log_with_rank(f"Loaded PEFT adapter checkpoint from {model_dist_path}", rank=self.rank, logger=logger)
             else:
                 log_with_rank(f"Loaded sharded model checkpoint from {model_dist_path}", rank=self.rank, logger=logger)
+            model_loaded = True
 
         elif self.should_load_hf_model and self.peft_cls is None:
             hf_model_path = get_hf_model_checkpoint_path(local_path)
             self._load_model_as_hf_via_bridge(hf_model_path)
             log_with_rank(f"Loaded HF model checkpoint from {hf_model_path} with bridge", rank=self.rank, logger=logger)
+            model_loaded = True
 
         # ── Load optimizer / LR scheduler ───────────────────────────────────
         if self.should_load_optimizer:
@@ -955,6 +958,16 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     log_with_rank(
                         f"Loaded LR scheduler checkpoint from {optim_dist_path}", rank=self.rank, logger=logger
                     )
+        elif model_loaded and self.optimizer is not None:
+            # Model weights were updated outside the optimizer. Refresh the
+            # optimizer's FP32 master weights from the loaded model parameters
+            # so the first step() does not overwrite them with stale weights.
+            self.optimizer.reload_model_params()
+            log_with_rank(
+                "Reloaded optimizer model params from loaded model weights (optimizer not in load_contents)",
+                rank=self.rank,
+                logger=logger,
+            )
 
         # ── Load RNG states ─────────────────────────────────────────────────
         if self.should_load_extra:

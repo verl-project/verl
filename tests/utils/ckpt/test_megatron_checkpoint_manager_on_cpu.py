@@ -23,6 +23,7 @@ Uses real megatron.core with gloo backend on a single CPU process.
 import os
 import shutil
 import tempfile
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -109,6 +110,9 @@ def _make_manager(
     bridge="auto",
     peft_cls=None,
     use_distributed_optimizer=False,
+    use_megatron_fsdp=False,
+    model=None,
+    optimizer="auto",
 ):
     if save_contents is None:
         save_contents = ["model", "optimizer", "extra"]
@@ -121,9 +125,11 @@ def _make_manager(
         async_save=False,
     )
 
-    model = _make_mock_model()
-    optimizer = MagicMock()
-    optimizer.sharded_state_dict.return_value = {"step": 1, "param_state": MagicMock()}
+    if model is None:
+        model = _make_mock_model()
+    if optimizer == "auto":
+        optimizer = MagicMock()
+        optimizer.sharded_state_dict.return_value = {"step": 1, "param_state": MagicMock()}
     lr_scheduler = MagicMock()
     lr_scheduler.state_dict.return_value = {"last_epoch": 10}
 
@@ -148,6 +154,7 @@ def _make_manager(
         optimizer_scheduler=lr_scheduler,
         use_distributed_optimizer=use_distributed_optimizer,
         use_dist_checkpointing=use_dist_checkpointing,
+        use_megatron_fsdp=use_megatron_fsdp,
         bridge=bridge,
         peft_cls=peft_cls,
     )
@@ -655,3 +662,220 @@ class TestModelShardedStateDictNotBuiltUnnecessarily:
 
         mgr.load_checkpoint(ckpt_path)
         mgr.model[0].sharded_state_dict.assert_called_once()
+
+
+# ===========================================================================
+# Tests: reload_model_params on model-only resume (issue #8604)
+# ===========================================================================
+
+
+class _TinyBF16Model(torch.nn.Module):
+    """Minimal BF16 module exposing ``sharded_state_dict`` for CPU resume tests."""
+
+    def __init__(self, init_val: float):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.full((4,), init_val, dtype=torch.bfloat16))
+
+    def sharded_state_dict(self, metadata=None):
+        return {"weight": self.weight}
+
+
+class _FakeMixedPrecisionOptimizer:
+    """Minimal stand-in for Megatron's mixed-precision optimizer.
+
+    Holds an independent FP32 main-param copy initialized from ``model`` at
+    construction time. ``step()`` updates that FP32 copy and writes it back
+    into the BF16 model parameter; ``reload_model_params()`` resyncs the FP32
+    copy from the current model parameter.
+    """
+
+    def __init__(self, model: torch.nn.Module):
+        self._param = model.weight
+        self.main_param = self._param.detach().float().clone()
+        self.reload_calls = 0
+
+    def reload_model_params(self):
+        self.reload_calls += 1
+        self.main_param.copy_(self._param.detach().float())
+
+    @torch.no_grad()
+    def step(self, lr: float = 1e-3):
+        grad = torch.ones_like(self.main_param)
+        self.main_param.sub_(grad, alpha=lr)
+        self._param.data.copy_(self.main_param.to(self._param.dtype))
+
+
+class TestReloadModelParamsOnModelOnlyResume:
+    @pytest.fixture(autouse=True)
+    def _tmpdir(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.ckpt_path = os.path.join(self.test_dir, "global_step_1")
+        os.makedirs(self.ckpt_path, exist_ok=True)
+        yield
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_dist_ckpt_model_only_reloads_optimizer_params(self, mock_load_dc, _mock_meta):
+        _make_v2_layout(self.ckpt_path, "model", "extra")
+        mock_load_dc.side_effect = lambda sharded_state_dict, ckpt_dir: (
+            {"model": {"layer.weight": torch.zeros(1)}}
+            if "model" in sharded_state_dict
+            else {"rng_state": [{"random_rng_state": None}]}
+        )
+        mgr = _make_manager(load_contents=["model", "extra"], use_dist_checkpointing=True)
+        mgr.optimizer.reload_model_params.side_effect = lambda: mgr.model[0].load_state_dict.assert_called_once()
+
+        with patch.object(mgr, "load_rng_states"):
+            mgr.load_checkpoint(self.ckpt_path)
+
+        mgr.model[0].load_state_dict.assert_called_once()
+        mgr.optimizer.reload_model_params.assert_called_once_with()
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_hf_bridge_model_only_reloads_optimizer_params(self, mock_load_dc, _mock_meta):
+        mgr = _make_manager(load_contents=["model"], use_dist_checkpointing=False)
+
+        with patch.object(mgr, "_load_model_as_hf_via_bridge") as mock_bridge_load:
+            mgr.optimizer.reload_model_params.side_effect = lambda: mock_bridge_load.assert_called_once()
+            mgr.load_checkpoint(self.ckpt_path)
+
+        mock_bridge_load.assert_called_once()
+        mock_load_dc.assert_not_called()
+        mgr.optimizer.reload_model_params.assert_called_once_with()
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_peft_model_only_reloads_optimizer_params(self, mock_load_dc, _mock_meta):
+        _make_v2_layout(self.ckpt_path, "model")
+        mock_load_dc.return_value = {"model": {"lora.weight": torch.zeros(1)}}
+        mgr = _make_manager(load_contents=["model"], use_dist_checkpointing=False, peft_cls=MagicMock())
+        mgr.optimizer.reload_model_params.side_effect = lambda: mgr.model[0].load_state_dict.assert_called_once()
+
+        with patch.object(mgr, "_maybe_filter_peft_state_dict", side_effect=lambda sd: sd):
+            mgr.load_checkpoint(self.ckpt_path)
+
+        mgr.model[0].load_state_dict.assert_called_once()
+        mgr.optimizer.reload_model_params.assert_called_once_with()
+
+    @pytest.mark.parametrize(
+        ("load_contents", "use_dist_checkpointing"),
+        [
+            (["model", "optimizer"], True),
+            (["model", "optimizer"], False),
+            (["optimizer"], True),
+        ],
+    )
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_loading_optimizer_does_not_reload_model_params(
+        self, mock_load_dc, _mock_meta, load_contents, use_dist_checkpointing
+    ):
+        _make_v2_layout(self.ckpt_path, "model", "optimizer")
+        mock_load_dc.side_effect = lambda sharded_state_dict, ckpt_dir: (
+            {"model": {"layer.weight": torch.zeros(1)}} if "model" in sharded_state_dict else {"optimizer": {"step": 1}}
+        )
+        mgr = _make_manager(load_contents=load_contents, use_dist_checkpointing=use_dist_checkpointing)
+
+        with patch.object(mgr, "_load_model_as_hf_via_bridge"):
+            mgr.load_checkpoint(self.ckpt_path)
+
+        mgr.optimizer.load_state_dict.assert_called_once()
+        mgr.optimizer.reload_model_params.assert_not_called()
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_extra_only_does_not_reload_model_params(self, mock_load_dc, _mock_meta):
+        _make_v2_layout(self.ckpt_path, "extra")
+        mock_load_dc.return_value = {"rng_state": [{"random_rng_state": None}]}
+        mgr = _make_manager(load_contents=["extra"])
+
+        with patch.object(mgr, "load_rng_states"):
+            mgr.load_checkpoint(self.ckpt_path)
+
+        mgr.optimizer.reload_model_params.assert_not_called()
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_none_optimizer_does_not_fail(self, mock_load_dc, _mock_meta):
+        mgr = _make_manager(load_contents=["model"], optimizer=None)
+        with patch.object(mgr, "_load_model_as_hf_via_bridge") as mock_bridge_load:
+            mgr.load_checkpoint(self.ckpt_path)
+        mock_bridge_load.assert_called_once()
+
+    def test_megatron_fsdp_model_only_skips_reload_model_params(self):
+        """Megatron-FSDP raises NotImplementedError in DistributedOptimizer.reload_model_params()."""
+        dist_path = os.path.join(self.ckpt_path, "model", "dist_ckpt")
+        os.makedirs(dist_path, exist_ok=True)
+        with open(os.path.join(dist_path, ".metadata"), "w") as f:
+            f.write("")
+
+        checkpointing = ModuleType("megatron.bridge.training.checkpointing")
+        checkpointing.load_fsdp_dtensor_checkpoint = MagicMock(
+            return_value=({"model": {"layer.weight": torch.zeros(1)}}, None, None, None)
+        )
+        bridge_mod = ModuleType("megatron.bridge")
+        training_mod = ModuleType("megatron.bridge.training")
+        bridge_mod.training = training_mod
+        training_mod.checkpointing = checkpointing
+
+        mgr = _make_manager(load_contents=["model"], use_megatron_fsdp=True)
+        mgr.optimizer.reload_model_params.side_effect = NotImplementedError
+        modules = {
+            "megatron.bridge": bridge_mod,
+            "megatron.bridge.training": training_mod,
+            "megatron.bridge.training.checkpointing": checkpointing,
+        }
+        with patch.dict("sys.modules", modules):
+            mgr.load_checkpoint(self.ckpt_path)
+
+        mgr.model[0].load_state_dict.assert_called_once()
+        mgr.optimizer.reload_model_params.assert_not_called()
+
+    @pytest.mark.parametrize("use_dist_checkpointing", [True, False])
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_first_step_after_model_only_resume_preserves_loaded_weights(
+        self, mock_load_dc, _mock_meta, use_dist_checkpointing
+    ):
+        """Regression test for #8604: first optimizer step must update from resumed weights, not initial weights."""
+        init_val = 0.0
+        ckpt_val = 5.0
+        lr = 0.25
+
+        model = _TinyBF16Model(init_val=init_val)
+        optimizer = _FakeMixedPrecisionOptimizer(model)
+        mgr = _make_manager(
+            load_contents=["model"],
+            use_dist_checkpointing=use_dist_checkpointing,
+            model=[model],
+            optimizer=optimizer,
+        )
+
+        ckpt_weight = torch.full_like(model.weight, ckpt_val)
+        if use_dist_checkpointing:
+            _make_v2_layout(self.ckpt_path, "model")
+            mock_load_dc.return_value = {"model": {"weight": ckpt_weight}}
+            mgr.load_checkpoint(self.ckpt_path)
+        else:
+
+            def _fake_bridge_load(_path):
+                with torch.no_grad():
+                    model.weight.copy_(ckpt_weight)
+
+            with patch.object(mgr, "_load_model_as_hf_via_bridge", side_effect=_fake_bridge_load):
+                mgr.load_checkpoint(self.ckpt_path)
+
+        assert optimizer.reload_calls == 1
+        torch.testing.assert_close(
+            optimizer.main_param,
+            torch.full_like(optimizer.main_param, ckpt_val),
+            rtol=0,
+            atol=0,
+        )
+
+        optimizer.step(lr=lr)
+
+        expected = torch.full_like(model.weight, ckpt_val - lr)
+        torch.testing.assert_close(model.weight, expected, rtol=0, atol=0)
