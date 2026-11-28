@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import warnings
 from dataclasses import is_dataclass
 from typing import Any, Optional
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 __all__ = ["omega_conf_to_dataclass", "validate_config"]
+
+logger = logging.getLogger(__name__)
 
 
 def omega_conf_to_dataclass(config: DictConfig | dict, dataclass_type: Optional[type[Any]] = None) -> Any:
@@ -115,6 +119,172 @@ def _validate_score_centering_config(config: DictConfig) -> None:
         raise ValueError("score centering requires stochastic training rollouts with temperature > 0.")
     if (config.get("distillation") or {}).get("enabled", False):
         raise ValueError("score centering cannot be combined with distillation.")
+
+
+# Role profiler blocks that a worker can read, with the role-level switch that decides whether that
+# role runs at all. `global_profiler` only says *when* and *with which tool* to collect; each role's
+# own `profiler.enable` is what decides *whether* it does. A run that sets only one side starts,
+# trains to completion, and produces no trace and no error.
+#
+# The role switch matters for the check: a `profiler.enable=True` on a role that is itself off
+# profiles nothing, so counting it as "somebody collects" would suppress the warning exactly when it
+# is most needed. `None` means the role is always present (the actor and its rollout).
+_PROFILER_ROLES = (
+    ("actor_rollout_ref.actor.profiler.enable", None),
+    ("actor_rollout_ref.ref.profiler.enable", "actor_rollout_ref.actor.use_kl_loss"),
+    ("actor_rollout_ref.rollout.profiler.enable", None),
+    ("critic.profiler.enable", "critic.enable"),
+)
+
+# In the hybrid engine the reference runs in the actor/rollout worker group, so the scheduled
+# start_profile call reaches a worker whose profiler block is `actor.profiler`
+# (trainer_base.py::_start_profiling drives ref_policy_wg only when it is a distinct group). A
+# `ref.profiler.enable` on its own therefore cannot catch the scheduled steps. It still counts for a
+# standalone reference worker, which v1 separate_async creates without hybrid replicas.
+_HYBRID_ALIASED_ROLES = frozenset({"actor_rollout_ref.ref.profiler.enable"})
+
+
+def _select_profiler_field(config: DictConfig, key: str, default: Any) -> Any:
+    """Read a profiler config value, tolerating schemas that do not define it at all."""
+    try:
+        return OmegaConf.select(config, key, default=default)
+    except Exception:  # unresolvable interpolation or missing parent node
+        return default
+
+
+def _effective_tool(config: DictConfig, enable_key: str) -> Any:
+    """The tool a role's own worker ends up with, after resolving what it inherits.
+
+    A role block interpolates `tool: ${oc.select:global_profiler.tool,null}`, so resolving the key
+    gives the value the worker reads -- the global default when the role does not override it, and
+    the role's own value (including an explicit null) when it does.
+    """
+    return _select_profiler_field(config, enable_key.removesuffix(".enable") + ".tool", None)
+
+
+def _rollout_profiler_discrete(config: DictConfig) -> bool:
+    """Whether the rollout's profiler block runs in discrete mode.
+
+    The vLLM and SGLang servers forward a scheduled ``start_profile`` only when
+    ``DistProfiler.is_discrete_mode()`` is true, so a continuous-mode rollout profiler never starts
+    during the trainer's profiled steps.
+    """
+    tool = _effective_tool(config, "actor_rollout_ref.rollout.profiler.enable")
+    if tool is None:
+        # The null-tool warning below reports this case.
+        return True
+    return bool(
+        _select_profiler_field(config, f"actor_rollout_ref.rollout.profiler.tool_config.{tool}.discrete", False)
+    )
+
+
+def _reference_shares_actor_group(config: DictConfig) -> bool:
+    """Whether the reference worker is colocated with the actor/rollout group.
+
+    Mirrors ``PPOTrainer._init_resource_pool_mgr``: LoRA keeps the reference in the actor group, and
+    a v1 ``separate_async`` run also shares the actor group when hybrid replicas are enabled
+    (``enable_switch`` and ``hybrid_engine``); otherwise it creates a distinct reference worker.
+    """
+    lora_rank = _select_profiler_field(config, "actor_rollout_ref.model.lora.rank", 0) or _select_profiler_field(
+        config, "actor_rollout_ref.model.lora_rank", 0
+    )
+    lora_adapter_path = _select_profiler_field(config, "actor_rollout_ref.model.lora_adapter_path", None)
+    if lora_rank > 0 or lora_adapter_path is not None:
+        return True
+
+    trainer_mode = _select_profiler_field(config, "trainer.v1.trainer_mode", "sync")
+    if trainer_mode != "separate_async":
+        return True
+
+    enable_switch = bool(
+        _select_profiler_field(config, "trainer.v1.separate_async.hybrid_rollout.enable_switch", False)
+    )
+    hybrid_engine = bool(_select_profiler_field(config, "actor_rollout_ref.hybrid_engine", True))
+    return enable_switch and hybrid_engine
+
+
+def _validate_profiler_config(
+    config: DictConfig, use_reference_policy: bool, use_critic: bool, ref_aliased: bool = True
+) -> None:
+    """Warn about profiler configurations that silently collect nothing.
+
+    ``global_profiler.steps`` and the per-role ``profiler.enable`` are two halves of one switch that
+    neither validates against the other. ``steps`` only decides on *which* steps the trainer calls
+    ``start_profile``/``stop_profile``; every worker then gates that call on its own ``enable``. Arm
+    the trigger with no role enabled and the trainer spends the whole run driving calls that every
+    worker discards -- no trace, no error, no log line saying why.
+
+    The reverse direction (``enable`` with ``steps: null``) is deliberate and documented, so it is
+    not reported: that is how code-instrumented collection works, where the user calls the profiler
+    API from their own script and ``global_profiler.steps`` must stay null to avoid a second,
+    conflicting profiler.
+
+    ``ref_aliased`` says whether the reference shares the actor/rollout worker group; only then does
+    its enabled flag fail to reach a distinct worker.
+    """
+    steps = _select_profiler_field(config, "global_profiler.steps", None)
+    # An empty step list schedules nothing, exactly like null.
+    has_steps = bool(steps)
+    if not has_steps:
+        # Manual instrumentation, or not profiling at all. Both are valid.
+        return
+
+    active_roles = {
+        "actor_rollout_ref.ref.profiler.enable": use_reference_policy,
+        "critic.profiler.enable": use_critic,
+    }
+    enabled_roles = []
+    for key, _ in _PROFILER_ROLES:
+        if not bool(_select_profiler_field(config, key, False)):
+            continue
+        if not active_roles.get(key, True):
+            logger.warning("%s is set, but that role does not run in this job; it will not profile.", key)
+            continue
+        if key in _HYBRID_ALIASED_ROLES and ref_aliased:
+            # Colocated: the scheduled call lands on the actor's block, not this one.
+            logger.warning(
+                "%s is set, but the reference is colocated in the actor/rollout worker group, whose "
+                "profiler block is actor_rollout_ref.actor.profiler; this flag alone will not catch the "
+                "scheduled steps.",
+                key,
+            )
+            continue
+        if key == "actor_rollout_ref.rollout.profiler.enable" and not _rollout_profiler_discrete(config):
+            # The rollout servers only forward the scheduled call in discrete mode.
+            logger.warning(
+                "%s is set, but the rollout profiler only starts for the trainer's scheduled "
+                "start_profile calls in discrete mode; set "
+                "actor_rollout_ref.rollout.profiler.tool_config.%s.discrete=true to collect.",
+                key,
+                _effective_tool(config, key),
+            )
+            continue
+        enabled_roles.append(key)
+
+    if not enabled_roles:
+        names = ", ".join(key for key, _ in _PROFILER_ROLES)
+        warnings.warn(
+            f"global_profiler.steps={list(steps)} schedules profiling but no active role collects it: "
+            f"{names} are all False, or the enabled role cannot receive the scheduled calls. Every "
+            "worker then skips the trainer's start/stop_profile calls and no trace is written. Set "
+            "actor_rollout_ref.actor.profiler.enable=True (rollout and ref follow the actor) to collect.",
+            stacklevel=2,
+        )
+        return
+
+    # Warn when any enabled role's *effective* tool is null. The role block interpolates
+    # `global_profiler.tool` as its default but overrides it with its own value -- including an
+    # explicit null -- so the global setting alone does not decide what the worker gets. Check each
+    # role: one role with a working tool must not hide another role that falls back to no-op.
+    null_tool_roles = [key for key in enabled_roles if _effective_tool(config, key) is None]
+    if null_tool_roles:
+        warnings.warn(
+            "Profiling is enabled and steps are configured, but the effective profiler tool is null for: "
+            f"{', '.join(null_tool_roles)}. DistProfiler falls back to a no-op backend for an unknown "
+            "tool, so those steps produce no trace. Set global_profiler.tool to one of: nsys, npu, "
+            "torch, torch_memory, precision_debugger.",
+            stacklevel=2,
+        )
 
 
 def validate_config(
@@ -251,5 +421,12 @@ def validate_config(
         from verl.workers.rollout.vllm_rollout.utils import get_vllm_max_lora_rank
 
         get_vllm_max_lora_rank(lora_rank)
+
+    _validate_profiler_config(
+        config,
+        use_reference_policy=use_reference_policy,
+        use_critic=use_critic,
+        ref_aliased=_reference_shares_actor_group(config),
+    )
 
     print("[validate_config] All configuration checks passed successfully!")
