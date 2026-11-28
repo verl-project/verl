@@ -14,6 +14,7 @@
 
 import asyncio
 import concurrent.futures
+import os
 
 import pytest
 import ray
@@ -22,6 +23,7 @@ import torch
 from tests.checkpoint_engine.d2h_checkpoint_engine import TestD2HCheckpointEngine
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.checkpoint_engine import base as checkpoint_engine_base
+from verl.utils.device import get_device_name, is_device_available
 
 
 class _FakeTicket:
@@ -182,7 +184,7 @@ async def test_d2h_snapshot_is_published_before_rollout_consumes_it():
         await asyncio.sleep(0)
         assert not receive_task.done()
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = os.environ.get("VERL_TEST_DEVICE") or (get_device_name() if is_device_available() else "cpu")
         source = torch.arange(8, dtype=torch.float32, device=device)
         expected = source.cpu().clone()
         await sender.send_weights(iter([("weight", source)]), global_steps=1)
