@@ -88,6 +88,7 @@ class AgentData:
         self.tool_rewards: list[float] = []
         self.user_turns = 0
         self.assistant_turns = 0
+        self.is_truncated: Optional[bool] = False
 
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
@@ -192,6 +193,9 @@ class ToolAgentLoop(AgentLoopBase):
         if agent_data.audio_data is not None:
             multi_modal_data["audios"] = agent_data.audio_data
 
+        agent_data.extra_fields["response_truncated"] = (
+            True if len(response_ids) > self.response_length else agent_data.is_truncated
+        )
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
@@ -271,6 +275,13 @@ class ToolAgentLoop(AgentLoopBase):
                 if key in output.extra_fields and key in agent_data.extra_fields:
                     agent_data.extra_fields[key] = int(agent_data.extra_fields[key]) + int(output.extra_fields[key])
 
+        # Any length-limited turn makes the trajectory truncated. An unknown turn
+        # keeps the legacy metric fallback unless another turn proves truncation.
+        if output.is_truncated:
+            agent_data.is_truncated = True
+        elif output.is_truncated is None and agent_data.is_truncated is False:
+            agent_data.is_truncated = None
+
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
         merge_result, response_mask, response_logprobs = await self.ct_merge_assistant_token(
@@ -288,14 +299,6 @@ class ToolAgentLoop(AgentLoopBase):
         if output.routed_experts is not None:
             agent_data.routed_experts = output.routed_experts
 
-        # Check termination conditions
-        if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
-            return AgentState.TERMINATED
-        if self.max_assistant_turns and agent_data.assistant_turns >= self.max_assistant_turns:
-            return AgentState.TERMINATED
-        if self.max_user_turns and agent_data.user_turns >= self.max_user_turns:
-            return AgentState.TERMINATED
-
         # Extract tool calls (use per-sample tools if routed)
         active_tools = getattr(agent_data, "_active_tools", self.tools)
         tools = [tool.tool_schema for tool in active_tools.values()]
@@ -303,6 +306,21 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.response_ids, tools
         )
         agent_data.messages.append(self._build_assistant_message(assistant_content, agent_data))
+
+        # A normal final answer can end exactly at the response budget. Pending
+        # tool calls still require another turn, so stopping them is truncation.
+        if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
+            if (
+                len(agent_data.response_mask) > self.response_length
+                or output.is_truncated is not False
+                or agent_data.tool_calls
+            ):
+                agent_data.is_truncated = True
+            return AgentState.TERMINATED
+        if self.max_assistant_turns and agent_data.assistant_turns >= self.max_assistant_turns:
+            return AgentState.TERMINATED
+        if self.max_user_turns and agent_data.user_turns >= self.max_user_turns:
+            return AgentState.TERMINATED
 
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
@@ -394,6 +412,7 @@ class ToolAgentLoop(AgentLoopBase):
             tools=schemas,
         )
         if len(response_mask) >= self.response_length:
+            agent_data.is_truncated = True
             return AgentState.TERMINATED
         agent_data.prompt_ids = merge_result.token_ids
         agent_data.response_mask = response_mask
