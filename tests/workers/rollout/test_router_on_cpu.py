@@ -25,7 +25,8 @@ import yaml
 from omegaconf import OmegaConf
 
 from verl.utils.import_utils import resolve_config_path
-from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
+from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerClient, LLMServerManager
+from verl.workers.rollout.replica import TokenOutput
 from verl.workers.rollout.router import GlobalRequestLoadBalancer, get_router_handle
 
 MOCK_PLUGIN_FQN = __name__ + "._MockPluginLoadBalancer"
@@ -123,6 +124,98 @@ def ray_session():
     ray.init(ignore_reinit_error=True)
     yield
     ray.shutdown()
+
+
+@ray.remote
+class _RolloutServer:
+    def generate(self, prompt_ids, **kwargs):
+        if prompt_ids == [0]:
+            raise ValueError("generation failed")
+        return TokenOutput(token_ids=[7], log_probs=[-0.25], stop_reason="completed", extra_fields={"global_steps": 3})
+
+
+class _DelayedAcquireLoadBalancer(GlobalRequestLoadBalancer):
+    def __init__(self, server):
+        super().__init__(servers={"s0": server})
+        self.acquired = asyncio.Event()
+        self.deliver = asyncio.Event()
+        self.released = asyncio.Event()
+        self.releases = []
+
+    def require_release_fields(self):
+        return ["request_id"]
+
+    async def acquire_server(self, request_id):
+        result = super().acquire_server(request_id)
+        if request_id == "cancelled":
+            self.acquired.set()
+            await self.deliver.wait()
+        return result
+
+    async def wait_for_acquire(self):
+        await self.acquired.wait()
+
+    def deliver_acquire(self):
+        self.deliver.set()
+
+    def release_server(self, server_id, request_id=None):
+        super().release_server(server_id, request_id)
+        self.releases.append((server_id, request_id))
+        self.released.set()
+
+    async def wait_for_release(self, request_id):
+        while ("s0", request_id) not in self.releases:
+            self.released.clear()
+            await self.released.wait()
+        return self.releases
+
+
+@pytest.mark.parametrize("client_cls", [LLMServerClient, FullyAsyncLLMServerClient])
+def test_cancelled_acquire_releases_server(ray_session, client_cls):
+    async def run():
+        server = _RolloutServer.remote()
+        lb = ray.remote(_DelayedAcquireLoadBalancer).remote(server)
+        config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"name": "vllm", "response_length": 4}}})
+        client = client_cls(config=config, load_balancer_handle=lb)
+        try:
+            # Keep an unrelated request in flight: cleanup must release exactly one lease.
+            await lb.acquire_server.remote("held")
+            task = asyncio.create_task(client.generate("cancelled", prompt_ids=[1], sampling_params={}))
+            await asyncio.wait_for(lb.wait_for_acquire.remote(), timeout=10)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+
+            # Cancelling the local await does not undo the actor's completed allocation.
+            assert await lb.get_total_inflight.remote() == 2
+            await lb.deliver_acquire.remote()
+            try:
+                releases = await asyncio.wait_for(lb.wait_for_release.remote("cancelled"), timeout=5)
+            except TimeoutError:
+                pytest.fail(f"cancelled acquire leaked: {await lb.get_status.remote()}")
+            assert releases == [("s0", "cancelled")]
+            assert await lb.get_total_inflight.remote() == 1
+
+            output = await client.generate("next", prompt_ids=[2], sampling_params={})
+            assert output.token_ids == [7]
+            assert output.log_probs == [-0.25]
+            assert output.extra_fields["min_global_steps"] == output.extra_fields["max_global_steps"] == 3
+            await asyncio.wait_for(lb.wait_for_release.remote("next"), timeout=5)
+            assert await lb.get_total_inflight.remote() == 1
+            with pytest.raises(ray.exceptions.RayTaskError, match="generation failed"):
+                await client.generate("failed", prompt_ids=[0], sampling_params={})
+            await asyncio.wait_for(lb.wait_for_release.remote("failed"), timeout=5)
+            assert await lb.get_total_inflight.remote() == 1
+            await lb.release_server.remote("s0", "held")
+            assert await lb.get_total_inflight.remote() == 0
+            await lb.remove_servers.remote(["s0"])
+            with pytest.raises(ray.exceptions.RayTaskError, match="No available servers"):
+                await client.generate("no-server", prompt_ids=[2], sampling_params={})
+        finally:
+            ray.kill(lb)
+            ray.kill(server)
+
+    asyncio.run(run())
 
 
 def _write_router_yaml(tmp_path, router_class, **kwargs):
