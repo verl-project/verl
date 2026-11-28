@@ -86,22 +86,21 @@ class ServerAdapter(BaseRollout):
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
 
-        # Map each trainer rank to its co-located vLLM server so weight-update
-        # IPC handles stay on the GPU where they were created. Offset math
-        # assumes prefill_replicas == 1 (enforced by vLLMPDReplica); if that
-        # ever lifts, update both this block and vLLMPDReplica.launch_servers.
+        # Match launch_servers: all prefill engines, then all decode engines.
+        # Each engine's TP-rank-0 controls that engine's weight-update RPC.
         self._pd_role: Optional[str] = None
         self._pd_server_index: Optional[int] = None
         self._pd_tp_local_rank: Optional[int] = None
         if disagg is not None and getattr(disagg, "enabled", False):
-            footprint = prefill_tp + disagg.decode_replicas * decode_tp
+            prefill_span = prefill_tp * disagg.prefill_replicas
+            footprint = prefill_span + disagg.decode_replicas * decode_tp
             local = self.rollout_rank % footprint
-            if local < prefill_tp:
+            if local < prefill_span:
                 self._pd_role = "prefill"
-                self._pd_server_index = 0
-                self._pd_tp_local_rank = local
+                self._pd_server_index = local // prefill_tp
+                self._pd_tp_local_rank = local % prefill_tp
             else:
-                off = local - prefill_tp
+                off = local - prefill_span
                 self._pd_role = "decode"
                 self._pd_server_index = off // decode_tp
                 self._pd_tp_local_rank = off % decode_tp
@@ -128,15 +127,10 @@ class ServerAdapter(BaseRollout):
         else:
             self.sleep_level = VLLM_SLEEP_LEVEL
 
-        # Use replica_rank + node-local rank to form ZMQ handle instead of GPU UUID,
-        # because CheckpointEngineWorker and vLLM worker may see different GPU UUIDs
-        # when CUDA_VISIBLE_DEVICES differs between processes (common on ROCm/AMD).
-        # Must use node-local rank (not rollout_rank) so it matches vLLM worker's
-        # local_rank on every node. Include replica_rank to avoid collisions when
-        # multiple replicas share a node, and the Ray job id so two independent
-        # verl jobs on the same host (or a new run after a crashed one with a
-        # stale socket file) cannot collide on the shared /tmp namespace.
-        local_rank = self.rollout_rank % local_world_size
+        # PD receivers add VERL_ZMQ_BASE_TRAINER_RANK to the engine-local rank.
+        # Ordinary replicas retain node-local IPC ranks. Job/replica identifiers
+        # keep independent engines and jobs out of each other's IPC namespace.
+        local_rank = self.rollout_rank if self._pd_role is not None else self.rollout_rank % local_world_size
         job_id = ray.get_runtime_context().get_job_id()
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
@@ -157,7 +151,10 @@ class ServerAdapter(BaseRollout):
         if self.server_handle is None:
             prefix = self._get_server_name_prefix()
             if self._pd_role == "prefill":
-                actor_name = f"{prefix}server_{self.replica_rank}_0"
+                if self.config.disaggregation.prefill_replicas == 1:
+                    actor_name = f"{prefix}server_{self.replica_rank}_0"
+                else:
+                    actor_name = f"{prefix}server_prefill_{self.replica_rank}_{self._pd_server_index}_0"
             elif self._pd_role == "decode":
                 actor_name = f"{prefix}server_decode_{self.replica_rank}_{self._pd_server_index}"
             else:

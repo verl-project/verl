@@ -514,7 +514,7 @@ quantization:
 # MTP configuration, reuse model configuration
 mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 
-# Prefill-Decode disaggregation (SGLang only; keep rollout.name=sglang and toggle enabled=True).
+# Prefill-Decode disaggregation (backend support and topology limits vary).
 disaggregation:
 
   # Master switch for PD disaggregation.
@@ -528,6 +528,18 @@ disaggregation:
 
   # Decode TP override; null = same as tensor_model_parallel_size.
   decode_tensor_model_parallel_size: null
+
+  # vLLM prefill memory fraction; null inherits common rollout settings.
+  prefill_gpu_memory_utilization: null
+
+  # vLLM decode memory fraction; null inherits common rollout settings.
+  decode_gpu_memory_utilization: null
+
+  # vLLM prefill engine arguments, overlaid on engine_kwargs.vllm; empty inherits common settings.
+  prefill_engine_kwargs: {}
+
+  # vLLM decode engine arguments, overlaid on engine_kwargs.vllm; empty inherits common settings.
+  decode_engine_kwargs: {}
 
   # KV cache transport: nixl | mooncake | ascend | mori | fake.
   transfer_backend: nixl
