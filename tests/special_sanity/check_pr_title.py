@@ -21,7 +21,7 @@ pr_title = os.environ.get("PR_TITLE", "").strip()
 # Define rules
 allowed_modules = ["fsdp", "megatron", "veomni", "sglang", "vllm", "trtllm", "rollout", "trainer"]
 allowed_modules += ["tests", "training_utils", "recipe", "hardware", "deployment"]
-allowed_modules += ["ray", "worker", "single_controller", "misc", "docker", "ci"]
+allowed_modules += ["ray", "worker", "single_controller", "misc", "docker", "ci", "uv"]
 allowed_modules += ["perf", "model", "algo", "env", "tool", "ckpt", "doc", "data", "cfg", "reward"]
 allowed_modules += ["fully_async", "one_step_off"]
 allowed_types = ["feat", "fix", "refactor", "chore", "test"]
