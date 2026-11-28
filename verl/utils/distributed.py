@@ -24,6 +24,7 @@ import torch.distributed
 from torch.distributed import TCPStore
 
 from verl.utils.device import get_device_name, get_nccl_backend, get_resource_name, get_torch_device, is_npu_available
+from verl.utils.hccl_diagnostics import hccl_diagnostic_stage
 from verl.utils.net_utils import is_ipv6
 
 
@@ -90,13 +91,20 @@ def initialize_global_process_group_ray(timeout_second=None, backend=None):
     if not torch.distributed.is_initialized():
         rank = int(os.environ.get("RANK", 0))
         world_size = int(os.environ.get("WORLD_SIZE", 1))
-        torch.distributed.init_process_group(
+        with hccl_diagnostic_stage(
+            "process_group.init",
             backend=backend,
             rank=rank,
             world_size=world_size,
-            timeout=timeout,
-            init_method=os.environ.get("DIST_INIT_METHOD", None),
-        )
+            init_method=os.environ.get("DIST_INIT_METHOD"),
+        ):
+            torch.distributed.init_process_group(
+                backend=backend,
+                rank=rank,
+                world_size=world_size,
+                timeout=timeout,
+                init_method=os.environ.get("DIST_INIT_METHOD", None),
+            )
 
 
 def create_tcp_store(
