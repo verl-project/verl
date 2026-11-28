@@ -1893,7 +1893,12 @@ class PPOTrainer(ABC):
 
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
-        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob"]
+        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs"]
+        # ref_log_prob is produced by _compute_ref_log_prob only when a reference
+        # policy is used (actor.use_kl_loss or algorithm.use_kl_in_reward); requesting
+        # it unconditionally crashes every no-ref recipe on the first update.
+        if self.use_reference_policy:
+            fields.append("ref_log_prob")
         if self.use_critic:
             fields.append("values")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
