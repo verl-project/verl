@@ -138,6 +138,10 @@ class CheckpointEngineConfig(BaseConfig):
     update_weights_bucket_megabytes: int = 2048
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
+    # The rollout keeps generating during a weight update: it loads the new weights into a staging copy and
+    # installs them between two decode steps, so the manager neither aborts its requests nor releases its
+    # KV cache. In-flight requests continue on the KV cache the old weights produced. SGLang rollout only.
+    rollout_staging: bool = False
     # If set, this Python module is imported on every worker process before the
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.

@@ -323,6 +323,15 @@ class ServerAdapter(BaseRollout):
         """
         await self._init_server_adapter()
         use_quantized_refit = _uses_quantized_refit(self.config, self.model_config)
+        # checkpoint_engine.rollout_staging: the server is generating. Its TP leader opens a session whose
+        # loads fill the server's staging copy; the session's end installs them between two decode steps.
+        staging = self.config.checkpoint_engine.rollout_staging
+        is_leader = self._engine is not None and self._is_server_tp_leader()
+        if staging and (wire_format == "delta_flush" or kwargs.get("peft_config") or use_quantized_refit):
+            raise ValueError(
+                "checkpoint_engine.rollout_staging stages full bf16 weight tensors: the delta wire format, "
+                "LoRA and the quantized refit load in place and need the regular (quiesced) weight sync"
+            )
 
         # Delta checkpoint-engine wire (standalone replicas): the generator yields
         # per-flush sparse payloads, applied in place through the verl custom
@@ -368,19 +377,33 @@ class ServerAdapter(BaseRollout):
                 if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4"
                 else ()
             )
-            async for params_batch in get_named_tensor_buckets(
-                weights, update_weights_bucket_bytes, fusion_groups=fusion_groups
-            ):
-                load_format = None
-                if use_quantized_refit:
-                    load_format = LOADER_FQN
-                await sgl_update_weights(
-                    engine=self._engine,
-                    params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
-                    device_mesh_key="infer_tp",
-                    device_mesh=self.device_mesh,
-                    load_format=load_format,
-                )
+            if staging and is_leader:
+                await self._engine.begin_weight_update(use_staging=True)
+            try:
+                async for params_batch in get_named_tensor_buckets(
+                    weights, update_weights_bucket_bytes, fusion_groups=fusion_groups
+                ):
+                    load_format = None
+                    if use_quantized_refit:
+                        load_format = LOADER_FQN
+                    params_batch = [(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch]
+                    # A tensor whose byte size is not a multiple of 8 would leave the ones packed after it
+                    # misaligned for the server's views; such a bucket goes tensor by tensor.
+                    if staging and not any(t.nbytes % 8 for _, t in params_batch):
+                        await self._update_weights_flattened(params_batch)
+                        continue
+                    await sgl_update_weights(
+                        engine=self._engine,
+                        params_batch=params_batch,
+                        device_mesh_key="infer_tp",
+                        device_mesh=self.device_mesh,
+                        load_format=load_format,
+                    )
+            except BaseException:
+                if staging and is_leader:
+                    # The server never used the staged tensors: drop them, it keeps serving its weights.
+                    await self._engine.end_weight_update(abort=True)
+                raise
             if use_quantized_refit:
                 await sgl_update_weights(
                     engine=self._engine,
@@ -390,10 +413,43 @@ class ServerAdapter(BaseRollout):
                     load_format=LOADER_FQN,
                 )
 
-        if self._engine is not None and self._is_server_tp_leader():
-            await self._engine.flush_cache()
+        if is_leader:
+            if staging:
+                await self._engine.end_weight_update(weight_version=None if global_steps is None else str(global_steps))
+            else:
+                await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
+
+    async def _update_weights_flattened(self, params_batch: list[tuple[str, torch.Tensor]]) -> None:
+        """Load one bucket as a single device tensor per TP rank (SGLang's ``flattened_bucket`` format).
+
+        SGLang's update helper shares every tensor on its own: one CUDA IPC handle to serialize here and to
+        open in the server per tensor, thousands per update for a MoE. Packed, a bucket is one handle; the
+        server slices it back into the same named tensors before its loader runs. On a 30B MoE (bf16, 1 GiB
+        buckets, TP4) an update took 6.5 s this way and 10.9 s tensor by tensor.
+        """
+        from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
+        from sglang.srt.utils import MultiprocessingSerializer
+        from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+        from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
+
+        monkey_patch_torch_reductions()
+        bucket = FlattenedTensorBucket(named_tensors=params_batch)
+        payload = MultiprocessingSerializer.serialize(
+            {"flattened_tensor": bucket.get_flattened_tensor(), "metadata": bucket.get_metadata()}
+        )
+        mesh = self.device_mesh["infer_tp"]
+        is_destination = mesh.get_local_rank() == 0
+        # One payload per TP rank, in rank order: each server rank opens only its own.
+        gathered = [None] * mesh.mesh.size()[0] if is_destination else None
+        torch.distributed.gather_object(
+            obj=payload, object_gather_list=gathered, dst=mesh.mesh.tolist()[0], group=mesh.get_group()
+        )
+        if is_destination:
+            await self._engine.update_weights_from_tensor(
+                UpdateWeightsFromTensorReqInput(serialized_named_tensors=gathered, load_format="flattened_bucket")
+            )
 
     async def _update_weights_delta(self, flushes, global_steps: int = None) -> None:
         """Apply the delta engine's sparse flushes in place.

@@ -352,6 +352,62 @@ class HttpServerAdapter(EngineBase):
 
         raise RuntimeError(f"Failed to complete request to {endpoint} after {self.max_attempts} attempts")
 
+    # Set while a staging weight-update session is open on the server (begin_weight_update(use_staging=True)).
+    _staging_session = False
+
+    @staticmethod
+    def _begin_weight_update_payload(selector: str, sync_base: bool, use_staging: bool) -> dict[str, Any]:
+        payload = {"selector": selector, "sync_base": sync_base}
+        if use_staging:
+            # Sent only when set: a server without a staging copy does not know the field.
+            payload["use_staging"] = True
+        return payload
+
+    @staticmethod
+    def _end_weight_update_payload(
+        expected_lora_checksums: Optional[dict], weight_version: Optional[str], abort: bool
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"expected_lora_checksums": expected_lora_checksums}
+        if weight_version is not None:
+            payload["weight_version"] = weight_version
+        if abort:
+            payload["abort"] = True
+        return payload
+
+    def _flush_cache_of(self, req: UpdateWeightsFromTensorReqInput) -> bool:
+        """SGLang's update helper leaves flush_cache at its default (True). In a staging session the server
+        keeps generating and a load reaches only its staging copy, so there is nothing to flush and the
+        server refuses the flag; the session's end installs the weights."""
+        return req.flush_cache and not self._staging_session
+
+    def begin_weight_update(
+        self, selector: str = "all", sync_base: bool = True, use_staging: bool = False
+    ) -> dict[str, Any]:
+        """Open a weight-update session on the server (SGLang's EngineBase interface).
+
+        With ``use_staging`` the session's loads go to the server's staging copy of the weights
+        (``--weight-update-staging``) and the server keeps generating with its live weights until
+        ``end_weight_update``.
+        """
+        response = self._make_request(
+            "begin_weight_update", self._begin_weight_update_payload(selector, sync_base, use_staging)
+        )
+        self._staging_session = use_staging
+        return response
+
+    def end_weight_update(
+        self,
+        expected_lora_checksums: Optional[dict] = None,
+        weight_version: Optional[str] = None,
+        abort: bool = False,
+    ) -> dict[str, Any]:
+        """Close the weight-update session. A staging session installs its weights here, between two decode
+        steps, and records ``weight_version`` with them; with ``abort`` it discards them instead."""
+        self._staging_session = False
+        return self._make_request(
+            "end_weight_update", self._end_weight_update_payload(expected_lora_checksums, weight_version, abort)
+        )
+
     def update_weights_from_tensor(self, req: UpdateWeightsFromTensorReqInput) -> dict[str, Any]:
         """Update model weights from tensor data.
 
@@ -376,7 +432,7 @@ class HttpServerAdapter(EngineBase):
 
         named_tensors = req.serialized_named_tensors
         load_format = req.load_format
-        flush_cache = req.flush_cache
+        flush_cache = self._flush_cache_of(req)
 
         if named_tensors:
             serialized_named_tensors = [
@@ -775,7 +831,7 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
 
         named_tensors = req.serialized_named_tensors
         load_format = req.load_format
-        flush_cache = req.flush_cache
+        flush_cache = self._flush_cache_of(req)
 
         serialized_named_tensors = [base64.b64encode(named_tensor).decode("utf-8") for named_tensor in named_tensors]
         return await self._make_async_request(
@@ -785,6 +841,28 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                 "load_format": load_format,
                 "flush_cache": flush_cache,
             },
+        )
+
+    async def begin_weight_update(
+        self, selector: str = "all", sync_base: bool = True, use_staging: bool = False
+    ) -> dict[str, Any]:
+        """Open a weight-update session on the server (async version)."""
+        response = await self._make_async_request(
+            "begin_weight_update", self._begin_weight_update_payload(selector, sync_base, use_staging)
+        )
+        self._staging_session = use_staging
+        return response
+
+    async def end_weight_update(
+        self,
+        expected_lora_checksums: Optional[dict] = None,
+        weight_version: Optional[str] = None,
+        abort: bool = False,
+    ) -> dict[str, Any]:
+        """Close the weight-update session (async version)."""
+        self._staging_session = False
+        return await self._make_async_request(
+            "end_weight_update", self._end_weight_update_payload(expected_lora_checksums, weight_version, abort)
         )
 
     async def load_lora_adapter_from_tensor(self, req):

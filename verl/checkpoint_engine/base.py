@@ -464,6 +464,10 @@ class CheckpointEngineManager:
        immutable trainer snapshot is published; in parallel, the background task aborts generation, releases the KV
        cache, fetches and installs that version, finalizes the transfer, and resumes rollout.
 
+    With ``rollout_staging`` (either mode) the manager skips the abort, the KV cache release and their
+    counterparts: the rollout keeps generating, loads the version into a staging copy of its weights and
+    installs it between two decode steps.
+
     The manager allows at most one uncommitted version. Every new update first waits for the previous rollout commit,
     which bounds snapshot lifetime and prevents versions from being installed out of order.
 
@@ -485,6 +489,7 @@ class CheckpointEngineManager:
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.actor_wg = actor_wg
         self.replicas = replicas
+        self._check_rollout_staging(replicas)
         # set while a sync is writing rollout weights; a failed sync leaves it set, so generation stays
         # blocked until a later sync completes. It lives in this manager, so a replica resumed through
         # another handle (fully_async rollouter rebalance) bypasses it; move it onto the server actors
@@ -504,6 +509,18 @@ class CheckpointEngineManager:
         if not self._background_loop_ready.wait(timeout=5):
             self.close()
             raise RuntimeError("Failed to start CheckpointEngineManager background event loop.")
+
+    def _check_rollout_staging(self, replicas: list[RolloutReplica]):
+        """With rollout_staging the manager never quiesces a replica, so one that loads weights in place
+        would do so under running requests."""
+        if not self.config.rollout_staging:
+            return
+        unsupported = sorted({type(r).__name__ for r in replicas if not r.supports_weight_staging})
+        if unsupported:
+            raise ValueError(
+                f"checkpoint_engine.rollout_staging=True is not supported by {unsupported}: only replicas "
+                "that can stage a weight update while generating (SGLang) may skip the abort"
+            )
 
     def _run_background_loop(self):
         asyncio.set_event_loop(self._background_loop)
@@ -556,6 +573,7 @@ class CheckpointEngineManager:
         Args:
             replicas: The list of rollout replicas to add.
         """
+        self._check_rollout_staging(replicas)
         self.replicas.extend(replicas)
 
     def remove_replicas(self, replicas: list[RolloutReplica]):
@@ -736,7 +754,7 @@ class CheckpointEngineManager:
             workers.extend(replica.workers)
         rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
 
-        if not self.backend_cls.support_publish_weights:
+        if not self.backend_cls.support_publish_weights and not self.config.rollout_staging:
             # Coupled transports allocate receive buffers and start collectives in
             # build_process_group(), so preserve the original ordering: quiesce
             # rollout and release its KV cache before either of those operations.
@@ -773,7 +791,7 @@ class CheckpointEngineManager:
         global_steps: int | None,
     ):
         """Install a published weight version on rollout workers."""
-        if self.backend_cls.support_publish_weights:
+        if self.backend_cls.support_publish_weights and not self.config.rollout_staging:
             await self.abort_replicas()
             await self.release_kv_cache_replicas()
 
@@ -788,8 +806,10 @@ class CheckpointEngineManager:
             *rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size),
         )
 
-        await self.resume_kv_cache_replicas()
-        await self.resume_generation_replicas()
+        # A staging rollout was never quiesced: it installed the weights between two decode steps.
+        if not self.config.rollout_staging:
+            await self.resume_kv_cache_replicas()
+            await self.resume_generation_replicas()
         return self._merge_sync_metrics(results[: self.actor_wg.world_size])
 
 

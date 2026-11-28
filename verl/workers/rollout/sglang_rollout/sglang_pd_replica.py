@@ -39,6 +39,9 @@ logger.setLevel(logging.INFO)
 class SGLangPDReplica(SGLangReplica):
     """Replica that runs SGLang in prefill-decode disaggregated mode."""
 
+    # shortcut: a staged update was never run on prefill and decode engines; lift once it has a test
+    supports_weight_staging = False
+
     def __init__(
         self,
         replica_rank: int,
