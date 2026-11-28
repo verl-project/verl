@@ -29,6 +29,7 @@ VALID_CONFIG_TYPE = {
     "mistral",
     "gemma3_text",
     "apertus",
+    "cohere2_moe",
 }
 
 
@@ -522,6 +523,38 @@ CONFIG = {
             367622860308480 / 1e12,
         ),
     },
+    "cohere2_moe": {
+        "config": {  # CohereLabs/North-Mini-Code-1.0
+            "model_type": "cohere2_moe",
+            "vocab_size": 262144,
+            "hidden_size": 2048,
+            # routed-expert size; the dense prefix layer uses prefix_dense_intermediate_size
+            "intermediate_size": 768,
+            "prefix_dense_intermediate_size": 3072,
+            "first_k_dense_replace": 1,
+            "num_hidden_layers": 49,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 4,
+            "head_dim": 128,
+            "num_experts": 128,
+            "num_experts_per_tok": 8,
+            "num_shared_experts": 0,
+            "sliding_window": 4096,
+            # 3:1 sliding:full, starting with a full-attention layer
+            "layer_types": ["full_attention" if i % 4 == 0 else "sliding_attention" for i in range(49)],
+        },
+        # first tuple stays under sliding_window (no clamp), second exceeds it (clamp active)
+        "batch_seqlens_tuple": ([512, 1024, 2048], [8192, 8192, 8192]),
+        # attn_linear = hidden*(q+k+v+o) = 2048*(32*128+4*128+4*128+32*128) = 18874368
+        # dense_mlp   = hidden*prefix_dense_inter*3 = 2048*3072*3 = 18874368       (1 layer)
+        # moe_mlp     = hidden*experts + hidden*inter*topk*3
+        #             = 2048*128 + 2048*768*8*3 = 38010880                          (48 layers)
+        # emb+lm_head = 262144*2048*2 = 1073741824
+        # dense_N     = 18874368*49 + 18874368*1 + 38010880*48 + 1073741824 = 3841982464
+        # attn: 13 full layers use seqlen^2, 36 sliding layers use seqlen*min(seqlen, 4096)
+        # flops = 6*dense_N*token_sum + 6*seqlen_square_sum*head_dim*num_attention_heads
+        "expected_flops_tuple": (89.247272927232, 719.905238286336),
+    },
 }
 
 
@@ -541,6 +574,7 @@ CONFIG = {
         "qwen3_5_moe",
         "qwen3_vl",
         "qwen3_vl_moe",
+        "cohere2_moe",
     ],
 )
 def test_flops_counter(config_type: str):
