@@ -321,6 +321,9 @@ class PPOTrainer(ABC):
                 wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
                     OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
                 )
+                wg_kwargs["profiler_discrete"] = bool(
+                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "discrete")
+                )
         wg_kwargs["device_name"] = self.config.trainer.device
         logger.info(f"worker group kwargs: {wg_kwargs}")
 
