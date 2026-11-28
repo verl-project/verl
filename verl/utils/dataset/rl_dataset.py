@@ -238,6 +238,8 @@ class RLHFDataset(Dataset):
                                     mm_processor_kwargs=self.mm_processor_kwargs,
                                 )["input_ids"][0]
                             )
+                    except ImportError:
+                        raise
                     except Exception:
                         print("Error processing one of the samples, skipping...")
                         traceback.print_exc()
@@ -260,6 +262,8 @@ class RLHFDataset(Dataset):
                             doc[prompt_key], add_generation_prompt=True, tokenize=True, **apply_kwargs
                         )
                         return len(normalize_token_ids(tokenized_prompt))
+                    except ImportError:
+                        raise
                     except Exception:
                         print("Error processing one of the samples, skipping...")
                         traceback.print_exc()
