@@ -1105,6 +1105,7 @@ skip:
     dump_dir: ~/.verl/rollout_dump
     steps: []
     action: cache
+    load_mode: dump
 ray_kwargs:
   ray_init:
     num_cpus: null

@@ -1,7 +1,7 @@
 SkipManager: Cache and Replay Rollouts
 =====================================
 
-Last updated: 11/10/2026.
+Last updated: 11/24/2026.
 
 ``skip.rollout_tq`` caches sampled training trajectories from TransferQueue and replays
 them in place of regular training-batch generation. It is integrated into all V1 trainer modes: ``sync``,
@@ -18,12 +18,15 @@ Configuration
        dump_dir: /path/to/rollout_dump
        steps: [1, 2, 3]
        action: cache
+       load_mode: dump
 
 * ``enable``: enable caching and replay. The default is ``false``.
 * ``dump_dir``: root directory for cached trajectories.
 * ``steps``: trainer ``global_steps`` at which caching or replay is active.
   An empty list disables caching and replay for all steps.
 * ``action``: ``cache`` or ``repeat``.
+* ``load_mode``: ``dump`` (default) or ``config``. This controls how the selected
+  cache is matched to the current rollout request.
 
 With ``cache``, a complete cache for the exact step is replayed. Otherwise,
 normal rollout runs and the sampled training trajectories are saved.
@@ -100,11 +103,23 @@ encode all training settings.
 Replay behavior
 ---------------
 
-Replay loads and merges the inner batches, groups trajectories by their original
-prompt UID, and maps those groups onto the fresh prompt UIDs. If fewer groups or
-responses are cached than requested, they are reused cyclically; excess groups
-are omitted. Trajectory step tags are updated to the current training step, and
+In ``dump`` mode, replay loads and merges the inner batches, groups trajectories
+by their original prompt UID, and maps those groups onto the fresh prompt UIDs.
+If fewer groups or responses are cached than requested, they are reused cyclically.
+Excess groups are omitted. Trajectory step tags are updated to the current training step, and
 prompt keys are marked ``finished`` so the replay buffer can sample them.
+
+With ``skip.rollout_tq.load_mode=config``, the cache must have one group for each
+prompt in the current submission and all session IDs from 0 to ``rollout.n - 1``
+in each group. A session can produce several trajectory rows. For example, when
+``rollout.n=2``, keys ending in ``0_0``, ``0_1``, and ``1_0`` cover both sessions.
+Replay retains all three rows and their original session and output indices.
+Validation checks row identities in each original inner batch before replay
+writes to TransferQueue. A cache hit writes each inner batch in its saved tensor
+layout and then marks the submitted prompts finished. On a mismatch, the
+trainer logs a warning and submits the whole batch for fresh rollout. The
+same applies when a prompt overrides the configured session count. The selected
+dump stays on disk.
 
 Implementation
 --------------

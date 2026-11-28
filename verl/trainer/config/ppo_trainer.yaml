@@ -479,6 +479,9 @@ skip:
     # Action to take when rollout is skipped (cache | repeat)
     action: cache
 
+    # Use config to require the current prompt count and rollout.n sessions per prompt.
+    load_mode: dump
+
 # configs related to ray
 ray_kwargs:
 
