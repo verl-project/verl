@@ -440,6 +440,11 @@ def _estimate_qwen2_moe_flops(config, tokens_sum, batch_seqlens, delta_time):
     # non-attn per layer parm
     # gate + moe export
     moe_mlp_N = hidden_size * moe_topk * moe_intermediate_size * 3 + hidden_size * num_experts
+    # Qwen2-MoE also runs a shared expert (gate/up/down) and its sigmoid gate on every token;
+    # Qwen3-MoE has none (no shared_expert_intermediate_size in its config).
+    shared_expert_intermediate_size = getattr(config, "shared_expert_intermediate_size", 0) or 0
+    if shared_expert_intermediate_size:
+        moe_mlp_N += hidden_size * shared_expert_intermediate_size * 3 + hidden_size
     attn_linear_N = hidden_size * (q_size + k_size + v_size + num_attention_heads * head_dim)
     emd_and_lm_head_N = vocab_size * hidden_size * 2
     # non-attn all_layer parm
