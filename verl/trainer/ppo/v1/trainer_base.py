@@ -2000,11 +2000,15 @@ class PPOTrainer(ABC):
         score_centering = bool(
             self.config.actor_rollout_ref.actor.policy_loss.get("rollout_correction", {}).get("score_centering", False)
         )
+        whiten_advantages = not distillation_only and core_algos.uses_advantage_whitening(
+            self.config.algorithm.adv_estimator
+        )
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "distillation_use_topk": distillation_use_topk,
             "distillation_only": distillation_only,
             "score_centering": score_centering,
+            "whiten_advantages": whiten_advantages,
             "global_batch_size": ppo_mini_batch_size,
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
