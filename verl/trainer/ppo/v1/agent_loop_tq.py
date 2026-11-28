@@ -253,6 +253,17 @@ class AgentLoopManagerTQ(AgentLoopManager):
         Args:
             prompts (TensorDict): Input batch from train or validation dataset.
         """
+        # Occupancy donate needs per-key remaining counts before this batch is split.
+        distillation = self.config.get("distillation") if hasattr(self.config, "get") else None
+        serving = (
+            distillation.get("teacher_serving", "resident")
+            if distillation is not None and hasattr(distillation, "get")
+            else "resident"
+        )
+        if str(serving) == "on_demand":
+            from verl.experimental.teacher_loop.teacher_shared_fleet import notify_on_demand_occupancy
+
+            notify_on_demand_occupancy(self, prompts)
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         ray.get(
             [

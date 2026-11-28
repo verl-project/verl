@@ -12,6 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Teacher serving for on-policy distillation.
+
+::
+
+    DistillationConfig.teacher_serving
+      resident  → teacher_model.TeacherModelManager   (one engine per teacher)
+      on_demand → teacher_shared_fleet.SharedTeacherFleetManager
+                    ├ slot_scheduler          occupancy / donate
+                    ├ teacher_weight_cache    mmap snapshots
+                    └ teacher_port_isolation  concurrent replica ports
+
+    teacher_manager.py is the per-sample generate client (unchanged).
+    AgentLoopManagerTQ calls notify_on_demand_occupancy before dispatching a step.
+"""
+
 from .teacher_model import MultiTeacherModelManager
 
 __all__ = ["MultiTeacherModelManager"]
