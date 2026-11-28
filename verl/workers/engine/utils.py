@@ -64,13 +64,23 @@ def enable_full_determinism(seed: int):
     torch.backends.cudnn.enabled = False
 
 
+# vLLM registers backend kernels for these on SM80-family GPUs and ROCm. Without a backend kernel autograd
+# differentiates their composite decomposition; with one it uses their own formulas, which call
+# aten::linear_backward / aten::matmul_backward, and those have no CUDA kernel, so backward fails.
+_SKIPPED_VLLM_OVERRIDES = ("aten::linear", "aten::matmul")
+
+
 def enable_batch_invariance():
     """Install vLLM's batch-invariant kernel overrides in this process.
 
-    ``init_batch_invariance()`` replaces softmax, log_softmax, mean, bmm (and matmul on SM80) with the
+    ``init_batch_invariance()`` replaces softmax, log_softmax, mean, bmm (and mm/addmm on SM80) with the
     batch-invariant kernels a rollout under ``VLLM_BATCH_INVARIANT=1`` uses and pins TF32 and cuBLASLt
-    the same way. It also writes vLLM's NCCL profile into ``os.environ``; the training communicators are
-    created after this call and that profile would throttle them, so every env change is reverted and
+    the same way. Its ``aten::linear``/``aten::matmul`` overrides are skipped: they break backward
+    (``aten::linear_backward``/``aten::matmul_backward`` have no CUDA kernel). Without them linear and
+    matmul decompose into the overridden mm/addmm/bmm, so forward and backward stay on the invariant kernels.
+
+    It also writes vLLM's NCCL profile into ``os.environ``; the training communicators are created after
+    this call and that profile would throttle them, so every env change is reverted and
     ``BATCH_INVARIANT_ENV`` (which main_ppo already exports) is written back. vLLM 0.29-0.31 also assign
     ``torch.bmm`` to a kernel launch without autograd; the ``aten::bmm`` override keeps the invariant
     kernel, so the original ``torch.bmm`` is restored.
@@ -87,13 +97,30 @@ def enable_batch_invariance():
     os.environ["VLLM_BATCH_INVARIANT"] = "1"
     before = dict(os.environ)
     bmm = torch.bmm
-    batch_invariant.init_batch_invariance()
+    impl = torch.library.Library.impl
+
+    def impl_with_autograd(lib, op_name, *args, **kwargs):
+        if lib.ns != "aten" or op_name not in _SKIPPED_VLLM_OVERRIDES:
+            return impl(lib, op_name, *args, **kwargs)
+
+    torch.library.Library.impl = impl_with_autograd
+    try:
+        batch_invariant.init_batch_invariance()
+    finally:
+        torch.library.Library.impl = impl
     torch.bmm = bmm
     if not batch_invariant._batch_invariant_MODE:
         raise RuntimeError(
             "vLLM did not install its batch-invariant kernels: its cached envs read VLLM_BATCH_INVARIANT as unset; "
             "export it before vLLM is first imported in this process"
         )
+    for op in _SKIPPED_VLLM_OVERRIDES:
+        for key in ("CPU", "CUDA", "XPU"):
+            if torch._C._dispatch_has_kernel_for_dispatch_key(op, key):
+                raise RuntimeError(
+                    f"{op} has a {key} kernel (vLLM's batch-invariant install ran before verl's), so backward would "
+                    "fail; call enable_batch_invariance() before anything else initializes vLLM batch invariance"
+                )
     for key in set(before) | set(os.environ):
         if os.environ.get(key) != before.get(key):
             if key in before:
