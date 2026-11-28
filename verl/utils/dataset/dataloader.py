@@ -64,6 +64,14 @@ def resolve_gen_batch_size(config: DictConfig, trainer_mode: str) -> int:
     return config.data.get("gen_batch_size", None) or config.data.train_batch_size
 
 
+def uses_custom_validation_loader(config: DictConfig) -> bool:
+    """Return whether the configured custom loader will supply validation batches."""
+    trainer = config.trainer
+    return config.data.get("custom_dataloader") is not None and (
+        trainer.get("val_before_train", True) or trainer.get("val_only", False) or trainer.get("test_freq", -1) > 0
+    )
+
+
 def create_custom_dataloaders(
     config: DictConfig, *, trainer_mode: str, tokenizer: Any, processor: Any, collate_fn: Any
 ) -> tuple[PromptDataLoader, PromptDataLoader | None, int | None, int]:
@@ -108,11 +116,7 @@ def create_custom_dataloaders(
 
         val_batch_size = config.data.get("val_batch_size")
         val_batch_size = train_batch_size if val_batch_size is None else val_batch_size
-        if (
-            config.trainer.get("val_before_train", True)
-            or config.trainer.get("val_only", False)
-            or config.trainer.get("test_freq", -1) > 0
-        ):
+        if uses_custom_validation_loader(config):
             val = create_custom_dataloader(
                 config.data,
                 split="val",
