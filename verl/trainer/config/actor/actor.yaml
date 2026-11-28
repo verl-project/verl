@@ -141,6 +141,12 @@ checkpoint:
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
 
+  # Max estimated per-rank staged payload (MiB) to coalesce Megatron async saves (0 disables)
+  async_save_coalesce_max_staging_mib: 0
+
+  # Clone CPU-resident tensors during a coalesced preload when optimizer CPU offload is enabled
+  async_save_cpu_offload_snapshot: False
+
   # Whether to perform strict validation during weight export
   strict: True
 

@@ -30,6 +30,7 @@ from packaging import version
 from verl.utils.device import get_device_name, get_torch_device, is_device_available
 from verl.utils.fs import is_non_local, local_mkdir_safe
 from verl.utils.logger import log_with_rank
+from verl.utils.megatron.async_checkpoint_batch import coalesce_async_requests
 from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing, save_dist_checkpointing
 from verl.utils.megatron_utils import (
     get_checkpoint_contents_manifest_path,
@@ -109,6 +110,21 @@ def _config_to_shallow_dict(config):
     if is_dataclass(config):
         return {field.name: getattr(config, field.name) for field in fields(config) if hasattr(config, field.name)}
     return vars(config)
+
+
+def _noop_async_checkpoint_write(*args, **kwargs):
+    """Ignore request arguments so the persistent worker can signal empty-rank completion."""
+
+
+def _all_ranks_agree_checkpoint_batch(local_eligible: bool) -> bool:
+    """Keep the number and order of async requests equal across ranks."""
+    if is_device_available():
+        device = torch.device(get_device_name(), get_torch_device().current_device())
+    else:
+        device = torch.device("cpu")
+    eligible = torch.tensor([int(local_eligible)], dtype=torch.int, device=device)
+    torch.distributed.all_reduce(eligible, op=torch.distributed.ReduceOp.MIN)
+    return bool(eligible.item())
 
 
 class MegatronCheckpointManager(BaseCheckpointManager):
@@ -1125,7 +1141,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
         self.register_checkpoint(local_path, max_ckpt_to_keep)
 
-    def _dispatch_finalize(self, async_requests: list, finalize_save_fn) -> None:
+    def _dispatch_finalize(self, async_requests: list, finalize_save_fn, snapshot_cpu_tensors: bool = False) -> bool:
         """Run ``finalize_save_fn`` now, or after all async writes complete.
 
         When ``async_save`` is enabled and at least one dist_checkpointing
@@ -1140,15 +1156,39 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         the callback fires immediately on the calling thread.
         """
         if self.checkpoint_config.async_save and async_requests:
+            batch_limit_mib = getattr(self.checkpoint_config, "async_save_coalesce_max_staging_mib", 0)
+            if not isinstance(batch_limit_mib, int) or isinstance(batch_limit_mib, bool) or batch_limit_mib < 0:
+                raise ValueError("async_save_coalesce_max_staging_mib must be a non-negative integer")
+            snapshot_kwargs = {"snapshot_cpu_tensors": True} if snapshot_cpu_tensors else {}
+            async_requests, batch_bytes = coalesce_async_requests(
+                async_requests, batch_limit_mib * 1024 * 1024, _all_ranks_agree_checkpoint_batch, **snapshot_kwargs
+            )
+            if batch_bytes is not None:
+                log_with_rank(
+                    f"Coalesced Megatron async checkpoint preload; estimated local payload {batch_bytes} bytes",
+                    rank=self.rank,
+                    logger=logger,
+                )
             async_requests[-1].add_finalize_fn(finalize_save_fn)
             from megatron.core.dist_checkpointing.strategies.base import async_calls
 
             for req in async_requests:
+                if req.async_fn is None:
+                    req = req._replace(async_fn=_noop_async_checkpoint_write)
                 async_calls.schedule_async_request(req)
+            return not snapshot_cpu_tensors or batch_bytes is not None
         else:
             finalize_save_fn()
+            return True
 
-    def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep=None):
+    def save_checkpoint(
+        self,
+        local_path: str,
+        hdfs_path: str = None,
+        global_step: int = 0,
+        max_ckpt_to_keep=None,
+        snapshot_cpu_tensors: bool = False,
+    ):
         """Save a Megatron checkpoint under ``local_path`` (layout schema v2).
 
         Contents are split across three sibling directories so each piece can
@@ -1269,7 +1309,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # finalize callback fires immediately for that path even though we
         # still need to record that a dist_ckpt was written.
         saved_any_dist_ckpt = fsdp_saved or bool(model_state_dict or optimizer_state_dict or extra_state_dict)
-        self._dispatch_finalize(
+        cpu_snapshot_safe = self._dispatch_finalize(
             async_requests,
             lambda: self._finalize_save(
                 local_path=local_path,
@@ -1278,4 +1318,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 max_ckpt_to_keep=max_ckpt_to_keep,
                 saved_any_dist_ckpt=saved_any_dist_ckpt,
             ),
+            snapshot_cpu_tensors=snapshot_cpu_tensors,
         )
+        if self.checkpoint_config.async_save and snapshot_cpu_tensors and not cpu_snapshot_safe:
+            from megatron.core.dist_checkpointing.strategies.base import async_calls
+
+            async_calls.maybe_finalize_async_calls(blocking=True)
