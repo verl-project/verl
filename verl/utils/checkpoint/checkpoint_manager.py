@@ -14,6 +14,7 @@
 
 import os
 import random
+import re
 import shutil
 
 import numpy as np
@@ -57,6 +58,7 @@ class BaseCheckpointManager:
             checkpoint_save_contents = ["model", "optimizer", "extra"]
         self.previous_global_step = None
         self.previous_saved_paths = []
+        self._loaded_checkpoint_path = None
 
         self.model = model
         self.optimizer = optimizer
@@ -192,6 +194,41 @@ class BaseCheckpointManager:
             keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep
             self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
             self.previous_saved_paths = self.previous_saved_paths[keep_start:]
+
+    def record_loaded_checkpoint(self, loaded_path: str):
+        """Remember an exact local checkpoint after it has loaded successfully."""
+        if loaded_path and not loaded_path.startswith("hdfs://") and os.path.isdir(loaded_path):
+            self._loaded_checkpoint_path = os.path.abspath(loaded_path)
+
+    def finalize_loaded_checkpoint_retention(self, new_path: str, max_ckpt_to_keep: int):
+        """Delete a loaded SFT checkpoint after its max-one replacement is committed."""
+        loaded_path = self._loaded_checkpoint_path
+        self._loaded_checkpoint_path = None
+        new_path = os.path.abspath(new_path)
+        registered_paths = {os.path.abspath(path) for path in self.previous_saved_paths}
+        if (
+            max_ckpt_to_keep != 1
+            or loaded_path is None
+            or new_path not in registered_paths
+            or not os.path.isdir(new_path)
+        ):
+            return
+
+        loaded_step = self._sft_checkpoint_series_step(loaded_path)
+        new_step = self._sft_checkpoint_series_step(new_path)
+        if loaded_step is None or new_step is None:
+            return
+        loaded_series, loaded_step_number = loaded_step
+        new_series, new_step_number = new_step
+        if loaded_series == new_series and new_step_number > loaded_step_number:
+            self.remove_previous_save_local_path(loaded_path)
+
+    @staticmethod
+    def _sft_checkpoint_series_step(path: str):
+        """Return the parent checkpoint series and step for an SFT checkpoint path."""
+        path = os.path.abspath(path)
+        match = re.fullmatch(r"global_step_(\d+)", os.path.basename(path))
+        return (os.path.dirname(path), int(match.group(1))) if match else None
 
     @staticmethod
     def get_rng_state():
