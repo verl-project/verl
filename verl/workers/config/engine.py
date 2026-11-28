@@ -259,7 +259,8 @@ class FSDPEngineConfig(EngineConfig):
             formula (fp32 log_softmax + gather), so the actor forward can be compared bitwise with a rollout
             running under VLLM_BATCH_INVARIANT=1. Not compatible with use_fused_kernels.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
-        dtype (str): Mixed precision training param dtype, default "bfloat16"
+        dtype (str): Mixed precision training param dtype, default "bfloat16". Used when
+            ``mixed_precision.param_dtype`` is not set; an explicit ``param_dtype`` takes precedence.
         use_no_sync_for_gradient_accumulation (bool): Whether to defer FSDP gradient synchronization until the
             final micro-batch. Disabling this reduces peak memory by synchronizing and resharding gradients after
             every micro-batch. default True
