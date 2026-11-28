@@ -500,6 +500,43 @@ class TestRateLimitedRewardManager:
         assert "custom_field" in received_extra_info
         assert received_extra_info["custom_field"] == "test_value"
 
+    @pytest.mark.asyncio
+    async def test_extra_info_per_rollout(self):
+        """Rollouts of one prompt share an extra_info dict; concurrent run_single calls must not see each other's
+        tool_extra_fields."""
+
+        class StubTokenizer:
+            def decode(self, token_ids, skip_special_tokens=True):
+                return "answer"
+
+        async def score_turn(data_source: str, solution_str: str, ground_truth: str, extra_info: dict, **kwargs):
+            await asyncio.sleep(0.01)
+            return float(extra_info["turn"])
+
+        config = DictConfig({"reward": {"max_concurrent": 10, "timeout": 10.0}})
+        RateLimitedRewardManager.init_class(config, StubTokenizer())
+        manager = RateLimitedRewardManager(config=config, tokenizer=StubTokenizer(), compute_score=score_turn)
+
+        n = 4
+        shared = {"index": 0}
+        items = []
+        for i in range(n):
+            data = DataProto.from_dict(
+                {"responses": torch.ones(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long)}
+            )
+            data.non_tensor_batch = {
+                "data_source": np.array(["test"], dtype=object),
+                "reward_model": np.array([{"ground_truth": "answer"}], dtype=object),
+                "extra_info": np.array([shared], dtype=object),
+                "tool_extra_fields": np.array([{"turn": i}], dtype=object),
+            }
+            items.append(data)
+
+        results = await asyncio.gather(*[manager.run_single(d) for d in items])
+
+        assert [r["reward_score"] for r in results] == list(range(n))
+        assert shared == {"index": 0}
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
