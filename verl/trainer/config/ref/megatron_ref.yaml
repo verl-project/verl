@@ -33,6 +33,8 @@ megatron:
   # colocated reference model must follow the actor's setting.
   dynamic_context_parallel: ${oc.select:actor_rollout_ref.actor.megatron.dynamic_context_parallel,False}
   max_seqlen_per_dp_cp_rank: ${oc.select:actor_rollout_ref.actor.megatron.max_seqlen_per_dp_cp_rank,null}
+  # Whichever engine initializes the Megatron process groups first sets their timeout.
+  distributed_timeout_minutes: ${oc.select:actor_rollout_ref.actor.megatron.distributed_timeout_minutes,null}
   expert_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.expert_model_parallel_size,1}
   expert_tensor_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.expert_tensor_parallel_size,null}
   param_offload: ${oc.select:actor_rollout_ref.actor.megatron.param_offload,False}
