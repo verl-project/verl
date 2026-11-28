@@ -70,8 +70,6 @@ jobs:
       VERL_TEST_N_GPUS_PER_NODE: "16"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
-      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
