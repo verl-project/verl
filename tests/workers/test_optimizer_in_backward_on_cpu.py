@@ -294,6 +294,51 @@ def test_hook_mode_skips_the_whole_update_when_the_first_grad_is_non_finite():
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
+def test_hook_mode_steps_leftover_accumulated_grads_and_counts_their_norm():
+    """A parameter that only received gradients in earlier micro-batches fires no hook in the
+    last one, but must still be stepped and contribute to the reported grad norm."""
+    model = _build_model()
+    optimizer, _ = _build_optimizer(model, clip_grad=None)
+    wrapper = create_optim_in_bwd_wrapper(optimizer, step_in_hooks=True)
+    wrapper.zero_grad()
+    wrapper.begin_backward(stepping=True)
+
+    parameters = list(model.parameters())
+    parameters[0].grad = torch.ones_like(parameters[0])
+    parameters[-1].grad = torch.full_like(parameters[-1], 2.0)
+    expected_norm = (
+        sum(parameter.grad.double().pow(2).sum() for parameter in parameters if parameter.grad is not None)
+        .sqrt()
+        .item()
+    )
+    # Only the last parameter is reached by the final backward, so only it fires a hook.
+    wrapper._on_grad_ready(parameters[-1])
+
+    grad_norm = wrapper.finalize()
+
+    assert grad_norm == pytest.approx(expected_norm, rel=1e-6)
+    assert all(parameter.grad is None for parameter in parameters)
+
+
+def test_hook_mode_skips_the_update_when_only_a_leftover_grad_is_non_finite():
+    model = _build_model()
+    initial = [parameter.detach().clone() for parameter in model.parameters()]
+    optimizer, _ = _build_optimizer(model, clip_grad=None)
+    wrapper = create_optim_in_bwd_wrapper(optimizer, step_in_hooks=True)
+    wrapper.zero_grad()
+    wrapper.begin_backward(stepping=True)
+
+    # No hook fires for this gradient, so only finalize can see it.
+    model[0].weight.grad = torch.full_like(model[0].weight, float("nan"))
+
+    grad_norm = wrapper.finalize()
+
+    assert not torch.tensor(grad_norm).isfinite()
+    for before, after in zip(initial, model.parameters(), strict=True):
+        assert torch.equal(before, after)
+    assert all(parameter.grad is None for parameter in model.parameters())
+
+
 def test_hook_mode_refuses_a_partial_update_when_a_later_grad_is_non_finite():
     """Parameters stepped in the backward pass cannot be rolled back, so a late non-finite
     gradient fails closed instead of leaving a half-updated model behind."""
