@@ -1,7 +1,7 @@
 Hardware Resource Needed for RL
 ===============================
 
-Last updated: 06/25/2025.
+Last updated: 11/18/2026.
 
 Since RL requires more resources compared to regular training, 
 determining how much resources are needed to successfully run it before training 
@@ -54,6 +54,24 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - vllm0.8.3
       - `qwen2-0.5b_grpo-lora_1_h100_fsdp_vllm.sh <https://github.com/verl-project/verl/blob/2239fd0ff7210c80ad63e20581924d1f66167429/examples/tuning/0.5b/qwen2-0.5b_grpo-lora_1_h100_fsdp_vllm.sh>`_
       - `SimonHuang <thelongestusernameofall@gmail.com>`_
+    * - MIN
+      - Qwen2.5-0.5B-Instruct
+      - GRPO
+      - 1*H20(96G)
+      - 64
+      - fsdp
+      - vllm
+      - ``examples/tuning/0.5b/run_qwen2-0.5b_grpo_1_h20_fsdp.sh`` (``TIER=min``; peak 38.9GB, 80s/step, GSM8K 0.547 @100 steps; details: ``examples/tuning/0.5b/h20_results.md``)
+      - `Shen Shen <sxs.abcn@gmail.com>`_
+    * - RECOMMENDED
+      - Qwen2.5-0.5B-Instruct
+      - GRPO
+      - 1*H20(96G)
+      - 64
+      - fsdp
+      - vllm
+      - ``examples/tuning/0.5b/run_qwen2-0.5b_grpo_1_h20_fsdp.sh`` (``TIER=recommended``; peak 74.6GB, 21s/step, GSM8K 0.539 @100 steps; details: ``examples/tuning/0.5b/h20_results.md``)
+      - `Shen Shen <sxs.abcn@gmail.com>`_
 
 1.5B
 ~~~
