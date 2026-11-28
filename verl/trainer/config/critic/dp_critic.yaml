@@ -8,10 +8,10 @@
 defaults:
 
   # fsdp optimizer config
-  - ../optim@optim: fsdp
+  - /optim@optim: fsdp
 
   # fsdp engine config
-  - ../engine@fsdp: fsdp
+  - /engine@fsdp: fsdp
 
   # dp actor config, inheriting from trainer/config/critic/critic.yaml
   - critic

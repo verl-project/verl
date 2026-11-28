@@ -1,10 +1,10 @@
 # torchtitan actor config, inheriting from trainer/config/actor/actor.yaml
 defaults:
   # torchtitan optimizer config
-  - ../optim@optim: torchtitan
+  - /optim@optim: torchtitan
 
   # torchtitan engine config
-  - ../engine@torchtitan: torchtitan
+  - /engine@torchtitan: torchtitan
 
   - actor
 

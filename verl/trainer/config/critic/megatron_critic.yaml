@@ -2,10 +2,10 @@
 defaults:
 
   # megatron optimizer config
-  - ../optim@optim: megatron
+  - /optim@optim: megatron
 
   # megatron engine config
-  - ../engine@megatron: megatron
+  - /engine@megatron: megatron
 
   # dp actor config, inheriting from trainer/config/critic/critic.yaml
   - critic
