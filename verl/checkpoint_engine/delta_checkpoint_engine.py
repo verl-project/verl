@@ -267,6 +267,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     MAX_ENTRY_ELEMS = 64 << 20
 
     wire_format = "delta_flush"
+    _confirm_bucket_subscriptions = False
 
     send_weights_takes_engine = True
 
