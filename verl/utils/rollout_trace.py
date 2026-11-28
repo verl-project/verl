@@ -35,7 +35,7 @@ class RolloutTraceConfig:
             tracing backends like Weave, MLflow, and Trackio.
 
     Args:
-        backend (Optional[str]): Tracing backend to use ('weave', 'mlflow', or None).
+        backend (Optional[str]): Tracing backend to use ('weave', 'mlflow', 'trackio', or None).
         client (Optional[object]): Client instance for the selected backend.
         token2text (bool): Whether to convert tokens to text in traces. Defaults to False.
         project_name (str): Name of the project for tracing.
