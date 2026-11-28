@@ -21,8 +21,10 @@ Uses (newer ``npu_*`` names preferred; older aliases also accepted):
 
 Policy (verl) — hybrid mid-term path:
   - Forward always returns ``(logprobs, entropy)``, matching the CUDA fused API.
+  - Entropy is per-token Shannon entropy, including when CANN omits softmax.
+    ``reduction`` applies only to logprobs; training applies response masks.
   - ``dentropy == 0``: CANN CE-only backward.
-  - ``dentropy != 0``: chunked PyTorch CE+entropy backward (Triton ``d_logits``).
+  - ``dentropy != 0``: tiled FP32 CE+entropy backward, reusing forward statistics.
   - Chunk size: ``VERL_NPU_LCE_CHUNK_SIZE`` (default 2048).
 """
 
@@ -182,6 +184,61 @@ def _lce_chunk_size() -> int:
     return size
 
 
+def _chunked_entropy_stats(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    dist_process_group: Optional[dist.ProcessGroup] = None,
+    chunk_size: Optional[int] = None,
+    token_chunk_size: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return global (maximum, shifted partition, shifted first moment).
+
+    Hidden is already temperature-scaled. Centering the first moment avoids
+    subtracting two large, nearly equal numbers when computing entropy.
+    FP64 inputs are retained for independent CPU mathematical checks.
+    """
+    chunk_size = _lce_chunk_size() if chunk_size is None else chunk_size
+    if chunk_size < 1 or token_chunk_size < 1:
+        raise ValueError("Entropy tile sizes must be positive")
+    dtype = torch.float64 if hidden.dtype == torch.float64 else torch.float32
+    maximum = torch.empty(hidden.shape[0], dtype=dtype, device=hidden.device)
+    partition = torch.empty_like(maximum)
+    moment = torch.empty_like(maximum)
+    for row in range(0, hidden.shape[0], token_chunk_size):
+        h = hidden[row : row + token_chunk_size].to(dtype)
+        m = torch.full((h.shape[0],), -torch.inf, dtype=dtype, device=hidden.device)
+        s = torch.zeros_like(m)
+        q = torch.zeros_like(m)
+        for col in range(0, weight.shape[0], chunk_size):
+            # FSDP forward runs under autocast; explicit casts alone do not
+            # prevent matmul from downcasting the entropy logits to BF16.
+            with torch.autocast(device_type=hidden.device.type, enabled=False):
+                z = h @ weight[col : col + chunk_size].to(dtype).T
+            new_m = torch.maximum(m, z.max(dim=-1).values)
+            delta = m - new_m
+            scale = delta.exp()
+            # The initial empty accumulator has m=-inf and zero mass.
+            offset = torch.where(torch.isfinite(m), delta, 0.0)
+            shifted = z - new_m[:, None]
+            mass = shifted.exp()
+            q = scale * (q + offset * s) + (mass * shifted).sum(dim=-1)
+            s = scale * s + mass.sum(dim=-1)
+            m = new_m
+        maximum[row : row + h.shape[0]] = m
+        partition[row : row + h.shape[0]] = s
+        moment[row : row + h.shape[0]] = q
+    if dist_process_group is not None:
+        local_maximum = maximum.clone()
+        dist.all_reduce(maximum, op=dist.ReduceOp.MAX, group=dist_process_group)
+        delta = local_maximum - maximum
+        scale = delta.exp()
+        moment = scale * (moment + delta * partition)
+        partition = scale * partition
+        dist.all_reduce(partition, op=dist.ReduceOp.SUM, group=dist_process_group)
+        dist.all_reduce(moment, op=dist.ReduceOp.SUM, group=dist_process_group)
+    return maximum, partition, moment
+
+
 def _expand_dlogprobs_for_tokens(
     dlogprobs: torch.Tensor,
     reduction: str,
@@ -192,12 +249,7 @@ def _expand_dlogprobs_for_tokens(
     if reduction == "none":
         return (-dlogprobs.reshape(-1)).to(dtype=torch.float32)
     scale = 1.0 if reduction == "sum" else (1.0 / max(num_tokens, 1))
-    return torch.full(
-        (num_tokens,),
-        float(-dlogprobs.reshape(()).item() * scale),
-        device=device,
-        dtype=torch.float32,
-    )
+    return (-dlogprobs.reshape(()).to(device=device, dtype=torch.float32) * scale).expand(num_tokens)
 
 
 def _chunked_ce_entropy_backward(
@@ -213,11 +265,15 @@ def _chunked_ce_entropy_backward(
     vocab_start: int,
     dist_process_group: Optional[dist.ProcessGroup] = None,
     chunk_size: Optional[int] = None,
+    entropy_stats: Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+    token_chunk_size: int = 256,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Chunked CE+entropy backward aligned with Triton ``efficient_entropy_backward``.
 
     Expects ``hidden`` already scaled by ``1/temperature`` (same as CANN forward).
     Returns grads w.r.t. the original (unscaled) hidden and weight.
+    With vocabulary parallelism, d_hidden is a local contribution; the caller
+    (for example Megatron's sequence-parallel gather backward) owns its reduction.
     """
     if chunk_size is None:
         chunk_size = _lce_chunk_size()
@@ -237,44 +293,39 @@ def _chunked_ce_entropy_backward(
     accu_rcp = torch.reciprocal(accumulate)
     labels_i64 = labels.reshape(-1).to(dtype=torch.int64)
 
-    hidden_f = hidden.to(dtype=torch.float32)
-    weight_f = weight.to(dtype=torch.float32)
+    if entropy_stats is None:
+        entropy_stats = _chunked_entropy_stats(hidden, weight, dist_process_group, chunk_size, token_chunk_size)
+    entropy_max, entropy_sum, entropy_moment = entropy_stats
+    shifted_mean = entropy_moment / entropy_sum
 
-    # Pass 1: entropy_b = E_p[logits]
-    entropy_b_num = torch.zeros(num_tokens, device=device, dtype=torch.float32)
+    # These are gradient accumulators, not temporary copies of the model inputs.
+    d_hidden = torch.zeros(hidden.shape, device=device, dtype=torch.float32)
+    d_weight = torch.empty(weight.shape, device=device, dtype=torch.float32)
     for start in range(0, vocab_local, chunk_size):
         end = min(start + chunk_size, vocab_local)
-        logits = torch.matmul(hidden_f, weight_f[start:end].T)
-        exp_logits = torch.exp(logits - maximum[:, None])
-        entropy_b_num = entropy_b_num + (exp_logits * logits).sum(dim=-1)
-
-    if dist_process_group is not None:
-        dist.all_reduce(entropy_b_num, op=dist.ReduceOp.SUM, group=dist_process_group)
-    entropy_b = entropy_b_num * accu_rcp
-
-    # Pass 2: d_logits -> d_hidden / d_weight
-    d_hidden = torch.zeros_like(hidden_f)
-    d_weight = torch.zeros_like(weight_f)
-    for start in range(0, vocab_local, chunk_size):
-        end = min(start + chunk_size, vocab_local)
-        w_chunk = weight_f[start:end]
-        logits = torch.matmul(hidden_f, w_chunk.T)
-        exp_logits = torch.exp(logits - maximum[:, None])
-        softmax = exp_logits * accu_rcp[:, None]
-
+        w_chunk = weight[start:end].float()
+        dw_chunk = torch.zeros_like(w_chunk)
         global_ids = torch.arange(
             vocab_start + start,
             vocab_start + end,
             device=device,
             dtype=labels_i64.dtype,
         )
-        mask_f = (global_ids[None, :] == labels_i64[:, None]).to(dtype=torch.float32)
-
-        d_logits = d_lp[:, None] * (softmax - mask_f)
-        d_logits = d_logits + d_ent[:, None] * (-softmax) * (logits - entropy_b[:, None])
-
-        d_hidden = d_hidden + torch.matmul(d_logits, w_chunk)
-        d_weight[start:end] = torch.matmul(d_logits.T, hidden_f)
+        for row in range(0, num_tokens, token_chunk_size):
+            rows = slice(row, min(row + token_chunk_size, num_tokens))
+            h_chunk = hidden[rows].float()
+            logits = h_chunk @ w_chunk.T
+            softmax = (logits - maximum[rows, None]).exp() * accu_rcp[rows, None]
+            mask = global_ids[None, :] == labels_i64[rows, None]
+            d_logits = d_lp[rows, None] * (softmax - mask.to(torch.float32))
+            # CANN's CE statistics can reflect rounded logits. Entropy must
+            # retain its independent FP32 normalization, including its gradient.
+            shifted = logits - entropy_max[rows, None]
+            entropy_p = shifted.exp() / entropy_sum[rows, None]
+            d_logits.add_(-d_ent[rows, None] * entropy_p * (shifted - shifted_mean[rows, None]))
+            d_hidden[rows].add_(d_logits @ w_chunk)
+            dw_chunk.add_(d_logits.T @ h_chunk)
+        d_weight[start:end] = dw_chunk
 
     if temperature != 1.0:
         d_hidden = d_hidden * (1.0 / temperature)
@@ -319,7 +370,7 @@ class CannLinearCrossEntropy(torch.autograd.Function):
         # (return_logits=False + backward via logits_max/sum_exp_logits).
         # Materializing vocab logits (return_logits=True) has been observed to
         # corrupt a small fraction of per-token losses on some torch_npu builds.
-        # Opt in with VERL_NPU_LCE_RETURN_LOGITS=1 when metric entropy is needed.
+        # Entropy is computed in bounded tiles when softmax is not returned.
         return_logits = os.environ.get("VERL_NPU_LCE_RETURN_LOGITS", "0").lower() in (
             "1",
             "true",
@@ -395,8 +446,11 @@ class CannLinearCrossEntropy(torch.autograd.Function):
             logprobs = logprobs.reshape(-1).contiguous()
 
         if softmax is None or (isinstance(softmax, torch.Tensor) and softmax.numel() == 0):
-            entropy = torch.zeros(hidden_in.shape[0], device=hidden_in.device, dtype=torch.float32)
+            entropy_stats = _chunked_entropy_stats(hidden_in, weight_in, dist_process_group)
+            _, partition, moment = entropy_stats
+            entropy = partition.log() - moment / partition
         else:
+            entropy_stats = ()
             entropy = _entropy_from_local_softmax(softmax, dist_process_group)
         if reduction == "none":
             entropy = entropy.reshape(-1).contiguous()
@@ -417,6 +471,7 @@ class CannLinearCrossEntropy(torch.autograd.Function):
                 logits_max,
                 sum_exp_logits,
                 softmax,
+                *entropy_stats,
             )
             ctx.bwd_mode = "softmax"
         else:
@@ -428,8 +483,10 @@ class CannLinearCrossEntropy(torch.autograd.Function):
                 masked_target,
                 logits_max,
                 sum_exp_logits,
+                *entropy_stats,
             )
             ctx.bwd_mode = "max_sum"
+        ctx.has_entropy_stats = bool(entropy_stats)
         ctx.temperature = float(temperature)
         ctx.reduction = reduction
         ctx.vocab_start = int(vocab_start)
@@ -445,6 +502,9 @@ class CannLinearCrossEntropy(torch.autograd.Function):
         bwd_mode = getattr(ctx, "bwd_mode", "max_sum")
         vocab_start = getattr(ctx, "vocab_start", 0)
         dist_process_group = getattr(ctx, "dist_process_group", None)
+        saved = ctx.saved_tensors
+        entropy_stats = saved[-3:] if ctx.has_entropy_stats else None
+        saved = saved[:-3] if ctx.has_entropy_stats else saved
 
         if bwd_mode == "softmax":
             (
@@ -456,7 +516,7 @@ class CannLinearCrossEntropy(torch.autograd.Function):
                 logits_max,
                 sum_exp_logits,
                 softmax,
-            ) = ctx.saved_tensors
+            ) = saved
         else:
             (
                 hidden_in,
@@ -466,7 +526,7 @@ class CannLinearCrossEntropy(torch.autograd.Function):
                 masked_target,
                 logits_max,
                 sum_exp_logits,
-            ) = ctx.saved_tensors
+            ) = saved
             softmax = None
 
         if dentropy is not None and torch.any(dentropy != 0):
@@ -482,6 +542,7 @@ class CannLinearCrossEntropy(torch.autograd.Function):
                 reduction,
                 vocab_start,
                 dist_process_group,
+                entropy_stats=entropy_stats,
             )
             return (
                 d_hidden.to(ctx.original_hidden_dtype),

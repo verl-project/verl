@@ -47,6 +47,59 @@ pytestmark = pytest.mark.skipif(
 DEVICE = "npu"
 
 
+@pytest.fixture(scope="module")
+def hccl_group():
+    """Reuse one communicator across the parametrized TP cases."""
+    import torch.distributed as dist
+
+    torch.npu.set_device(int(os.environ["LOCAL_RANK"]))
+    initialized_here = not dist.is_initialized()
+    if initialized_here:
+        dist.init_process_group("hccl")
+    try:
+        assert dist.get_backend() == "hccl"
+        yield dist.group.WORLD
+    finally:
+        if initialized_here:
+            dist.destroy_process_group()
+
+
+@pytest.mark.skipif(int(os.environ.get("WORLD_SIZE", "1")) != 2, reason="Run with torchrun --nproc-per-node=2")
+@pytest.mark.parametrize(("entropy_coeff", "logprob_scale"), [(0.0, 1.0), (0.7, 1.0), (0.7, 0.0)])
+def test_cann_vocab_parallel_entropy_hccl(entropy_coeff, logprob_scale, monkeypatch, hccl_group):
+    """Validate global entropy and caller-reduced hidden gradients on two NPUs."""
+    import torch.distributed as dist
+
+    rank = dist.get_rank(hccl_group)
+    monkeypatch.delenv("VERL_NPU_LCE_RETURN_LOGITS", raising=False)
+    torch.manual_seed(123)
+    hidden_cpu = (torch.randn(33, 256) * 0.2).bfloat16()
+    weight_cpu = (torch.randn(2112, 256) * 0.2).bfloat16()
+    labels_cpu = torch.randint(0, 2112, (33,))
+    labels_cpu[:4] = torch.tensor([0, 1055, 1056, 2111])
+    hidden = hidden_cpu.to(DEVICE).requires_grad_()
+    weight = weight_cpu.chunk(2)[rank].to(DEVICE).requires_grad_()
+    labels = labels_cpu.to(DEVICE)
+    lp, entropy = CannLinearCrossEntropy.apply(hidden, weight, labels, 1.5, "none", hccl_group)
+    upstream = torch.linspace(-0.3, 0.4, 33, device=DEVICE)
+    dh, dw = torch.autograd.grad((lp, entropy), (hidden, weight), (upstream * logprob_scale, upstream * entropy_coeff))
+    dist.all_reduce(dh, group=hccl_group)
+    hr = (hidden_cpu / 1.5).double().requires_grad_()
+    wr = weight_cpu.double().requires_grad_()
+    logp = (hr @ wr.T).log_softmax(-1)
+    lp_ref = logp[torch.arange(33), labels_cpu]
+    entropy_ref = -(logp.exp() * logp).sum(-1)
+    g = upstream.cpu().double()
+    rh, rw = torch.autograd.grad((lp_ref, entropy_ref), (hr, wr), (g * logprob_scale, g * entropy_coeff))
+    for actual, expected, atol, rtol in (
+        (lp, lp_ref, 2e-3, 2e-3),
+        (entropy, entropy_ref, 2e-5, 2e-5),
+        (dh, rh / 1.5, 5e-4, 1e-2),
+        (dw, rw.chunk(2)[rank], 5e-4, 1e-2),
+    ):
+        torch.testing.assert_close(actual.cpu().double(), expected, atol=atol, rtol=rtol)
+
+
 def _synchronize():
     torch.npu.synchronize()
 
@@ -100,7 +153,7 @@ def _make_inputs(
 )
 def test_cann_forward_matches_torch_reference(num_tokens, hidden_size, vocab_size, temperature, monkeypatch):
     monkeypatch.setenv("VERL_NPU_LCE_BACKEND", "cann")
-    # Default path: return_logits=False (CE-accurate, entropy may be zeros).
+    # Default path must return real entropy without materializing vocab logits.
     monkeypatch.delenv("VERL_NPU_LCE_RETURN_LOGITS", raising=False)
     hidden, weight, labels, temperature = _make_inputs(num_tokens, hidden_size, vocab_size, temperature=temperature)
 
@@ -110,10 +163,41 @@ def test_cann_forward_matches_torch_reference(num_tokens, hidden_size, vocab_siz
 
     assert should_use_cann_linear_ce(hidden.device) is True
     torch.testing.assert_close(out_lp.float(), ref_lp, atol=2e-2, rtol=2e-2)
-    # Default CANN path does not materialize vocab logits; entropy is a zero placeholder
-    # (training uses entropy_coeff=0). Only assert shape/device here.
+    torch.testing.assert_close(out_ent.float(), ref_ent, atol=2e-2, rtol=2e-2)
     assert out_ent.shape == ref_ent.shape
     assert out_ent.device.type == "npu"
+
+
+def test_cann_entropy_preserves_fp32_under_autocast(monkeypatch):
+    """Exercise the autocast context used by the FSDP actor forward."""
+    monkeypatch.delenv("VERL_NPU_LCE_RETURN_LOGITS", raising=False)
+    hidden, weight, labels, temperature = _make_inputs(33, 256, 1056)
+    _, expected = _torch_ce_logprobs_entropy(hidden.detach(), weight.detach(), labels, temperature)
+    with torch.autocast(DEVICE, dtype=torch.bfloat16):
+        _, entropy = CannLinearCrossEntropy.apply(hidden, weight, labels)
+    torch.testing.assert_close(entropy.float(), expected, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("offset", [32.0, 128.0])
+def test_cann_entropy_only_gradient_with_common_offset(offset, monkeypatch):
+    """CANN CE normalization must not bias the independent entropy gradient."""
+    monkeypatch.delenv("VERL_NPU_LCE_RETURN_LOGITS", raising=False)
+    hidden, weight, labels, _ = _make_inputs(273, 256, 2112)
+    with torch.no_grad():
+        hidden[:, 0] = 1
+        weight[:, 0] = offset
+    hr = hidden.detach().cpu().double().requires_grad_()
+    wr = weight.detach().cpu().double().requires_grad_()
+    logp = (hr @ wr.T).log_softmax(-1)
+    expected_entropy = -(logp.exp() * logp).sum(-1)
+    g = torch.linspace(-0.2, 0.3, 273)
+    expected = torch.autograd.grad(expected_entropy, (hr, wr), g.double())
+    with torch.autocast(DEVICE, dtype=torch.bfloat16):
+        lp, entropy = CannLinearCrossEntropy.apply(hidden, weight, labels)
+    actual = torch.autograd.grad((lp, entropy), (hidden, weight), (torch.zeros_like(lp), g.to(DEVICE)))
+    torch.testing.assert_close(entropy.cpu().double(), expected_entropy, atol=1e-5, rtol=1e-5)
+    for value, reference in zip(actual, expected, strict=True):
+        torch.testing.assert_close(value.cpu().double(), reference, atol=5e-4, rtol=1e-2)
 
 
 def test_cann_forward_accepts_3d_hidden(monkeypatch):
