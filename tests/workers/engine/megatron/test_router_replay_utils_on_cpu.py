@@ -493,3 +493,116 @@ def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
             tf_config,
             model=object(),
         )
+
+
+def test_set_router_replay_data_applies_bshd_replay_mask(monkeypatch):
+    """BSHD replay masks are packed and installed, not silently dropped."""
+    router = _FakeRouter()
+    tf_config = _config(num_layers=1)
+    routed_experts = torch.ones(1, 3, 2, 1, dtype=torch.int64)
+    replay_mask = torch.tensor([[True, True, False]])
+
+    monkeypatch.setattr(rr_utils, "device_name", "cpu")
+    monkeypatch.setattr(rr_utils, "preprocess_packed_seqs", lambda tensor, _mask, **_kwargs: (tensor, object()))
+    monkeypatch.setattr(rr_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
+    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda model: iter([(1, router)]))
+
+    rr_utils.set_router_replay_data(
+        routed_experts,
+        torch.ones(1, 3, dtype=torch.bool),
+        tf_config,
+        replay_mask=replay_mask,
+        model=object(),
+    )
+
+    assert router.target_replay_mask is not None
+    assert torch.equal(router.target_replay_mask, replay_mask.squeeze(0))
+
+
+def test_router_replay_debug_env(monkeypatch):
+    monkeypatch.delenv("VERL_ROUTER_REPLAY_DEBUG", raising=False)
+    assert not rr_utils.is_router_replay_debug_enabled()
+
+    monkeypatch.setenv("VERL_ROUTER_REPLAY_DEBUG", "1")
+    assert rr_utils.is_router_replay_debug_enabled()
+    monkeypatch.setenv("VERL_ROUTER_REPLAY_DEBUG", "yes")
+    assert rr_utils.is_router_replay_debug_enabled()
+    monkeypatch.setenv("VERL_ROUTER_REPLAY_DEBUG", "0")
+    assert not rr_utils.is_router_replay_debug_enabled()
+
+
+def test_summarize_replay_mask():
+    """The summary separates valid, replayed, native and padding rows."""
+    mask = torch.tensor([True, True, False, False])
+
+    assert rr_utils.summarize_replay_mask(mask) == {
+        "valid_rows": 4,
+        "replay_rows": 2,
+        "native_rows": 2,
+        "padding_rows": 0,
+    }
+    assert rr_utils.summarize_replay_mask(None) == {}
+
+
+def test_summarize_replay_mask_counts_alignment_padding():
+    """THD alignment padding is reported separately from native rows."""
+    nested = torch.nested.as_nested_tensor(
+        [torch.tensor([True, True, False]), torch.tensor([True, True])], layout=torch.jagged
+    )
+
+    assert rr_utils.summarize_replay_mask(nested, packed_rows=10) == {
+        "valid_rows": 5,
+        "replay_rows": 4,
+        "native_rows": 1,
+        "padding_rows": 5,
+    }
+
+
+def test_summarize_replay_mask_counts_bshd_padding():
+    """BSHD sequence padding is excluded from native rows."""
+    mask = torch.tensor([True, True, False, False])
+
+    assert rr_utils.summarize_replay_mask(mask, valid_rows=3) == {
+        "valid_rows": 3,
+        "replay_rows": 2,
+        "native_rows": 1,
+        "padding_rows": 1,
+    }
+
+
+def test_summarize_dense_replay_coverage_ignores_padding():
+    """Padded mask positions are not counted as replayed rows."""
+    replay_mask = torch.tensor([True, True, True, True])
+    attention_mask = torch.tensor([True, True, False, False])
+
+    assert rr_utils._summarize_dense_replay_coverage(replay_mask, attention_mask, packed_rows=4) == {
+        "valid_rows": 2,
+        "replay_rows": 2,
+        "native_rows": 0,
+        "padding_rows": 2,
+    }
+
+
+def test_summarize_dense_replay_coverage_counts_only_valid_replays():
+    """Only replay rows at valid positions are counted."""
+    replay_mask = torch.tensor([True, False, True, True])
+    attention_mask = torch.tensor([True, True, False, False])
+
+    assert rr_utils._summarize_dense_replay_coverage(replay_mask, attention_mask, packed_rows=4) == {
+        "valid_rows": 2,
+        "replay_rows": 1,
+        "native_rows": 1,
+        "padding_rows": 2,
+    }
+
+
+def test_summarize_dense_replay_coverage_without_attention_mask_keeps_old_counting():
+    """A missing attention_mask keeps the previous all-position behavior."""
+    replay_mask = torch.tensor([True, True, False, False])
+
+    assert rr_utils._summarize_dense_replay_coverage(replay_mask, None) == {
+        "valid_rows": 4,
+        "replay_rows": 2,
+        "native_rows": 2,
+        "padding_rows": 0,
+    }

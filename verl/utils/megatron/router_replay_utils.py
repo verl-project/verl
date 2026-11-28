@@ -18,6 +18,8 @@ Utilities for handling router replay functionality in Megatron models.
 """
 
 import inspect
+import logging
+import os
 import warnings
 
 import torch
@@ -44,6 +46,8 @@ from verl.models.mcore.util import (
 )
 from verl.utils.device import get_device_name
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
+
+logger = logging.getLogger(__name__)
 
 device_name = get_device_name()
 
@@ -436,6 +440,60 @@ def align_r3_router_replay_data(layers_topk_idx: torch.Tensor, input_ids: torch.
     return torch.nested.as_nested_tensor(aligned_parts, layout=torch.jagged)
 
 
+def is_router_replay_debug_enabled() -> bool:
+    """Whether ``VERL_ROUTER_REPLAY_DEBUG`` enables replay diagnostics."""
+    return os.getenv("VERL_ROUTER_REPLAY_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def summarize_replay_mask(
+    replay_mask: torch.Tensor | None,
+    valid_rows: int | None = None,
+    packed_rows: int | None = None,
+) -> dict[str, int]:
+    """Return replay/native/padding row counts for a boolean replay mask.
+
+    ``valid_rows`` excludes sequence padding; ``packed_rows`` includes THD
+    alignment padding. ``None`` means every row is replayed.
+    """
+    if replay_mask is None:
+        return {}
+    if replay_mask.is_nested:
+        total_rows = int(replay_mask.offsets().diff().sum().item())
+        replay_rows = int(replay_mask.values().sum().item())
+    else:
+        total_rows = int(replay_mask.numel())
+        replay_rows = int(replay_mask.sum().item())
+    valid_rows = total_rows if valid_rows is None else int(valid_rows)
+    packed_rows = total_rows if packed_rows is None else int(packed_rows)
+    return {
+        "valid_rows": valid_rows,
+        "replay_rows": replay_rows,
+        "native_rows": valid_rows - replay_rows,
+        "padding_rows": max(0, packed_rows - valid_rows),
+    }
+
+
+def _summarize_dense_replay_coverage(
+    replay_mask: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    packed_rows: int | None = None,
+) -> dict[str, int]:
+    """Coverage for a dense replay mask, counting replay rows only at valid positions.
+
+    Padded positions can be True in a caller-provided dense mask; intersecting
+    with ``attention_mask`` keeps ``native_rows`` non-negative and matches the
+    packed THD path, which excludes padding. A missing ``attention_mask`` keeps
+    the previous all-position counting behaviour.
+    """
+    valid_mask = None
+    if attention_mask is not None:
+        valid_mask = attention_mask.to(device=replay_mask.device, dtype=torch.bool)
+    valid_rows = int(valid_mask.sum().item()) if valid_mask is not None else None
+    if valid_mask is not None:
+        replay_mask = replay_mask.to(torch.bool) & valid_mask
+    return summarize_replay_mask(replay_mask, valid_rows=valid_rows, packed_rows=packed_rows)
+
+
 def set_router_replay_data(
     layers_topk_idx,
     attention_mask,
@@ -511,6 +569,10 @@ def set_router_replay_data(
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
                 layers_topk_idx, attention_mask, pre_process=True, quant_align_size=quant_align_size
             )
+            if replay_mask is not None:
+                replay_mask_rmpad, _ = preprocess_packed_seqs(
+                    replay_mask, attention_mask, pre_process=True, quant_align_size=quant_align_size
+                )
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 
         # 1, dynamic_bs_split, layer_num, topk
@@ -531,6 +593,28 @@ def set_router_replay_data(
         # index by absolute layer_idx; otherwise (R2 with mixed dense/MoE),
         # dim-0 only contains MoE layers, index by MoE-layer ordinal.
         index_by_layer = len(layers_topk_idx_reshape) == tf_config.num_layers
+
+        if is_router_replay_debug_enabled():
+            if replay_mask is None:
+                coverage = {}
+            else:
+                if layers_topk_idx.is_nested:
+                    cp_size = local_cp_size if local_cp_size is not None else mpu.get_context_parallel_world_size()
+                else:
+                    cp_size = mpu.get_context_parallel_world_size()
+                packed_rows = int(replay_mask_rmpad.numel()) * cp_size if replay_mask_rmpad is not None else None
+                if layers_topk_idx.is_nested:
+                    coverage = summarize_replay_mask(replay_mask, packed_rows=packed_rows)
+                else:
+                    coverage = _summarize_dense_replay_coverage(replay_mask, attention_mask, packed_rows=packed_rows)
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            logger.warning(
+                "router replay REPLAY: rank=%d, layers=%d, vp_rank=%s, coverage=%s",
+                rank,
+                layers_topk_idx_reshape.shape[0],
+                vp_rank,
+                coverage or "all rows replayed",
+            )
 
         if model is not None:
             model_routers = list(iter_model_routers(model))
