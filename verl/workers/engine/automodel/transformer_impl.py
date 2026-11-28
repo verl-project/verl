@@ -266,6 +266,11 @@ class AutomodelEngine(BaseEngine):
     def optimizer_zero_grad(self):
         self.optimizer.zero_grad()
 
+    def scale_gradients(self, factor: float):
+        for param in self.module.parameters():
+            if param.grad is not None:
+                param.grad.mul_(factor)
+
     def optimizer_step(self):
         grad_norm = scale_grads_and_clip_grad_norm(
             max_grad_norm=self.optimizer_config.clip_grad,

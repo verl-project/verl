@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .utils import AggregationType, Metric, reduce_metrics
+from .utils import LOSS_NUM_TOKENS, AggregationType, Metric, reduce_metrics
 
-__all__ = ["reduce_metrics", "AggregationType", "Metric"]
+__all__ = ["reduce_metrics", "AggregationType", "Metric", "LOSS_NUM_TOKENS"]

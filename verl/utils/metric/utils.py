@@ -21,6 +21,11 @@ from typing import Any, Optional, Union
 import numpy as np
 import torch
 
+# Metric through which a loss reports, per micro-batch, the tokens its token-mean averages over when they are only
+# known after the forward pass (bypass-mode rejection sampling). The engine divides by their total instead of
+# batch_num_tokens once all micro-batches have run.
+LOSS_NUM_TOKENS = "loss_num_tokens"
+
 
 def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, Any]:
     """

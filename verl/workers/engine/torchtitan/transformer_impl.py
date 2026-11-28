@@ -462,6 +462,13 @@ class TorchTitanEngine(BaseEngine):
         """Zero gradients."""
         self.optimizer.zero_grad()
 
+    def scale_gradients(self, factor: float):
+        """Multiply the accumulated gradients by a factor."""
+        for model_part in self.module:
+            for param in model_part.parameters():
+                if param.grad is not None:
+                    param.grad.mul_(factor)
+
     def optimizer_step(self):
         """Perform optimizer step with gradient clipping."""
         grad_norm = dist_utils.clip_grad_norm_(
