@@ -59,8 +59,15 @@ def set_numa_affinity():
             pynvml.nvmlShutdown()
 
 
+def _default_distributed_backend() -> str:
+    device_name = get_device_name()
+    if device_name == "cpu":
+        return "gloo"
+    return f"cpu:gloo,{device_name}:{get_nccl_backend()}"
+
+
 def initialize_global_process_group(timeout_second=36000):
-    backend = f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}"
+    backend = _default_distributed_backend()
     torch.distributed.init_process_group(
         backend=backend,
         timeout=timedelta(seconds=timeout_second),
@@ -86,7 +93,7 @@ def initialize_global_process_group_ray(timeout_second=None, backend=None):
     import torch.distributed
 
     timeout = timedelta(seconds=timeout_second) if timeout_second is not None else None
-    backend = backend or f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}"
+    backend = backend or _default_distributed_backend()
     if not torch.distributed.is_initialized():
         rank = int(os.environ.get("RANK", 0))
         world_size = int(os.environ.get("WORLD_SIZE", 1))
