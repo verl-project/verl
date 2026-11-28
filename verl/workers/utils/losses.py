@@ -16,6 +16,8 @@
 import torch
 from tensordict import TensorDict
 
+from verl.trainer.dpo.dpo_losses import get_dpo_loss_fn
+from verl.trainer.dpo.utils import sum_logps_per_sequence
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
@@ -249,3 +251,76 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     }
 
     return vf_loss, metrics
+
+
+def dpo_loss(config, model_output, data: TensorDict, dp_group=None):
+    """DPO preference loss for ``TrainingWorker.set_loss_fn``.
+
+    The micro-batch holds 2B sequences interleaved as [chosen_0, rejected_0, chosen_1, rejected_1, ...].
+    Each sequence's response log-prob is summed, the selected loss variant is applied to the B pairs,
+    and the result is scaled so that summing over micro-batches and averaging over data-parallel ranks
+    gives the mean loss over the global batch of pairs, the same convention as ``agg_loss``.
+
+    Args:
+        config: ``verl.trainer.dpo.dpo_losses.DPOLossConfig`` (loss_type, beta, label_smoothing, reference_free).
+        model_output: dict with "log_probs", a NestedTensor (2B, j). It is consumed and removed, because
+            its 2B rows do not match the B-row indices the engine uses to restore dynamic batches.
+        data: micro-batch TensorDict with "loss_mask" (NestedTensor, 2B rows), "ref_logps" ((2B,) summed
+            reference log-probs, not needed when reference_free), and non-tensor "dp_size" and
+            "global_batch_size" (the number of pairs in the global batch, across all data-parallel ranks).
+        dp_group: unused.
+
+    Returns:
+        (loss, metrics). Every metric is pre-scaled like the loss, so its reported value is the
+        sum over micro-batches, averaged over data-parallel ranks.
+    """
+    pad_mode = tu.get_non_tensor_data(data=data, key="pad_mode", default=DatasetPadMode.NO_PADDING)
+    if pad_mode != DatasetPadMode.NO_PADDING:
+        raise NotImplementedError(f"dpo_loss requires pad_mode=no_padding, got {pad_mode}")
+    dp_size = data["dp_size"]
+    global_num_pairs = tu.get_non_tensor_data(data=data, key="global_batch_size", default=None)
+    if global_num_pairs is None:
+        raise ValueError("dpo_loss needs global_batch_size, the number of pairs in the global batch")
+
+    log_probs = model_output.pop("log_probs")
+    per_seq_logps = sum_logps_per_sequence(log_probs, data["loss_mask"])
+    if per_seq_logps.shape[0] % 2 != 0:
+        raise ValueError(f"DPO micro-batch must hold whole (chosen, rejected) pairs, got {per_seq_logps.shape[0]} rows")
+    chosen_logps, rejected_logps = per_seq_logps[0::2], per_seq_logps[1::2]
+    num_pairs = chosen_logps.shape[0]
+
+    if config.reference_free and "ref_logps" not in data.keys():
+        ref_logps = torch.zeros_like(per_seq_logps).detach()
+    else:
+        ref_logps = data["ref_logps"].to(per_seq_logps)
+    ref_chosen_logps, ref_rejected_logps = ref_logps[0::2], ref_logps[1::2]
+
+    loss_fn = get_dpo_loss_fn(config.loss_type)
+    preference_loss, chosen_rewards, rejected_rewards = loss_fn(
+        chosen_logps,
+        rejected_logps,
+        ref_chosen_logps,
+        ref_rejected_logps,
+        beta=config.beta,
+        label_smoothing=config.label_smoothing,
+        reference_free=config.reference_free,
+    )
+
+    # Weight this micro-batch's mean by its share of the global pairs, then multiply by dp_size to undo the
+    # average over data-parallel ranks (the reported loss and FSDP's gradient reduction both average).
+    scale = num_pairs / global_num_pairs * dp_size
+    loss = preference_loss * scale
+
+    def _scaled(value: torch.Tensor) -> float:
+        return value.detach().float().mean().item() * scale
+
+    metrics = {
+        "dpo/loss": preference_loss.detach().item() * scale,
+        "dpo/accuracy": _scaled((chosen_rewards > rejected_rewards).float()),
+        "dpo/chosen_reward": _scaled(chosen_rewards),
+        "dpo/rejected_reward": _scaled(rejected_rewards),
+        "dpo/reward_margin": _scaled(chosen_rewards - rejected_rewards),
+        "dpo/chosen_logps": _scaled(chosen_logps),
+        "dpo/rejected_logps": _scaled(rejected_logps),
+    }
+    return loss, metrics
