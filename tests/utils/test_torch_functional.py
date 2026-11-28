@@ -150,6 +150,29 @@ def test_calculate_sum_pi_squared_from_logits_extreme_values():
     torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
 
 
+@pytest.mark.parametrize("shape", [(10, 33), (3, 7, 33), (0, 33)])
+@pytest.mark.parametrize("chunk_size", [1, 4, 2048])
+def test_calculate_sum_pi_squared_from_logits_chunking(shape, chunk_size):
+    """Chunked rows give the same values and gradients as a single pass."""
+    torch.manual_seed(0)
+    logits = (torch.randn(*shape, dtype=torch.float64) * 5.0).requires_grad_()
+    expected = torch.softmax(logits, dim=-1).pow(2).sum(dim=-1)
+
+    actual = calculate_sum_pi_squared_from_logits(logits, chunk_size=chunk_size)
+
+    assert actual.shape == expected.shape
+    torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+    (grad,) = torch.autograd.grad(actual.sum(), logits)
+    (expected_grad,) = torch.autograd.grad(expected.sum(), logits)
+    torch.testing.assert_close(grad, expected_grad, atol=1e-10, rtol=1e-10)
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_calculate_sum_pi_squared_from_logits_rejects_non_positive_chunk_size(chunk_size):
+    with pytest.raises(ValueError, match="chunk_size"):
+        calculate_sum_pi_squared_from_logits(torch.randn(4, 8), chunk_size=chunk_size)
+
+
 def test_expand_as_nested():
     a = torch.randn(2)
     b = torch.randn(3)
