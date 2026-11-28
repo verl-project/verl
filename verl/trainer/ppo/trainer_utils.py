@@ -208,6 +208,16 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        # These estimators normalize group advantages by std and must honor Dr.GRPO.
+        if adv_estimator in (
+            AdvantageEstimator.GRPO_VECTORIZED,
+            AdvantageEstimator.GDPO,
+            AdvantageEstimator.GRPO_PASSK,
+            "grpo_vectorized",
+            "gdpo",
+            "grpo_passk",
+        ):
+            adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
         # GDPO: pass raw data for per-dimension reward extraction
         if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
             adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
