@@ -13,7 +13,8 @@
 # limitations under the License.
 """Rollout with vLLM / SGLang, recompute old_log_probs with Megatron or VeOmni, and report the rollout-vs-actor gap.
 
-Exits non-zero if k3_kl exceeds --max-k3-kl. Trailing arguments are passed to Hydra as config overrides.
+Exits non-zero if any refit round has non-finite KL or k3_kl reaches --max-k3-kl.
+Trailing arguments are passed to Hydra as config overrides.
 
 Examples (8 GPUs):
     # bf16 rollout
@@ -138,7 +139,7 @@ def parse_args() -> argparse.Namespace:
         "--refit-rounds",
         type=int,
         default=1,
-        help="generate and measure after this many consecutive live-engine weight refits",
+        help="generate and measure after this many consecutive live-engine weight refits; every round must pass",
     )
     parser.add_argument("--max-k3-kl", type=float, default=1e-2)
     parser.add_argument("--output-json", default=None, help="optional file path to write the metrics JSON")
@@ -365,9 +366,13 @@ def main() -> int:
     print(metrics_json)
     ray.shutdown()
 
-    k3_kl = metrics["k3_kl"]
-    if not (np.isfinite(metrics["kl"]) and np.isfinite(k3_kl)) or k3_kl >= args.max_k3_kl:
-        print(f"FAILED: k3_kl {k3_kl} (threshold {args.max_k3_kl})")
+    failed = False
+    for round_index, run in enumerate(refit_runs, start=1):
+        k3_kl = run["k3_kl"]
+        if not (np.isfinite(run["kl"]) and np.isfinite(k3_kl)) or k3_kl >= args.max_k3_kl:
+            print(f"FAILED: refit round {round_index}, kl {run['kl']}, k3_kl {k3_kl} (threshold {args.max_k3_kl})")
+            failed = True
+    if failed:
         return 1
     print("PASSED")
     return 0
