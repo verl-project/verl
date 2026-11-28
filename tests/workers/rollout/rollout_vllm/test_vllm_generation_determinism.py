@@ -98,6 +98,12 @@ def _make_rollout_config(model_path, seed):
     config.actor_rollout_ref.rollout.full_determinism = True
     config.actor_rollout_ref.rollout.seed = seed
     config.actor_rollout_ref.rollout.scheduling_policy = "priority"
+    # Keep max_num_batched_tokens <= max_num_seqs * max_model_len (8*512=4096).
+    # Otherwise vLLM's FlashInfer autotune runs _dummy_run(num_tokens=8192),
+    # over-subscribing the batch-invariant attention kernel -> CUDA illegal memory
+    # access on B300. Verified still broken on vLLM 0.25.1 AND 0.32.0 (upstream
+    # unfixed as of 0.32.0). 512 == max_model_len is safely within capacity.
+    config.actor_rollout_ref.rollout.max_num_batched_tokens = 512
     # Standalone servers have no trainer to sync weights from; without real weights
     # this test would compare logprobs of a randomly initialized model.
     config.actor_rollout_ref.rollout.load_format = "auto"
@@ -135,6 +141,9 @@ def _make_e2e_config(model_path, seed, n_gpus=2):
     config.actor_rollout_ref.rollout.full_determinism = True
     config.actor_rollout_ref.rollout.seed = seed
     config.actor_rollout_ref.rollout.scheduling_policy = "priority"
+    # See _make_rollout_config: keep within max_num_seqs * max_model_len to avoid
+    # the vLLM batch-invariant autotune over-subscription crash (unfixed as of 0.32.0).
+    config.actor_rollout_ref.rollout.max_num_batched_tokens = 512
     config.actor_rollout_ref.rollout.calculate_log_probs = True
     config.actor_rollout_ref.rollout.temperature = 0.7
     config.actor_rollout_ref.rollout.top_p = 1.0
