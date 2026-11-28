@@ -193,6 +193,7 @@ jobs:
           ray stop --force
           CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh "${VLLM_ROCM_OVERRIDE}"
       - name: Clean up
+        if: always()
         run: |
           rm -rf checkpoints
 
@@ -267,18 +268,6 @@ jobs:
           bash tests/special_e2e/run_ppo_trainer_megatron.sh \
           global_profiler.tool=null actor_rollout_ref.actor.profiler.tool=null actor_rollout_ref.ref.profiler.tool=null actor_rollout_ref.rollout.profiler.tool=null critic.profiler.tool=null "${VLLM_ROCM_OVERRIDE}"
       - name: clean up
-        run: |
-          rm -rf checkpoints
-
-  cleanup_rocm:
-    needs:
-      - e2e_ppo_trainer_fsdp_vllm_rocm
-      - e2e_ppo_trainer_megatron-moe-expert-parallel_rocm
-    if: ${{ always() && github.repository_owner == 'verl-project' }}
-    runs-on: [rocm-mi300]
-    container:
-      image: "verlai/verl:rocm7.14_torch2.12_release_1112"
-    steps:
-      - name: Clean up leftover checkpoints
+        if: always()
         run: |
           rm -rf checkpoints
