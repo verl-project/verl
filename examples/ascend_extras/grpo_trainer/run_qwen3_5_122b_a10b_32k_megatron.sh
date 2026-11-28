@@ -135,7 +135,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.ignore_eos=False
     actor_rollout_ref.rollout.enforce_eager=False
 
-    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
 
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[4,12,24,48,64]"
