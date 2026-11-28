@@ -60,6 +60,11 @@ from verl.utils.fsdp_utils import (
     replace_lora_wrapper,
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
+from verl.utils.optimizer_in_backward import (
+    OptimizerInBackwardWrapper,
+    create_optim_in_bwd_wrapper,
+    supports_step_in_hooks,
+)
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.seqlen_balancing import ceildiv
 from verl.utils.torch_functional import logprobs_from_logits
@@ -182,6 +187,8 @@ class FSDPEngine(BaseEngine):
         self._uses_fsdp2_cpu_offload_policy = False
         # Set by set_rollout_weight_quantizer when the rollout is quantized.
         self._rollout_weight_quantizer = None
+        # Grad norm reported by the in-backward optimizer step (None until a mini-batch runs).
+        self._fused_grad_norm = None
 
         # Defaults for mixed-precision state. _build_fsdp_module overrides these when it
         # runs; subclasses that bypass _build_fsdp_module (e.g. VeOmniEngine) keep the
@@ -514,7 +521,48 @@ class FSDPEngine(BaseEngine):
 
         optimizer = build_optimizer(module.parameters(), self.optimizer_config)
 
+        if getattr(self.optimizer_config, "optimizer_in_backward", False):
+            optimizer = self._wrap_optimizer_in_backward(optimizer, module)
+
         return optimizer
+
+    def _wrap_optimizer_in_backward(self, optimizer, module):
+        """Wrap ``optimizer`` so it steps during the backward pass.
+
+        A global grad-norm clip needs every gradient of the mini-batch, and those only
+        co-exist once the last backward returns, so clipping keeps the gradients alive and
+        the per-parameter release only happens afterwards. Everything else (checkpoints, LR
+        scheduler, offload) keeps using the wrapped optimizer transparently.
+        """
+        if getattr(self.engine_config, "strategy", None) == "fsdp_turbo":
+            raise ValueError("optimizer_in_backward is not supported by the fsdp_turbo strategy")
+        if getattr(self, "scaler", None) is not None:
+            raise ValueError("optimizer_in_backward does not support fp16 loss scaling; use bf16 instead")
+        step_in_hooks = self.optimizer_config.clip_grad is None
+        if step_in_hooks and not supports_step_in_hooks(module):
+            # FSDP1 writes gradients from its own backward hook instead of the autograd
+            # accumulator, so the in-backward step would never fire. Keep the update at the
+            # end of the last backward instead of silently never stepping.
+            logger.warning(
+                "optimizer_in_backward cannot step from grad hooks under FSDP1; falling back to "
+                "releasing gradients one parameter at a time after the backward pass."
+            )
+            step_in_hooks = False
+        return create_optim_in_bwd_wrapper(
+            optimizer,
+            step_in_hooks=step_in_hooks,
+            grad_norm_group=self._get_grad_norm_group(),
+        )
+
+    def _get_grad_norm_group(self):
+        """Group whose ranks split a parameter's gradient (the FSDP mesh), or None if unsharded."""
+        mesh = getattr(self, "device_mesh", None)
+        if mesh is None:
+            return None
+        try:
+            return mesh.get_group(mesh_dim="fsdp")
+        except (KeyError, RuntimeError, ValueError):
+            return None
 
     def _build_lr_scheduler(self, optimizer):
         from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
@@ -576,8 +624,13 @@ class FSDPEngine(BaseEngine):
         if not self.engine_config.forward_only:
             # Initialize optimizer with model parameters and config settings
             optimizer = self._build_optimizer(module)
+            # The scheduler must see a real torch.optim.Optimizer and keep writing into the
+            # group the optimizer actually steps, so unwrap the in-backward wrapper here.
+            scheduler_optimizer = (
+                optimizer.optimizer if isinstance(optimizer, OptimizerInBackwardWrapper) else optimizer
+            )
             # Create learning rate scheduler with warmup and decay settings
-            lr_scheduler = self._build_lr_scheduler(optimizer)
+            lr_scheduler = self._build_lr_scheduler(scheduler_optimizer)
         else:
             optimizer = None
             lr_scheduler = None
@@ -706,11 +759,21 @@ class FSDPEngine(BaseEngine):
         # and _build_fsdp_module, so self.scaler may not be set.
         scaler = getattr(self, "scaler", None)
 
+        # optimizer_in_backward steps the parameters from inside the backward pass of the last
+        # micro-batch, so optimizer_step() only reports the grad norm computed there.
+        # getattr fallback: lightweight engine stubs do not always define an optimizer.
+        fused_optimizer = isinstance(getattr(self, "optimizer", None), OptimizerInBackwardWrapper) and not forward_only
+        if fused_optimizer:
+            self._fused_grad_norm = None
+
         for micro_batch_idx, micro_batch in enumerate(micro_batches):
+            is_last_micro_batch = micro_batch_idx == len(micro_batches) - 1
+            if fused_optimizer:
+                # Only the last micro-batch steps; the earlier ones must accumulate into
+                # param.grad exactly like the standard path.
+                self.optimizer.begin_backward(stepping=is_last_micro_batch)
             sync_ctx = (
-                nullcontext()
-                if forward_only
-                else self._gradient_sync_context(is_last_micro_batch=micro_batch_idx == len(micro_batches) - 1)
+                nullcontext() if forward_only else self._gradient_sync_context(is_last_micro_batch=is_last_micro_batch)
             )
             # Name each micro-batch in the trace. Without this a forward-only stage
             # (compute_log_prob / compute_ref_log_prob) is a single row with anonymous forwards
@@ -731,10 +794,25 @@ class FSDPEngine(BaseEngine):
                         # Specialized callers such as Tinker may opt in when their response requires these outputs.
                         meta_info.pop("model_output", None)
 
+            if fused_optimizer and is_last_micro_batch:
+                self._fused_grad_norm = self._step_optimizer_in_backward()
+
             output_lst.append(meta_info)
 
         # postprocess and return
         return postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
+    def _step_optimizer_in_backward(self) -> float:
+        """Clip (when configured) and step every parameter, releasing gradients as they are used."""
+        if self.optimizer_config.clip_grad is None:
+            return self.optimizer.finalize()
+
+        self._unscale_gradients()
+        grad_norm = self._clip_gradients()
+        if not torch.isfinite(grad_norm).all():
+            print(f"WARN: grad_norm is not finite: {grad_norm}")
+            return self.optimizer.finalize(float(grad_norm), step=False)
+        return self.optimizer.finalize(float(grad_norm))
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
         raise NotImplementedError("forward_step must be implemented in subclass")
@@ -752,6 +830,17 @@ class FSDPEngine(BaseEngine):
         Returns:
             grad_norm (float): Norm of gradients before clipping.
         """
+        if isinstance(self.optimizer, OptimizerInBackwardWrapper):
+            # The step already happened inside forward_backward_batch; only report its grad norm.
+            grad_norm = self._fused_grad_norm
+            self._fused_grad_norm = None
+            if grad_norm is None:
+                raise RuntimeError(
+                    "optimizer_in_backward stepped during forward_backward_batch; "
+                    "call forward_backward_batch() before optimizer_step()."
+                )
+            return float(grad_norm)
+
         assert self.optimizer_config.clip_grad is not None
 
         # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__.
@@ -759,20 +848,9 @@ class FSDPEngine(BaseEngine):
 
         # Unscale gradients before clip so the clip threshold is applied to true gradient
         # magnitudes, not scaled ones. scaler.step() will skip the update if any grad is inf/nan.
-        if scaler is not None:
-            scaler.unscale_(self.optimizer)
+        self._unscale_gradients()
 
-        if isinstance(self.module, FSDP):
-            grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
-        elif isinstance(self.module, FSDPModule):
-            grad_norm = fsdp2_clip_grad_norm_(self.module.parameters(), max_norm=self.optimizer_config.clip_grad)
-        else:
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.module.parameters(), max_norm=self.optimizer_config.clip_grad
-            )
-
-        if isinstance(grad_norm, DTensor):
-            grad_norm = grad_norm.full_tensor()
+        grad_norm = self._clip_gradients()
 
         if scaler is not None:
             # scaler handles inf/nan skipping internally via _check_inf_per_device.
@@ -787,6 +865,27 @@ class FSDPEngine(BaseEngine):
                 self.optimizer.step()
 
         return grad_norm.item()
+
+    def _unscale_gradients(self):
+        """Undo the loss scaling before gradients are inspected or clipped."""
+        scaler = getattr(self, "scaler", None)
+        if scaler is not None:
+            scaler.unscale_(self.optimizer)
+
+    def _clip_gradients(self) -> torch.Tensor:
+        """Clip gradients to ``clip_grad`` and return the norm measured before clipping."""
+        if isinstance(self.module, FSDP):
+            grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
+        elif isinstance(self.module, FSDPModule):
+            grad_norm = fsdp2_clip_grad_norm_(self.module.parameters(), max_norm=self.optimizer_config.clip_grad)
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.module.parameters(), max_norm=self.optimizer_config.clip_grad
+            )
+
+        if isinstance(grad_norm, DTensor):
+            grad_norm = grad_norm.full_tensor()
+        return grad_norm
 
     def lr_scheduler_step(self):
         """

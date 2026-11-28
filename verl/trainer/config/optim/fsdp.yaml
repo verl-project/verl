@@ -41,6 +41,12 @@ lr_scheduler_type: constant
 # Whether the LR schedule uses 0-indexed steps
 zero_indexed_step: true
 
+# Update parameters while the backward pass is still running instead of after it, so each
+# gradient is released (and the optimizer state grows) one parameter at a time. Default
+# false keeps the standard zero_grad -> backward -> optimizer_step order. The memory win
+# needs `clip_grad: null`: a global grad-norm clip requires every gradient to exist first.
+optimizer_in_backward: false
+
 # deprecated
 warmup_style: null
 
