@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import math
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -205,6 +206,23 @@ def _check_salted_kv_connectors(engine_kwargs) -> None:
                 f"external_kv_cache_invalidation='salt' keeps the KV connector's store across weight updates, "
                 f"so it requires a connector keyed by vLLM block hashes {_SALTED_VLLM_KV_CONNECTORS}; got {name!r}"
             )
+
+
+def validate_sglang_score_centering_sampling(
+    top_k: int, top_p: float, min_p: float = 0.0, *, temperature: float | None = None
+) -> None:
+    if temperature is not None and (not math.isfinite(temperature) or temperature < 1e-6):
+        raise ValueError(
+            "SGLang score centering requires stochastic sampling with temperature >= 1e-6 "
+            "(SGLang treats lower temperatures as greedy)."
+        )
+    if not (0.0 < top_p <= 1.0 and 0.0 <= min_p <= 1.0):
+        raise ValueError("SGLang score centering requires top_p in (0, 1] and min_p in [0, 1].")
+    if top_k <= 0 and (top_p < 1.0 or min_p > 0.0):
+        raise ValueError(
+            "SGLang score centering requires sampling top_k > 0 when top_p < 1 or min_p > 0. "
+            "Set a finite rollout.top_k > 0 or use untruncated sampling (top_k=-1, top_p=1.0, min_p=0.0)."
+        )
 
 
 @dataclass
@@ -435,15 +453,19 @@ class RolloutConfig(BaseConfig):
             if self.name == "vllm":
                 _check_salted_kv_connectors(self.engine_kwargs)
 
+        if self.topk_log_probs < 0:
+            raise ValueError("rollout.topk_log_probs must be non-negative.")
         if self.topk_log_probs:
-            if self.name != "vllm":
-                raise ValueError("rollout.topk_log_probs is supported by the vLLM rollout only.")
+            if self.name not in ("vllm", "sglang"):
+                raise ValueError("rollout.topk_log_probs requires the vLLM or SGLang rollout.")
             if not self.calculate_log_probs or self.logprobs_mode != "processed_logprobs":
                 raise ValueError(
-                    "rollout.topk_log_probs needs calculate_log_probs=True, logprobs_mode='processed_logprobs' and "
-                    "the vLLM rollout so the returned head uses the sampling distribution."
+                    "rollout.topk_log_probs needs calculate_log_probs=True and logprobs_mode='processed_logprobs' "
+                    "so the returned head uses the sampling distribution."
                 )
-            if 0 < self.topk_log_probs < self.top_k:
+            if self.name == "sglang":
+                validate_sglang_score_centering_sampling(self.top_k, self.top_p, temperature=self.temperature)
+            if self.topk_log_probs < self.top_k:
                 warnings.warn(
                     f"rollout.topk_log_probs={self.topk_log_probs} is smaller than the sampling top_k={self.top_k}. "
                     "Increasing topk_log_probs can allow score centering to align the full sampling support. "
@@ -451,5 +473,14 @@ class RolloutConfig(BaseConfig):
                     UserWarning,
                     stacklevel=2,
                 )
-            vllm_kwargs = self.engine_kwargs.setdefault("vllm", {})
-            vllm_kwargs["max_logprobs"] = max(vllm_kwargs.get("max_logprobs", 0), self.topk_log_probs)
+            if self.name == "vllm":
+                vllm_kwargs = self.engine_kwargs.setdefault("vllm", {})
+                vllm_kwargs["max_logprobs"] = max(vllm_kwargs.get("max_logprobs", 0), self.topk_log_probs)
+            elif self.top_k > 0:
+                sglang_kwargs = self.engine_kwargs.setdefault("sglang", {})
+                if sglang_kwargs.get("sampling_mask_max_tokens", 4096) < self.top_k:
+                    sglang_kwargs["sampling_mask_max_tokens"] = self.top_k
+            elif self.disaggregation.enabled:
+                sglang_kwargs = self.engine_kwargs.setdefault("sglang", {})
+                if sglang_kwargs.get("disaggregation_max_top_logprobs_num", 128) < self.topk_log_probs:
+                    sglang_kwargs["disaggregation_max_top_logprobs_num"] = self.topk_log_probs

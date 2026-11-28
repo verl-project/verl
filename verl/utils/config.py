@@ -107,12 +107,22 @@ def _validate_score_centering_config(config: DictConfig) -> None:
             )
     if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2", "veomni", "megatron"):
         raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2, veomni or megatron.")
-    if config.actor_rollout_ref.rollout.get("name") != "vllm":
-        raise ValueError("score centering requires actor_rollout_ref.rollout.name=vllm.")
-    if not config.actor_rollout_ref.rollout.get("topk_log_probs", 0):
+    rollout = config.actor_rollout_ref.rollout
+    if rollout.get("name") not in ("vllm", "sglang"):
+        raise ValueError("score centering requires actor_rollout_ref.rollout.name to be vllm or sglang.")
+    if rollout.get("topk_log_probs", 0) <= 0:
         raise ValueError("score centering requires actor_rollout_ref.rollout.topk_log_probs > 0.")
-    if config.actor_rollout_ref.rollout.get("temperature", 1.0) <= 0:
+    if rollout.get("temperature", 1.0) <= 0:
         raise ValueError("score centering requires stochastic training rollouts with temperature > 0.")
+    if rollout.get("name") == "sglang":
+        from verl.workers.config.rollout import validate_sglang_score_centering_sampling
+
+        validate_sglang_score_centering_sampling(
+            rollout.get("top_k", -1),
+            rollout.get("top_p", 1.0),
+            rollout.get("min_p", 0.0),
+            temperature=rollout.get("temperature", 1.0),
+        )
     if (config.get("distillation") or {}).get("enabled", False):
         raise ValueError("score centering cannot be combined with distillation.")
 

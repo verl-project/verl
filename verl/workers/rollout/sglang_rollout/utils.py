@@ -13,14 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
+import math
 import pickle
-from typing import Any, Iterator, Optional
+from collections.abc import Mapping, Sequence
+from typing import Any, Iterator, Literal, Optional
 
 import numpy as np
 import torch
 import torch.distributed as dist
 
 from verl.utils.device import get_device_capability, get_device_name
+from verl.workers.config.rollout import validate_sglang_score_centering_sampling
 from verl.workers.rollout.utils import ensure_async_iterator
 
 SGLANG_LORA_NAME = "verl_actor_lora_name"
@@ -37,6 +41,237 @@ DEEPSEEK_V4_FUSION_GROUPS = tuple(
     for attention in ("self_attn", "attn")
     for members in _DEEPSEEK_V4_FUSION_MEMBERS
 )
+
+
+def validate_sglang_topk_request(
+    sampling_params: Mapping[str, Any],
+    topk_log_probs: int,
+    *,
+    prompt_logprobs: int | None = None,
+    return_original_logprob: bool = False,
+) -> Literal["logprob", "sampling_mask"]:
+    """Select the SGLang response that measures the effective sampling distribution."""
+    if topk_log_probs <= 0:
+        raise ValueError("rollout.topk_log_probs must be positive")
+    if prompt_logprobs is not None:
+        raise ValueError("prompt_logprobs cannot be combined with rollout.topk_log_probs in SGLang")
+    temperature = sampling_params.get("temperature", 1.0)
+    if not math.isfinite(temperature) or temperature < 1e-6:
+        raise ValueError(
+            "SGLang rollout.topk_log_probs requires stochastic sampling with temperature > 0 "
+            "(SGLang treats temperatures below 1e-6 as greedy)"
+        )
+    top_p, min_p = sampling_params.get("top_p", 1.0), sampling_params.get("min_p", 0.0)
+    if not (0.0 < top_p <= 1.0 and 0.0 <= min_p <= 1.0):
+        raise ValueError("SGLang requires top_p in (0, 1] and min_p in [0, 1]")
+    top_k = sampling_params.get("top_k", -1)
+    validate_sglang_score_centering_sampling(top_k, top_p, min_p)
+    if top_k > 0:
+        return "sampling_mask"
+    if return_original_logprob:
+        raise ValueError("Unset SGLANG_RETURN_ORIGINAL_LOGPROB to record temperature-scaled SGLang log-probs")
+    return "logprob"
+
+
+def sglang_vocab_size(model_config: Any, tokenizer_manager: Any = None) -> int | None:
+    """Get the sampler's vocabulary size. Tokenizer length can omit padded model IDs."""
+    engine_config = getattr(tokenizer_manager, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", model_config)
+    for config in (engine_config, getattr(hf_config, "text_config", None), hf_config):
+        size = getattr(config, "vocab_size", None)
+        if isinstance(size, int | np.integer) and not isinstance(size, bool) and size > 0:
+            return int(size)
+    return None
+
+
+def _response_field(meta_info: Mapping[str, Any], name: str) -> Any:
+    if name not in meta_info:
+        raise ValueError(f"Missing SGLang response field {name}")
+    return meta_info[name]
+
+
+def _flat_response_array(meta_info: Mapping[str, Any], name: str, dtype: str) -> np.ndarray:
+    b64_key = f"{name}_b64"
+    if b64_key in meta_info:
+        # SGLang sends float32 and int32 binary arrays in little-endian order.
+        binary_dtype = np.dtype(dtype)
+        if meta_info.get(f"{b64_key}_dtype", binary_dtype.name) != binary_dtype.name:
+            raise ValueError(f"Invalid SGLang dtype for {b64_key}, expected {binary_dtype.name}")
+        try:
+            return np.frombuffer(base64.b64decode(meta_info[b64_key], validate=True), dtype=binary_dtype)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid SGLang base64 array in {b64_key}") from error
+    values = np.asarray(_response_field(meta_info, name))
+    if values.ndim != 1:
+        raise ValueError(f"SGLang {name} must be flat")
+    return values
+
+
+def _validate_token_ids(ids: np.ndarray, vocab_size: int | None) -> None:
+    if ids.size and (
+        ids.dtype.kind not in "iu"
+        or np.any(ids < 0)
+        or np.any(ids > np.iinfo(np.int32).max)
+        or (vocab_size is not None and np.any(ids >= vocab_size))
+    ):
+        raise ValueError("SGLang token ids must be nonnegative int32 ids within the model vocabulary")
+
+
+def _validate_logprobs(logprobs: np.ndarray) -> None:
+    if (
+        logprobs.dtype.kind not in "fiu"
+        or np.any(np.isnan(logprobs))
+        or np.any(np.isposinf(logprobs))
+        or np.any(logprobs > 1e-6)
+    ):
+        raise ValueError("SGLang log-probs must be nonpositive and finite or -inf")
+
+
+def _validate_ranked_rows(ids: np.ndarray, logprobs: np.ndarray, vocab_size: int | None) -> None:
+    _validate_token_ids(ids, vocab_size)
+    _validate_logprobs(logprobs)
+    if np.any(logprobs[..., 1:] > logprobs[..., :-1] + 1e-6):
+        raise ValueError("SGLang log-probs must be ordered by rank")
+    sorted_ids = np.sort(ids, axis=-1)
+    if np.any(sorted_ids[..., 1:] == sorted_ids[..., :-1]):
+        raise ValueError("SGLang token ids must be unique within each row")
+
+
+def _topk_output(token_ids: Sequence[int], k: int, vocab_size: int | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if k <= 0 or (vocab_size is not None and k > vocab_size):
+        raise ValueError("SGLang head size must be positive and no larger than the model vocabulary")
+    return (
+        np.empty((len(token_ids), k), dtype=np.int32),
+        np.empty((len(token_ids), k), dtype=np.float32),
+        np.empty(len(token_ids), dtype=np.bool_),
+    )
+
+
+def extract_sglang_topk_logprobs_with_coverage(
+    meta_info: Mapping[str, Any],
+    token_ids: Sequence[int],
+    k: int,
+    vocab_size: int | None = None,
+    *,
+    mass_atol: float = 1e-5,
+) -> tuple[list[float], np.ndarray, np.ndarray, np.ndarray]:
+    """Extract the sampled log-probs and ranked head of an untruncated SGLang response."""
+    ids, logprobs, complete = _topk_output(token_ids, k, vocab_size)
+    if len(token_ids) == 0:
+        return [], ids, logprobs, complete
+
+    sampled_ids = np.asarray(token_ids)
+    _validate_token_ids(sampled_ids, vocab_size)
+    sampled_entries = _response_field(meta_info, "output_token_logprobs")
+    if len(sampled_entries) != len(token_ids):
+        raise ValueError("SGLang sampled log-probs must align with generated token ids")
+    sampled_values, reported_ids, _ = zip(*sampled_entries, strict=True)
+    sampled = np.asarray(sampled_values)
+    reported_ids = np.asarray(reported_ids)
+    _validate_logprobs(sampled)
+    _validate_token_ids(reported_ids, vocab_size)
+    if not np.array_equal(reported_ids, sampled_ids) or not np.all(np.isfinite(sampled)):
+        raise ValueError("SGLang sampled log-probs must be finite and align with generated token ids")
+
+    if "output_top_logprobs_shape" in meta_info:
+        if (
+            tuple(meta_info["output_top_logprobs_shape"]) != ids.shape
+            or _response_field(meta_info, "output_top_logprobs_null_prefix") != 0
+        ):
+            raise ValueError("SGLang output top log-probs must have shape (generated tokens, k) and no null prefix")
+        head_ids = _flat_response_array(meta_info, "output_top_logprobs_idx_flat", "<i4").reshape(ids.shape)
+        head_logprobs = _flat_response_array(meta_info, "output_top_logprobs_val_flat", "<f4").reshape(ids.shape)
+    else:
+        rows = _response_field(meta_info, "output_top_logprobs")
+        if len(rows) != len(token_ids) or any(row is None or len(row) != k for row in rows):
+            raise ValueError("SGLang output top log-probs must have shape (generated tokens, k)")
+        head_logprobs, head_ids, _ = zip(*(zip(*row, strict=True) for row in rows), strict=True)
+        head_ids, head_logprobs = np.asarray(head_ids), np.asarray(head_logprobs)
+
+    _validate_ranked_rows(head_ids, head_logprobs, vocab_size)
+    mass = np.exp(head_logprobs, dtype=np.float64).sum(axis=-1)
+    if not np.all(np.isfinite(head_logprobs).any(axis=-1)) or np.any(mass > 1 + mass_atol):
+        raise ValueError("SGLang head must have positive probability mass no larger than one")
+    rows, columns = np.nonzero(head_ids == sampled_ids[:, None])
+    if not np.allclose(head_logprobs[rows, columns], sampled[rows], atol=1e-5, rtol=0):
+        raise ValueError("SGLang sampled log-probs must match the corresponding top log-probs")
+    # SGLang clamps -inf masked logits to finfo(dtype).min (<= -65504), which stays finite
+    # and would falsely mark excluded tokens in-support if certified complete.
+    has_clamped = np.isfinite(head_logprobs) & (head_logprobs <= -65504.0)
+    complete[:] = (k == vocab_size) & ~has_clamped.any(axis=-1)
+    if np.any(complete):
+        sampled_in_head = (head_ids == sampled_ids[:, None]).any(axis=-1)
+        if not np.all(sampled_in_head[complete]) or not np.allclose(mass[complete], 1.0, atol=mass_atol, rtol=0):
+            raise ValueError(
+                "SGLang full-vocabulary head must contain the sampled token and have unit probability mass"
+            )
+    ids[:] = head_ids
+    logprobs[:] = head_logprobs
+    return sampled.astype(float, copy=False).tolist(), ids, logprobs, complete
+
+
+def extract_sglang_sampling_mask_with_coverage(
+    meta_info: Mapping[str, Any], token_ids: Sequence[int], k: int, vocab_size: int | None = None
+) -> tuple[list[float], np.ndarray, np.ndarray, np.ndarray]:
+    """Extract the head and sampled log-probs from the same full, normalized sampling support."""
+    ids, logprobs, complete = _topk_output(token_ids, k, vocab_size)
+    if len(token_ids) == 0:
+        return [], ids, logprobs, complete
+    _validate_token_ids(np.asarray(token_ids), vocab_size)
+
+    mask_key = "output_token_sampling_mask"
+    logprobs_key = "output_token_sampling_logprobs"
+    length_key = f"{mask_key}_length"
+    if f"{mask_key}_flat" in meta_info or f"{mask_key}_flat_b64" in meta_info:
+        lengths = _flat_response_array(meta_info, f"{mask_key}_row_lengths", "<i4")
+        flat_ids = _flat_response_array(meta_info, f"{mask_key}_flat", "<i4")
+        flat_logprobs = _flat_response_array(meta_info, f"{logprobs_key}_flat", "<f4")
+        if (
+            _response_field(meta_info, length_key) != len(token_ids)
+            or len(lengths) != len(token_ids)
+            or lengths.dtype.kind not in "iu"
+            or np.any(lengths <= 0)
+            or sum(map(int, lengths)) != len(flat_ids)
+            or len(flat_ids) != len(flat_logprobs)
+        ):
+            raise ValueError("SGLang flat sampling mask lengths must align with generated tokens and support entries")
+        splits = np.cumsum(lengths, dtype=np.int64)[:-1]
+        id_rows, logprob_rows = np.split(flat_ids, splits), np.split(flat_logprobs, splits)
+    else:
+        id_rows = _response_field(meta_info, mask_key)
+        logprob_rows = _response_field(meta_info, logprobs_key)
+        if (
+            meta_info.get(length_key, len(token_ids)) != len(token_ids)
+            or len(id_rows) != len(token_ids)
+            or len(logprob_rows) != len(token_ids)
+        ):
+            raise ValueError("SGLang sampling mask row counts must match the number of generated tokens")
+
+    sampled: list[float] = []
+    logprobs.fill(-np.inf)
+    for t, (token_id, row_ids, row_logprobs) in enumerate(zip(token_ids, id_rows, logprob_rows, strict=True)):
+        row_ids, row_logprobs = np.asarray(row_ids), np.asarray(row_logprobs)
+        if row_ids.ndim != 1 or row_ids.size == 0 or row_ids.shape != row_logprobs.shape:
+            raise ValueError(f"SGLang sampling mask row {t} must have one log-prob for each support token")
+        _validate_ranked_rows(row_ids, row_logprobs, vocab_size)
+        weights = np.exp(row_logprobs, dtype=np.float64)
+        if np.any(weights == 0):
+            raise ValueError(f"SGLang sampling mask row {t} must contain only positive-probability support tokens")
+        if not np.isclose(weights.sum(), 1.0, atol=1e-4, rtol=0) or weights[:k].sum() > 1 + 1e-5:
+            raise ValueError(f"SGLang sampling mask row {t} must have unit support mass and head mass at most one")
+        matching = np.flatnonzero(row_ids == token_id)
+        if not matching.size:
+            raise ValueError(f"SGLang sampled token {token_id} is missing from the sampling mask support at row {t}")
+        sampled.append(float(row_logprobs[matching[0]]))
+        width = min(row_ids.size, k)
+        complete[t] = row_ids.size <= k
+        ids[t, :width] = row_ids[:width]
+        logprobs[t, :width] = row_logprobs[:width]
+        if width < k:
+            available = np.ones(k, dtype=np.bool_)
+            available[row_ids[row_ids < k]] = False
+            ids[t, width:] = np.flatnonzero(available)[: k - width]
+    return sampled, ids, logprobs, complete
 
 
 def _fusion_key(name: str, groups: tuple[tuple[str, ...], ...]):

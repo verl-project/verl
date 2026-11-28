@@ -252,7 +252,8 @@ multi_turn:
 calculate_log_probs: True
 
 # Sampler top-k log-probs per generated token, needed by algorithm.rollout_correction.score_centering.
-# 0 disables; the paper uses 128 (32 also matches). vLLM only for now, single-turn agent loop only.
+# Supported by vLLM and SGLang with the single-turn agent loop. Set to 0 to disable.
+# SGLang needs a positive top_k for truncated sampling. Use top_k=-1 and top_p=1 for untruncated sampling.
 topk_log_probs: 0
 
 # [Experimental] agent loop based rollout configs
