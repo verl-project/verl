@@ -465,6 +465,57 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     assert merged.non_tensor_batch["tool_rewards"][0] == []
 
 
+def test_agent_loop_output_as_dict_scores_last_generated_token():
+    """as_dict puts the score on the last generated token, not on a trailing response_mask=0 token."""
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12, 13, 14],
+        response_mask=[1, 0, 1, 0],
+        reward_score=1.0,
+        metrics=AgentLoopMetrics(),
+    )
+
+    fields = output.as_dict()
+
+    torch.testing.assert_close(fields["rm_scores"], torch.tensor([0.0, 0.0, 1.0, 0.0]))
+
+
+def test_agent_loop_postprocess_scores_last_generated_token():
+    """_postprocess puts the score of each row on its last generated token, or on its last valid token."""
+    rows = [
+        # (response_ids, response_mask, expected score index)
+        ([11, 12, 13], [1, 1, 0], 1),  # trailing chat-template suffix
+        ([11, 12], [1, 1], 1),  # ends with a generated token, padded to width 4
+        ([11, 12, 13], [0, 0, 0], 2),  # no generated token: keep the last valid token
+    ]
+    inputs = []
+    for i, (response_ids, response_mask, _) in enumerate(rows):
+        internal = _to_internal(
+            output_prompt_ids=[101, 102],
+            output_response_ids=response_ids,
+            output_response_mask=response_mask,
+            metrics=AgentLoopMetrics(),
+            extra_fields={},
+            num_turns=2,
+            prompt_len=2,
+            response_len=4,
+        )
+        internal.reward_score = float(i + 1)
+        inputs.append(internal)
+    dummy_worker = type(
+        "_DummyWorker",
+        (),
+        {"reward_loop_worker_handles": None, "distillation_enabled": False},
+    )()
+
+    merged = AgentLoopWorker._postprocess(dummy_worker, inputs=inputs)
+
+    expected = torch.zeros(len(rows), 4)
+    for i, (_, _, index) in enumerate(rows):
+        expected[i, index] = float(i + 1)
+    torch.testing.assert_close(merged.batch["rm_scores"], expected)
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
     class _DummyWorker:
