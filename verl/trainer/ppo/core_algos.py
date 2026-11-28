@@ -2240,8 +2240,8 @@ def kl_penalty_forward(logprob: torch.FloatTensor, ref_logprob: torch.FloatTenso
         kl = ref_logprob - logprob
         # For numerical stability
         kl = torch.clamp(kl, min=-20, max=20)
-        ratio = torch.exp(kl)
-        kld = (ratio - kl - 1).contiguous()
+        # Avoid cancellation in exp(kl) - 1 when the policies are close.
+        kld = (torch.expm1(kl) - kl).contiguous()
         return torch.clamp(kld, min=-10, max=10)
 
     if kl_penalty == "full":
