@@ -19,6 +19,7 @@ import logging
 import os
 import warnings
 from contextlib import contextmanager, nullcontext
+from functools import partial
 from inspect import signature
 from typing import Callable, ContextManager, Optional
 
@@ -72,7 +73,8 @@ from verl.utils.ulysses import (
     ulysses_pad_and_slice_inputs,
 )
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
-from verl.workers.utils.padding import build_attention_mask_from_nested
+from verl.workers.utils.losses import ppo_loss
+from verl.workers.utils.padding import build_attention_mask_from_nested, compute_response_logprob_index
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import (
@@ -555,9 +557,12 @@ class FSDPEngine(BaseEngine):
         # Load base model with specified configuration and dtype
         module = self._build_module()
         try:
-            self.pass_packed_cu_seqlens = "cu_seqlens" in signature(module.forward).parameters
+            forward_params = signature(module.forward).parameters
+            self.pass_packed_cu_seqlens = "cu_seqlens" in forward_params
+            self.pass_logprob_index = "logprob_index" in forward_params
         except (TypeError, ValueError):
             self.pass_packed_cu_seqlens = False
+            self.pass_logprob_index = False
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
@@ -1577,11 +1582,77 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         return model_output
 
+    def _supports_logprob_index(self) -> bool:
+        if hasattr(self, "pass_logprob_index"):
+            return bool(self.pass_logprob_index)
+
+        module = getattr(self, "module", None)
+        visited = set()
+        while module is not None and id(module) not in visited:
+            visited.add(id(module))
+            if hasattr(module, "_fsdp_wrapped_module"):
+                module = module._fsdp_wrapped_module
+                continue
+            if hasattr(module, "_orig_mod"):
+                module = module._orig_mod
+                continue
+            get_base_model = getattr(module, "get_base_model", None)
+            if callable(get_base_model):
+                base_model = get_base_model()
+                if base_model is not None and base_model is not module:
+                    module = base_model
+                    continue
+            break
+
+        try:
+            supported = module is not None and "logprob_index" in signature(module.forward).parameters
+        except (TypeError, ValueError):
+            supported = False
+        self.pass_logprob_index = supported
+        return supported
+
+    def _maybe_build_response_logprob_index(
+        self, micro_batch: TensorDict, loss_function, forward_only: bool
+    ) -> Optional[torch.Tensor]:
+        if not self._supports_logprob_index():
+            return None
+
+        use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+        use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
+        pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
+        if not (use_fused_kernels and use_remove_padding and pad_mode == DatasetPadMode.NO_PADDING):
+            return None
+
+        sp_size = tu.get_non_tensor_data(data=micro_batch, key="sp_size", default=1)
+        if getattr(self, "use_ulysses_sp", False) or sp_size > 1:
+            return None
+
+        distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+        distillation_only = tu.get_non_tensor_data(data=micro_batch, key="distillation_only", default=False)
+        score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
+        return_model_output = tu.get_non_tensor_data(data=micro_batch, key="return_model_output", default=False)
+        if distillation_use_topk or distillation_only or score_centering or return_model_output:
+            return None
+
+        target_loss_fn = loss_function
+        while isinstance(target_loss_fn, partial):
+            target_loss_fn = target_loss_fn.func
+        is_ppo_consumer = target_loss_fn is ppo_loss or (forward_only and loss_function is None)
+        if not is_ppo_consumer:
+            return None
+
+        return compute_response_logprob_index(micro_batch)
+
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
         device_name = get_device_name()
         # actually, we should avoid assigning like this...
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
+        logprob_index = self._maybe_build_response_logprob_index(
+            micro_batch=micro_batch, loss_function=loss_function, forward_only=forward_only
+        )
+        if logprob_index is not None:
+            model_inputs["logprob_index"] = logprob_index
 
         # Honor mixed_precision.param_dtype resolved during FSDP setup. When dtype is fp32,
         # autocast is a no-op at best and a footgun at worst, so skip it entirely.
@@ -1627,6 +1698,9 @@ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
     """
     The only difference between critic and actor is how the raw model output is processed
     """
+
+    def _maybe_build_response_logprob_index(self, micro_batch: TensorDict, loss_function, forward_only: bool):
+        return None
 
     def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
