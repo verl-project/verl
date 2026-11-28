@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 08/24/2026.
+Last updated: 11/20/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -226,6 +226,11 @@ PEFT still needs adapter shards under ``model/dist_ckpt/``).
 
 Optimizer + LR-scheduler (``optimizer/dist_ckpt/``) and RNG state (``extra/dist_ckpt/``) always
 go through ``dist_checkpointing`` into their own sibling directories.
+
+Initial weights are independent of the save format: with ``use_dist_checkpointing=True``,
+leave ``dist_checkpointing_path=null`` to initialize from ``model.path`` through the HF loader
+while saving native checkpoints. A configured ``dist_checkpointing_path`` still selects native
+initialization when ``use_dist_checkpointing=True``.
 
 .. note::
 
