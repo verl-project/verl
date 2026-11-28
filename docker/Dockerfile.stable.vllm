@@ -173,7 +173,7 @@ RUN CUDA_TARGET=$(uname -m | sed 's/aarch64/sbsa-linux/;s/x86_64/x86_64-linux/')
 
 RUN git clone https://github.com/Dao-AILab/fast-hadamard-transform.git fast-hadamard-transform && \
     cd fast-hadamard-transform && \
-    pip install -v -no-build-isolation .
+    pip install -v --no-build-isolation .
 
 RUN pip install git+https://github.com/verl-project/verl.git@${VERL_VERSION} && pip uninstall -y verl
 
@@ -191,3 +191,8 @@ RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
 # (RFC: https://github.com/verl-project/verl/issues/6266).
 # TODO(xiefan46): remove once torch pin bumps to >= 2.12.0.
 RUN pip install --no-deps --upgrade "nvidia-nccl-cu13>=2.29.7,<3.0"
+
+# Megatron-Bridge imports ModelOpt, which requires PuLP and SciPy. GatedDeltaNet uses FLA.
+RUN pip install --no-deps \
+    nvidia-modelopt==0.44.0 PuLP==3.3.2 scipy==1.16.3 \
+    flash-linear-attention==0.5.2 fla-core==0.5.2
