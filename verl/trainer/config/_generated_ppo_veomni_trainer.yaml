@@ -29,6 +29,9 @@ actor_rollout_ref:
       fsdp_size: -1
       ulysses_parallel_size: 1
       expert_parallel_size: 1
+      ple_parallel_size: 1
+      freeze_ple_embeddings: false
+      frozen_ple_dtype: null
       mixed_precision: true
       low_precision_reduce_scatter_comm: false
       seed: 42
@@ -45,15 +48,20 @@ actor_rollout_ref:
       forward_only: false
       enable_fsdp_offload: false
       enable_reentrant: false
+      broadcast_model_weights_from_rank0: false
+      ep_sharded_stream_load: true
       attn_implementation: flash_attention_2
       moe_implementation: fused
       cross_entropy_loss_implementation: eager
       rms_norm_implementation: eager
       swiglu_mlp_implementation: eager
+      gated_mlp_implementation: eager
       rotary_pos_emb_implementation: eager
+      rotary_pos_emb_vision_implementation: eager
       rms_norm_gated_implementation: eager
       causal_conv1d_implementation: eager
       chunk_gated_delta_rule_implementation: eager
+      qsa_attention_implementation: eager
       load_balancing_loss_implementation: eager
       dsa_indexer_implementation: eager
       dsa_attention_implementation: eager
@@ -137,6 +145,13 @@ actor_rollout_ref:
           level: level0
           analysis: true
           discrete: false
+          schedule:
+            _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+            skip_first: 0
+            wait: 0
+            warmup: 0
+            active: 0
+            repeat: 0
         torch:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: []
@@ -159,16 +174,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    qat:
-      enable: false
-      mode: w4a16
-      group_size: 16
-      ignore_patterns:
-      - lm_head
-      - embed_tokens
-      - re:.*mlp.gate$
-      activation_observer: static_minmax
-      quantization_config_path: null
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
     pad_to_length: false
   ref:
@@ -229,6 +234,9 @@ actor_rollout_ref:
       fsdp_size: ${oc.select:actor_rollout_ref.actor.veomni.fsdp_size,-1}
       ulysses_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.ulysses_parallel_size,1}
       expert_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.expert_parallel_size,1}
+      ple_parallel_size: 1
+      freeze_ple_embeddings: false
+      frozen_ple_dtype: null
       mixed_precision: true
       low_precision_reduce_scatter_comm: false
       seed: ${oc.select:actor_rollout_ref.actor.veomni.seed,42}
@@ -245,15 +253,20 @@ actor_rollout_ref:
       forward_only: true
       enable_fsdp_offload: false
       enable_reentrant: false
+      broadcast_model_weights_from_rank0: false
+      ep_sharded_stream_load: true
       attn_implementation: ${oc.select:actor_rollout_ref.actor.veomni.attn_implementation,flash_attention_2}
       moe_implementation: ${oc.select:actor_rollout_ref.actor.veomni.moe_implementation,fused}
       cross_entropy_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation,eager}
       rms_norm_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rms_norm_implementation,eager}
       swiglu_mlp_implementation: ${oc.select:actor_rollout_ref.actor.veomni.swiglu_mlp_implementation,eager}
+      gated_mlp_implementation: ${oc.select:actor_rollout_ref.actor.veomni.gated_mlp_implementation,eager}
       rotary_pos_emb_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rotary_pos_emb_implementation,eager}
-      rms_norm_gated_implementation: eager
-      causal_conv1d_implementation: eager
-      chunk_gated_delta_rule_implementation: eager
+      rotary_pos_emb_vision_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rotary_pos_emb_vision_implementation,eager}
+      rms_norm_gated_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rms_norm_gated_implementation,eager}
+      causal_conv1d_implementation: ${oc.select:actor_rollout_ref.actor.veomni.causal_conv1d_implementation,eager}
+      chunk_gated_delta_rule_implementation: ${oc.select:actor_rollout_ref.actor.veomni.chunk_gated_delta_rule_implementation,eager}
+      qsa_attention_implementation: ${oc.select:actor_rollout_ref.actor.veomni.qsa_attention_implementation,eager}
       load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
       dsa_indexer_implementation: eager
       dsa_attention_implementation: eager
@@ -301,6 +314,7 @@ actor_rollout_ref:
     ray_actor_max_concurrency: 1024
     enable_chunked_prefill: true
     enable_prefix_caching: true
+    external_kv_cache_invalidation: reset
     logprobs_mode: processed_logprobs
     scheduling_policy: fcfs
     load_format: dummy
@@ -409,6 +423,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.RolloutQuantizationConfig
       linear: null
       moe: null
+      moe_activation: null
       ignore: []
       config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
@@ -461,6 +476,7 @@ actor_rollout_ref:
     lora:
       type: lora
       merge: false
+      resync_base: false
       rank: 0
       alpha: 32
       dropout: 0.0
@@ -473,12 +489,17 @@ actor_rollout_ref:
       dropout_position: pre
       lora_A_init_method: xavier
       lora_B_init_method: zero
+      normalize_moe_lora: false
+      share_expert_adapters: true
+      experts_shared_outer_loras: false
+      lora_plus_ratio: 1.0
       a2a_experimental: false
       dtype: null
       adapter_path: null
       freeze_vision_model: true
       freeze_vision_projection: true
       freeze_language_model: true
+      enable_tower_connector_lora: true
   hybrid_engine: true
   nccl_timeout: 600
 data:
@@ -517,6 +538,7 @@ data:
   custom_cls:
     path: null
     name: null
+  custom_dataloader: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
   mm_processor_kwargs: {}
@@ -545,6 +567,9 @@ critic:
     fsdp_size: -1
     ulysses_parallel_size: 1
     expert_parallel_size: 1
+    ple_parallel_size: 1
+    freeze_ple_embeddings: false
+    frozen_ple_dtype: null
     mixed_precision: true
     low_precision_reduce_scatter_comm: false
     seed: 42
@@ -561,15 +586,20 @@ critic:
     forward_only: false
     enable_fsdp_offload: false
     enable_reentrant: false
+    broadcast_model_weights_from_rank0: false
+    ep_sharded_stream_load: true
     attn_implementation: flash_attention_2
     moe_implementation: fused
     cross_entropy_loss_implementation: eager
     rms_norm_implementation: eager
     swiglu_mlp_implementation: eager
+    gated_mlp_implementation: eager
     rotary_pos_emb_implementation: eager
+    rotary_pos_emb_vision_implementation: eager
     rms_norm_gated_implementation: eager
     causal_conv1d_implementation: eager
     chunk_gated_delta_rule_implementation: eager
+    qsa_attention_implementation: eager
     load_balancing_loss_implementation: eager
     dsa_indexer_implementation: eager
     dsa_attention_implementation: eager
@@ -630,6 +660,13 @@ critic:
         level: level0
         analysis: true
         discrete: false
+        schedule:
+          _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+          skip_first: 0
+          wait: 0
+          warmup: 0
+          active: 0
+          repeat: 0
       torch:
         _target_: verl.utils.profiler.config.TorchProfilerToolConfig
         contents: []
@@ -693,6 +730,7 @@ critic:
     lora:
       type: lora
       merge: false
+      resync_base: false
       rank: 0
       alpha: 32
       dropout: 0.0
@@ -705,12 +743,17 @@ critic:
       dropout_position: pre
       lora_A_init_method: xavier
       lora_B_init_method: zero
+      normalize_moe_lora: false
+      share_expert_adapters: true
+      experts_shared_outer_loras: false
+      lora_plus_ratio: 1.0
       a2a_experimental: false
       dtype: null
       adapter_path: null
       freeze_vision_model: true
       freeze_vision_projection: true
       freeze_language_model: true
+      enable_tower_connector_lora: true
 custom_reward_function:
   path: null
   name: null
@@ -757,6 +800,7 @@ sandbox_fusion:
 reward:
   _target_: verl.workers.config.RewardConfig
   num_workers: 8
+  preset: null
   custom_reward_function:
     path: null
     name: compute_score
@@ -814,6 +858,7 @@ reward:
         _target_: verl.workers.config.RolloutQuantizationConfig
         linear: null
         moe: null
+        moe_activation: null
         ignore: []
         config_file: null
       mtp: null
@@ -983,6 +1028,7 @@ trainer:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
       sync_refill_failed_groups: false
+      poll_interval: 2.0
       custom_sampler:
         path: null
         name: null
@@ -1027,17 +1073,7 @@ global_profiler:
       strict: false
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
-  rollout:
-    enable: false
-    dump_dir: ~/.verl/rollout_dump
-    steps: []
-    action: cache
   rollout_tq:
-    enable: false
-    dump_dir: ~/.verl/rollout_dump
-    steps: []
-    action: cache
-  async_rollout:
     enable: false
     dump_dir: ~/.verl/rollout_dump
     steps: []

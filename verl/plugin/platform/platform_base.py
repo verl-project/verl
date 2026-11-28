@@ -201,6 +201,14 @@ class PlatformBase(abc.ABC):
         """
         return None
 
+    def torch_profiler_activity(self) -> Optional[Any]:
+        """Torch profiler activity for this device; ``None`` uses torch's own for ``device_name``."""
+        return None
+
+    def torch_profiler_kwargs(self, save_path: str, rank: int) -> dict[str, Any]:
+        """Extra ``torch.profiler.profile`` kwargs for this device, e.g. an ``experimental_config``."""
+        return {}
+
     # ------------------------------------------------------------------
     # vllm integration
     # ------------------------------------------------------------------

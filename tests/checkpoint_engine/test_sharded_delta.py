@@ -90,6 +90,37 @@ def test_spec_to_hf_chunk_preserves_nan_sentinels():
     assert name == "w.2" and pos.tolist() == [3] and fl[pos[0]] == 42.0
 
 
+def test_mcore_shard_runs_replay_nan_probe_order():
+    """Cached source runs (``lidx=None``) must reproduce the NaN probe's values in
+    the same slot-major HF order without returning indices."""
+    from types import SimpleNamespace
+
+    from verl.workers.engine.megatron.delta_export import McoreParamExport, _nan_block, mcore_hf_delta_entry
+    from verl.workers.engine.spec import ShardSpec
+
+    def to_hf(x, _module):
+        # rows 0-1: row-parallel rank 1 of 2 (contiguous), rows 2-3: transposed (permuted)
+        top, bottom = x[:2], x[2:]
+        return {"row": torch.cat([_nan_block(top.shape, x.dtype, x.device), top], dim=1), "t": bottom.t()}
+
+    param = torch.randn(4, 3).to(torch.bfloat16)
+    rec = McoreParamExport(
+        megatron_name="w",
+        param=param,
+        spec=ShardSpec(full_shape=(4, 3)),
+        probe=SimpleNamespace(megatron_to_hf=to_hf),
+        module=None,
+        slots=[("row", (2, 6)), ("t", (3, 2))],
+    )
+    lval = param.reshape(-1)
+    slots, _dt, counts, hf_idx, hf_val = mcore_hf_delta_entry(rec, 0, torch.arange(12), lval, {})
+    for _ in range(2):  # discovery, then replay
+        got_slots, _dt, got_counts, got_idx, got_val = mcore_hf_delta_entry(rec, 0, None, lval, {})
+        assert got_idx is None and got_slots == slots
+        assert torch.equal(got_counts, counts) and torch.equal(got_val, hf_val)
+    assert rec.shard_runs[1] == [(0, 7), (9, 1), (7, 1), (10, 1), (8, 1), (11, 1)]
+
+
 def test_gather_slot_entries_sub_rounds_world1():
     """max_round_bytes splits the slot list into deterministic sub-rounds; the
     reassembled output must equal the single-round result (world=1 mechanics)."""

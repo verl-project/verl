@@ -17,10 +17,16 @@ Compatibility utilities for different versions of transformers library.
 """
 
 import importlib.metadata
+import logging
+import os
 from functools import lru_cache
 from typing import Optional
 
 from packaging import version
+from transformers import GenerationConfig
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 # Handle version compatibility for flash_attn_supports_top_left_mask
 # This function was added in newer versions of transformers
@@ -119,3 +125,24 @@ def drop_tied_target_keys(state_dict, model, model_config) -> None:
         else:
             # Canonical name absent: promote the alias instead of erasing it.
             canonical_by_id[pid] = name
+
+
+def copy_generation_config(model_path: str, save_dir: str) -> None:
+    """Copy the generation config of the model at ``model_path`` to ``save_dir/generation_config.json``.
+
+    ``GenerationConfig.save_pretrained`` refuses a config that fails its strict validation, as some published ones
+    do (GLM-5's sets ``top_p`` without ``do_sample``); such a config is written the way ``save_pretrained`` writes
+    after its check. A failure to load or save is logged as a warning, so the caller's save goes on.
+    """
+    try:
+        generation_config = GenerationConfig.from_pretrained(model_path)
+        try:
+            generation_config.save_pretrained(save_dir)
+        except ValueError as e:
+            # TODO: drop once verl requires a transformers release with huggingface/transformers#49914.
+            generation_config.to_json_file(
+                os.path.join(save_dir, "generation_config.json"), keys_to_pop=["compile_config"]
+            )
+            logger.info(f"Saved generation_config.json to {save_dir} as loaded; transformers refuses to save it: {e}")
+    except Exception as e:
+        logger.warning(f"Saved no generation_config.json to {save_dir}: {e}")

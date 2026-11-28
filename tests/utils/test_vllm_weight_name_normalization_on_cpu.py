@@ -24,7 +24,6 @@ list. Imports *only* from ``verl.workers.rollout.vllm_rollout.utils`` (deps
 stubbed) to prove the receiver is decoupled from ``megatron_peft_utils``.
 """
 
-import contextlib
 import importlib.util
 import sys
 import types
@@ -142,14 +141,8 @@ def _load_vllm_rollout_utils():
     fake_vllm_quant.apply_vllm_quant_patches = lambda: None
     fake_vllm_quant.configure_fp8_ignored_layers_match_mode = lambda config: None
     fake_vllm_quant.is_quantized_model = lambda config: False
-    fake_vllm_quant.load_quanted_weights = lambda *a, **k: []
-    fake_vllm_quant.prepare_quanted_weights_for_loading = lambda model: None
-    fake_vllm_quant.process_quanted_weights_after_loading = lambda model, state: None
-
-    # Tests swap these for recorders on the loaded module via ``monkeypatch.setattr``.
-    fake_vllm_unquant = types.ModuleType("verl.utils.vllm.vllm_unquant_utils")
-    fake_vllm_unquant.stage_unquantized_moe_params = lambda model: []
-    fake_vllm_unquant.fold_unquantized_moe_params = lambda layers: contextlib.nullcontext()
+    fake_vllm_quant.refresh_rocm_attention_weight_caches = lambda model: None
+    fake_vllm_quant.reset_uncalibrated_kv_cache_scales = lambda model: None
 
     fake_rocm_expert_map = types.ModuleType("verl.utils.vllm.rocm_vllm_moe_expert_map")
     fake_rocm_expert_map.restore_moe_expert_maps = lambda model: None
@@ -193,7 +186,6 @@ def _load_vllm_rollout_utils():
         "verl.utils.vllm": fake_vllm_utils,
         "verl.utils.vllm.patch": fake_vllm_patch,
         "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
-        "verl.utils.vllm.vllm_unquant_utils": fake_vllm_unquant,
         "verl.utils.vllm.rocm_vllm_moe_expert_map": fake_rocm_expert_map,
         "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer": fake_bucketed_transfer,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
@@ -769,10 +761,8 @@ def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     worker._is_nvfp4_packed = False
     worker._get_zmq_handle = lambda: "ipc:///tmp/test-bucketed-std.sock"
 
-    # Bypass the post-load process_weights_after_loading (needs real vLLM).
-    fake_loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
-    fake_loader_utils.process_weights_after_loading = lambda *a, **k: None
-    monkeypatch.setitem(sys.modules, "vllm.model_executor.model_loader.utils", fake_loader_utils)
+    # Bypass vLLM's reload lifecycle (needs real vLLM).
+    _install_fake_reload(monkeypatch, [])
 
     worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
 
@@ -853,32 +843,10 @@ def test_drop_tied_alias_updates_maps_checkpoint_names_before_matching():
     assert [name for name, _ in drop_tied_alias_updates(model, updates)] == ["q.weight"]
 
 
-def test_quantized_sync_drops_tied_alias_updates(monkeypatch):
-    """The quantized branch loads per bucket like the standard one, so it must drop the alias too."""
-    pytest.importorskip("vllm")
-    model = _FakeTiedModel(torch.zeros(2))
-    model.named_parameters = lambda remove_duplicate=False: iter(())
-    model.named_buffers = lambda: iter(())
-    worker = _make_worker(model)
-    loaded = []
-    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda config: True)
-    monkeypatch.setattr(
-        _vllm_rollout_utils,
-        "load_quanted_weights",
-        lambda weights, runner, is_drafter=False: loaded.extend(name for name, _ in weights) or [],
-    )
-    updates = [("lm_head.weight", torch.ones(2)), ("q.weight", torch.ones(1))]
-
-    worker._update_weights(updates, peft_config=None, base_sync_done=False)
-
-    assert loaded == ["q.weight"]
-
-
 # ---------------------------------------------------------------------------
-# The standard (non-quantized) sync stages unquantized MoE layers whose kernel prep
-# reshaped the expert weights, and folds them back after the last bucket
-# (verl-project/verl#7978: FlashInfer TRT-LLM bf16 MoE keeps w13/w2 in a 4-D layout).
-# These stub the receiver and the staging module, so they run without vLLM.
+# The standard sync brackets the buckets with vLLM's reload lifecycle, which restores
+# the checkpoint layout before the first bucket and post-processes after the last.
+# These stub the receiver and the lifecycle, so they run without vLLM.
 # ---------------------------------------------------------------------------
 
 
@@ -886,23 +854,12 @@ def _install_fake_receiver(monkeypatch, buckets):
     monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", lambda *a, **k: _FakeBucketReceiver(buckets))
 
 
-def _install_fake_moe_staging(monkeypatch, events, staged_layers):
-    fake_loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
-    fake_loader_utils.process_weights_after_loading = lambda *a, **k: events.append("process_weights_after_loading")
-    monkeypatch.setitem(sys.modules, "vllm.model_executor.model_loader.utils", fake_loader_utils)
-
-    def _stage(model):
-        events.append("stage")
-        return list(staged_layers)
-
-    @contextlib.contextmanager
-    def _fold(layers):
-        events.append(f"fold:{len(layers)}")
-        yield
-        events.append("fold:done")
-
-    monkeypatch.setattr(_vllm_rollout_utils, "stage_unquantized_moe_params", _stage)
-    monkeypatch.setattr(_vllm_rollout_utils, "fold_unquantized_moe_params", _fold)
+def _install_fake_reload(monkeypatch, events):
+    """Record vLLM's reload lifecycle calls (start_reload / finish_reload)."""
+    reload = types.ModuleType("vllm.model_executor.model_loader.reload")
+    reload.start_reload = lambda model: events.append("start_reload")
+    reload.finish_reload = lambda model, model_config, device: events.append("finish_reload")
+    monkeypatch.setitem(sys.modules, reload.__name__, reload)
 
 
 def _staging_sync_worker(model):
@@ -914,11 +871,10 @@ def _staging_sync_worker(model):
     return worker
 
 
-def test_standard_sync_stages_moe_layers_before_the_buckets_and_folds_them_after(monkeypatch):
-    """The loads stream into the staged views bucket by bucket: the tensors handed to load_weights
-    are the receiver's views into its reused buffer, with no copies held past the bucket."""
+def test_standard_sync_loads_between_start_and_finish_reload(monkeypatch):
+    """The tensors handed to load_weights are the receiver's views into its reused buffer."""
     events = []
-    _install_fake_moe_staging(monkeypatch, events, staged_layers=["experts"])
+    _install_fake_reload(monkeypatch, events)
     bucket_buffer = torch.zeros(2)
     views = [bucket_buffer[0:1], bucket_buffer[1:2]]
     _install_fake_receiver(monkeypatch, [([("q.weight", views[0])], False), ([("k.weight", views[1])], True)])
@@ -933,20 +889,13 @@ def test_standard_sync_stages_moe_layers_before_the_buckets_and_folds_them_after
     model.load_weights = _load
     _staging_sync_worker(model).update_weights_from_ipc(peft_config=None, base_sync_done=False)
 
-    assert events == [
-        "stage",
-        "load:q.weight",
-        "load:k.weight",
-        "fold:1",
-        "process_weights_after_loading",
-        "fold:done",
-    ]
+    assert events == ["start_reload", "load:q.weight", "load:k.weight", "finish_reload"]
     assert [t.data_ptr() for t in loaded] == [v.data_ptr() for v in views]
 
 
-def test_lora_adapter_sync_neither_stages_nor_folds(monkeypatch):
+def test_lora_adapter_sync_skips_the_reload(monkeypatch):
     events = []
-    _install_fake_moe_staging(monkeypatch, events, staged_layers=["experts"])
+    _install_fake_reload(monkeypatch, events)
     _install_fake_receiver(monkeypatch, [([("lora.A.weight", torch.ones(1))], True)])
     worker = _staging_sync_worker(_FakeModel({"q.base_layer.weight": torch.empty(0)}))
     worker.add_lora = lambda request: events.append("add_lora")

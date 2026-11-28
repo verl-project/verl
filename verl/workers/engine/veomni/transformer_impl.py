@@ -26,11 +26,12 @@ from veomni.arguments import AcceleratorConfig, FSDPConfig, MixedPrecisionConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
-from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
+from veomni.models.checkpoint import export_weights, get_checkpoint_tensor_converter
 from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
 import verl.utils.torch_functional as verl_F
+from verl.models.transformers.monkey_patch import patch_veomni_forward_with_backends
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -51,7 +52,6 @@ from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead, FSDPEngine
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
     VL_TYPE2INDEX,
-    get_moe_param_handler,
     load_safetensors_index,
     load_veomni_model_to_gpu,
     load_veomni_optimizer,
@@ -164,11 +164,30 @@ class VeOmniEngine(FSDPEngine):
             data_parallel_replicate_size = dp_size // fsdp_size
             data_parallel_shard_size = fsdp_size
 
+        extra_parallel_names = []
+        extra_parallel_sizes = []
+        extra_parallel_placement_innermost = []
+        if self.engine_config.ple_parallel_size > 1:
+            # VeOmni builds ExtraParallel over dp_shard_sp, which includes Ulysses
+            # but excludes the HSDP replicate axis.
+            dp_shard_sp_size = data_parallel_shard_size * self.engine_config.ulysses_parallel_size
+            if dp_shard_sp_size % self.engine_config.ple_parallel_size != 0:
+                raise ValueError(
+                    f"Parameter shard domain ({dp_shard_sp_size}) must be divisible by "
+                    f"ple_parallel_size ({self.engine_config.ple_parallel_size})."
+                )
+            extra_parallel_names.append("ple")
+            extra_parallel_sizes.append(self.engine_config.ple_parallel_size)
+            extra_parallel_placement_innermost.append(False)
+
         accelerator = AcceleratorConfig(
             dp_replicate_size=data_parallel_replicate_size,
             dp_shard_size=data_parallel_shard_size,
             ep_size=self.engine_config.expert_parallel_size,
             ulysses_size=self.engine_config.ulysses_parallel_size,
+            extra_parallel_sizes=extra_parallel_sizes,
+            extra_parallel_placement_innermost=extra_parallel_placement_innermost,
+            extra_parallel_names=extra_parallel_names,
             init_device=self.engine_config.init_device,
             fsdp_config=FSDPConfig(fsdp_mode=self.data_parallel_mode),
         )
@@ -225,6 +244,7 @@ class VeOmniEngine(FSDPEngine):
 
         self.pad_to_length: bool = self.engine_config.pad_to_length
         self.pad_to_length_bucket: int = self.engine_config.pad_to_length_bucket
+        self._rollout_weight_quantizer = None
 
     def initialize(self):
         """
@@ -273,7 +293,7 @@ class VeOmniEngine(FSDPEngine):
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
             trust_remote_code=self.model_config.trust_remote_code,
-            per_tensor_param_fn=self.get_per_tensor_param,
+            per_tensor_param_fn=self._get_hf_export_per_tensor_param,
             hf_export_dtype=hf_export_dtype,
         )
 
@@ -287,13 +307,21 @@ class VeOmniEngine(FSDPEngine):
         log_gpu_memory_usage("After offload model/optimizer/grad during init", logger=logger)
 
     def _build_optimizer(self, module):
-        optimizer = build_optimizer(
-            module,
-            lr=self.optimizer_config.lr,
-            betas=self.optimizer_config.betas,
-            weight_decay=self.optimizer_config.weight_decay,
-            optimizer_type=self.optimizer_config.optimizer,
-        )
+        optim_config = self.optimizer_config
+        # override_optimizer_config wins over the base arguments, as in the FSDP engine's builder.
+        optimizer_kwargs = {
+            "lr": optim_config.lr,
+            "betas": optim_config.betas,
+            "weight_decay": optim_config.weight_decay,
+            "optimizer_type": optim_config.optimizer,
+            **(optim_config.override_optimizer_config or {}),
+        }
+        if self.engine_config.enable_fsdp_offload:
+            # FSDP2 CPU offload keeps the sharded parameters, gradients and optimizer states on the
+            # host, where foreach AdamW materializes a temporary as large as the local fp32
+            # parameters at every step; the fused CPU kernel computes the same update in place.
+            optimizer_kwargs.setdefault("fused", True)
+        optimizer = build_optimizer(module, **optimizer_kwargs)
         get_optimizer_pre_hook = getattr(module, "get_optimizer_pre_hook", None)
         if get_optimizer_pre_hook is not None:
             optimizer_pre_hook = get_optimizer_pre_hook(module, module.config, self.data_parallel_mode)
@@ -306,7 +334,7 @@ class VeOmniEngine(FSDPEngine):
         lr_scheduler = build_lr_scheduler(
             optimizer,
             train_steps=optim_config.total_training_steps,
-            lr=optim_config.lr,
+            lr=(optim_config.override_optimizer_config or {}).get("lr", optim_config.lr),
             lr_min=optim_config.lr_min,
             lr_decay_style=optim_config.lr_scheduler_type,
             lr_decay_ratio=optim_config.lr_decay_ratio,
@@ -363,6 +391,15 @@ class VeOmniEngine(FSDPEngine):
             ops_implementation=ops_implementation,
             init_device=self.engine_config.init_device,
         )
+        fused_kernel_options = self.model_config.fused_kernel_options
+        fused_kernels_backend = (
+            fused_kernel_options.get("impl_backend", None) if fused_kernel_options is not None else None
+        )
+        patch_veomni_forward_with_backends(
+            model=module,
+            use_fused_kernels=self.model_config.use_fused_kernels,
+            fused_kernels_backend=fused_kernels_backend,
+        )
         log_gpu_memory_usage("After load base model", logger=logger)
 
         self._maybe_apply_async_activation_offload(module)
@@ -383,8 +420,11 @@ class VeOmniEngine(FSDPEngine):
             ),
             enable_reentrant=self.engine_config.enable_reentrant,
             enable_forward_prefetch=self.engine_config.forward_prefetch,
-            broadcast_model_weights_from_rank0=True,
+            broadcast_model_weights_from_rank0=self.engine_config.broadcast_model_weights_from_rank0,
+            ep_sharded_stream_load=self.engine_config.ep_sharded_stream_load,
             fqn_to_index_mapping=load_safetensors_index(self.model_config.local_path),
+            freeze_ple_embeddings=self.engine_config.freeze_ple_embeddings,
+            frozen_ple_dtype=self.engine_config.frozen_ple_dtype,
         )
         log_gpu_memory_usage("After parallelize model", logger=logger)
 
@@ -643,55 +683,53 @@ class VeOmniEngine(FSDPEngine):
     # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
+        per_tensor_param, peft_config = self._export_per_tensor_param(skip_frozen_ple=True)
+        return self._quantize_for_rollout(per_tensor_param), peft_config
+
+    def _get_hf_export_per_tensor_param(self):
+        """Full HF-format weights without the rollout weight quantizer: the checkpoint 'hf_model' export."""
+        return self._export_per_tensor_param(skip_frozen_ple=False)
+
+    def _export_per_tensor_param(self, *, skip_frozen_ple: bool):
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
-        # per-DTensor .to(device).full_tensor() in param_generator() below stages each
-        # shard instead, so the manual whole-model move is unnecessary under CPU offload.
-        if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
+        # per-DTensor .to(device).full_tensor() in export_weights() stages each shard
+        # instead, so the manual whole-model move is unnecessary under CPU offload.
+        manual_offload = not getattr(self, "_uses_fsdp2_cpu_offload_policy", False)
+        if manual_offload:
             load_veomni_model_to_gpu(self.module)
 
-        # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
         converter = get_checkpoint_tensor_converter(self.module)
         if converter is not None and hasattr(converter, "export_weights"):
-            return converter.export_weights(self.module), None
+            exported = converter.export_weights(self.module)
+        else:
+            wrapped_module = getattr(self.module, "_fsdp_wrapped_module", self.module)
+            exported = (
+                (next(iter(convert_weight_keys({name: tensor}, wrapped_module))), tensor)
+                if hasattr(wrapped_module, "_checkpoint_conversion_mapping")
+                else (name, tensor)
+                for name, tensor in export_weights(self.module, skip_frozen_ple=skip_frozen_ple)
+            )
 
-        params = self.module.state_dict()
-        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-
-        if self._is_offload_param:
-            offload_veomni_model_to_cpu(self.module)
-
-        ps = parallel_state.get_parallel_state()
-        model_type = getattr(self.module.config, "model_type", "default")
-        process_func = get_moe_param_handler(model_type, ps.ep_enabled)
-
-        device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-
-        def param_generator():
-            for name, param in params.items():
-                unsharded_tensor = (
-                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
-                )
-
-                is_expert_layer = "mlp.experts." in name
-                is_proj = any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
-
-                if is_expert_layer and is_proj and ps.ep_enabled:
-                    ep_rank, ep_size = ps.ep_rank, ps.ep_size
-                    buffer = torch.empty_like(unsharded_tensor)  # [num_experts/ep_size, H, I]
-                    for src_ep_rank in range(ep_size):
-                        tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
-                        torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ps.ep_group)
-                        yield from process_func(name, tensor, expert_id_base=src_ep_rank * tensor.size(0))
-
-                else:
-                    if is_expert_layer:
-                        yield from process_func(name, unsharded_tensor, expert_id_base=0)
-                    else:
-                        yield name, unsharded_tensor
+        def _with_offload_back():
+            try:
+                yield from exported
+            finally:
+                if manual_offload and self._is_offload_param:
+                    offload_veomni_model_to_cpu(self.module)
 
         # TODO: support VeOmni LoRA
-        return param_generator(), None
+        return _with_offload_back(), None
+
+    def set_rollout_weight_quantizer(self, quantizer) -> None:
+        self._rollout_weight_quantizer = quantizer
+
+    def _quantize_for_rollout(self, per_tensor_param):
+        # A converter that exports the checkpoint's own quantized layout (DeepSeek-V4's FP8 / FP4
+        # experts) meets a pass-through quantizer for that model type, as with Megatron-Bridge.
+        if self._rollout_weight_quantizer is None:
+            return per_tensor_param
+        return self._rollout_weight_quantizer(per_tensor_param)
 
 
 class EngineEvalModeCtx(BaseEngineCtx):
@@ -855,47 +893,19 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
     def prepare_model_inputs(self, micro_batch: TensorDict):
+        use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
         self._apply_veomni_input_transforms(model_inputs, micro_batch)
 
-        # Activate VeOmni's chunk_logprobs path: ForCausalLMLoss short-circuits
-        # to per-token log_probs/entropy on return_log_probs=True. Pass the
-        # already-rolled labels as shift_labels so chunk_logprobs skips its
-        # internal causal shift and the output seq length matches the input —
-        # prepare_model_outputs().squeeze(0) then lands at (total_nnz,).
+        # Activate verl's fused-linear loss hook. Pass the already-rolled labels
+        # as shift_labels so the kernel output stays aligned with the packed
+        # input sequence.
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
-        use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
-        if use_fused_kernels and use_remove_padding:
-            input_ids_rmpad = model_inputs["input_ids"]
-            shift_labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
-            model_inputs["labels"] = input_ids_rmpad
-            model_inputs["shift_labels"] = shift_labels
+        if use_fused_kernels:
+            model_inputs["labels"] = model_inputs["input_ids"]
             model_inputs["return_log_probs"] = True
-
-            # Pass teacher top-K tensors so ForCausalLMLoss routes to
-            # chunk_topk_distill_function for fused distillation. TD keys
-            # teacher_ids / teacher_logprobs are populated by verl's native
-            # distillation pipeline (see verl/trainer/distillation/losses.py).
-            distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
-            if distillation_use_topk and "teacher_ids" in micro_batch.keys():
-                if "teacher_logprobs" not in micro_batch.keys():
-                    raise ValueError(
-                        "teacher_ids present without teacher_logprobs; "
-                        "both must be provided together for fused top-K distillation."
-                    )
-                # Kernel kwarg names follow veomni's chunk_topk_distill_function API.
-                teacher_topk_ids = micro_batch["teacher_ids"].values().unsqueeze(0)
-                teacher_topk_log_probs = micro_batch["teacher_logprobs"].values().unsqueeze(0)
-                # SP-slice along seqlen (dim=1); teacher tensors are 3D
-                # (1, total_nnz, K) so use slice_input_tensor directly —
-                # ulysses_pad_and_slice_inputs hardcodes 2D.
-                if self.use_ulysses_sp:
-                    from verl.utils.ulysses import slice_input_tensor
-
-                    teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1, padding=True)
-                    teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1, padding=True)
-                model_inputs["teacher_topk_ids"] = teacher_topk_ids
-                model_inputs["teacher_topk_log_probs"] = teacher_topk_log_probs
+            if use_remove_padding:
+                model_inputs["shift_labels"] = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
 
         # Arm router replay for this micro-batch. In REPLAY mode this also
         # reshapes routed_experts with the same pad + Ulysses rule that

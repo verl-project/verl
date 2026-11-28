@@ -1,0 +1,13 @@
+diff --git a/src/megatron/bridge/models/qwen3_asr/hf_qwen3_asr/__init__.py b/src/megatron/bridge/models/qwen3_asr/hf_qwen3_asr/__init__.py
+--- a/src/megatron/bridge/models/qwen3_asr/hf_qwen3_asr/__init__.py
++++ b/src/megatron/bridge/models/qwen3_asr/hf_qwen3_asr/__init__.py
+@@ -38,3 +38,6 @@
+-AutoConfig.register("qwen3_asr", Qwen3ASRConfig)
+-AutoModel.register(Qwen3ASRConfig, Qwen3ASRForConditionalGeneration)
+-AutoProcessor.register(Qwen3ASRConfig, Qwen3ASRProcessor)
++from transformers.models.auto.configuration_auto import CONFIG_MAPPING
++
++if Qwen3ASRConfig.model_type not in CONFIG_MAPPING:
++    AutoConfig.register(Qwen3ASRConfig.model_type, Qwen3ASRConfig)
++    AutoModel.register(Qwen3ASRConfig, Qwen3ASRForConditionalGeneration)
++    AutoProcessor.register(Qwen3ASRConfig, Qwen3ASRProcessor)

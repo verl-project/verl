@@ -132,16 +132,12 @@ class QATEngineConfig(BaseConfig):
         mode (str): Quantization mode, "fp8", "mxfp8", "mxfp4", or "nvfp4", default "fp8"
         group_size (int): Group size for blockwise quantization, default 16
         ignore_patterns (list[str]): Module name patterns to exclude from quantization
-        activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
-        quantization_config_path (Optional[str]): Path to quantization config JSON for vLLM
     """
 
     enable: bool = False
     mode: str = "fp8"
     group_size: int = 16
     ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
-    activation_observer: str = "static_minmax"
-    quantization_config_path: Optional[str] = None
 
 
 @dataclass
@@ -216,6 +212,15 @@ class McoreEngineConfig(EngineConfig):
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        from verl.utils.real_nvfp4 import real_nvfp4_enabled
+
+        if real_nvfp4_enabled(self.override_transformer_config):
+            if self.qat.enable:
+                raise ValueError("override_transformer_config.fp4 and ModelOpt QAT are mutually exclusive")
+            if self.dtype != "bfloat16":
+                raise ValueError("NVFP4 training currently requires dtype='bfloat16'")
+            if self.use_megatron_fsdp:
+                raise ValueError("NVFP4 training is a Megatron-DDP path and does not support Megatron-FSDP")
         if self.dynamic_context_parallel and (
             not isinstance(self.max_seqlen_per_dp_cp_rank, int)
             or isinstance(self.max_seqlen_per_dp_cp_rank, bool)
@@ -249,6 +254,10 @@ class FSDPEngineConfig(EngineConfig):
         full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
             in distributed training. Important: this will negatively impact performance, so only use it for
             debugging.
+        batch_invariant (bool): If true, export vLLM's batch-invariant env at the entrypoint, install vLLM's
+            batch-invariant kernel overrides in the training process and compute log-probs with the vLLM sampler
+            formula (fp32 log_softmax + gather), so the actor forward can be compared bitwise with a rollout
+            running under VLLM_BATCH_INVARIANT=1. Not compatible with use_fused_kernels.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
         dtype (str): Mixed precision training param dtype, default "bfloat16"
         use_no_sync_for_gradient_accumulation (bool): Whether to defer FSDP gradient synchronization until the
@@ -267,7 +276,6 @@ class FSDPEngineConfig(EngineConfig):
             (``max_token_len_per_gpu * ulysses_sequence_parallel_size``) collapses every
             within-budget micro-batch onto a single shape. Only read when ``pad_to_length=True``.
             default 1024
-        qat (QATEngineConfig): QAT configuration, default disabled
     """
 
     # ulysses_sequence_parallel_size is mutable for backward compatibility
@@ -291,7 +299,7 @@ class FSDPEngineConfig(EngineConfig):
     strategy: str = "fsdp"
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
-    qat: QATEngineConfig = field(default_factory=QATEngineConfig)
+    batch_invariant: bool = False
     turbo_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -320,6 +328,13 @@ class VeOmniEngineConfig(EngineConfig):
         enable_full_shard (bool): Enable fully shard for FSDP training (ZeRO-3), default False
         enable_fsdp_offload (bool): Enable CPU offload for FSDP1, default False
         enable_reentrant (bool): Use reentrant gradient checkpointing, default False
+        broadcast_model_weights_from_rank0 (bool): Rank 0 reads the checkpoint and broadcasts
+            every tensor; False makes every rank read from disk instead (dense models load
+            weights per rank, while MoE/PLE models stream only their ExtraParallel slice when
+            ``ep_sharded_stream_load=True``). Default False
+        ep_sharded_stream_load (bool): With broadcast_model_weights_from_rank0=False, each rank
+            streams only its own slice of ExtraParallel (expert/PLE) tensors; automatically
+            ignored for dense models so each rank loads directly. Default True
         attn_implementation (str): Attention implementation to use.
             1. `eager`
             2. `sdpa`
@@ -344,9 +359,13 @@ class VeOmniEngineConfig(EngineConfig):
             ``"npu"``.
         swiglu_mlp_implementation (str): SwiGLU MLP kernel. ``"eager"`` (default) or
             ``"liger_kernel"``.
+        gated_mlp_implementation (str): VeOmni gated-MLP slot. ``"eager"`` (default),
+            ``"liger_kernel"``, or another backend registered by VeOmni.
         rotary_pos_emb_implementation (str): RoPE kernel. ``"eager"`` (default), ``"triton"``
             (deterministic Triton bmm — required for bitwise-aligned RoPE on DeepSeek-V3 /
             Moonlight), ``"liger_kernel"``, ``"npu"``.
+        rotary_pos_emb_vision_implementation (str): Full-layout vision RoPE kernel.
+            ``"eager"`` (default), ``"liger_kernel"``, or ``"torch_npu"``.
         load_balancing_loss_implementation (str): MoE load-balancing loss kernel.
             ``"eager"`` (default) or ``"triton"``.
         force_use_huggingface (bool): Force loading model from huggingface, default False
@@ -369,6 +388,7 @@ class VeOmniEngineConfig(EngineConfig):
         full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
             in distributed training. Important: this will negatively impact performance, so only use it for
             debugging.
+        batch_invariant (bool): Not supported by the VeOmni engine, must stay false.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
         low_precision_reduce_scatter_comm (bool): Use VeOmni's node-local BF16 ReduceScatter
             transport while retaining FP32 accumulation and output. Requires mixed precision
@@ -418,6 +438,9 @@ class VeOmniEngineConfig(EngineConfig):
     fsdp_size: int = -1
     ulysses_parallel_size: int = 1
     expert_parallel_size: int = 1
+    ple_parallel_size: int = 1
+    freeze_ple_embeddings: bool = False
+    frozen_ple_dtype: Optional[str] = None
     seed: int = 42
     full_determinism: bool = False
     mixed_precision: bool = False
@@ -428,6 +451,8 @@ class VeOmniEngineConfig(EngineConfig):
     load_checkpoint_path: Optional[str] = None
     enable_fsdp_offload: bool = False
     enable_reentrant: bool = False
+    broadcast_model_weights_from_rank0: bool = False
+    ep_sharded_stream_load: bool = True
     attn_implementation: str = "flash_attention_2"
     moe_implementation: str = "fused"
     # Kernel-backend selectors for VeOmni's per-model patches; passed into
@@ -437,11 +462,14 @@ class VeOmniEngineConfig(EngineConfig):
     cross_entropy_loss_implementation: str = "eager"
     rms_norm_implementation: str = "eager"
     swiglu_mlp_implementation: str = "eager"
+    gated_mlp_implementation: str = "eager"
     rotary_pos_emb_implementation: str = "eager"
+    rotary_pos_emb_vision_implementation: str = "eager"
     load_balancing_loss_implementation: str = "eager"
     rms_norm_gated_implementation: str = "eager"
     causal_conv1d_implementation: str = "eager"
     chunk_gated_delta_rule_implementation: str = "eager"
+    qsa_attention_implementation: str = "eager"
     dsa_indexer_implementation: str = "eager"
     dsa_attention_implementation: str = "eager"
     mhc_implementation: str = "eager"
@@ -453,10 +481,33 @@ class VeOmniEngineConfig(EngineConfig):
     basic_modules: Optional[list[str]] = field(default_factory=list)
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
+    batch_invariant: bool = False
 
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["veomni"], f"strategy {self.strategy} not supported"
+
+        if self.batch_invariant:
+            raise ValueError("batch_invariant is not supported by the VeOmni engine")
+
+        if self.ple_parallel_size < 1:
+            raise ValueError(f"ple_parallel_size must be >= 1, got {self.ple_parallel_size}.")
+        if self.enable_fsdp_offload and self.ple_parallel_size > 1:
+            raise ValueError("enable_fsdp_offload is not supported with ple_parallel_size > 1.")
+        if self.ple_parallel_size > 1 and (self.broadcast_model_weights_from_rank0 or not self.ep_sharded_stream_load):
+            raise ValueError(
+                "ple_parallel_size > 1 requires broadcast_model_weights_from_rank0=False and "
+                "ep_sharded_stream_load=True."
+            )
+        if self.freeze_ple_embeddings and self.frozen_ple_dtype is None:
+            object.__setattr__(self, "frozen_ple_dtype", "bfloat16")
+        if self.frozen_ple_dtype is not None:
+            if not self.freeze_ple_embeddings:
+                raise ValueError("frozen_ple_dtype requires freeze_ple_embeddings=True.")
+            if self.frozen_ple_dtype not in {"bfloat16", "float32"}:
+                raise ValueError(
+                    f"frozen_ple_dtype must be one of None, 'bfloat16', 'float32'; got {self.frozen_ple_dtype!r}."
+                )
 
         if not math.isfinite(self.activation_offload_host_cache_limit_gb) or (
             self.activation_offload_host_cache_limit_gb < 0

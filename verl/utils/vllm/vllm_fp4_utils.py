@@ -13,36 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Refit support for vLLM's MXFP4 and NVFP4 routed experts.
+"""verl's MXFP4 routed-expert feature patch and NVFP4 kernel checks.
 
-Reloading these experts means undoing the kernel's weight conversion: the refit
-stream carries checkpoint-layout tensors while the live parameters hold whatever
-layout the selected backend rewrote them into. Each expert param is handed a
-checkpoint-layout buffer to absorb the reload, then the backend's conversion is
-replayed and folded back into the live storage, so the addresses the CUDA graph
-captured stay put.
-
-Backends differ only in how much of that buffer has to be a real allocation.
-A param whose kernel layout spans the same bytes as the checkpoint one -- the
-expert weights under both DeepGEMM and Marlin -- stages as a reinterpret of its
-own storage and costs nothing. Only the block scales, which change element
-count, need an allocation, and those are a sixteenth of the weights.
-
-``verl/utils/vllm/vllm_quant_utils.py`` is the entry point that drives these.
+vLLM's reload (``start_reload`` / ``finish_reload``) restores the checkpoint
+layout of these experts for a refit.
 """
 
 import logging
-from dataclasses import replace
-from unittest.mock import patch
 
 import torch
 
 logger = logging.getLogger(__name__)
 
 _MXFP4_SF_BLOCK = 32
-_MXFP4_LIVE_ATTR = "_verl_mxfp4_live_params"
-_NVFP4_SF_BLOCK = 16
-_NVFP4_LIVE_ATTR = "_verl_nvfp4_live_params"
 
 
 def is_deepseek_v4_model(model):
@@ -55,11 +38,6 @@ def is_deepseek_v4_model(model):
 
     text_config = getattr(getattr(model, "config", None), "text_config", None)
     return getattr(text_config, "model_type", None) == "deepseek_v4"
-
-
-# ---------------------------------------------------------------------------
-# MXFP4 experts
-# ---------------------------------------------------------------------------
 
 
 def install_mxfp4_mxfp8_compressed_tensors_patch():
@@ -79,6 +57,7 @@ def install_mxfp4_mxfp8_compressed_tensors_patch():
     )
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
     from vllm.model_executor.layers.quantization.utils.quant_utils import kFp8Dynamic128Sym
+    from vllm.model_executor.utils import move_parameter
 
     CompressedTensorsW4A4Mxfp4MoEMethod = compressed_tensors_moe_w4a4_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod
     if getattr(CompressedTensorsMoEMethod, "_verl_mxfp4_mxfp8_patch", False):
@@ -87,11 +66,12 @@ def install_mxfp4_mxfp8_compressed_tensors_patch():
     class CompressedTensorsW4A8Mxfp4MoEMethod(Mxfp4MoEMethod):
         """Compressed-tensors MXFP4 weights with DeepGEMM dynamic FP8 activations."""
 
-        _verl_uses_packed_checkpoint_names = True
-
         def __init__(self, moe):
             FusedMoEMethodBase.__init__(self, moe)
             self.weight_dtype = "mxfp4"
+            self.activation_key = kFp8Dynamic128Sym
+            self.is_k3_situ_aiter = False
+            self.is_k3_situ_int4_gfx942 = False
             self.group_size = _MXFP4_SF_BLOCK
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe, activation_key=kFp8Dynamic128Sym)
             self.max_capture_size = moe.max_capture_size
@@ -123,13 +103,9 @@ def install_mxfp4_mxfp8_compressed_tensors_patch():
             self.hidden_size = hidden_size
 
         def process_weights_after_loading(self, layer):
-            # The compressed-tensors loader uses ``*_packed`` only for the
-            # initial load.  Refit staging restores the canonical names.
-            if hasattr(layer, "w13_weight_packed"):
-                layer.w13_weight = torch.nn.Parameter(layer.w13_weight_packed.data, requires_grad=False)
-                delattr(layer, "w13_weight_packed")
-                layer.w2_weight = torch.nn.Parameter(layer.w2_weight_packed.data, requires_grad=False)
-                delattr(layer, "w2_weight_packed")
+            # the kernel reads wN_weight; the loaded wN_weight_packed stay registered for reloads
+            move_parameter(layer, "w13_weight_packed", "w13_weight")
+            move_parameter(layer, "w2_weight_packed", "w2_weight")
             return super().process_weights_after_loading(layer)
 
     original = CompressedTensorsMoEMethod.get_moe_method
@@ -152,377 +128,6 @@ def install_mxfp4_mxfp8_compressed_tensors_patch():
 
     CompressedTensorsMoEMethod.get_moe_method = staticmethod(get_moe_method)
     CompressedTensorsMoEMethod._verl_mxfp4_mxfp8_patch = True
-
-
-def _is_mxfp4_fused_moe_module(module):
-    from vllm.model_executor.layers.fused_moe import RoutedExperts
-    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
-
-    return isinstance(module, RoutedExperts) and isinstance(module.quant_method, Mxfp4MoEMethod)
-
-
-def _refittable_mxfp4_backends():
-    """Backends whose weight conversion can be replayed onto live storage.
-
-    Two properties qualify a backend. Its conversion must be a pure function of
-    the checkpoint layout, so replaying it after a reload reproduces the same
-    inference layout. And it must publish the result through
-    ``replace_parameter``, which is the hook ``_replace_parameter_in_place``
-    intercepts to redirect the write into the captured storage.
-
-    Triton is the notable exclusion: it assigns the weights as non-Parameter
-    wrappers and parks the scales on the quant method, so the buffers its kernel
-    reads are not reachable as parameters at all.
-    """
-    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-
-    return (
-        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
-        Mxfp4MoeBackend.DEEPGEMM_MXFP4,
-        Mxfp4MoeBackend.MARLIN,
-        Mxfp4MoeBackend.BATCHED_MARLIN,
-        Mxfp4MoeBackend.AITER_MXFP4_BF16,
-    )
-
-
-def _mxfp4_checkpoint_layout(module):
-    """Layout of the expert params before kernel post-processing rewrites them.
-
-    Mirrors ``Mxfp4MoEMethod.create_weights``. These are not guesses: vLLM
-    re-asserts the same shapes at the top of ``_setup_kernel``, so a refit that
-    hands back anything else fails loudly there. The third element is the
-    ``quant_method`` tag ``RoutedExperts.weight_loader`` dispatches on, which
-    ``replace_parameter`` does not carry over and must be reattached.
-    """
-    quant_method = module.quant_method
-    num_experts = quant_method.num_experts
-    intermediate = quant_method.intermediate_size
-    hidden = quant_method.hidden_size
-    return {
-        "w13_weight": ((num_experts, 2 * intermediate, hidden // 2), torch.uint8, None),
-        "w2_weight": ((num_experts, hidden, intermediate // 2), torch.uint8, None),
-        "w13_weight_scale": ((num_experts, 2 * intermediate, hidden // _MXFP4_SF_BLOCK), torch.uint8, "block"),
-        "w2_weight_scale": ((num_experts, hidden, intermediate // _MXFP4_SF_BLOCK), torch.uint8, "block"),
-        # Listed unconditionally: models without MoE bias never registered these
-        # and are skipped when the parameter turns up missing. Leaving them out
-        # would instead let Marlin's bias permute fall through to the real
-        # ``replace_parameter`` and quietly move the buffer.
-        "w13_bias": ((num_experts, 2 * intermediate), torch.bfloat16, None),
-        "w2_bias": ((num_experts, hidden), torch.bfloat16, None),
-    }
-
-
-def _mxfp4_staging_data(param, shape, dtype):
-    """Checkpoint-layout tensor for ``load_weights`` to write into.
-
-    Reuses the live storage whenever it spans the same number of bytes, which
-    covers more than the params a backend left alone. Marlin's repack is a
-    permutation of 4-bit values, so its int32 tiles occupy exactly the bytes the
-    uint8 checkpoint weight did; reinterpreting them costs nothing and keeps the
-    reload landing where the kernel reads. That is what stops a refit from
-    needing a second copy of the experts, which for the expert weights is the
-    difference between a negligible allocation and doubling MoE memory.
-
-    Replaying the conversion reads this buffer in full and builds its result in a
-    fresh tensor before ``_replace_parameter_in_place`` writes back, so aliasing
-    the destination is safe.
-    """
-    data = param.data
-    shape = torch.Size(shape)
-    if data.dtype == dtype and data.shape == shape:
-        return data
-    if data.is_contiguous() and data.numel() * data.element_size() == shape.numel() * dtype.itemsize:
-        return data.flatten().view(dtype).reshape(shape)
-    # Zero rather than empty: a param the refit stream happens to skip then
-    # collapses the layer's output instead of feeding the kernel whatever was
-    # left in the freed memory.
-    return torch.zeros(shape, dtype=dtype, device=param.device)
-
-
-def _stage_mxfp4_moe_params(module):
-    """Expose checkpoint-layout buffers without moving any live storage.
-
-    Each expert param is handed a buffer in the layout its ``weight_loader``
-    expects, preferring a reinterpret of the param's own storage so the reload
-    lands where the kernel reads. ``_process_mxfp4_moe_params`` then replays the
-    backend's conversion and folds the result back into the live storage.
-    """
-    live = {}
-    uses_packed_names = getattr(module.quant_method, "_verl_uses_packed_checkpoint_names", False)
-    for name, (shape, dtype, scale_kind) in _mxfp4_checkpoint_layout(module).items():
-        param = getattr(module, name, None)
-        if not isinstance(param, torch.nn.Parameter):
-            continue
-        live[name] = param
-
-        staged = torch.nn.Parameter(_mxfp4_staging_data(param, shape, dtype), requires_grad=False)
-        staged.weight_loader = module.weight_loader
-        if scale_kind is not None:
-            staged.quant_method = scale_kind
-        checkpoint_name = f"{name}_packed" if uses_packed_names and name in ("w13_weight", "w2_weight") else name
-        setattr(module, checkpoint_name, staged)
-
-    setattr(module, _MXFP4_LIVE_ATTR, live)
-
-
-def _replace_parameter_in_place(layer, param_name, new_data, prefer_copy=False):
-    """Fold post-processing output into the parameter the CUDA graph captured.
-
-    Reinstating the live parameter here rather than after
-    ``process_weights_after_loading`` returns is deliberate: the tail of
-    ``_setup_kernel`` rebuilds ``moe_quant_config`` and ``moe_kernel`` from
-    whatever is on the layer at that moment, and those cache tensor references.
-    Swapping back later would leave the kernel pointing at the temporaries.
-    """
-    from vllm.model_executor.utils import replace_parameter
-
-    live = getattr(layer, _MXFP4_LIVE_ATTR, None) or {}
-    param = live.pop(param_name, None)
-    if param is None or new_data is None:
-        return replace_parameter(layer, param_name, new_data, prefer_copy)
-
-    if isinstance(new_data, torch.nn.Parameter):
-        new_data = new_data.data
-
-    if new_data.shape != param.shape or new_data.dtype != param.dtype:
-        raise RuntimeError(
-            f"mxfp4 refit re-derived {param_name} as {tuple(new_data.shape)}/{new_data.dtype}, "
-            f"but the live parameter is {tuple(param.shape)}/{param.dtype}; "
-            "its storage cannot be updated in place."
-        )
-    if new_data.data_ptr() != param.data_ptr():
-        param.data.copy_(new_data)
-    setattr(layer, param_name, param)
-
-
-def _process_mxfp4_moe_params(module):
-    from vllm.model_executor.layers.quantization import mxfp4 as vllm_mxfp4
-
-    with patch.object(vllm_mxfp4, "replace_parameter", _replace_parameter_in_place):
-        module.quant_method.process_weights_after_loading(module)
-
-    # Every staged param is consumed through the patched replace_parameter, so
-    # a leftover means post-processing took a path that assigns weights some
-    # other way and the live storage was never refreshed.
-    leftover = getattr(module, _MXFP4_LIVE_ATTR, None) or {}
-    delattr(module, _MXFP4_LIVE_ATTR)
-    if leftover:
-        raise RuntimeError(
-            f"mxfp4 refit left {sorted(leftover)} un-reinstated; every backend listed in "
-            "_refittable_mxfp4_backends is expected to route each expert param through "
-            "replace_parameter."
-        )
-
-
-def stage_mxfp4_moe_params_for_loading(model):
-    """Hand ``load_weights`` checkpoint-layout expert buffers.
-
-    Returns the staged modules for ``process_mxfp4_moe_weights_after_loading``.
-    A model with no mxfp4 experts yields an empty list, which makes this safe
-    to call unconditionally.
-    """
-    supported = _refittable_mxfp4_backends()
-    staged_modules = []
-    backends = set()
-    for module in model.modules():
-        if not _is_mxfp4_fused_moe_module(module):
-            continue
-
-        backend = getattr(module.quant_method, "mxfp4_backend", None)
-        if backend not in supported:
-            # Refusing beats skipping: an unsupported backend would quietly load
-            # checkpoint-layout data into rewritten parameters, and the rollout
-            # would drift with nothing pointing at the cause.
-            raise NotImplementedError(
-                f"mxfp4 MoE refit does not support the {backend} backend selected by "
-                f"{type(module).__name__}. Supported backends: "
-                f"{', '.join(str(b) for b in supported)}."
-            )
-
-        _stage_mxfp4_moe_params(module)
-        staged_modules.append(module)
-        backends.add(backend)
-
-    logger.info(
-        "Staged %d mxfp4 MoE modules for in-place refit (backends: %s)",
-        len(staged_modules),
-        ", ".join(sorted(str(b) for b in backends)) or "none",
-    )
-    return staged_modules
-
-
-def process_mxfp4_moe_weights_after_loading(modules):
-    """Repack the loaded experts into the kernel layout inside the live storage."""
-    for module in modules:
-        _process_mxfp4_moe_params(module)
-
-
-# ---------------------------------------------------------------------------
-# NVFP4 experts
-# ---------------------------------------------------------------------------
-
-
-def install_nvfp4_cutlass_compressed_tensors_patch():
-    """Make verl's NVFP4 W4A4 preset select the verified CUTLASS backend."""
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
-        compressed_tensors_moe_w4a4_nvfp4,
-    )
-
-    CompressedTensorsW4A4Nvfp4MoEMethod = compressed_tensors_moe_w4a4_nvfp4.CompressedTensorsW4A4Nvfp4MoEMethod
-    if getattr(CompressedTensorsW4A4Nvfp4MoEMethod, "_verl_cutlass_patch", False):
-        return
-    original_init = CompressedTensorsW4A4Nvfp4MoEMethod.__init__
-
-    def __init__(self, moe, layer_name=None, use_a16=False):
-        if use_a16:
-            raise NotImplementedError("verl supports NVFP4 only as W4A4 routed experts")
-        selection_moe = replace(moe, moe_backend="flashinfer_cutlass") if moe.moe_backend == "auto" else moe
-        original_init(self, selection_moe, layer_name=layer_name, use_a16=False)
-
-    CompressedTensorsW4A4Nvfp4MoEMethod.__init__ = __init__
-    CompressedTensorsW4A4Nvfp4MoEMethod._verl_cutlass_patch = True
-
-
-def _is_nvfp4_fused_moe_module(module):
-    from vllm.model_executor.layers.fused_moe import RoutedExperts
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
-        compressed_tensors_moe_w4a4_nvfp4,
-    )
-
-    CompressedTensorsW4A4Nvfp4MoEMethod = compressed_tensors_moe_w4a4_nvfp4.CompressedTensorsW4A4Nvfp4MoEMethod
-    return isinstance(module, RoutedExperts) and isinstance(module.quant_method, CompressedTensorsW4A4Nvfp4MoEMethod)
-
-
-def _nvfp4_checkpoint_layout(module):
-    """Checkpoint tensors consumed by vLLM's NVFP4 fused-expert loader."""
-    num_experts = module.num_experts
-    intermediate = module.intermediate_size_per_partition
-    hidden = module.hidden_size
-    w13_shards = 2 if module.quant_method.moe.is_act_and_mul else 1
-    tensor = "tensor"
-    group = "group"
-    return {
-        "w13_weight": (
-            (num_experts, w13_shards * intermediate, hidden // 2),
-            torch.uint8,
-            None,
-            "w13_weight_packed",
-        ),
-        "w2_weight": (
-            (num_experts, hidden, intermediate // 2),
-            torch.uint8,
-            None,
-            "w2_weight_packed",
-        ),
-        "w13_weight_scale": (
-            (num_experts, w13_shards * intermediate, hidden // _NVFP4_SF_BLOCK),
-            torch.float8_e4m3fn,
-            group,
-            "w13_weight_scale",
-        ),
-        "w2_weight_scale": (
-            (num_experts, hidden, intermediate // _NVFP4_SF_BLOCK),
-            torch.float8_e4m3fn,
-            group,
-            "w2_weight_scale",
-        ),
-        "w13_weight_global_scale": (
-            (num_experts, w13_shards),
-            torch.float32,
-            tensor,
-            "w13_weight_global_scale",
-        ),
-        "w2_weight_global_scale": (
-            (num_experts,),
-            torch.float32,
-            tensor,
-            "w2_weight_global_scale",
-        ),
-        "w13_input_global_scale": (
-            (num_experts, w13_shards),
-            torch.float32,
-            tensor,
-            "w13_input_global_scale",
-        ),
-        "w2_input_global_scale": (
-            (num_experts,),
-            torch.float32,
-            tensor,
-            "w2_input_global_scale",
-        ),
-    }
-
-
-def _stage_nvfp4_moe_params(module):
-    live = {}
-    layout = _nvfp4_checkpoint_layout(module)
-    for live_name, (shape, dtype, scale_kind, checkpoint_name) in layout.items():
-        param = getattr(module, live_name, None)
-        if not isinstance(param, torch.nn.Parameter):
-            continue
-        # Global scales stay in checkpoint layout and are not replaced by
-        # post-processing, so loading them directly is address-safe.
-        if live_name.endswith("global_scale"):
-            continue
-        live[live_name] = param
-        staged = torch.nn.Parameter(_mxfp4_staging_data(param, shape, dtype), requires_grad=False)
-        staged.weight_loader = module.weight_loader
-        if scale_kind is not None:
-            staged.quant_method = scale_kind
-        setattr(module, checkpoint_name, staged)
-
-    # These are derived from the global scales and replaced by the official
-    # post-process even though they have no checkpoint-side staging tensor.
-    for name in ("w13_weight_scale_2", "w2_weight_scale_2"):
-        param = getattr(module, name, None)
-        if isinstance(param, torch.nn.Parameter):
-            live[name] = param
-    # CUDA graphs capture these activation-scale pointers too.  The upstream
-    # post-process assigns freshly derived tensors instead of Parameters, so
-    # preserve their initial storage and copy each refit's values into it.
-    for name in ("w13_input_scale", "w2_input_scale"):
-        tensor = getattr(module, name, None)
-        if isinstance(tensor, torch.Tensor):
-            live[name] = tensor
-    setattr(module, _NVFP4_LIVE_ATTR, live)
-
-
-def _replace_nvfp4_parameter_in_place(layer, param_name, new_data, prefer_copy=False):
-    from vllm.model_executor.utils import replace_parameter
-
-    live = getattr(layer, _NVFP4_LIVE_ATTR, None) or {}
-    param = live.pop(param_name, None)
-    if param is None or new_data is None:
-        return replace_parameter(layer, param_name, new_data, prefer_copy)
-    if isinstance(new_data, torch.nn.Parameter):
-        new_data = new_data.data
-    if new_data.shape != param.shape or new_data.dtype != param.dtype:
-        raise RuntimeError(
-            f"nvfp4 refit re-derived {param_name} as {tuple(new_data.shape)}/{new_data.dtype}, "
-            f"but the CUDA-graph live parameter is {tuple(param.shape)}/{param.dtype}"
-        )
-    if new_data.data_ptr() != param.data_ptr():
-        param.data.copy_(new_data)
-    setattr(layer, param_name, param)
-
-
-def _restore_nvfp4_input_scales_in_place(module, converted):
-    converted = list(converted)
-    live = getattr(module, _NVFP4_LIVE_ATTR, None) or {}
-    for index, name in ((3, "w13_input_scale"), (7, "w2_input_scale")):
-        tensor = live.pop(name, None)
-        new_data = converted[index]
-        if tensor is None or new_data is None:
-            continue
-        if new_data.shape != tensor.shape or new_data.dtype != tensor.dtype:
-            raise RuntimeError(
-                f"nvfp4 refit re-derived {name} as {tuple(new_data.shape)}/{new_data.dtype}, "
-                f"but the CUDA-graph live tensor is {tuple(tensor.shape)}/{tensor.dtype}"
-            )
-        if new_data.data_ptr() != tensor.data_ptr():
-            tensor.copy_(new_data)
-        converted[index] = tensor
-    return tuple(converted)
 
 
 def _attest_nvfp4_kernel_scale_references(module):
@@ -555,80 +160,14 @@ def _attest_nvfp4_kernel_scale_references(module):
         if not torch.equal(actual, 1.0 / input_scale):
             raise RuntimeError(f"nvfp4 {config_name} does not match the current activation scale")
 
-
-def _restore_nvfp4_kernel_config_in_place(module, retained_kernel, retained_config):
-    """Copy newly derived scales into the config storage captured by CUDA graphs."""
-    method = module.quant_method
-    processing_config = method.moe_quant_config
-    for name in ("a1_gscale", "a2_gscale"):
-        retained = getattr(retained_config, name, None)
-        current = getattr(processing_config, name, None)
-        if not isinstance(retained, torch.Tensor) or not isinstance(current, torch.Tensor):
-            raise RuntimeError(f"nvfp4 refit cannot restore derived scale {name}")
-        if retained.shape != current.shape or retained.dtype != current.dtype:
-            raise RuntimeError(
-                f"nvfp4 refit re-derived {name} as {tuple(current.shape)}/{current.dtype}, "
-                f"but the CUDA-graph config has {tuple(retained.shape)}/{retained.dtype}"
-            )
-        retained.copy_(current)
-
-    method.moe_kernel = retained_kernel
-    method.moe_quant_config = retained_config
-    _attest_nvfp4_kernel_scale_references(module)
-
-
-def _process_nvfp4_moe_params(module):
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
-        compressed_tensors_moe_w4a4_nvfp4,
-    )
-
-    original_convert = compressed_tensors_moe_w4a4_nvfp4.convert_to_nvfp4_moe_kernel_format
-
-    def convert_to_nvfp4_moe_kernel_format(*args, **kwargs):
-        return _restore_nvfp4_input_scales_in_place(module, original_convert(*args, **kwargs))
-
-    retained_kernel = module.quant_method.moe_kernel
-    retained_config = module.quant_method.moe_quant_config
-    with (
-        patch.object(
-            compressed_tensors_moe_w4a4_nvfp4,
-            "replace_parameter",
-            _replace_nvfp4_parameter_in_place,
-        ),
-        patch.object(
-            compressed_tensors_moe_w4a4_nvfp4,
-            "convert_to_nvfp4_moe_kernel_format",
-            convert_to_nvfp4_moe_kernel_format,
-        ),
-    ):
-        module.quant_method.process_weights_after_loading(module)
-    _restore_nvfp4_kernel_config_in_place(module, retained_kernel, retained_config)
-    leftover = getattr(module, _NVFP4_LIVE_ATTR, None) or {}
-    delattr(module, _NVFP4_LIVE_ATTR)
-    if leftover:
-        raise RuntimeError(f"nvfp4 refit left {sorted(leftover)} un-reinstated")
-
-
-def stage_nvfp4_moe_params_for_loading(model):
-    """Stage NVFP4 W4A4 FlashInfer CUTLASS experts for a bucketed refit."""
-    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
-
-    staged = []
-    for module in model.modules():
-        if not _is_nvfp4_fused_moe_module(module):
-            continue
-        method = module.quant_method
-        if method.use_a16 or method.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_CUTLASS:
-            raise NotImplementedError(
-                "NVFP4 refit supports only W4A4 FlashInfer CUTLASS routed experts; "
-                f"got use_a16={method.use_a16}, backend={method.nvfp4_backend}"
-            )
-        _stage_nvfp4_moe_params(module)
-        staged.append(module)
-    logger.info("Staged %d NVFP4 W4A4 MoE modules for in-place refit", len(staged))
-    return staged
-
-
-def process_nvfp4_moe_weights_after_loading(modules):
-    for module in modules:
-        _process_nvfp4_moe_params(module)
+    # FlashInfer TRT-LLM derives g1_scale_c from the scales above and keeps its own reference.
+    derived = getattr(experts, "g1_scale_c", None)
+    if isinstance(derived, torch.Tensor):
+        registered = getattr(module, "g1_scale_c", None)
+        if not isinstance(registered, torch.Tensor) or derived.data_ptr() != registered.data_ptr():
+            raise RuntimeError("nvfp4 kernel has a stale g1_scale_c reference")
+        expected = config.a2_gscale
+        if experts.moe_config.is_act_and_mul:
+            expected = config.g1_alphas * config.a2_gscale
+        if not torch.equal(registered, expected):
+            raise RuntimeError("nvfp4 g1_scale_c does not match the current scales")

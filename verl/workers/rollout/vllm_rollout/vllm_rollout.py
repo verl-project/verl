@@ -141,7 +141,6 @@ class ServerAdapter(BaseRollout):
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
         self.use_shm = not is_support_ipc()
-        self._delta_weight_transfer_engine_initialized = False
         if self.use_shm:
             logger.warning(
                 "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
@@ -206,6 +205,36 @@ class ServerAdapter(BaseRollout):
         if self.config.free_cache_engine and self._ensure_server_handle():
             await self.server_handle.sleep.remote()
 
+    async def get_weight_ownership(self):
+        """This worker's ``RolloutLayout``, reported by its vLLM worker.
+
+        Every rollout worker needs its own layout, not only the one holding the server handle, so
+        each asks the replica's server and picks its entry from the per-worker ``collective_rpc``
+        results, which are ordered by rank within the replica.
+        """
+        from verl.workers.rollout.base import RolloutLayout
+
+        if self._pd_role is not None:
+            return None
+        if self.server_handle is None:
+            # node 0's server: the other nodes of a multi-node replica run vLLM headless, without an engine
+            actor_name = f"{self._get_server_name_prefix()}server_{self.replica_rank}_0"
+            try:
+                handle = ray.get_actor(actor_name)
+            except ValueError:
+                logger.warning(f"get_weight_ownership: server actor {actor_name} not found; assuming full ownership")
+                return None
+        else:
+            handle = self.server_handle
+        results = await handle.collective_rpc.remote("get_weight_ownership")
+        if not results or self.rollout_rank >= len(results):
+            logger.warning(
+                f"get_weight_ownership: {len(results or [])} vLLM workers for rollout rank {self.rollout_rank}; "
+                "assuming full ownership"
+            )
+            return None
+        return RolloutLayout.from_dict(results[self.rollout_rank])
+
     @torch.no_grad()
     async def update_weights(
         self,
@@ -214,15 +243,9 @@ class ServerAdapter(BaseRollout):
         wire_format: str = "named_tensors",
         **kwargs,
     ):
-        """Update rollout weights from full tensors or DeltaFlush payloads.
-
-        Full-tensor updates may fall back to shared memory; delta updates
-        require colocated CUDA IPC.
-        """
-        if wire_format == "delta_flush":
-            return await self._update_delta_weights(weights, global_steps=global_steps)
+        """Update rollout weights via colocated CUDA IPC or shared memory."""
         assert wire_format == "named_tensors", (
-            f"vLLM rollout supports wire_format='named_tensors' or 'delta_flush'; got {wire_format!r}"
+            f"vLLM ServerAdapter supports wire_format='named_tensors'; got {wire_format!r}"
         )
         start_time = time.time()
 
@@ -251,72 +274,6 @@ class ServerAdapter(BaseRollout):
 
         if self.replica_rank == 0 and self.rollout_rank == 0:
             logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")
-
-    async def _update_delta_weights(
-        self,
-        weights,
-        *,
-        global_steps: int | None,
-    ) -> None:
-        """Send one delta weight update as a stream of DeltaFlush payloads."""
-
-        from verl.workers.rollout.utils import ensure_async_iterator
-
-        if self.use_shm:
-            raise NotImplementedError("delta_sharded with vLLM requires colocated CUDA IPC")
-
-        flushes = ensure_async_iterator(weights)
-        try:
-            first_item = await anext(flushes)
-        except StopAsyncIteration:
-            # A steady sync with no changed BF16 values sends only a terminal
-            # marker: weights are unchanged, so advance the step tag without
-            # touching the transfer engine or the KV cache.
-            if global_steps is not None and self._ensure_server_handle():
-                await self.server_handle.set_global_steps.remote(global_steps)
-            return
-
-        first_named_tensors, saw_last = first_item
-        if not self._delta_weight_transfer_engine_initialized:
-            await self._execute_method(
-                "init_weight_transfer_engine",
-                kwargs={"init_info": {}},
-            )
-            self._delta_weight_transfer_engine_initialized = True
-
-        await self._execute_method("start_weight_update")
-
-        async def send_flush(flush_tensors: list[tuple[str, torch.Tensor]]) -> None:
-            receiver_future = await self._execute_method(
-                "update_verl_delta_weights",
-                non_block=True,
-                kwargs={"update_info": {}},
-            )
-            sender = BucketedWeightSender(
-                zmq_handle=self.zmq_handle,
-                bucket_size_mb=self.config.checkpoint_engine.update_weights_bucket_megabytes,
-                use_shm=False,
-            )
-            await sender.async_send_weights(iter(flush_tensors))
-            if receiver_future is not None:
-                await receiver_future
-
-        await send_flush(list(first_named_tensors))
-        async for named_tensors, is_last in flushes:
-            if saw_last:
-                raise ValueError("DeltaFlush stream yielded data after is_last=True")
-            saw_last = is_last
-            await send_flush(list(named_tensors))
-
-        if not saw_last:
-            raise ValueError("DeltaFlush stream ended without is_last=True")
-
-        await self._execute_method("finish_weight_update")
-
-        if self._has_server:
-            await self.server_handle.clear_kv_cache.remote()
-            if global_steps is not None:
-                await self.server_handle.set_global_steps.remote(global_steps)
 
     def _get_server_name_prefix(self) -> str:
         """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_')."""

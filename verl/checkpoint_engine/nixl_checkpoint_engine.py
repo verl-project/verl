@@ -59,6 +59,11 @@ class NixlAgent:
 
     def __init__(self):
         self.agent_name = str(uuid.uuid4())
+        if torch.cuda.is_available():
+            # UCX takes the GPU from the CUDA context current on this thread when the agent is created
+            # and picks the NICs nearest it; with no context every NIC looks equally near, and WRITEs
+            # go through NICs behind other GPUs' PCIe switches at a fraction of line rate
+            torch.zeros(1, device=torch.cuda.current_device())
         self.agent = nixl_api.nixl_agent(self.agent_name)
         self.notifications: dict[str, deque[bytes]] = defaultdict(deque)
 

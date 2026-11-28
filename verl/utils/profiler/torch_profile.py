@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import logging
 import os
 import re
+from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -24,7 +25,7 @@ import torch
 from verl.plugin.platform import get_platform
 
 from .config import DEVICE_ACTIVITIES, DEVICE_CONTENTS, ProfilerConfig, TorchProfilerToolConfig
-from .profile import DistProfiler
+from .profile import DistProfiler, _wrap_with_profile_context
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,12 @@ def build_trace_basename(
     parts.append(f"pid{pid}")
     parts.append(timestamp)
     return "_".join(parts)
+
+
+def _call_platform_hook(platform, name: str, **kwargs):
+    """Call an optional platform hook; None if the platform has none."""
+    hook = getattr(platform, name, None)
+    return hook(**kwargs) if callable(hook) else None
 
 
 def get_torch_profiler(
@@ -205,8 +212,12 @@ def get_torch_profiler(
     # The platform's own device type is both the activity to record and the `contents` keyword that
     # asks for it, so no per-backend branch is needed: NVIDIA/ROCm resolve "cuda" exactly as before,
     # and a device torch cannot profile resolves to nothing.
-    device = get_platform().device_name
-    device_activity = DEVICE_ACTIVITIES.get(device)
+    platform = get_platform()
+    device = platform.device_name
+    # A platform may name its activity (e.g. PrivateUse1); otherwise use torch's for the device.
+    device_activity = _call_platform_hook(platform, "torch_profiler_activity")
+    if not isinstance(device_activity, torch.profiler.ProfilerActivity):
+        device_activity = DEVICE_ACTIVITIES.get(device)
     device_requested = not contents or device in contents
     if device_requested and device_activity is not None:
         activities.append(device_activity)
@@ -233,6 +244,11 @@ def get_torch_profiler(
         profile_memory="memory" in contents,
         on_trace_ready=_trace_handler,
     )
+    # Platform-specific profiler kwargs, e.g. an experimental_config for a device trace.
+    if device_activity is not None and device_requested:
+        extra_kwargs = _call_platform_hook(platform, "torch_profiler_kwargs", save_path=save_path, rank=rank)
+        if isinstance(extra_kwargs, Mapping):
+            profile_kwargs.update(extra_kwargs)
     # With a schedule the caller drives prof.step() per mini-batch to walk the
     # skip_first/wait/warmup/active/repeat state machine; without one, collection runs
     # continuously from start() to stop().
@@ -454,8 +470,8 @@ class Profiler(DistProfiler):
         scheduled = bool(kwargs_outer.get("scheduled", False))
 
         def decorator(func):
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs_inner):
+            @contextmanager
+            def profile_context(*args, **kwargs_inner):
                 # Prefer the stage label (`role`, e.g. "actor_compute_log_prob"), which names both
                 # the role and the function it ran: in a colocated worker the method name alone
                 # cannot say whether a log-prob forward belongs to the actor or the reference
@@ -465,7 +481,9 @@ class Profiler(DistProfiler):
                 if not self.discrete:
                     # In continuous mode, we just record function, profiler started globally
                     with torch.profiler.record_function(profile_name):
-                        return func(*args, **kwargs_inner)
+                        yield func
+
+                    return
 
                 # In discrete mode, we start/stop profiler around the function.
                 # Only the update stage is scheduled (its mini-batches drive step()); every other
@@ -495,13 +513,13 @@ class Profiler(DistProfiler):
                     Profiler._active_prof = prof
                 try:
                     with torch.profiler.record_function(profile_name):
-                        return func(*args, **kwargs_inner)
+                        yield func
                 finally:
                     if schedule_kwargs is not None:
                         self._flush_partial_window(prof)
                         Profiler._active_prof = None
                     prof.stop()
 
-            return wrapper
+            return _wrap_with_profile_context(func, profile_context)
 
         return decorator

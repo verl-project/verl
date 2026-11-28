@@ -60,11 +60,13 @@ from verl.utils.sglang.sglang_quant_utils import (
 )
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, prefix_cache_salt
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
 from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
     default_moe_runner_backend,
+    default_stop_token_ids,
+    lora_base_kept_on_sleep,
     lora_rank_of,
     lora_served_as_adapter,
     sglang_lora_target_modules,
@@ -170,6 +172,7 @@ class SGLangHttpServer:
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+        self._default_stop_token_ids = default_stop_token_ids(self.model_config)
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
         if self.config.max_model_len is None:
             self.config.max_model_len = max_position_embeddings
@@ -188,6 +191,9 @@ class SGLangHttpServer:
         self.base_gpu_id = base_gpu_id
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+        # Cleared before the tokenizer manager pauses, set after it resumes.
+        self._generation_allowed = asyncio.Event()
+        self._generation_allowed.set()
 
         # PD peer linkage populated post-launch by SGLangPDReplica.set_pd_peer.
         self._pd_decode_peers: list[ActorHandle] = []
@@ -326,6 +332,7 @@ class SGLangHttpServer:
         args = {
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
+            "context_length": self.config.max_model_len,
             "mem_fraction_static": self.config.gpu_memory_utilization,
             "disable_cuda_graph": self.config.enforce_eager,
             "enable_memory_saver": True,
@@ -466,6 +473,9 @@ class SGLangHttpServer:
         self._server_port, self._server_task = await run_uvicorn(app, server_args, self._server_address)
         self.tokenizer_manager.server_status = ServerStatus.Up
 
+    @RLInsightLogger.trace_state_decorator(
+        "wake_up", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def wake_up(self):
         if self.node_rank != 0:
             return
@@ -474,8 +484,9 @@ class SGLangHttpServer:
             # In hybrid mode, rollout is wake up in `update_weights`
             raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            # Resume exactly what sleep() released; adapter mode keeps the base weights resident.
-            tags = ["kv_cache"] if self.lora_as_adapter else ["kv_cache", "weights"]
+            # Resume exactly what sleep() released; adapter mode keeps the base weights resident
+            # unless lora.resync_base is set.
+            tags = ["kv_cache"] if lora_base_kept_on_sleep(self.model_config) else ["kv_cache", "weights"]
             obj = ResumeMemoryOccupationReqInput(tags=tags)
             await self.tokenizer_manager.resume_memory_occupation(obj, None)
             await self.tokenizer_manager.flush_cache()
@@ -490,14 +501,18 @@ class SGLangHttpServer:
         """See :func:`verl.workers.rollout.sglang_rollout.utils.lora_served_as_adapter`."""
         return lora_served_as_adapter(self.model_config)
 
+    @RLInsightLogger.trace_state_decorator(
+        "sleep", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
         # When using LoRA as adapter (merge=False), only release kv_cache —
         # keep base weights in GPU so we only need to sync adapter deltas.
+        # With lora.resync_base, the base is re-synced on every update, so release it too.
         # Mirrors the vLLM sleep() pattern in vllm_async_server.py.
-        if self.lora_as_adapter:
+        if lora_base_kept_on_sleep(self.model_config):
             tags = ["kv_cache"]
         else:
             tags = ["kv_cache", "weights"]
@@ -513,10 +528,16 @@ class SGLangHttpServer:
             obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
             await self.tokenizer_manager.release_memory_occupation(obj, None)
 
+    @RLInsightLogger.trace_state_decorator(
+        "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def clear_kv_cache(self):
         if self.node_rank == 0:
             await self.tokenizer_manager.flush_cache()
 
+    @RLInsightLogger.trace_state_decorator(
+        "release_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -524,6 +545,9 @@ class SGLangHttpServer:
         obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.release_memory_occupation(obj, None)
 
+    @RLInsightLogger.trace_state_decorator(
+        "resume_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -602,6 +626,11 @@ class SGLangHttpServer:
             f"max_new_tokens {max_new_tokens} exceeds available context space {max_possible_tokens}"
         )
         sampling_params["max_new_tokens"] = max_new_tokens
+        # Forward rollout.ignore_eos and default EOS IDs (SGLang skips tokenizer init by default).
+        sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
+        if not sampling_params.get("ignore_eos") and self._default_stop_token_ids:
+            caller_stops = sampling_params.get("stop_token_ids") or ()
+            sampling_params["stop_token_ids"] = list(dict.fromkeys((*caller_stops, *self._default_stop_token_ids)))
         return_logprob = sampling_params.pop("logprobs", False)
 
         # vLLM-style "prompt_logprobs=K" from the distillation teacher: request
@@ -642,6 +671,15 @@ class SGLangHttpServer:
         # Add lora request
         if self.lora_as_adapter:
             generate_request.lora_path = SGLANG_LORA_NAME
+
+        if self.config.external_kv_cache_invalidation == "salt":
+            # A request submitted while paused waits inside generate_request() and then runs on
+            # the updated weights, so wait out the pause here and salt it with those weights.
+            # The gate closes before the tokenizer manager pauses, so a request that passes it
+            # either reaches the engine first and is aborted, or waits behind this gate. This
+            # relies on generate_request() not yielding before its own pause check (SGLang 0.5.20).
+            await self._generation_allowed.wait()
+            generate_request.cache_salt = prefix_cache_salt(self.config, self.global_steps)
 
         with RLInsightLogger.trace_state(
             "sglang_generate",
@@ -722,12 +760,19 @@ class SGLangHttpServer:
     async def abort_all_requests(self):
         if self.node_rank != 0:
             return
-        await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
+        self._generation_allowed.clear()
+        try:
+            await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
+        except Exception:
+            # Not paused, so do not hold requests behind the gate.
+            self._generation_allowed.set()
+            raise
 
     async def resume_generation(self):
         if self.node_rank != 0:
             return
         await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
+        self._generation_allowed.set()
 
     async def start_profile(self, **kwargs):
         if (
@@ -781,6 +826,17 @@ class SGLangReplica(RolloutReplica):
         )
         self.server_class = ray.remote(SGLangHttpServer)
 
+    def _get_server_env_vars(self, node_ids: list[str]) -> dict[str, str]:
+        """Environment variables of this replica's server actors (one per node, ``node_ids`` in node-rank order).
+
+        Platforms whose engine needs per-replica settings (e.g. the device topology of the replica's hosts) can
+        override this instead of ``launch_servers``.
+        """
+        return {
+            **{var: "1" for var in get_platform().ray_noset_envvars()},
+            **get_platform().rollout_env_vars(),
+        }
+
     async def launch_servers(self):
         """Launch http server in each node."""
         assert len(self.workers) == self.world_size, (
@@ -791,7 +847,9 @@ class SGLangReplica(RolloutReplica):
         worker_infos = await asyncio.gather(
             *[
                 worker.__ray_call__.remote(
-                    lambda self: (ray.get_runtime_context().get_node_id(), os.environ[visible_devices_keyword])
+                    # A worker that holds no accelerator (e.g. on TPU, where the engine opens the devices itself)
+                    # has no visible-devices variable; it contributes no devices.
+                    lambda self: (ray.get_runtime_context().get_node_id(), os.environ.get(visible_devices_keyword, ""))
                 )
                 for worker in self.workers
             ]
@@ -805,6 +863,7 @@ class SGLangReplica(RolloutReplica):
             logger.warning(f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword} is set True!")
             base_gpu_id = (0 + self.replica_rank * replica_world_size) % self.gpus_per_node
         # create server actor in each node with node affinity and cuda visible devices
+        env_vars = self._get_server_env_vars(worker_node_ids[:: self.gpus_per_replica_node])
         for node_rank in range(self.nnodes):
             workers = self.workers[
                 node_rank * self.gpus_per_replica_node : (node_rank + 1) * self.gpus_per_replica_node
@@ -838,12 +897,7 @@ class SGLangReplica(RolloutReplica):
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={
-                    "env_vars": {
-                        **{var: "1" for var in get_platform().ray_noset_envvars()},
-                        **get_platform().rollout_env_vars(),
-                    }
-                },
+                runtime_env={"env_vars": env_vars},
                 name=name,
                 max_concurrency=self.config.ray_actor_max_concurrency,
             ).remote(

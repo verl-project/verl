@@ -14,6 +14,12 @@ ulysses_parallel_size: 1
 
 expert_parallel_size: 1
 
+ple_parallel_size: 1
+
+freeze_ple_embeddings: false
+
+frozen_ple_dtype: null
+
 mixed_precision: true
 
 # Opt in to node-local BF16 gradient transport with FP32 accumulation and output.
@@ -57,6 +63,15 @@ enable_fsdp_offload: false
 
 enable_reentrant: false
 
+# Every rank reads weights from disk by default (dense models load weights per rank;
+# MoE/PLE models stream only their ExtraParallel slice when ep_sharded_stream_load=true).
+# Set true to have rank 0 read the checkpoint and broadcast it instead.
+broadcast_model_weights_from_rank0: false
+
+# With broadcast_model_weights_from_rank0=false, each rank streams only its ExtraParallel
+# (expert/PLE) slice; automatically ignored for dense models so each rank loads directly.
+ep_sharded_stream_load: true
+
 # support eager, sdpa, flash_attention_2, flash_attention_3, veomni_flash_attention_2_with_sp,
 # veomni_flash_attention_3_with_sp and native-sparse
 attn_implementation: flash_attention_2
@@ -72,10 +87,13 @@ moe_implementation: fused
 cross_entropy_loss_implementation: eager
 rms_norm_implementation: eager
 swiglu_mlp_implementation: eager
+gated_mlp_implementation: eager
 rotary_pos_emb_implementation: eager
+rotary_pos_emb_vision_implementation: eager
 rms_norm_gated_implementation: eager
 causal_conv1d_implementation: eager
 chunk_gated_delta_rule_implementation: eager
+qsa_attention_implementation: eager
 load_balancing_loss_implementation: eager
 dsa_indexer_implementation: eager
 dsa_attention_implementation: eager

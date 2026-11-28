@@ -70,16 +70,16 @@ NPU 相关的工作流主要包括：
 +--------------+----------------------------------------------------------------+
 | geo3k        | ``${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k``       |
 +--------------+----------------------------------------------------------------+
-| dapo-math-17k| ``$HOME/.cache/modelscope/dataset/dapo-math-17k.parquet``      |
+| dapo-math-17k| ``${HOME}/.cache/modelscope/dataset/dapo-math-17k.parquet``    |
 +--------------+----------------------------------------------------------------+
 
 **Note**
 
    ${HOME}是root
 
-   GPU用例中权重在~/models/路径下，如需适配可以用软链接，``ln -s /root/.cache/modelscope/hub/modelscope/hub/models ~/models``
+   GPU用例中权重在~/models/路径下，如需适配可以用软链接，``ln -s ${HOME}/.cache/modelscope/hub/models ~/models``
 
-   以下为原始数据集，请按需进行数据处理，示例如下。
+   以下命令预处理 GSM8K 原始数据。 ``--local_dataset_path`` 是可选的字符串参数，指向可由 ``datasets.load_dataset`` 加载的本地 GSM8K 数据集目录，其中的 ``main`` 配置需提供 ``train`` 和 ``test`` 两个划分。省略时参数默认为 ``None``，脚本通过数据集名称 ``openai/gsm8k`` 加载相同配置。
    
    ``python examples/data_preprocess/gsm8k_multiturn_sft.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k``
 
@@ -129,7 +129,7 @@ NPU 相关的工作流主要包括：
        timeout-minutes: 60          # 任务超时阈值（分钟）
        container:
          #运行镜像 该示例为vllm的镜像
-         image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+         image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
          options: >-
            --shm-size 16g  # 共享内存配置
        env:

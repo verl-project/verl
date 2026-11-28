@@ -128,6 +128,7 @@ verl is fast with:
 
    advance/one_step_off
    advance/delta_weight_sync
+   advance/sharded_nixl_weight_sync
    advance/v1_async_trainer
    advance/fully_async
    advance/async-on-policy-distill
@@ -139,7 +140,8 @@ verl is fast with:
 
    low_precision/fp8.md
    low_precision/mxfp8.md
-   low_precision/nvfp4_qat.md
+   low_precision/mxfp4_qat.md
+   low_precision/nvfp4.md
    low_precision/qat.md
 
 .. toctree::

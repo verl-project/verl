@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Rollout with vLLM / SGLang, recompute old_log_probs with Megatron, and report the rollout-vs-actor log-prob gap.
+"""Rollout with vLLM / SGLang, recompute old_log_probs with Megatron or VeOmni, and report the rollout-vs-actor gap.
 
 Exits non-zero if k3_kl exceeds --max-k3-kl. Trailing arguments are passed to Hydra as config overrides.
 
@@ -21,6 +21,12 @@ Examples (8 GPUs):
     # fp8 blockwise rollout on a MoE model
     .venv/bin/python scripts/rollout_logprob_diff.py --model-path ~/models/Qwen3.5-35B-A3B --ep 8 \\
         --quant-linear FP8_BLOCK --quant-moe FP8_BLOCK
+    # VeOmni actor backend with FSDP2 CPU offload and R3 router replay
+    .venv-vllm/bin/python scripts/rollout_logprob_diff.py --backend veomni \\
+        --model-path ~/models/Qwen3.5-35B-A3B --ep 8 --enable-fsdp-offload --r3-router-replay
+    # VeOmni actor backend on Qwen3.8-Flash-Next (PLE + EP sharded stream load)
+    .venv-vllm/bin/python scripts/rollout_logprob_diff.py --backend veomni \\
+        --model-path /mnt/efs/model/Qwen/Qwen3.8-Flash-Next --ep 8 --ple 8 --gen-tp 8 --r3-router-replay
     # MXFP8 rollout on Blackwell (linear only for a dense model, linear + MoE for a MoE model)
     .venv-vllm/bin/python scripts/rollout_logprob_diff.py --model-path ~/models/Qwen3.5-0.8B \\
         --quant-linear MXFP8 --quant-ignore 're:.*linear_attn\\.in_proj_[ab]$'
@@ -32,7 +38,7 @@ Examples (8 GPUs):
     # MXFP4 expert weights with dynamic MXFP8 expert activations
     .venv-vllm/bin/python scripts/rollout_logprob_diff.py --model-path ~/models/Qwen3.5-35B-A3B --ep 8 \\
         --quant-moe MXFP4 --qat-mode mxfp4 --r3-router-replay
-    # NVFP4 W4A4 experts with FlashInfer CUTLASS
+    # NVFP4 W4A4 experts with per-token activations on FlashInfer TRT-LLM
     .venv-vllm/bin/python scripts/rollout_logprob_diff.py --model-path ~/models/Qwen3.5-35B-A3B --ep 8 \\
         --quant-moe NVFP4 --qat-mode nvfp4
     # same, with Megatron ModelOpt QAT fake-quantizing to the rollout scheme
@@ -59,10 +65,10 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 from verl.trainer.ppo.rollout_corr_helper import compute_offpolicy_metrics
+from verl.trainer.ppo.utils import Role
 from verl.utils import omega_conf_to_dataclass
 from verl.utils import tensordict_utils as tu
 from verl.utils.debug.metrics import calculate_debug_metrics
@@ -89,13 +95,20 @@ QUESTIONS = [
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model-path", default="~/models/Qwen3.5-35B-A3B")
+    parser.add_argument("--backend", default="megatron", choices=["megatron", "veomni"], help="actor training backend")
     parser.add_argument("--engine", default="vllm", choices=["vllm", "sglang"])
     parser.add_argument("--n-gpus", type=int, default=8)
     parser.add_argument("--tp", type=int, default=2, help="Megatron tensor parallel size")
     parser.add_argument("--pp", type=int, default=1, help="Megatron pipeline parallel size")
-    parser.add_argument("--cp", type=int, default=1, help="Megatron context parallel size")
-    parser.add_argument("--ep", type=int, default=1, help="Megatron expert parallel size")
+    parser.add_argument("--cp", type=int, default=1, help="Megatron context / VeOmni Ulysses parallel size")
+    parser.add_argument("--ep", type=int, default=1, help="Megatron / VeOmni expert parallel size")
+    parser.add_argument("--ple", type=int, default=1, help="VeOmni PLE parallel size (e.g. 8 for Qwen3.8-Flash-Next)")
     parser.add_argument("--etp", type=int, default=1, help="Megatron expert tensor parallel size")
+    parser.add_argument(
+        "--enable-fsdp-offload",
+        action="store_true",
+        help="use FSDP2 CPUOffloadPolicy on the VeOmni actor instead of manual param/optimizer offload",
+    )
     parser.add_argument("--gen-tp", type=int, default=2, help="rollout tensor parallel size")
     parser.add_argument("--quant-linear", default=None, help="rollout.quantization.linear preset: FP8_BLOCK or MXFP8")
     parser.add_argument(
@@ -119,7 +132,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--r3-router-replay",
         action="store_true",
-        help="replay rollout expert choices in the Megatron log-prob recomputation",
+        help="replay rollout expert choices in the actor log-prob recomputation",
     )
     parser.add_argument(
         "--refit-rounds",
@@ -128,32 +141,81 @@ def parse_args() -> argparse.Namespace:
         help="generate and measure after this many consecutive live-engine weight refits",
     )
     parser.add_argument("--max-k3-kl", type=float, default=1e-2)
+    parser.add_argument("--output-json", default=None, help="optional file path to write the metrics JSON")
     parser.add_argument("overrides", nargs="*", help="extra Hydra overrides, e.g. actor_rollout_ref.rollout.n=8")
     return parser.parse_args()
 
 
 def build_config(args: argparse.Namespace) -> DictConfig:
+    if args.enable_fsdp_offload and args.backend != "veomni":
+        raise ValueError("--enable-fsdp-offload is only supported with --backend veomni")
+    if args.ple > 1 and args.backend != "veomni":
+        raise ValueError("--ple > 1 is only supported with --backend veomni")
+    if args.enable_fsdp_offload and args.ple > 1:
+        raise ValueError(
+            "--enable-fsdp-offload cannot be combined with --ple > 1 "
+            "(VeOmni persistent ExtraParallel parameters use manual param/optimizer offload)"
+        )
+    if args.qat_mode and args.backend != "megatron":
+        raise ValueError(
+            "--qat-mode (ModelOpt QAT) requires --backend megatron; "
+            "for --backend veomni pass actor_rollout_ref.actor.veomni.*_implementation overrides"
+        )
+
+    if args.backend == "megatron":
+        engine_overrides = [
+            "model_engine=megatron",
+            "actor_rollout_ref.actor.megatron.use_remove_padding=True",
+            f"actor_rollout_ref.actor.megatron.tensor_model_parallel_size={args.tp}",
+            f"actor_rollout_ref.actor.megatron.pipeline_model_parallel_size={args.pp}",
+            f"actor_rollout_ref.actor.megatron.context_parallel_size={args.cp}",
+            f"actor_rollout_ref.actor.megatron.expert_model_parallel_size={args.ep}",
+            f"actor_rollout_ref.actor.megatron.expert_tensor_parallel_size={args.etp}",
+            "actor_rollout_ref.actor.megatron.param_offload=True",
+            "actor_rollout_ref.actor.megatron.optimizer_offload=True",
+            "++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto",
+            "+actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True",
+            "+actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True",
+        ]
+    else:
+        offload_overrides = (
+            [
+                "actor_rollout_ref.actor.veomni.enable_fsdp_offload=True",
+                "actor_rollout_ref.actor.veomni.param_offload=False",
+                "actor_rollout_ref.actor.veomni.optimizer_offload=False",
+            ]
+            if args.enable_fsdp_offload
+            else [
+                "actor_rollout_ref.actor.veomni.enable_fsdp_offload=False",
+                "actor_rollout_ref.actor.veomni.param_offload=True",
+                "actor_rollout_ref.actor.veomni.optimizer_offload=True",
+            ]
+        )
+        engine_overrides = [
+            "model_engine=veomni",
+            "actor_rollout_ref.model.use_remove_padding=True",
+            *offload_overrides,
+            "actor_rollout_ref.actor.veomni.enable_full_shard=True",
+            f"actor_rollout_ref.actor.veomni.ulysses_parallel_size={args.cp}",
+            f"actor_rollout_ref.actor.veomni.expert_parallel_size={args.ep}",
+            f"actor_rollout_ref.actor.veomni.ple_parallel_size={args.ple}",
+            "actor_rollout_ref.actor.veomni.moe_implementation=fused_triton",
+            "actor_rollout_ref.actor.veomni.attn_implementation=flash_attention_2",
+            "actor_rollout_ref.actor.veomni.rms_norm_gated_implementation=fla",
+            "actor_rollout_ref.actor.veomni.causal_conv1d_implementation=fla",
+            "actor_rollout_ref.actor.veomni.chunk_gated_delta_rule_implementation=fla",
+        ]
+
     config_dir = os.path.join(os.path.dirname(verl.__file__), "trainer", "config")
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         config = compose(
             config_name="ppo_trainer",
             overrides=[
-                "model_engine=megatron",
+                *engine_overrides,
                 f"trainer.n_gpus_per_node={args.n_gpus}",
                 "trainer.nnodes=1",
                 "actor_rollout_ref.actor.optim.total_training_steps=1",
                 "actor_rollout_ref.actor.use_dynamic_bsz=True",
-                "actor_rollout_ref.actor.megatron.use_remove_padding=True",
-                f"actor_rollout_ref.actor.megatron.tensor_model_parallel_size={args.tp}",
-                f"actor_rollout_ref.actor.megatron.pipeline_model_parallel_size={args.pp}",
-                f"actor_rollout_ref.actor.megatron.context_parallel_size={args.cp}",
-                f"actor_rollout_ref.actor.megatron.expert_model_parallel_size={args.ep}",
-                f"actor_rollout_ref.actor.megatron.expert_tensor_parallel_size={args.etp}",
-                "actor_rollout_ref.actor.megatron.param_offload=True",
-                "actor_rollout_ref.actor.megatron.optimizer_offload=True",
-                "++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto",
-                "+actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True",
-                "+actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True",
                 f"actor_rollout_ref.rollout.name={args.engine}",
                 "actor_rollout_ref.rollout.mode=async",
                 f"actor_rollout_ref.rollout.tensor_model_parallel_size={args.gen_tp}",
@@ -179,7 +241,10 @@ def build_config(args: argparse.Namespace) -> DictConfig:
             *args.qat_ignore,
         ]
     if args.r3_router_replay:
-        config.actor_rollout_ref.actor.megatron.router_replay.mode = "R3"
+        if args.backend == "megatron":
+            config.actor_rollout_ref.actor.megatron.router_replay.mode = "R3"
+        else:
+            config.actor_rollout_ref.actor.veomni.router_replay.mode = "R3"
         config.actor_rollout_ref.rollout.enable_rollout_routing_replay = True
     return config
 
@@ -245,6 +310,7 @@ def main() -> int:
                 "TOKENIZERS_PARALLELISM": "true",
                 "NCCL_DEBUG": "WARN",
                 "VLLM_LOGGING_LEVEL": "INFO",
+                "VEOMNI_VERBOSITY": os.environ.get("VEOMNI_VERBOSITY", "WARNING"),
                 "VLLM_USE_V1": "1",
                 "VLLM_ALLREDUCE_USE_SYMM_MEM": "0",
                 "CUDA_DEVICE_MAX_CONNECTIONS": "1",
@@ -292,7 +358,11 @@ def main() -> int:
     metrics = dict(refit_runs[-1])
     if len(refit_runs) > 1:
         metrics["refit_runs"] = refit_runs
-    print(json.dumps(metrics, indent=2))
+    metrics_json = json.dumps(metrics, indent=2)
+    if args.output_json:
+        with open(os.path.expanduser(args.output_json), "w") as f:
+            f.write(metrics_json + "\n")
+    print(metrics_json)
     ray.shutdown()
 
     k3_kl = metrics["k3_kl"]

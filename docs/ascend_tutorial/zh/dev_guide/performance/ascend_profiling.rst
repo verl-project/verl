@@ -16,16 +16,15 @@ Last updated: 07/13/2026.
 全局采集控制
 ~~~~~~~~~~~~
 
-通过 ppo_trainer.yaml 中的参数控制采集步数和模式：
+-  global_profiler: 设置采集工具、训练步和结果保存路径。昇腾性能采集的 rank 由各角色的 ``profiler.all_ranks`` 和 ``profiler.ranks`` 控制。
 
--  global_profiler: 控制采集的rank和模式
-
-   -  tool: 使用的采集工具，选项有 nsys、npu、torch、torch_memory。
+   -  tool: 采集工具名称（字符串），默认为 ``null``。要采集昇腾性能数据，在 YAML 的 ``global_profiler`` 下设置 ``tool: npu``，或在命令行指定 ``global_profiler.tool=npu``。
 
       -  nsys: NVIDIA 官方的系统级性能分析工具。
       -  npu: 华为昇腾（Ascend）芯片的原生性能分析工具。
       -  torch: PyTorch 框架内置的性能分析器。
       -  torch_memory: PyTorch 的显存轨迹分析器（基于显存历史快照功能）。
+      -  precision_debugger: 使用 msprobe 进行精度调试。
 
    -  steps: 此参数可以设置为包含采集步数的列表，例如 [2, 4]，表示将采集第2步和第4步。如果设置为 null，则不进行采集。
    -  save_path: 保存采集数据的路径。默认值为 "outputs/profile"。
@@ -61,6 +60,24 @@ Last updated: 07/13/2026.
 
 -  analysis: 是否启用自动数据解析。
 -  discrete: 是否使用离散模式。
+-  schedule: 配置采集窗口。verl 每完成一个 Actor/Critic update mini-batch，
+   调用一次 ``profiler.step()`` 推进 schedule，仅在 ``active > 0`` 时生效：
+
+   -  skip_first: 在第一个周期开始前忽略的初始 mini-batch 数。
+   -  wait: 每个周期开始时空闲（不采集）的 mini-batch 数。
+   -  warmup: 每个周期中先追踪但丢弃的 mini-batch 数，用于让 profiler 稳定。
+   -  active: 每个周期实际记录的 mini-batch 数。设为 ``0``（默认）则关闭调度，不支持负值。
+   -  repeat: 记录的周期数。``0``（默认）表示持续重复直到 profiling 结束。
+
+   当 ``discrete=False`` 时，带 schedule 的 profiler 在计算 log-prob 之前启动，
+   因而 schedule 会影响该 profiler 覆盖的所有阶段，而不仅是 update mini-batch。
+   例如，设置 ``wait=1`` 时，最初的 log-prob 计算处于 wait 阶段，其 trace 不会被记录。
+   初始的 ``skip_first`` 或 ``warmup`` 阶段也可能使前面的阶段数据不被保留。
+   当 ``discrete=True`` 时，仅 Actor update 使用 schedule，log-prob 阶段全量采集。
+
+   对于 Critic，仅在 ``discrete=False`` 时支持 schedule。当 ``discrete=True`` 时，
+   每个 Critic mini-batch 都会全量采集，即使 ``active > 0``，schedule 也不会生效。
+
 -  profile_token_start：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集起始 response token；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
 -  profile_token_end：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集结束 response token（右边界不包含）；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
 
@@ -81,6 +98,7 @@ Last updated: 07/13/2026.
 .. code:: yaml
 
       global_profiler:
+         tool: npu
          steps: [1, 2, 5]
          save_path: ./outputs/profile
       actor_rollout_ref:
@@ -99,6 +117,7 @@ Last updated: 07/13/2026.
 .. code:: yaml
 
       global_profiler:
+         tool: npu
          steps: [1, 2, 5]
          save_path: ./outputs/profile
       actor_rollout_ref:
@@ -111,11 +130,18 @@ Last updated: 07/13/2026.
                   npu:
                      discrete: True
                      contents: [npu, cpu]
+                     # 可选：按 mini-batch schedule 抽样；不设置时采集 actor 的全部 mini-batch
+                     schedule:
+                        skip_first: 0
+                        wait: 0
+                        warmup: 1  # 预热一个 mini-batch
+                        active: 1  # 采集第二个 mini-batch
+                        repeat: 1  # 采集一个周期后停止
          rollout:
             profiler:
                enable: True  # 设置为 True 以采集推理阶段
                all_ranks: False
-               ranks: [0]  # 全局 GPU rank；会被映射到拥有该 rank 的推理实例（replica）
+               ranks: [0]  # 全局 NPU rank；会被映射到拥有该 rank 的推理实例（replica）
                tool_config:
                   npu:
                      discrete: True  # Agent Loop 模式下必须开启离散模式
@@ -167,6 +193,12 @@ Last updated: 07/13/2026.
       actor_rollout_ref.actor.profiler.tool_config.npu.contents="['npu','cpu']" # 控制采集列表，默认cpu、npu，可配置memory、shapes、module等
       actor_rollout_ref.actor.profiler.tool_config.npu.level=level1
       actor_rollout_ref.actor.profiler.tool_config.npu.analysis=False # 禁用自动数据解析
+      # 可选：按 mini-batch schedule 抽样；不设置时采集 actor 的全部 mini-batch
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.skip_first=0
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.wait=0
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.warmup=1  # 预热一个mini-batch
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.active=1  # 采集第二个mini-batch
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.repeat=1  # 采集一个周期后停止
 
       actor_rollout_ref.rollout.profiler.enable=True
       actor_rollout_ref.rollout.profiler.all_ranks=False
@@ -178,9 +210,9 @@ Last updated: 07/13/2026.
 
 **Agent Loop 模式说明**：
 
-在 `Agent Loop <../../../../advance/agent_loop.rst>`_ 模式下，Rollout 阶段的性能数据 **必须使用离散模式** 采集，此时 Profiler 由推理引擎后端触发。
+在 `Agent Loop <https://verl.readthedocs.io/en/latest/advance/agent_loop.html>`_ 模式下，Rollout 阶段的性能数据 **必须使用离散模式** 采集，此时 Profiler 由推理引擎后端触发。
 
-1. Rank 定义：Rollout 配置中的 ranks 为全局 GPU rank（与训练角色一致）。由于每个 rollout 实例（replica）跨越 ``world_size = tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size`` 个 GPU，每个指定的 rank 会被映射到拥有它的实例（``replica = rank // world_size``），并对整个实例进行采集；例如 ``tp=8`` 时，``ranks: [0, 8]`` 会采集持有全局 rank 0 和 8 的实例（即 replica 0 和 replica 1）。
+1. Rank 定义：Rollout 配置中的 ranks 为全局 NPU rank（与训练角色一致）。由于每个 rollout 实例（replica）跨越 ``world_size = tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size`` 个 NPU，每个指定的 rank 会被映射到拥有它的实例（``replica = rank // world_size``），并对整个实例进行采集；例如 ``tp=8`` 时，``ranks: [0, 8]`` 会采集持有全局 rank 0 和 8 的实例（即 replica 0 和 replica 1）。
 
 2. 推理引擎支持：当前支持vLLM和SGLang引擎，无需额外设置。具体说明如下：
 
@@ -224,7 +256,7 @@ Last updated: 07/13/2026.
 在一个完整的训练步 (Step) 内，模型计算呈现出高频次、重复性的特征：
 
 1. Rollout 阶段：序列生成 (Generate Sequence) 是一个自回归过程，涉及成千上万次 Decoder 模型的前向计算。
-2. Training 阶段：为了控制显存峰值，verl 通常采用 Micro-Batch 策略，将庞大的数据流切分为多个微批次进行计算。
+2. Training 阶段：为了控制显存峰值，verl 通常将训练数据拆分为多个 micro-batch（微批次），逐个计算。
 
    - compute_log_prob (Actor/Ref)：涉及多轮纯前向传播。
    - update_policy (Actor/Critic)：涉及多轮前向与反向传播。
@@ -239,7 +271,7 @@ Last updated: 07/13/2026.
 解决方案：关键路径采样
 ~~~~~~~~~~~~~~~~~~~~~~
 
-为了解决上述问题，我们可以采用 **关键路径采样** 策略：基于 `torch_npu.profiler <https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu-profiler/torch_npu-profiler-profile.md>`_ 提供的API接口，直接修改 Python 源码，仅采集具有代表性的数据片段（如特定 Decode Step 或首个 Micro-Batch）。
+为了解决上述问题，我们可以采用 **关键路径采样** 策略：基于 `torch_npu.profiler <https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu-profiler/torch_npu-profiler-profile.md>`_ 提供的API接口，直接修改 Python 源码，仅采集具有代表性的数据片段（如特定 Decode Step 或首个 micro-batch）。
 
     **重要提示**
 
@@ -281,7 +313,7 @@ Last updated: 07/13/2026.
   
   +           # profile采集
   +           import os
-  +           import torch_npu
+  +           self.profiler_npu = None
   +           if os.environ.get('ROLLOUT_PROFILE', "false") == "true":
   +               # Initialize profiler
   +               import torch_npu
@@ -308,8 +340,7 @@ Last updated: 07/13/2026.
               output = self.model_runner.execute_model(scheduler_output,
                                                   intermediate_tensors)
               
-  +           import os
-  +           if os.environ.get('ROLLOUT_PROFILE', "false") == "true":
+  +           if self.profiler_npu is not None:
   +               self.profiler_npu.step()  # 驱动 schedule，对部分decode step进行采集
               
               # ... existing code ...
@@ -321,9 +352,6 @@ Last updated: 07/13/2026.
 
 .. code-block:: diff
 
-      # ... existing imports ...
-  +   import torch_npu
-  
       class ModelRunner:
   
           def __init__(self, *args, **kwargs):
@@ -331,7 +359,7 @@ Last updated: 07/13/2026.
               
   +           # profile采集
   +           import os
-  +           import torch_npu
+  +           self.profiler_npu = None
   +           if os.environ.get('ROLLOUT_PROFILE', "false") == "true":
   +               # Initialize profiler
   +               import torch_npu
@@ -354,8 +382,7 @@ Last updated: 07/13/2026.
           def forward(self, forward_batch, **kwargs):
               # ... existing code ...
 
-  +           import os
-  +           if os.environ.get('ROLLOUT_PROFILE', "false") == "true":
+  +           if self.profiler_npu is not None:
   +               self.profiler_npu.step()  # 驱动 schedule，对部分decode step进行采集
 
               return output
@@ -369,15 +396,15 @@ Update 阶段包含前向和反向传播。统一模型引擎下，mini-batch �
 
 **FSDP 后端**
 
-FSDP 后端支持设置对 Mini-Batch 和 Micro-Batch 的粒度进行采集。
-Mini-Batch 级别请插桩 ``TrainingWorker.train_mini_batch``；
-Micro-Batch 级别请插桩 FSDP 引擎的 ``forward_backward_batch`` 中的
+FSDP 后端支持设置对 mini-batch 和 micro-batch 的粒度进行采集。
+mini-batch 级别请插桩 ``TrainingWorker.train_mini_batch``；
+micro-batch 级别请插桩 FSDP 引擎的 ``forward_backward_batch`` 中的
 micro-batch 循环。
 
 - **修改文件**：``verl/workers/engine_workers.py``
-  （``TrainingWorker.train_mini_batch``，Mini-Batch 粒度）或
+  （``TrainingWorker.train_mini_batch``，mini-batch 粒度）或
   ``verl/workers/engine/fsdp/transformer_impl.py``
-  （``FSDPEngineWithLMHead.forward_backward_batch``，Micro-Batch 粒度）
+  （``FSDPEngineWithLMHead.forward_backward_batch``，micro-batch 粒度）
 
 .. code-block:: diff
 
@@ -404,7 +431,7 @@ micro-batch 循环。
   +                  record_shapes=os.environ.get('WITH_SHAPE', "false") == "true",
   +                  with_stack=os.environ.get('WITH_STACK', "false") == "true",
   +                  experimental_config=experimental_config,
-  +                  # 仅采集第一个 Mini Batch（包含所有 Micro-Batch 的计算和一次优化器更新）
+  +                  # 仅采集第一个 mini-batch（包含所有 micro-batch 的计算和一次优化器更新）
   +                  schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
   +                  on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(os.environ.get('UPDATE_PROFILE_PATH'), analyse_flag=True)
   +              )
@@ -417,16 +444,16 @@ micro-batch 循环。
                  actor_output = self.train_batch(mini_batch_td)
 
   +              if self.step == int(os.environ.get('PROFILE_STEP', 1)) and os.environ.get('UPDATE_PROFILE', "false") == "true":
-  +                  # 驱动 schedule，对mini batch进行采集，如果想对micro batch进行，则将self.prof_npu.step()移动到micro_batch的循环内
+  +                  # 驱动 schedule，对 mini-batch 进行采集，如果想对 micro-batch 进行，则将self.prof_npu.step()移动到 micro-batch 循环内
   +                  if str(torch.distributed.get_rank()) in os.environ.get('PROFILE_RANKS', "0").split(','):
   +                      self.prof_npu.step()
-  +          # 此mini batch结束
+  +          # 此 mini-batch 结束
   +          self.step += 1
 
 
 **Megatron 后端**
 
-Megatron 后端支持以 Mini-Batch 的粒度进行采集，入口同样是
+Megatron 后端支持以 mini-batch 的粒度进行采集，入口同样是
 ``TrainingWorker.train_mini_batch``：Megatron 引擎内部会调用 Megatron 的
 流水并行 forward/backward 调度并执行一次优化器 step。
 
@@ -444,7 +471,7 @@ Megatron 后端支持以 Mini-Batch 的粒度进行采集，入口同样是
 
 **FSDP 后端**
 
-FSDP 后端允许在 Micro-Batch 级别进行精细控制，可在 FSDP 引擎 forward 过程
+FSDP 后端允许在 micro-batch 级别进行精细控制，可在 FSDP 引擎 forward 过程
 的 micro-batch 循环内插桩。
 
 - **修改文件**：``verl/workers/engine/fsdp/transformer_impl.py``
@@ -480,7 +507,7 @@ FSDP 后端允许在 Micro-Batch 级别进行精细控制，可在 FSDP 引擎 f
                   with torch.no_grad():
                       output = self.forward_step(micro_batch, loss_function, forward_only=True)
 
-  +                   # 驱动 schedule，对micro batch进行采集
+  +                   # 驱动 schedule，对 micro-batch 进行采集
   +                   if role == "Ref":
   +                       self.prof_npu.step()
 
@@ -489,6 +516,6 @@ FSDP 后端允许在 Micro-Batch 级别进行精细控制，可在 FSDP 引擎 f
 
 **Megatron 后端**
 
-Megatron 后端的 Micro-Batch 调度由 Megatron 的流水并行
+Megatron 后端的 micro-batch 调度由 Megatron 的流水并行
 ``forward_backward_func`` 内部管理，暂不支持通过简单的代码插桩进行
-Micro-Batch 级别的精细化采集。建议使用全局 profiler 配置进行采集。
+micro-batch 级别的精细化采集。建议使用全局 profiler 配置进行采集。

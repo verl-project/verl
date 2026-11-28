@@ -64,10 +64,9 @@ vllm serve /path/to/Qwen3-30B/ \
 
 **修改AISBench推理配置启动vllm_client评测**
 
-打开推理配置文件 benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py 
+编辑 `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py`，配置 AISBench 通过流式 Chat 接口调用 vLLM。以下为示例取值，输入和输出的 token 总数须在服务端 `--max-model-len` 限制内。参数说明见 [AISBench 模型配置文档](https://ais-bench-benchmark.readthedocs.io/zh-cn/latest/base_tutorials/all_params/models.html)。
 
-host_port需与服务端的port一致，根据模型配置修改max_seq_len和max_out_len
-~~~bash
+~~~python
 from ais_bench.benchmark.models import VLLMCustomAPIChatStream
 from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
 
@@ -78,19 +77,19 @@ models = [
         abbr='vllm-api-stream-chat',
         path="",
         model="",
-        request_rate = 0,
-        retry = 2,
+        request_rate = 0,  # 每秒发送的请求数，0 表示不限速
+        retry = 2,  # 连接失败后的最大重试次数
         host_ip = "localhost",
-        host_port = 8080,
-        max_out_len = 512,
-        batch_size=1,
+        host_port = 8080,  # 与 vLLM 服务端的 --port 一致
+        max_out_len = 512,  # 单次响应最多生成的 token 数
+        batch_size=1,  # 最多同时发送的请求数
         trust_remote_code=False,
         generation_kwargs = dict(
-            temperature = 0.5,
-            top_k = 10,
-            top_p = 0.95,
+            temperature = 0.5,  # 采样温度，0 表示贪心解码
+            top_k = 10,  # 仅从概率最高的 10 个 token 中采样
+            top_p = 0.95,  # 按概率从高到低选取候选 token，直到累计概率达到 0.95
             seed = None,
-            repetition_penalty = 1.03,
+            repetition_penalty = 1.03,  # 大于 1 时降低已出现 token 再次被选中的概率
         ),
         pred_postprocessor=dict(type=extract_non_reasoning_content)
     )

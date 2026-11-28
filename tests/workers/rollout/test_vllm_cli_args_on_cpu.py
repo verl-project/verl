@@ -242,10 +242,11 @@ class TestEngineKwargsManagedArgs:
     """engine_kwargs may not set vLLM args that verl derives from its own config."""
 
     @staticmethod
-    def _preprocess(engine_kwargs):
+    def _preprocess(engine_kwargs, backend=None):
         from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
-        server = SimpleNamespace(config=SimpleNamespace(checkpoint_engine=None))
+        checkpoint_engine = SimpleNamespace(backend=backend) if backend else None
+        server = SimpleNamespace(config=SimpleNamespace(checkpoint_engine=checkpoint_engine))
         vLLMHttpServer._preprocess_engine_kwargs(server, engine_kwargs)
 
     @pytest.mark.parametrize(
@@ -255,17 +256,25 @@ class TestEngineKwargsManagedArgs:
             ("enable-expert-parallel", "rollout.expert_parallel_size"),
             ("tensor_parallel_size", "rollout.tensor_model_parallel_size"),
             ("enable_return_routed_experts", "rollout.enable_rollout_routing_replay"),
+            ("enable_tower_connector_lora", "actor_rollout_ref.model.lora"),
         ],
-        ids=["ep", "ep-hyphen", "tp", "r3"],
+        ids=["ep", "ep-hyphen", "tp", "r3", "tower-connector-lora"],
     )
     def test_rejects_managed_arg(self, key, points_to):
         with pytest.raises(ValueError, match=points_to):
             self._preprocess({key: True})
 
-    def test_passes_through_other_args(self):
+    def test_passes_through_other_args(self, monkeypatch):
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "")
+        monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
         engine_kwargs = {"max_num_seqs": 8}
         self._preprocess(engine_kwargs)
         assert engine_kwargs["max_num_seqs"] == 8
+
+    @pytest.mark.parametrize("key", ["enable_eplb", "enable-eplb"])
+    def test_sharded_nixl_rejects_eplb(self, key):
+        with pytest.raises(NotImplementedError, match="EPLB"):
+            self._preprocess({key: True}, backend="sharded_nixl")
 
 
 class TestVllmColocateZmqHandle:

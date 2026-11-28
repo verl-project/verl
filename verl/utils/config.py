@@ -105,10 +105,8 @@ def _validate_score_centering_config(config: DictConfig) -> None:
                 f"score centering requires actor_rollout_ref.actor.policy_loss.rollout_correction.{key} to match "
                 f"algorithm.rollout_correction.{key}."
             )
-    if not config.trainer.get("use_v1", True):
-        raise ValueError("score centering requires the v1 trainer (trainer.use_v1=True).")
-    if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2"):
-        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp or fsdp2.")
+    if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2", "veomni", "megatron"):
+        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2, veomni or megatron.")
     if config.actor_rollout_ref.rollout.get("name") != "vllm":
         raise ValueError("score centering requires actor_rollout_ref.rollout.name=vllm.")
     if not config.actor_rollout_ref.rollout.get("topk_log_probs", 0):
@@ -242,6 +240,11 @@ def validate_config(
     lora_rank = lora_config.get("rank", 0)
     if lora_rank <= 0:
         lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+    if lora_rank > 0 and config.actor_rollout_ref.rollout.get("checkpoint_engine", {}).get("backend") == "sharded_nixl":
+        raise NotImplementedError(
+            "checkpoint_engine.backend='sharded_nixl' does not support LoRA: its shard export bypasses the "
+            "trainer-side LoRA merge and adapter export"
+        )
     if lora_config.get("merge", False):
         lora_rank = 0
     if lora_rank > 0 and config.actor_rollout_ref.rollout.name == "vllm":
