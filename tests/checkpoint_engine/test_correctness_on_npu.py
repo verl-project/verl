@@ -82,7 +82,6 @@ async def test_hccl_checkpoint_engine(
     ray.shutdown()
 
 
-@pytest.mark.skip(reason="temporary skip since our ci environment is not ready")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(4, 12)])
