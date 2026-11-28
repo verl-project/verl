@@ -398,6 +398,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         its entries do **not** appear in the returned dict.
         """
         torch.distributed.barrier()
+        if is_loading:
+            self._preallocate_optimizer_state_without_param_update()
         sharded_state_dict_kwargs = {"is_loading": is_loading}
         if metadata is not None and mcore_ge_014:
             sharded_state_dict_kwargs["metadata"] = metadata
@@ -408,6 +410,63 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         if self.lr_scheduler is not None:
             state_dict["lr_scheduler"] = self.lr_scheduler.state_dict()
         return state_dict
+
+    def _preallocate_optimizer_state_without_param_update(self) -> None:
+        """Allocate optimizer state without letting Megatron's ``dummy_step`` touch weights.
+
+        ``DistributedOptimizer.sharded_state_dict(is_loading=True)`` pre-allocates
+        the optimizer state by calling ``HybridDeviceOptimizer.dummy_step()`` when
+        the state is empty. That dummy step runs a real optimizer step on random
+        gradients: it updates the fp32 master weights and, with
+        ``param_update_in_fp32=True``, copies them back into the bf16 model
+        parameters.
+
+        In the v2 split load path (``load_checkpoint()``) the model weights are
+        loaded *before* the optimizer sharded state dict is built, and the later
+        ``optimizer.load_state_dict()`` only restores optimizer-internal tensors,
+        so the dummy step silently perturbs the resumed weights (issue #8765).
+
+        Allocate the state here first, the same way Megatron does, but with the
+        optimizer-side copies (fp32 masters and offloaded CPU copies) refreshed
+        from the current parameters and a zero learning rate for the allocation
+        step. Parameters are left unchanged, and Megatron then
+        skips its own ``dummy_step`` because the state is no longer empty. This
+        mirrors the upstream Megatron-LM fix to ``dummy_step`` for versions of
+        megatron-core that predate it.
+        """
+        optimizers = getattr(self.optimizer, "chained_optimizers", None)
+        for distributed_optimizer in optimizers if optimizers is not None else [self.optimizer]:
+            inner_optimizer = getattr(distributed_optimizer, "optimizer", None)
+            if inner_optimizer is None or not hasattr(inner_optimizer, "dummy_step"):
+                continue
+            if getattr(inner_optimizer, "state", None):
+                # State already allocated: Megatron does not call dummy_step.
+                continue
+
+            # ``dummy_step`` copies the fp32 masters back into the parameters, so
+            # refresh them from the current (loaded) parameters first.
+            if hasattr(inner_optimizer, "update_fp32_param_by_new_param"):
+                inner_optimizer.update_fp32_param_by_new_param()
+            # Offloaded parameters keep a separate CPU copy that the fp32 refresh
+            # above does not cover (no fp32 master when ``param_update_in_fp32`` is
+            # false or the parameter is already fp32). The step post-hook copies
+            # that CPU copy back into the parameter, so refresh it as well.
+            for gpu_param, cpu_copy in getattr(inner_optimizer, "gpu_params_map_cpu_copy", {}).items():
+                cpu_copy.data.copy_(gpu_param.data)
+
+            # Groups without an ``lr`` key keep the sub-optimizer default, as the
+            # upstream fix does.
+            learning_rates = {}
+            for index, group in enumerate(inner_optimizer.param_groups):
+                if "lr" in group:
+                    learning_rates[index] = group["lr"]
+                    group["lr"] = 0.0
+            try:
+                inner_optimizer.dummy_step()
+            finally:
+                for index, learning_rate in learning_rates.items():
+                    inner_optimizer.param_groups[index]["lr"] = learning_rate
+                inner_optimizer.zero_grad()
 
     def _build_extra_state_dict(self) -> dict:
         """Build the extra state dict (RNG states)."""
