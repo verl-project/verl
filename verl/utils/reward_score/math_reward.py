@@ -47,27 +47,25 @@ def is_equiv(str1, str2, verbose=False):
 
 
 def remove_boxed(s):
-    if "\\boxed " in s:
-        left = "\\boxed "
-        assert s[: len(left)] == left
-        return s[len(left) :]
+    if s.startswith("\\boxed "):
+        return s[len("\\boxed ") :]
 
-    left = "\\boxed{"
+    for left in ("\\boxed{", "\\fbox{"):
+        if s.startswith(left) and s.endswith("}"):
+            return s[len(left) : -1]
 
-    assert s[: len(left)] == left
-    assert s[-1] == "}"
-
-    return s[len(left) : -1]
+    raise AssertionError(f"Unexpected boxed format: {s!r}")
 
 
 def last_boxed_only_string(string):
-    idx = string.rfind("\\boxed")
-    if "\\boxed " in string:
-        return "\\boxed " + string.split("\\boxed ")[-1].split("$")[0]
+    idx_boxed = string.rfind("\\boxed")
+    idx_fbox = string.rfind("\\fbox")
+    idx = max(idx_boxed, idx_fbox)
     if idx < 0:
-        idx = string.rfind("\\fbox")
-        if idx < 0:
-            return None
+        return None
+
+    if string.startswith("\\boxed ", idx):
+        return "\\boxed " + string[idx + len("\\boxed ") :].split("$")[0]
 
     i = idx
     right_brace_idx = None
@@ -94,6 +92,8 @@ def fix_fracs(string):
         substrs = substrs[1:]
         for substr in substrs:
             new_str += "\\frac"
+            if not substr:
+                continue
             if substr[0] == "{":
                 new_str += substr
             else:
@@ -138,10 +138,9 @@ def remove_right_units(string):
     # "\\text{ " only ever occurs (at least in the val set) when describing units
     if "\\text{ " in string:
         splits = string.split("\\text{ ")
-        assert len(splits) == 2
-        return splits[0]
-    else:
-        return string
+        if len(splits) == 2:
+            return splits[0]
+    return string
 
 
 def fix_sqrt(string):
@@ -150,6 +149,9 @@ def fix_sqrt(string):
     splits = string.split("\\sqrt")
     new_string = splits[0]
     for split in splits[1:]:
+        if not split:
+            new_string += "\\sqrt"
+            continue
         if split[0] != "{":
             a = split[0]
             new_substr = "\\sqrt{" + a + "}" + split[1:]
