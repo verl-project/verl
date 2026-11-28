@@ -97,6 +97,7 @@ def _build_ops_implementation_config(engine_config: VeOmniEngineConfig) -> OpsIm
 
 
 class VeOmniEngine(FSDPEngine):
+    routed_experts_as_model_input = False
     _veomni_handles_position_ids = True
 
     def _apply_veomni_input_transforms(self, model_inputs: dict, micro_batch: TensorDict):
