@@ -29,14 +29,19 @@ class DatasetPadMode(str, Enum):
     NO_PADDING = "no_padding"
 
 
-class SFTTensorCollator:
+class CustomTensorCollator:
     """
-    A custom collate_fn that handles batching of sequences.
-    1. for variable-length sequences, convert them into NestedTensors.
-    2. for fixed-length sequences, use default_collate.
+    Base collator that combines individual dataset samples into a single batch.
+
+    Supports two modes based on pad_mode:
+        - Right-padded / left-right: All samples are already the same length.
+          Uses PyTorch's default_collate which simply stacks tensors.
+        - No-padding: Samples have variable lengths. Converts them to PyTorch
+          NestedTensors (jagged layout). 0-dim (scalar) tensors are stacked into a
+          dense (B,) tensor instead, since they cannot form a NestedTensor.
     """
 
-    def __init__(self, pad_mode: DatasetPadMode = DatasetPadMode.LEFT_RIGHT):
+    def __init__(self, pad_mode: DatasetPadMode):
         self.pad_mode = pad_mode
 
     def __call__(self, batch: list[dict[str, any]]) -> dict[str, any]:
@@ -51,25 +56,27 @@ class SFTTensorCollator:
 
     def collate_variable_batch(self, batch: list[dict[str, any]]) -> dict[str, any]:
         """
-        Collates a list of samples into a single batch.
+        Collates a list of samples into a single batch using NestedTensors.
 
         Args:
             batch: A list of dictionary samples from the dataset.
 
         Returns:
             A dictionary representing the batched data, with variable-length
-            sequences converted to NestedTensors.
+            sequences converted to NestedTensors and 0-dim (per-sample scalar)
+            tensors stacked into a dense (B,) tensor.
         """
-
         final_batch = {}
-
         tensor_keys = set().union(*(d.keys() for d in batch))
 
-        # Handle tensor values by creating a NestedTensor.
         for key in tensor_keys:
             if isinstance(batch[0][key], torch.Tensor):
                 tensors = [item[key] for item in batch]
-                if tensors[0].dim() >= 2:
+                if tensors[0].dim() == 0:
+                    # Per-sample scalars (e.g. DPO boundary_offset): a nested tensor cannot be
+                    # built from 0-dim tensors, so stack them into a dense (B,) tensor.
+                    final_batch[key] = torch.stack(tensors)
+                elif tensors[0].dim() >= 2:
                     final_batch[key] = nested_tensor_from_tensor_list(tensors)
                 else:
                     final_batch[key] = torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
@@ -78,3 +85,27 @@ class SFTTensorCollator:
                 final_batch[key] = torch.stack(tensors, dim=0)
 
         return final_batch
+
+
+class DPOTensorCollator(CustomTensorCollator):
+    """
+    Collator for DPO datasets.
+
+    Defaults to NO_PADDING as the FSDPEngine used in the trainer does not
+    support padding right now.
+    """
+
+    def __init__(self, pad_mode: DatasetPadMode = DatasetPadMode.NO_PADDING):
+        super().__init__(pad_mode)
+
+
+class SFTTensorCollator(CustomTensorCollator):
+    """
+    Collator for SFT datasets.
+
+    Defaults to LEFT_RIGHT padding mode which is the standard for SFT
+    training in verl.
+    """
+
+    def __init__(self, pad_mode: DatasetPadMode = DatasetPadMode.LEFT_RIGHT):
+        super().__init__(pad_mode)
