@@ -13,11 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import inspect
 import json
 import logging
 import os
 import secrets
+from functools import cache
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import ray
@@ -66,17 +69,40 @@ from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
     default_moe_runner_backend,
     default_stop_token_ids,
+    extract_sglang_sampling_mask_with_coverage,
+    extract_sglang_topk_logprobs_with_coverage,
     lora_base_kept_on_sleep,
     lora_rank_of,
     lora_served_as_adapter,
     sglang_lora_target_modules,
+    sglang_vocab_size,
+    validate_sglang_topk_request,
 )
-from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn, warn_topk_logprob_budget
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 visible_devices_keyword = get_visible_devices_keyword()
+
+
+@cache
+def _generate_request_keyword_fields(request_type) -> frozenset[str]:
+    """Read explicit request capabilities without assuming **kwargs supports them."""
+    try:
+        parameters = inspect.signature(request_type).parameters
+    except (TypeError, ValueError):
+        return frozenset()
+    fields = {
+        name
+        for name, parameter in parameters.items()
+        if parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    if inspect.isclass(request_type) and any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        for base in request_type.__mro__:
+            fields.update(vars(base))
+            fields.update(inspect.get_annotations(base))
+    return frozenset(fields)
 
 
 def _extract_prompt_logprobs_sglang(
@@ -191,6 +217,8 @@ class SGLangHttpServer:
         self.base_gpu_id = base_gpu_id
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+        self._topk_budget_warnings: set[tuple] = set()
+        self._topk_coverage_warnings: set[tuple] = set()
         # Cleared before the tokenizer manager pauses, set after it resumes.
         self._generation_allowed = asyncio.Event()
         self._generation_allowed.set()
@@ -632,11 +660,21 @@ class SGLangHttpServer:
             caller_stops = sampling_params.get("stop_token_ids") or ()
             sampling_params["stop_token_ids"] = list(dict.fromkeys((*caller_stops, *self._default_stop_token_ids)))
         return_logprob = sampling_params.pop("logprobs", False)
+        topk_log_probs = sampling_params.pop("topk_log_probs", 0)
 
         # vLLM-style "prompt_logprobs=K" from the distillation teacher: request
         # input-token logprobs for every position (top-K when K>0, sampled-token
         # logprob only when K==0). Translate to SGLang's per-request logprob API.
         prompt_logprobs = sampling_params.pop("prompt_logprobs", None)
+        topk_mode = None
+        if return_logprob and topk_log_probs > 0:
+            return_original_logprob = os.getenv("SGLANG_RETURN_ORIGINAL_LOGPROB", "").lower() in ("true", "1")
+            topk_mode = validate_sglang_topk_request(
+                sampling_params,
+                topk_log_probs,
+                prompt_logprobs=prompt_logprobs,
+                return_original_logprob=return_original_logprob,
+            )
         if prompt_logprobs is not None:
             return_logprob = True
 
@@ -656,6 +694,48 @@ class SGLangHttpServer:
             request["logprob_start_len"] = 0
             if prompt_logprobs > 0:
                 request["top_logprobs_num"] = prompt_logprobs
+
+        topk_sampling_profile = None
+        server_args = getattr(self.tokenizer_manager, "server_args", None)
+        if topk_mode == "logprob":
+            if any(
+                getattr(server_args, attr, None)
+                for attr in ("enable_watermarking", "watermarking_config", "watermark_config", "synthid_config")
+            ):
+                raise ValueError(
+                    "SGLang untruncated score centering is incompatible with watermarking because reported "
+                    "log-probs precede watermark masking."
+                )
+            # Pin untruncated defaults explicitly so SGLang's preferred_sampling_params merge cannot inject truncation.
+            sampling_params["top_k"] = -1
+            sampling_params["top_p"] = 1.0
+            sampling_params["min_p"] = 0.0
+            request["top_logprobs_num"] = topk_log_probs
+            request_fields = _generate_request_keyword_fields(GenerateReqInput)
+            if "return_flat_raw_output_top_logprobs" in request_fields:
+                request["return_flat_raw_output_top_logprobs"] = True
+                if "return_flat_raw_top_logprobs_b64" in request_fields:
+                    request["return_flat_raw_top_logprobs_b64"] = True
+        elif topk_mode == "sampling_mask":
+            request_fields = _generate_request_keyword_fields(GenerateReqInput)
+            if not {"return_sampling_mask", "sampling_logprobs_mode"} <= request_fields:
+                raise RuntimeError(
+                    "SGLang score centering with finite top_k requires a SGLang build whose GenerateReqInput "
+                    "supports return_sampling_mask and sampling_logprobs_mode='support'."
+                )
+            request.update(return_logprob=False, return_sampling_mask=True, sampling_logprobs_mode="support")
+            if "return_flat_raw_sampling_mask" in request_fields:
+                request["return_flat_raw_sampling_mask"] = True
+                if "return_flat_raw_sampling_mask_b64" in request_fields:
+                    request["return_flat_raw_sampling_mask_b64"] = True
+            topk_sampling_profile = SimpleNamespace(
+                temperature=sampling_params.get("temperature", 1.0),
+                top_p=sampling_params.get("top_p", 1.0),
+                top_k=sampling_params["top_k"],
+                min_p=sampling_params.get("min_p", 0.0),
+                logprobs=topk_log_probs,
+            )
+            warn_topk_logprob_budget(topk_sampling_profile, self._topk_budget_warnings)
 
         if self.config.enable_rollout_routing_replay:
             request.update({"return_routed_experts": True})
@@ -689,7 +769,72 @@ class SGLangHttpServer:
         meta_info = output.get("meta_info", {})
         finish_reason = meta_info.get("finish_reason")
         finish_reason = finish_reason["type"] if finish_reason else None
-        if return_logprob:
+        extra_fields = {"global_steps": self.global_steps}
+        if topk_mode is not None:
+            token_ids = list(output.get("output_ids", []) if finish_reason == "abort" else output["output_ids"])
+            if finish_reason == "abort":
+                has_records = (
+                    any(
+                        key in meta_info
+                        for key in (
+                            "output_token_sampling_mask",
+                            "output_token_sampling_mask_flat",
+                            "output_token_sampling_mask_flat_b64",
+                        )
+                    )
+                    if topk_mode == "sampling_mask"
+                    else (
+                        "output_token_logprobs" in meta_info
+                        and ("output_top_logprobs" in meta_info or "output_top_logprobs_shape" in meta_info)
+                    )
+                )
+                if not has_records:
+                    # Aborted requests can omit flat mask/logprob buffers; drop unverified tokens so caller retries.
+                    token_ids = []
+            vocab_size = sglang_vocab_size(self.model_config, self.tokenizer_manager)
+            if topk_mode == "sampling_mask":
+                (
+                    log_probs,
+                    extra_fields["response_topk_ids"],
+                    extra_fields["response_topk_log_probs"],
+                    extra_fields["response_support_complete"],
+                ) = extract_sglang_sampling_mask_with_coverage(
+                    meta_info,
+                    token_ids,
+                    topk_log_probs,
+                    vocab_size=vocab_size,
+                )
+            else:
+                mass_atol = 1e-2 if getattr(server_args, "rl_on_policy_target", None) else 1e-5
+                (
+                    log_probs,
+                    extra_fields["response_topk_ids"],
+                    extra_fields["response_topk_log_probs"],
+                    extra_fields["response_support_complete"],
+                ) = extract_sglang_topk_logprobs_with_coverage(
+                    meta_info,
+                    token_ids,
+                    topk_log_probs,
+                    vocab_size=vocab_size,
+                    mass_atol=mass_atol,
+                )
+            if topk_sampling_profile is not None and not extra_fields["response_support_complete"].all():
+                signature = (
+                    topk_sampling_profile.temperature,
+                    topk_sampling_profile.top_p,
+                    topk_sampling_profile.top_k,
+                    topk_sampling_profile.min_p,
+                    topk_sampling_profile.logprobs,
+                )
+                if signature not in self._topk_coverage_warnings:
+                    logger.info(
+                        "The recorded top-k head does not prove complete sampling support for every token; "
+                        "score centering retains its head-plus-tail approximation for unknown rows. "
+                        "Effective request: temperature=%s, top_p=%s, top_k=%s, min_p=%s, logprobs=%s.",
+                        *signature,
+                    )
+                    self._topk_coverage_warnings.add(signature)
+        elif return_logprob:
             token_ids = list(output.get("output_ids", []))
             output_token_logprobs = meta_info.get("output_token_logprobs") or []
             if output_token_logprobs and len(output_token_logprobs) == len(token_ids):
@@ -728,7 +873,6 @@ class SGLangHttpServer:
                     -1, text_config.num_hidden_layers, text_config.num_experts_per_tok
                 )
 
-        extra_fields = {"global_steps": self.global_steps}
         if prompt_logprobs is not None:
             _extract_prompt_logprobs_sglang(
                 meta_info=meta_info,

@@ -298,7 +298,8 @@ Subtract the expected score under the sampler from every token's score
   when the represented sampler and trainer distributions agree
 - Requires `bypass_mode=True` and `loss_type="reinforce"` (raises `ValueError` otherwise)
 - Requires `rollout_is` to be `None` or `"token"` (raises `ValueError` for `"sequence"`) and `rollout_is_batch_normalize=False`
-- Requires `actor_rollout_ref.rollout.topk_log_probs > 0` (sampler top-k log-probs, vLLM only)
+- Requires `actor_rollout_ref.rollout.topk_log_probs > 0` with vLLM or SGLang. See the
+  [SGLang sampling requirements](#sglang-sampling-requirements) below.
 - FSDP or Megatron actor; incompatible with `use_fused_kernels` and distillation; single-turn agent loop only
 
 Score centering automatically tries to align with the actual sampling support. When the
@@ -653,7 +654,8 @@ algorithm:
 
 **Additional requirements:**
 
-- Set `actor_rollout_ref.rollout.calculate_log_probs: true` and `actor_rollout_ref.rollout.topk_log_probs: 128` (vLLM rollout only; `k=128` matches the paper, `k=32` also matches)
+- Set `actor_rollout_ref.rollout.calculate_log_probs: true`, `actor_rollout_ref.rollout.logprobs_mode: processed_logprobs`,
+  and `actor_rollout_ref.rollout.topk_log_probs: 128` (`k=128` and `k=32` match the paper)
 - Set `actor_rollout_ref.rollout.temperature` > 0 and choose sampling parameters independently
   of the recording budget. Validation and greedy reward-baseline requests do not record heads
 - Set `actor_rollout_ref.actor.policy_loss.loss_mode: bypass_mode` and mirror `bypass_mode`, `loss_type`, `rollout_is`, `rollout_is_threshold`, `score_centering` from `algorithm.rollout_correction` into `actor_rollout_ref.actor.policy_loss.rollout_correction`:
@@ -688,6 +690,30 @@ algorithm:
   reports approximate rows with near-unit head mass but no coverage proof. Trainer head mass
   is the full-vocabulary mass of the actual support for aligned rows and the recorded head for
   approximate rows. Head mass close to one alone is not a completeness test
+
+#### SGLang sampling requirements
+
+- With a positive `top_k`, verl requests the sampling mask and its post-filter log-probs using
+  `sampling_logprobs_mode="support"`. It records up to `topk_log_probs` entries and treats the support as
+  complete when the whole mask fits. Use SGLang 0.5.21 or later, or a build with the same request support.
+  [SGLang 0.5.21 request schema](https://github.com/sgl-project/sglang/blob/v0.5.21/python/sglang/srt/managers/io_struct.py#L223-L230)
+- With `top_k=-1`, `top_p=1`, and `min_p=0`, verl reads the sampled-token and top log-probs. The head
+  proves complete support when it spans the model vocabulary. This mode supports SGLang 0.5.20 or later. Leave
+  `SGLANG_RETURN_ORIGINAL_LOGPROB` unset or false on the SGLang engines so the reported log-probs include
+  temperature scaling. Truncation with `top_p < 1` or `min_p > 0` requires a positive `top_k`.
+  [SGLang 0.5.20 sampler](https://github.com/sgl-project/sglang/blob/v0.5.20/python/sglang/srt/layers/sampler.py#L179-L263)
+- Use `temperature >= 1e-6` for Score Centering. SGLang converts lower temperatures to greedy sampling.
+  [SGLang temperature normalization](https://github.com/sgl-project/sglang/blob/v0.5.20/python/sglang/srt/sampling/sampling_params.py#L200-L206)
+- SGLang's `engine_kwargs.sglang.sampling_mask_max_tokens` defaults to 4096. Verl raises it to at least
+  the configured positive `top_k`. Increase it further if cutoff ties cause the realized support to exceed
+  the limit. With prefill-decode disaggregation, set `SGLANG_ENABLE_DISAGG_SAMPLING_MASK=1` on both roles
+  for bounded sampling and use the same capacity on both roles.
+  [SGLang sampling mask capacity](https://github.com/sgl-project/sglang/blob/v0.5.21/python/sglang/srt/arg_groups/fields/exec_.py#L94-L100)
+- For untruncated sampling with prefill-decode disaggregation, verl raises
+  `engine_kwargs.sglang.disaggregation_max_top_logprobs_num` to at least `topk_log_probs` if the existing
+  capacity is too small. Builds with a fixed metadata capacity support up to 128. A larger budget requires
+  a build with the configurable capacity on both roles.
+  [SGLang configurable PD metadata](https://github.com/sgl-project/sglang/pull/49686)
 
 ---
 

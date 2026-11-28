@@ -77,25 +77,48 @@ def test_score_centering_rejects_unsupported_modes(kwargs):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        dict(name="sglang"),
         dict(calculate_log_probs=False),
         dict(logprobs_mode="raw_logprobs"),
     ],
 )
-def test_topk_log_probs_needs_the_vllm_sampling_distribution(kwargs):
+@pytest.mark.parametrize("name", ["vllm", "sglang"])
+def test_topk_log_probs_needs_the_sampling_distribution(name, kwargs):
     with pytest.raises(ValueError, match="topk_log_probs"):
-        RolloutConfig(**{"name": "vllm", "topk_log_probs": 128, "calculate_log_probs": True, **kwargs})
+        RolloutConfig(**{"name": name, "topk_log_probs": 128, "calculate_log_probs": True, **kwargs})
 
 
-@pytest.mark.parametrize("kwargs", [dict(top_k=128), dict(top_p=0.9, top_k=64), dict(top_p=0.9)])
-def test_topk_log_probs_accepts_sampling_parameters_without_a_manual_centering_mode(kwargs):
-    RolloutConfig(**{"name": "vllm", "topk_log_probs": 128, "calculate_log_probs": True, **kwargs})
+def test_topk_log_probs_rejects_unsupported_rollout_engine():
+    with pytest.raises(ValueError, match="vLLM or SGLang"):
+        RolloutConfig(name="trtllm", topk_log_probs=128, calculate_log_probs=True)
 
 
+@pytest.mark.parametrize(
+    "name, top_p, top_k",
+    [
+        ("vllm", 1.0, -1),
+        ("vllm", 0.9, -1),
+        ("vllm", 0.9, 64),
+        ("vllm", 1.0, 128),
+        ("sglang", 1.0, -1),
+        ("sglang", 0.9, 64),
+        ("sglang", 1.0, 128),
+    ],
+)
+def test_topk_log_probs_accepts_sampling_parameters_without_a_manual_centering_mode(name, top_p, top_k):
+    RolloutConfig(name=name, topk_log_probs=128, calculate_log_probs=True, top_p=top_p, top_k=top_k)
+
+
+@pytest.mark.parametrize("top_k", [-1, 0])
+def test_topk_log_probs_rejects_unbounded_sglang_top_p_sampling(top_k):
+    with pytest.raises(ValueError, match="SGLang score centering requires sampling top_k > 0"):
+        RolloutConfig(name="sglang", topk_log_probs=128, calculate_log_probs=True, top_p=0.9, top_k=top_k)
+
+
+@pytest.mark.parametrize("name", ["vllm", "sglang"])
 @pytest.mark.parametrize("top_p", [1.0, 0.9])
-def test_topk_log_probs_warns_but_accepts_a_recording_budget_below_sampling_top_k(top_p):
+def test_topk_log_probs_warns_but_accepts_a_recording_budget_below_sampling_top_k(name, top_p):
     with pytest.warns(UserWarning, match="smaller than the sampling top_k"):
-        config = RolloutConfig(name="vllm", topk_log_probs=128, calculate_log_probs=True, top_k=256, top_p=top_p)
+        config = RolloutConfig(name=name, topk_log_probs=128, calculate_log_probs=True, top_k=256, top_p=top_p)
     assert config.top_k == 256 and config.top_p == top_p
 
 
@@ -110,6 +133,46 @@ def test_topk_log_probs_raises_vllm_max_logprobs():
         name="vllm", topk_log_probs=128, calculate_log_probs=True, engine_kwargs={"vllm": {"max_logprobs": 20}}
     )
     assert cfg.engine_kwargs["vllm"]["max_logprobs"] == 128
+
+
+@pytest.mark.parametrize(
+    "top_k, engine_kwargs, expected",
+    [
+        (128, {}, {}),
+        (8192, {}, {"sampling_mask_max_tokens": 8192}),
+        (128, {"sampling_mask_max_tokens": 64}, {"sampling_mask_max_tokens": 128}),
+        (128, {"sampling_mask_max_tokens": 256}, {"sampling_mask_max_tokens": 256}),
+    ],
+)
+def test_sglang_topk_log_probs_sizes_sampling_mask_capacity(top_k, engine_kwargs, expected):
+    cfg = RolloutConfig(
+        name="sglang",
+        top_k=top_k,
+        topk_log_probs=top_k,
+        calculate_log_probs=True,
+        engine_kwargs={"sglang": engine_kwargs},
+    )
+    assert cfg.engine_kwargs["sglang"] == expected
+
+
+@pytest.mark.parametrize(
+    "budget, engine_kwargs, expected",
+    [
+        (128, {}, {}),
+        (256, {}, {"disaggregation_max_top_logprobs_num": 256}),
+        (128, {"disaggregation_max_top_logprobs_num": 64}, {"disaggregation_max_top_logprobs_num": 128}),
+        (128, {"disaggregation_max_top_logprobs_num": 256}, {"disaggregation_max_top_logprobs_num": 256}),
+    ],
+)
+def test_sglang_untruncated_topk_log_probs_sizes_disaggregation_capacity(budget, engine_kwargs, expected):
+    cfg = RolloutConfig(
+        name="sglang",
+        topk_log_probs=budget,
+        calculate_log_probs=True,
+        disaggregation={"enabled": True},
+        engine_kwargs={"sglang": engine_kwargs},
+    )
+    assert cfg.engine_kwargs["sglang"] == expected
 
 
 _RC = {"bypass_mode": True, "loss_type": "reinforce", "rollout_is": "token", "rollout_is_threshold": 2.0}
@@ -167,7 +230,7 @@ def test_score_centering_config_skips_checks_when_off():
         (dict(actor_rc={"rollout_is": "sequence"}), "score_centering"),
         (dict(actor_rc={"rollout_is_threshold": 3.0}), "match"),
         ({"actor_rollout_ref.actor.strategy": "torchtitan"}, "strategy"),
-        ({"actor_rollout_ref.rollout.name": "sglang"}, "vllm"),
+        ({"actor_rollout_ref.rollout.name": "trtllm"}, "vllm or sglang"),
         ({"actor_rollout_ref.rollout.topk_log_probs": 0}, "topk_log_probs"),
         ({"actor_rollout_ref.rollout.temperature": 0}, "temperature"),
         ({"actor_rollout_ref.rollout.temperature": -1}, "temperature"),
