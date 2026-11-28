@@ -526,11 +526,13 @@ def offload_megatron_model_to_cpu(models):
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
-                old_data = param.data
-                param.data = param.data.to("cpu")
-                if _can_safely_resize_storage(old_data):
-                    old_data.storage().resize_(0)
-                if param.grad is not None:
+                # Streaming export leaves parameters on CPU; repeated offload must retain their storage.
+                if param.device.type != "cpu":
+                    old_data = param.data
+                    param.data = param.data.to("cpu")
+                    if _can_safely_resize_storage(old_data):
+                        old_data.storage().resize_(0)
+                if param.grad is not None and param.grad.device.type != "cpu":
                     old_grad = param.grad
                     param.grad = param.grad.to("cpu")
                     if _can_safely_resize_storage(old_grad):
