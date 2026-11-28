@@ -50,3 +50,5 @@ def test_multiple_text_units_and_trailing_frac_sqrt_do_not_crash():
     )
     assert math_reward.compute_score("\\boxed{\\frac}", "\\frac") == 1.0
     assert math_reward.compute_score("\\boxed{\\sqrt}", "\\sqrt") == 1.0
+    assert math_reward.fix_fracs("\\frac") == "\\frac"
+    assert math_reward.fix_sqrt("\\sqrt") == "\\sqrt"
