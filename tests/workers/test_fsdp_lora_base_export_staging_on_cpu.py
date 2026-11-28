@@ -36,13 +36,15 @@ def staging_calls(monkeypatch):
 
 def _lora_engine():
     peft_config = SimpleNamespace(to_dict=lambda: {})
-    return SimpleNamespace(
-        module=SimpleNamespace(peft_config={"default": peft_config}),
-        model_config=SimpleNamespace(lora={"merge": False}, hf_config=SimpleNamespace(model_type="llama")),
-        _uses_fsdp2_cpu_offload_policy=False,
-        _is_offload_param=True,
-        _qat_enabled=False,
-    )
+    # A real FSDPEngine (without __init__), so get_per_tensor_param reaches its own helper methods.
+    engine = FSDPEngine.__new__(FSDPEngine)
+    engine.module = SimpleNamespace(peft_config={"default": peft_config})
+    engine.model_config = SimpleNamespace(lora={"merge": False}, hf_config=SimpleNamespace(model_type="llama"))
+    engine._uses_fsdp2_cpu_offload_policy = False
+    engine._is_offload_param = True
+    engine._qat_enabled = False
+    engine._rollout_weight_quantizer = None
+    return engine
 
 
 def test_lora_base_export_streams_shards_without_staging(staging_calls):
