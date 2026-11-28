@@ -73,7 +73,7 @@ async def test_standalone_rollout(init_config, tp_size):
         rollout_resource_pool=None,
     )
 
-    server_addresses = llm_server_manager.get_addresses()
+    server_addresses = await llm_server_manager.get_addresses.remote()
     assert server_addresses, "Expected at least one rollout server"
     assert len(server_addresses) == num_replicas
 

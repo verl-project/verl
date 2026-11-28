@@ -17,12 +17,23 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
+import pytest
 from omegaconf import OmegaConf
 
+from verl.trainer.ppo.v1 import trainer_base as trainer_base_module
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
 from verl.trainer.ppo.v1.trainer_colocate_async import PPOTrainerColocateAsync
 from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
 from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
+
+
+@pytest.fixture(autouse=True)
+def _manager_rpc_passthrough(monkeypatch):
+    # The rollout server managers are Ray actors: profiling round-trips through
+    # manager.<method>.remote() + ray.get. With MagicMock managers the returned
+    # refs are plain mocks and no Ray runtime is running, so ray.get must pass
+    # them through untouched (same pattern as test_separate_async_step_switch_on_cpu).
+    monkeypatch.setattr(trainer_base_module.ray, "get", lambda ref: ref)
 
 
 class _StubTrainer(PPOTrainer):
@@ -66,7 +77,7 @@ def test_profiled_step_starts_rollout_engines():
     trainer = _trainer(_StubTrainer, llm_server_manager=manager)
 
     trainer._start_profiling()
-    manager.start_profile.assert_called_once()
+    manager.start_profile.remote.assert_called_once()
 
 
 def test_unprofiled_step_leaves_rollout_engines_alone():
@@ -103,7 +114,7 @@ def test_sync_stops_rollout_after_sampling():
     trainer = _trainer(PPOTrainerSync, llm_server_manager=manager)
     calls = MagicMock()
     calls.attach_mock(trainer.checkpoint_manager.sleep_replicas, "sleep")
-    calls.attach_mock(manager.stop_profile, "stop")
+    calls.attach_mock(manager.stop_profile.remote, "stop")
 
     with patch.object(PPOTrainer, "_add_batch_to_generate") as submit:
         calls.attach_mock(submit, "submit")
@@ -111,7 +122,7 @@ def test_sync_stops_rollout_after_sampling():
         trainer.on_sample_end()
 
     assert calls.mock_calls == [call.submit(), call.sleep(), call.stop()]
-    manager.start_profile.assert_not_called()
+    manager.start_profile.remote.assert_not_called()
 
 
 def test_sync_skips_rollout_stop_on_unprofiled_step():
@@ -180,8 +191,8 @@ def test_separate_async_closes_hybrid_and_standalone_rollout_once():
     trainer.on_step_end()
 
     for manager in (hybrid, standalone):
-        manager.start_profile.assert_called_once()
-        manager.stop_profile.assert_called_once()
+        manager.start_profile.remote.assert_called_once()
+        manager.stop_profile.remote.assert_called_once()
 
 
 def test_colocate_async_stops_rollout_only_after_replicas_sleep():
@@ -190,21 +201,21 @@ def test_colocate_async_stops_rollout_only_after_replicas_sleep():
     calls = MagicMock()
     calls.attach_mock(trainer.checkpoint_manager.abort_replicas, "abort")
     calls.attach_mock(trainer.checkpoint_manager.sleep_replicas, "sleep")
-    calls.attach_mock(manager.stop_profile, "stop")
+    calls.attach_mock(manager.stop_profile.remote, "stop")
 
     trainer.on_sample_end()
     trainer._stop_profiling()
 
     assert calls.mock_calls == [call.abort(), call.sleep(), call.stop()]
-    manager.stop_profile.assert_called_once()
+    manager.stop_profile.remote.assert_called_once()
 
 
 def test_rollout_stops_before_the_first_training_stage():
     manager = MagicMock()
     trainer = _trainer(PPOTrainerSync, llm_server_manager=manager)
     calls = MagicMock()
-    calls.attach_mock(manager.start_profile, "rollout_start")
-    calls.attach_mock(manager.stop_profile, "rollout_stop")
+    calls.attach_mock(manager.start_profile.remote, "rollout_start")
+    calls.attach_mock(manager.stop_profile.remote, "rollout_stop")
 
     batch = SimpleNamespace(extra_info={})
     trainer.config.actor_rollout_ref = OmegaConf.create({"rollout": {"temperature": 1.0}})
@@ -231,4 +242,4 @@ def test_rollout_stops_before_the_first_training_stage():
     ]
 
     trainer._stop_profiling()
-    manager.stop_profile.assert_called_once()
+    manager.stop_profile.remote.assert_called_once()

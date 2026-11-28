@@ -17,6 +17,7 @@ import asyncio
 import logging
 import os
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,7 +27,12 @@ from omegaconf import OmegaConf
 
 from verl.utils.import_utils import resolve_config_path
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
-from verl.workers.rollout.router import GlobalRequestLoadBalancer, get_router_handle
+from verl.workers.rollout.router import (
+    GlobalRequestLoadBalancer,
+    create_embedded_load_balancer,
+    get_router_handle,
+    resolve_router_spec,
+)
 
 MOCK_PLUGIN_FQN = __name__ + "._MockPluginLoadBalancer"
 
@@ -332,6 +338,19 @@ class TestReleaseServerSignature:
         assert ray.get(lb.get_total_inflight.remote()) == 0
 
 
+class TestCreateEmbeddedLoadBalancer:
+    """Embedded hosting requires a plain class: the LLMServerManager actor is
+    the host process, so a Ray actor class spec must be rejected up front."""
+
+    def test_embedded_rejects_actor_class_spec(self, tmp_path):
+        """YAML plugin classes may be Ray actor classes; only the standalone
+        actorized path can host those."""
+        yaml_path = _write_router_yaml(tmp_path, MOCK_PLUGIN_FQN)
+        spec = resolve_router_spec(router_config_path=yaml_path)
+        with pytest.raises(TypeError, match="embedded load balancer must be"):
+            create_embedded_load_balancer(servers={"s0": None}, router_spec=spec)
+
+
 class TestGetRouterHandlePrecedence:
     """``load_balancer_cls`` overrides ``router_config_path``; the YAML path is
     ignored with a warning. Downstream config schemas (e.g. verl-omni's
@@ -361,19 +380,22 @@ class TestGetRouterHandlePrecedence:
 
     def test_router_config_path_missing_from_struct_config_does_not_raise(self, ray_session):
         """A struct rollout config without ``router_config_path`` (e.g. verl-omni's
-        DiffusionRolloutConfig) must not raise when the manager initializes the
-        router — the field is read defensively, not by direct attribute access."""
-        # Bypass the heavy __init__ (replica launch); this test only exercises
-        # _init_global_load_balancer's config reads.
+        DiffusionRolloutConfig) must not raise during driver-side spec resolution
+        or embedded construction — the field is read defensively, not by direct
+        attribute access."""
         rollout_config = OmegaConf.create({"full_determinism": False})  # no router_config_path key
         OmegaConf.set_struct(rollout_config, True)  # direct attribute access would now raise
+        config = SimpleNamespace(actor_rollout_ref=SimpleNamespace(rollout=rollout_config))
+
+        spec = LLMServerManager._router_spec_from_config(config)
+        assert spec.yaml_config is None
+
         manager = LLMServerManager.__new__(LLMServerManager)
         manager.rollout_config = rollout_config
         manager.server_addresses = ["s0", "s1"]
         manager.server_handles = [None, None]
-        manager._load_balancer_cls = None
 
-        asyncio.run(manager._init_global_load_balancer())
+        asyncio.run(manager._init_global_load_balancer(spec))
 
-        status = ray.get(manager.global_load_balancer.get_status.remote())
+        status = manager.global_load_balancer.get_status()
         assert status["active_servers"] == 2
