@@ -92,6 +92,12 @@ _VERL_MANAGED_VLLM_ARGS = {
     "enable_return_routed_experts": "rollout.enable_rollout_routing_replay",
 }
 
+# vLLM maps both spellings of the speculative-config option (and its dotted
+# sub-fields) onto the single --speculative-config argument, so verl normalizes
+# them before building the launch command and before resolving the sleep level.
+_SPECULATIVE_CONFIG_KEYS = ("speculative_config", "speculative-config")
+_SPECULATIVE_CONFIG_DOTTED_PREFIXES = ("speculative_config.", "speculative-config.")
+
 # Max wait for admissions already past the submission gate to reach the engine.
 _GATE_BARRIER_TIMEOUT_S = 60.0
 
@@ -1482,6 +1488,7 @@ class vLLMHttpServer:
 
     def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
         """Mutate engine_kwargs in-place before the CLI args dict is built."""
+        self._apply_speculative_config_normalization(engine_kwargs)
         managed = [key for key in engine_kwargs if key.replace("-", "_") in _VERL_MANAGED_VLLM_ARGS]
         if managed:
             raise ValueError(
@@ -1582,14 +1589,138 @@ class vLLMHttpServer:
         """Return the tags passed to engine.wake_up(). Default includes kv_cache."""
         return ["kv_cache", "weights"]
 
+    @staticmethod
+    def _iter_vllm_kwarg_items(vllm_kwargs: Any) -> list[tuple[str, Any]]:
+        """Return the engine kwargs as (key, value) pairs, mapping or object shape."""
+        if isinstance(vllm_kwargs, Mapping):
+            return list(vllm_kwargs.items())
+        if hasattr(vllm_kwargs, "__dict__"):
+            return list(vars(vllm_kwargs).items())
+        return []
+
+    def _effective_speculative_config(self, engine_kwargs: Any = None) -> Any:
+        """Return the speculative config vLLM effectively receives.
+
+        vLLM exposes a single ``--speculative-config`` option but engine kwargs may
+        carry it under either spelling (``speculative_config`` / ``speculative-config``)
+        and as dotted sub-fields (``speculative_config.model``). All of them collapse
+        onto that one option: vLLM 0.32 collects the dotted arguments into one dict
+        and appends it after the whole-key value, so a non-empty set of dotted fields
+        *replaces* the whole configuration instead of merging into it. With no dotted
+        fields, the underscore exact key wins over the dashed one. Launch-argument
+        preparation and sleep-level detection both read this normalized value, so the
+        engine cannot start a configuration the resolver did not see. ``None`` values are ignored:
+        ``launch_server()`` drops them before building the launch command, so a
+        ``None`` spelling must not shadow a usable one here either.
+        """
+        if engine_kwargs is None:
+            engine_kwargs = getattr(self.config, "engine_kwargs", None)
+            key = self._get_engine_kwargs_key()
+            if isinstance(engine_kwargs, Mapping):
+                engine_kwargs = engine_kwargs.get(key)
+            else:
+                engine_kwargs = getattr(engine_kwargs, key, None)
+        if engine_kwargs is None:
+            return None
+
+        exact: dict[str, Any] = {}
+        dotted: dict[str, Any] = {}
+        for key, value in self._iter_vllm_kwarg_items(engine_kwargs):
+            if value is None:
+                # ``launch_server()`` filters None values out of engine_kwargs, so a
+                # None spelling is absent for the launched configuration as well.
+                continue
+            if key in _SPECULATIVE_CONFIG_KEYS:
+                exact[key] = value
+                continue
+            for prefix in _SPECULATIVE_CONFIG_DOTTED_PREFIXES:
+                if key.startswith(prefix):
+                    parts = key[len(prefix) :].split(".")
+                    if not all(parts):
+                        break
+                    node = dotted
+                    for part in parts[:-1]:
+                        node = node.setdefault(part, {})
+                    node[parts[-1]] = value
+                    break
+
+        if dotted:
+            # vLLM 0.32 collects the dotted arguments into one dict and appends it
+            # after the whole-key value, so non-empty dotted fields replace the whole
+            # configuration rather than merging into it.
+            return dotted
+        return exact.get(_SPECULATIVE_CONFIG_KEYS[0], exact.get(_SPECULATIVE_CONFIG_KEYS[1]))
+
+    def _apply_speculative_config_normalization(self, engine_kwargs: dict) -> None:
+        """Collapse all speculative-config spellings onto one canonical entry.
+
+        ``build_cli_args_from_config()`` forwards every key, and vLLM 0.32 turns one
+        ``--speculative-config`` argument out of them: dotted fields rebuild the whole
+        config and replace the whole-key value. That lets the launched configuration
+        diverge from what the sleep resolver reads when the spellings disagree.
+        Collapse the spellings into a single ``speculative_config`` entry computed by
+        ``_effective_speculative_config()`` so the launch command and the resolver
+        agree. A single spelling without dotted fields is left untouched.
+        """
+        exact = [key for key in engine_kwargs if key in _SPECULATIVE_CONFIG_KEYS]
+        dotted = [
+            key
+            for key in engine_kwargs
+            if any(key.startswith(prefix) for prefix in _SPECULATIVE_CONFIG_DOTTED_PREFIXES)
+        ]
+        if not dotted and len(exact) <= 1:
+            return
+        effective = self._effective_speculative_config(engine_kwargs)
+        for key in exact + dotted:
+            engine_kwargs.pop(key, None)
+        if effective is not None:
+            engine_kwargs[_SPECULATIVE_CONFIG_KEYS[0]] = effective
+
+    def _has_separate_draft_model(self) -> bool:
+        """Return whether the effective engine configuration uses draft weights."""
+        spec_config = self._effective_speculative_config()
+        if spec_config is None:
+            return False
+        if isinstance(spec_config, str):
+            try:
+                spec_config = json.loads(spec_config)
+            except json.JSONDecodeError:
+                # Not JSON: treat the string as a bare method name, so weightless
+                # names such as "ngram" keep level 2 and anything else stays on the
+                # weight-preserving level 1.
+                spec_config = {"method": spec_config}
+        if isinstance(spec_config, Mapping):
+            model = spec_config.get("model") or spec_config.get("draft_model") or spec_config.get("draft_model_config")
+            method = spec_config.get("method")
+        else:
+            model = (
+                getattr(spec_config, "model", None)
+                or getattr(spec_config, "draft_model", None)
+                or getattr(spec_config, "draft_model_config", None)
+            )
+            method = getattr(spec_config, "method", None)
+        weightless_methods = {"ngram", "[ngram]", "ngram_gpu", "suffix", "prompt_lookup"}
+        if isinstance(method, str) and method.strip().lower() in weightless_methods:
+            return False
+        if isinstance(model, str) and model.strip().lower() in weightless_methods:
+            return False
+        if model is not None and (not isinstance(model, str) or bool(model.strip())):
+            return True
+        if isinstance(method, str) and bool(method.strip()):
+            return True
+        return False
+
     def _resolve_sleep_level(self) -> int:
         """Deepest sleep level whose discarded state a subsequent weight sync can restore.
 
         MTP drafter-only weights are initialized by vLLM and are not guaranteed
         to be restored by actor weight sync after level 2 sleep discards them.
+        Separately configured draft-model weights are not restored by that sync
+        either, so both keep level 1.
         LoRA normally updates only adapter weights, so it requires level 1.
         With resync_base, hybrid mode restores discarded base weights on every
-        update and can use level 2. vllm-ascend < 0.30.0 requires level 1 to
+        update and can use level 2, but a separate draft model is still outside
+        that sync and keeps level 1. vllm-ascend < 0.30.0 requires level 1 to
         avoid EP precision issues.
         """
         mtp_config = getattr(self.config, "mtp", None)
@@ -1604,12 +1735,18 @@ class vLLMHttpServer:
             if hasattr(self.config, "get")
             else getattr(self.config, "engine_kwargs", None)
         ) or {}
+        if not isinstance(engine_kwargs, Mapping):
+            # The launch path accepts mapping-style and attribute-style engine kwargs;
+            # the resolver reads the same object and must accept both shapes too.
+            engine_kwargs = dict(self._iter_vllm_kwarg_items(engine_kwargs))
         vllm_engine_kwargs = engine_kwargs.get(self._get_engine_kwargs_key(), {}) or {}
+        if not isinstance(vllm_engine_kwargs, Mapping):
+            vllm_engine_kwargs = dict(self._iter_vllm_kwarg_items(vllm_engine_kwargs))
         wtc = vllm_engine_kwargs.get("weight_transfer_config")
         sparse_update = checkpoint_backend == "vllm_sparse_nccl" or (
             isinstance(wtc, Mapping) and wtc.get("backend") == "sparse_nccl"
         )
-        if mtp_rollout_enabled or sparse_update:
+        if mtp_rollout_enabled or sparse_update or self._has_separate_draft_model():
             return 1
         if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
             return 1
