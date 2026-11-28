@@ -345,7 +345,8 @@ def test_output_processor_preserves_config_logger_payload(monkeypatch):
     assert logged["prefix"] == "input_and_logits"
 
 
-def test_output_processor_aligns_mcore_sequence_batch_layout_for_topk(monkeypatch):
+@pytest.mark.parametrize("backend", ["tilelang", "cutile"])
+def test_output_processor_aligns_mcore_sequence_batch_layout_for_topk(monkeypatch, backend):
     hidden_states = torch.randn(3, 2, 4)
     labels = torch.tensor([[1, 2, 3], [4, 5, 6]])
     topk_labels = torch.tensor(
@@ -356,7 +357,8 @@ def test_output_processor_aligns_mcore_sequence_batch_layout_for_topk(monkeypatc
     )
     seen = {}
 
-    def fake_linear_cross_entropy(hidden, _weight, kernel_labels, *_args, **_kwargs):
+    def fake_linear_cross_entropy(hidden, _weight, kernel_labels, *_args, **kwargs):
+        assert kwargs["impl_backend"] == backend
         seen["hidden"] = hidden
         seen["labels"] = kernel_labels
         return kernel_labels.float(), torch.zeros(kernel_labels.shape[:-1])
@@ -372,7 +374,7 @@ def test_output_processor_aligns_mcore_sequence_batch_layout_for_topk(monkeypatc
         labels=labels,
         context=mff.FusedOutputProcessorContext(
             temperature=1.0,
-            impl_backend="tilelang",
+            impl_backend=backend,
             topk_labels=topk_labels,
         ),
         config=SimpleNamespace(sequence_parallel=False),
@@ -392,6 +394,7 @@ def test_output_processor_aligns_mcore_sequence_batch_layout_for_topk(monkeypatc
         (True, True, "liger", False),
         (True, False, "triton", True),
         (True, False, "tilelang", True),
+        (True, False, "cutile", True),
         (False, False, "tilelang", None),
         (False, False, "liger", None),
     ],

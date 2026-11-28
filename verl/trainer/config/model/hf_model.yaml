@@ -63,9 +63,10 @@ use_fused_kernels: False
 # fused kernel options.
 fused_kernel_options:
 
-  # the implementation backend for fused kernels: torch, triton, liger, or tilelang.
-  # On CUDA, triton and tilelang support auxiliary multi-label log-prob queries.
-  # Megatron supports triton, liger (through use_liger), and tilelang.
+  # the implementation backend for fused kernels: torch, triton, liger, tilelang, or cutile.
+  # cutile uses the optional cuda-tile Python package on CUDA.
+  # On CUDA, triton, tilelang, and cutile support auxiliary multi-label log-prob queries.
+  # Megatron supports triton, liger (through use_liger), tilelang, and cutile.
   impl_backend: torch
 
 # TiledMLP configuration for memory-efficient MLP computation.

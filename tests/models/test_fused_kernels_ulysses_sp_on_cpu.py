@@ -254,16 +254,19 @@ def _adapter_id(forward_fn) -> str:
     return f"{forward_fn.__module__.rsplit('.', 1)[-1]}.{forward_fn.__name__}"
 
 
-@pytest.mark.parametrize("forward_fn", TORCH_ADAPTERS, ids=_adapter_id)
-def test_torch_adapter_propagates_fused_linear_backend(forward_fn):
+@pytest.mark.parametrize(
+    ("forward_fn", "backend"),
+    [(fn, "liger") for fn in TORCH_ADAPTERS] + [(fn, "cutile") for fn in TRITON_ADAPTERS],
+)
+def test_adapter_propagates_fused_linear_backend(forward_fn, backend):
     model = _make_fake_lm()
-    model._verl_fused_kernels_backend = "liger"
+    model._verl_fused_kernels_backend = backend
     input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
 
     with _patch_fused_kernels() as captured:
         forward_fn(model, input_ids=input_ids, labels=None, temperature=1.0, return_dict=True)
 
-    assert captured["impl_backend"] == "liger"
+    assert captured["impl_backend"] == backend
 
 
 @pytest.mark.parametrize("forward_fn", ALL_ADAPTERS, ids=_adapter_id)
@@ -318,7 +321,7 @@ def test_adapter_falls_back_to_local_roll_when_shift_labels_absent(forward_fn):
 
 
 @pytest.mark.parametrize("forward_fn", TRITON_ADAPTERS, ids=_adapter_id)
-@pytest.mark.parametrize("backend", ["tilelang", "triton"])
+@pytest.mark.parametrize("backend", ["tilelang", "triton", "cutile"])
 def test_adapter_combines_and_splits_auxiliary_labels(forward_fn, backend):
     model = _make_fake_lm()
     model._verl_fused_kernels_backend = backend
@@ -369,7 +372,7 @@ def test_liger_adapter_forwards_auxiliary_labels_to_unified_kernel(forward_fn):
     assert output.topk_log_probs.shape == topk_labels.shape
 
 
-@pytest.mark.parametrize("backend", ["tilelang", "triton"])
+@pytest.mark.parametrize("backend", ["tilelang", "triton", "cutile"])
 def test_veomni_adapter_promotes_unified_topk_log_probs(backend):
     model = _make_fake_lm()
     input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)

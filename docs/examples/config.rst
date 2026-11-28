@@ -286,17 +286,17 @@ Actor/Rollout/Reference Policy
 
   - ``actor_rollout_ref.model.fused_kernel_options.impl_backend``: The
     implementation backend for fused kernels. Options: "triton", "torch",
-    "liger", or "tilelang". The "torch" backend always uses verl's native
+    "liger", "tilelang", or "cutile". The "torch" backend always uses verl's native
     output-head implementation; select "liger" explicitly to use Liger's fused
-    output-head kernel. On CUDA, both ``triton`` and ``tilelang`` support
+    output-head kernel. On CUDA, ``triton``, ``tilelang``, and ``cutile`` support
     querying multiple token log probabilities for top-k distillation and score
     centering without materializing logits. Default is "torch".
-    With Megatron fused kernels enabled, ``impl_backend=tilelang`` selects the
-    TileLang tensor-parallel output head; otherwise ``use_liger=False`` keeps
+    With Megatron fused kernels enabled, ``impl_backend=tilelang`` or ``impl_backend=cutile`` selects the
+    corresponding tensor-parallel output head; otherwise ``use_liger=False`` keeps
     Verl's Triton head and ``use_liger=True`` calls Liger's public
     tensor-parallel fused scaled cross entropy operator.
     The VeOmni engine uses the same verl output-head implementations rather
-    than VeOmni's ``chunk_topk_distill`` path; select ``triton`` or ``tilelang`` on CUDA when
+    than VeOmni's ``chunk_topk_distill`` path; select ``triton``, ``tilelang``, or ``cutile`` on CUDA when
     distillation or score centering requests auxiliary top-k log probabilities.
 
 - ``actor_rollout_ref.model.use_remove_padding``: Whether to use remove
