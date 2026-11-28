@@ -384,8 +384,9 @@ def apply_router_replay_patch():
         original_hash_routing = TopKRouter._hash_routing
 
         @wraps(original_hash_routing)
-        def hash_routing_with_recording(self, logits, input_ids):
-            output = original_hash_routing(self, logits, input_ids)
+        def hash_routing_with_recording(self, logits, input_ids, *args, **kwargs):
+            # Megatron-Core dev added ``dense_output``; pass any extra arguments through unchanged.
+            output = original_hash_routing(self, logits, input_ids, *args, **kwargs)
             if self.router_replay is not None and self.router_replay.router_replay_action == RouterReplayAction.RECORD:
                 indices = self.tid2eid[input_ids.T.reshape(-1)].long()
                 if self.config.moe_router_force_load_balancing or self.config.moe_router_force_biased is not None:
@@ -458,6 +459,11 @@ def apply_router_replay_patch():
     # Step 3: Define the new __init__ method
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
+        # Megatron-Core builds its own replay object when moe_enable_routing_replay is set (resolved through the
+        # module-level RouterReplay, i.e. this class): drop it so each router is registered exactly once.
+        existing = getattr(self, "router_replay", None)
+        if existing is not None and existing in RouterReplay.router_instances:
+            RouterReplay.router_instances.remove(existing)
         self.router_replay = None
         if _router_replay_enabled(self.config):
             self.router_replay = RouterReplay()
