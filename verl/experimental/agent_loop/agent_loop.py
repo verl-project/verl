@@ -107,7 +107,13 @@ class AgentLoopOutput(BaseModel):
     metrics: AgentLoopMetrics
     """Auxiliary performance metrics"""
     extra_fields: dict[str, Any] = {}
-    """Extra fields for dynamic addition."""
+    """Extra fields for dynamic addition.
+
+    With v1 process rewards enabled, ``turn_rewards`` supplies one finite scalar
+    per generated assistant turn and overrides configured scorer evaluation.
+    Optional ``generated_turn_spans`` gives half-open response-token boundaries;
+    otherwise contiguous generated runs in ``response_mask`` define the turns.
+    """
     mm_processor_kwargs: Optional[dict[str, Any]] = None
     """Processor/backend kwargs that must stay aligned across rollout and training paths."""
     mm_processor_output: Optional[list[dict[str, Any]]] = None
@@ -812,7 +818,9 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            output: AgentLoopOutput = await agent_loop.run(
+                sampling_params, **(kwargs | {"validate": trajectory["validate"]})
+            )
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     def _pad_token_ids(
