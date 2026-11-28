@@ -390,9 +390,11 @@ def fp8_quant(
 
     x = x.contiguous()
     output = torch.empty_like(x) if dequant else torch.empty_like(x, dtype=torch.float8_e4m3fn)
-    scales = torch.empty(scale_shape, dtype=scale_dtype, device=x.device)
+    e8m0_on_hip = scale_dtype == torch.float8_e8m0fnu and torch.version.hip is not None
+    kernel_scale_dtype = torch.float32 if e8m0_on_hip else scale_dtype
+    scales = torch.empty(scale_shape, dtype=kernel_scale_dtype, device=x.device)
     in_dtype = _TORCH_TO_TILELANG_DTYPE[x.dtype]
-    tl_scale_dtype = _E8M0 if scale_dtype == torch.float8_e8m0fnu else _FP32
+    tl_scale_dtype = _E8M0 if kernel_scale_dtype == torch.float8_e8m0fnu else _FP32
 
     if block_rows == 1:
         kernel = _row_quant_kernel(
@@ -421,4 +423,4 @@ def fp8_quant(
 
     if dequant:
         return output
-    return output, scales
+    return output, scales.to(torch.float8_e8m0fnu) if e8m0_on_hip else scales

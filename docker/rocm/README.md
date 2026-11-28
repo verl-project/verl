@@ -10,7 +10,8 @@ the tutorial: [`docs/amd_tutorial/amd_quick_start.rst`](../../docs/amd_tutorial/
 
 > The other `Dockerfile.rocm*` / `Apptainerfile.rocm` files in this directory are
 > kept only as historical references for older verl releases (ROCm 6.x, pinned
-> verl 0.3.x / 0.4.x). New work should target `Dockerfile.rocm`.
+> verl 0.3.x / 0.4.x). New work should target `Dockerfile.rocm`; MXFP8 RL on
+> MI350 / MI355 uses [`Dockerfile.rocm103`](#dockerfilerocm103-mxfp8-rl-on-mi350--mi355).
 
 ## Supported Hardware
 
@@ -74,6 +75,31 @@ The vLLM build uses `MAX_JOBS=64`.
 | --------- | ------- | ------- |
 | `BASE_IMAGE` | `rocm/primus:v26.4` | Base image providing ROCm, torch, Flash Attention, TransformerEngine and aiter. |
 | `VLLM_TAG` / `SGLANG_TAG` / `VERL_TAG` | pinned | Source commits for the from-source components. |
+
+## Dockerfile.rocm103: MXFP8 RL on MI350 / MI355
+
+[`Dockerfile.rocm103`](Dockerfile.rocm103) builds verl's Megatron + vLLM stack for
+[MXFP8 RL on AMD ROCm](../../docs/low_precision/mxfp8_rocm.md) (gfx950) on top of
+`rocm/primus:v26.10`, which ships the ROCm 10.3 "TheRock" SDK, PyTorch 2.16 and
+Transformer Engine 2.21 (ROCm fork, with HipKittens MXFP8 GEMMs and the CK BF16
+grouped GEMM), aiter and FlyDSL. Nothing in that stack is rebuilt or replaced; the
+Dockerfile adds:
+
+| Component | Version |
+| --------- | ------- |
+| vLLM | v0.34.0, built from source |
+| megatron-core / megatron-bridge | `core_v0.19.2` / v0.6.2 |
+| transformers / tokenizers | 5.18.0 / 0.23.3 |
+| TileLang | 0.1.15 |
+| NVIDIA ModelOpt | 0.47.0 |
+
+```sh
+DOCKER_BUILDKIT=1 docker build -f docker/rocm/Dockerfile.rocm103 -t verl:rocm103 .
+```
+
+vLLM 0.34 needs three fixes on ROCm. They are kept as separate files in
+[`patches/`](patches/) (`vllm-0.34-rocm-*.patch`, each with a description at the
+top) and applied when the image is built.
 
 ## Release History
 
