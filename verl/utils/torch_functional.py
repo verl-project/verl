@@ -48,6 +48,14 @@ except ImportError:
     NPU_CROSS_ENTROPY_LOSS_AVAILABLE = False
 
 
+try:
+    from liger_kernel.transformers.functional import liger_cross_entropy
+
+    LIGER_CROSS_ENTROPY_LOSS_AVAILABLE = True
+except ImportError:
+    LIGER_CROSS_ENTROPY_LOSS_AVAILABLE = False
+
+
 def gather_from_labels(data: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
     """Gather values from data tensor at positions specified by label indices.
 
@@ -76,14 +84,19 @@ def logprobs_from_logits(logits, labels, inplace_backward=True, batch_invariant=
     Compute per-token log-probabilities for the given labels.
 
     Uses a Flash-Attention–based cross-entropy (if available) for efficient backward,
-    otherwise falls back to a standard log-softmax+gather approach.
+    then torch_npu's native op, then Liger Kernel's fused Triton op, otherwise falls
+    back to a standard log-softmax+gather approach.
 
     See: https://github.com/pytorch/pytorch/issues/563#issuecomment-330103591
 
     Args:
         logits (Tensor): Model outputs of shape (..., vocab_size).
         labels (LongTensor): True class indices of shape matching logits[..., :-1].
-        inplace_backward (bool): If True and Flash-Attn is available, perform backward in-place.
+        inplace_backward (bool): If True, the kernel may overwrite `logits` with their gradient
+            (Flash-Attn in backward, Liger in forward). Pass False when anything else still
+            reads `logits` after this call, e.g. entropy computed from the same tensor.
+            With Liger, leaving it True in that case gives silently wrong values: Liger
+            overwrites `logits` during the forward pass and autograd does not detect it.
         batch_invariant (bool): If True, compute the log-probabilities the way the vLLM sampler reports them:
             fp32 logits divided by the fp32 per-row ``temperature`` (unscaled when ``None`` or below 1e-5),
             fp32 log_softmax over the full vocabulary, then gather. Returns float32 regardless of the logits
@@ -122,6 +135,19 @@ def logprobs_from_logits(logits, labels, inplace_backward=True, batch_invariant=
         output = output.view(*batch_dim)
     elif NPU_CROSS_ENTROPY_LOSS_AVAILABLE:
         output = logprobs_from_logits_torch_npu(logits, labels)
+    elif (
+        LIGER_CROSS_ENTROPY_LOSS_AVAILABLE
+        and os.environ.get("VERL_DISABLE_LIGER_CE", "0") != "1"
+        and _is_accelerator_tensor(logits)
+    ):
+        # Liger writes the gradient into its input during the forward pass whenever
+        # that input requires grad. If the caller still reads `logits` afterwards
+        # (e.g. entropy), run Liger on detached logits and compute the backward here,
+        # so the caller's tensor stays intact without a logits-sized copy.
+        if logits.requires_grad and not inplace_backward:
+            output = logprobs_from_logits_liger_keep_logits(logits, labels)
+        else:
+            output = logprobs_from_logits_liger(logits, labels)
     else:
         output = logprobs_from_logits_v2(logits, labels)
     return output
@@ -170,6 +196,84 @@ def logprobs_from_logits_torch_npu(logits: torch.Tensor, labels: torch.Tensor) -
     logits = logits.reshape(-1, logits.shape[-1])
     loss, _, _, _ = torch_npu.npu_cross_entropy_loss(logits, labels.reshape(-1), reduction="none")
     return -loss.view(*batch_dim)
+
+
+def _is_accelerator_tensor(tensor: torch.Tensor) -> bool:
+    """True if `tensor` lives on the active platform's accelerator (never on CPU)."""
+    device_name = get_device_name()
+    return device_name != "cpu" and tensor.device.type == device_name
+
+
+def logprobs_from_logits_liger(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Compute log-probabilities using Liger Kernel's fused Triton cross-entropy.
+
+    Liger Kernel's cross-entropy op is a Triton kernel, so it runs on any accelerator
+    with a Triton backend and serves as a fused-kernel fallback where flash-attn's is
+    unavailable or disabled. Each row is reduced by a single program in a fixed order,
+    so the result is bitwise deterministic. Set VERL_DISABLE_LIGER_CE=1 to skip it.
+
+    Note: when `logits.requires_grad`, Liger overwrites `logits` with their gradient
+    during this call, silently: autograd does not detect it. Use
+    `logprobs_from_logits_liger_keep_logits` when anything reads `logits` afterwards.
+
+    Args:
+        logits: Model output logits of shape (..., vocab_size).
+        labels: Target token indices of shape (...,).
+
+    Returns:
+        torch.Tensor: Log-probabilities for target labels, same shape as labels.
+    """
+    batch_dim = logits.shape[:-1]
+    logits = logits.reshape(-1, logits.shape[-1])
+    loss = liger_cross_entropy(logits, labels.reshape(-1), reduction="none")
+    return -loss.view(*batch_dim)
+
+
+_LIGER_KEEP_LOGITS_BWD_CHUNK_SIZE = 1024
+
+
+class _LigerLogprobsKeepLogits(torch.autograd.Function):
+    """Liger forward on detached logits, so Liger writes nothing into them, plus a softmax backward."""
+
+    @staticmethod
+    def forward(ctx, logits, labels):
+        log_probs = -liger_cross_entropy(logits.detach(), labels, reduction="none")
+        ctx.save_for_backward(logits, labels)
+        return log_probs
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        logits, labels = ctx.saved_tensors
+        grad_logits = torch.empty_like(logits)
+        # token chunks bound the fp32 workspace, like the row-wise v2 fallback
+        for start in range(0, logits.shape[0], _LIGER_KEEP_LOGITS_BWD_CHUNK_SIZE):
+            end = start + _LIGER_KEEP_LOGITS_BWD_CHUNK_SIZE
+            chunk = logits[start:end].float()
+            grad_chunk = grad_output[start:end].float().unsqueeze(-1)
+            # d log_softmax(z)_y / dz = onehot(y) - softmax(z)
+            grad = (chunk - torch.logsumexp(chunk, dim=-1, keepdim=True)).exp_().mul_(-grad_chunk)
+            grad.scatter_add_(-1, labels[start:end].unsqueeze(-1), grad_chunk)
+            grad_logits[start:end] = grad
+        return grad_logits, None
+
+
+def logprobs_from_logits_liger_keep_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Same result as `logprobs_from_logits_liger`, but never modifies `logits`.
+
+    Liger only computes its in-forward gradient for inputs that require grad, so it runs
+    on `logits.detach()` and the gradient is computed in backward instead. This avoids
+    the extra logits-sized buffer that cloning `logits` for Liger would cost.
+
+    Args:
+        logits: Model output logits of shape (..., vocab_size).
+        labels: Target token indices of shape (...,).
+
+    Returns:
+        torch.Tensor: Log-probabilities for target labels, same shape as labels.
+    """
+    batch_dim = logits.shape[:-1]
+    log_probs = _LigerLogprobsKeepLogits.apply(logits.reshape(-1, logits.shape[-1]), labels.reshape(-1))
+    return log_probs.view(*batch_dim)
 
 
 def logprobs_from_logits_naive(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
