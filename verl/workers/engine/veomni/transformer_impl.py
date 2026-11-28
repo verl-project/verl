@@ -99,6 +99,14 @@ def _build_ops_implementation_config(engine_config: VeOmniEngineConfig) -> OpsIm
 class VeOmniEngine(FSDPEngine):
     _veomni_handles_position_ids = True
 
+    def _get_forward_autocast_context(self):
+        """Honor VeOmni's outer autocast setting for every model head."""
+        if not self.engine_config.enable_autocast:
+            # Disable an inherited/autocaller context as well as VeOmni's own
+            # default. FSDP parameter mixed precision remains independent.
+            return torch.autocast(device_type=get_device_name(), enabled=False)
+        return super()._get_forward_autocast_context()
+
     def _apply_veomni_input_transforms(self, model_inputs: dict, micro_batch: TensorDict):
         """Apply VeOmni-specific input transforms shared by LM and value heads.
 
@@ -1016,3 +1024,4 @@ class VeOmniEngineWithValueHead(VeOmniEngine, FSDPEngineWithValueHead):
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
         self._apply_veomni_input_transforms(model_inputs, micro_batch)
         return model_inputs, output_args
+
