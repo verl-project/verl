@@ -1,0 +1,204 @@
+# Doc Quality Review - GitHub Actions PR 文档质量自动检测
+#
+# 参考 ocr-review.yml，针对 PR 中的文档变更进行质量检测。
+# 复用 alibaba/open-code-review Action，通过自定义 rule JSON 注入
+# doc-quality 项目（https://gitcode.com/opencxd/doc-quality）的检测标准。
+#
+# 检测标准动态获取：运行时 clone doc-quality 仓，读取其 h2_registry.json
+# 和评估标准文件，由 generate_rule.py 动态生成 OCR rule JSON。
+# 标准更新随上游仓库同步，无需手动维护本地规则文件。
+#
+# 规则溯源：rule prompt 内置「规则索引」（规则编号/检测项/规则文件路径），
+# 每条 review 反馈的 content 末尾必须附「违反规则」标注行，注明该问题
+# 违反的 doc-quality 检测规则（可多条），便于回溯命中标准。
+#
+# 触发方式（仅目标分支为 main 的 PR）：
+#   - PR 自动触发：opened / synchronize / reopened
+#   - 评论手动触发：/doc-review 或 @doc-review（目标分支非 main 时取消本次运行，状态为 Cancelled）
+#
+# LLM credentials (shared with schedule_doc_translate.yaml):
+#   secret    TRANSLATION_ASCEND       default LLM API key (Volcengine deepseek-v4-flash)
+#   secret    LLM_API_KEY              used when api_base/model are overridden
+#   secret    DOC_QUALITY_TOKEN       gitcode.com access token for the private
+#                                      doc-quality repo (read-only scope)
+#   variable  DOC_REVIEW_LLM_API_BASE  optional override LLM API endpoint
+#   variable  DOC_REVIEW_LLM_MODEL     optional override model name
+#
+# Rule JSON is written to /tmp/ (outside GITHUB_WORKSPACE) so the Action's
+# internal actions/checkout (clean: true) does not delete it.
+
+name: Doc Quality Review
+
+concurrency:
+  group: >-
+    ${{
+      (
+        github.event_name == 'pull_request_target'
+        || (
+          github.event_name == 'issue_comment'
+          && github.event.issue.pull_request
+          && github.event.comment.user.type != 'Bot'
+          && (
+            github.event.comment.author_association == 'MEMBER'
+            || github.event.comment.author_association == 'OWNER'
+            || github.event.comment.author_association == 'COLLABORATOR'
+            || github.event.comment.user.login == github.event.issue.user.login
+          )
+          && (
+            startsWith(github.event.comment.body, '/doc-review')
+            || startsWith(github.event.comment.body, '@doc-review')
+          )
+        )
+      )
+      && format('doc-review-{0}', github.event.pull_request.number || github.event.issue.number)
+      || format('noop-{0}', github.run_id)
+    }}
+  cancel-in-progress: true
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+    branches: [main]
+    paths:
+      - 'docs/ascend_tutorial/**/*.md'
+      - 'docs/ascend_tutorial/**/*.rst'
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  doc-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    if: |
+      github.event_name == 'pull_request_target'
+      || (
+        github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && github.event.comment.user.type != 'Bot'
+        && (
+          github.event.comment.author_association == 'MEMBER'
+          || github.event.comment.author_association == 'OWNER'
+          || github.event.comment.author_association == 'COLLABORATOR'
+          || github.event.comment.user.login == github.event.issue.user.login
+        )
+        && (
+          startsWith(github.event.comment.body, '/doc-review')
+          || startsWith(github.event.comment.body, '@doc-review')
+        )
+      )
+    steps:
+      - name: Get PR context
+        id: pr-context
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.issue.number;
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            core.setOutput('base_ref', pullRequest.base.ref);
+            core.setOutput('head_sha', pullRequest.head.sha);
+            core.setOutput('base_ok', pullRequest.base.ref === 'main' ? 'true' : 'false');
+
+      - name: Skip non-main PR
+        if: github.event_name == 'issue_comment' && steps.pr-context.outputs.base_ok != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.notice('Cancelled: doc review only runs on PRs targeting main.');
+            await github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId
+            });
+            await new Promise(resolve => setTimeout(resolve, 60000));
+
+      - name: Checkout repo
+        if: github.event_name == 'pull_request_target' || steps.pr-context.outputs.base_ok == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone doc-quality and generate rule JSON
+        id: rule
+        if: github.event_name == 'pull_request_target' || steps.pr-context.outputs.base_ok == 'true'
+        shell: bash
+        timeout-minutes: 5
+        continue-on-error: true
+        env:
+          DOC_QUALITY_TOKEN: ${{ secrets.DOC_QUALITY_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Private repo: authenticate via https://<token>@gitcode.com/...
+          # DOC_QUALITY_TOKEN is a read-only access token created under the
+          # gitcode.com account that owns gh_55/doc-quality.
+          CLONE_URL="https://oauth2:${DOC_QUALITY_TOKEN}@gitcode.com/gh_55/doc-quality.git"
+          git clone --depth 1 "${CLONE_URL}" /tmp/doc-quality
+          echo "doc-quality HEAD: $(git -C /tmp/doc-quality rev-parse HEAD)"
+          python docs/ascend_tutorial/doc-review/generate_rule.py /tmp/doc-quality /tmp/doc-quality-rule.json
+          echo "Rule JSON generated at /tmp/doc-quality-rule.json"
+          echo "generated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve LLM credentials
+        id: llm
+        if: github.event_name == 'pull_request_target' || steps.pr-context.outputs.base_ok == 'true'
+        shell: bash
+        env:
+          TRANSLATION_ASCEND: ${{ secrets.TRANSLATION_ASCEND }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_API_BASE: ${{ vars.DOC_REVIEW_LLM_API_BASE }}
+          LLM_MODEL: ${{ vars.DOC_REVIEW_LLM_MODEL }}
+        run: |
+          set -euo pipefail
+          # Default: Volcengine deepseek-v4-flash with TRANSLATION_ASCEND key.
+          # Override: when LLM_API_BASE/LLM_MODEL vars are set, use LLM_API_KEY.
+          if [ -z "${LLM_API_BASE}" ] && [ -z "${LLM_MODEL}" ]; then
+            API_KEY="${TRANSLATION_ASCEND}"
+            API_URL="https://st8tp3ajl0df3n8b8l8qu.apigateway-cn-beijing.volceapi.com/v1"
+            MODEL="deepseek-v4-flash"
+            echo "Using default provider (Volcengine deepseek-v4-flash) with TRANSLATION_ASCEND key"
+          else
+            API_KEY="${LLM_API_KEY}"
+            API_URL="${LLM_API_BASE:-https://st8tp3ajl0df3n8b8l8qu.apigateway-cn-beijing.volceapi.com/v1}"
+            MODEL="${LLM_MODEL:-deepseek-v4-flash}"
+            echo "Using override provider (api_base=${API_URL}, model=${MODEL}) with LLM_API_KEY"
+          fi
+          if [ -z "${API_KEY}" ]; then
+            echo "::error::No LLM API key available. Set TRANSLATION_ASCEND (default) or LLM_API_KEY (override) in repo secrets."
+            exit 1
+          fi
+          echo "url=${API_URL}" >> "$GITHUB_OUTPUT"
+          echo "token=${API_KEY}" >> "$GITHUB_OUTPUT"
+          echo "model=${MODEL}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Doc Quality Review
+        uses: alibaba/open-code-review@main
+        if: github.event_name == 'pull_request_target' || steps.pr-context.outputs.base_ok == 'true'
+        timeout-minutes: 60
+        continue-on-error: true
+        with:
+          llm_url: ${{ steps.llm.outputs.url }}
+          llm_auth_token: ${{ steps.llm.outputs.token }}
+          llm_model: ${{ steps.llm.outputs.model }}
+          llm_use_anthropic: 'false'
+          language: Chinese
+          rule: ${{ steps.rule.outputs.generated == 'true' && '/tmp/doc-quality-rule.json' || '' }}
+          effort: medium
+          stream_progress: true
+          checkpoint_range: true
+          incremental: true
+          resolve_outdated: 'true'
+          base_ref: ${{ steps.pr-context.outputs.base_ref }}
+          head_sha: ${{ steps.pr-context.outputs.head_sha }}
+
+      - name: Finalize
+        if: always()
+        run: exit 0
