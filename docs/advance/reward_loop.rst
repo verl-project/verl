@@ -5,7 +5,7 @@ Reward Loop
 
 Author: `Yuyang Ding <https://yyding1.github.io>`_
 
-Last updated: 2/10/2026.
+Last updated: 10/03/2026.
 
 Introduction
 ------------
@@ -155,6 +155,12 @@ When trajectories consist of multiple output sequences (currently supported only
 In that case, the ``data`` argument passed to ``run_single`` will contain all outputs in the trajectory.
 However, the default reward managers (e.g. ``naive``, ``dapo``, etc.) will only consider the last sequence by default, as they are typically designed for single-output tasks.
 The same is true in the ``UserCostomizedRewardManager`` example above, as indicated by the line ``data_item = data[-1]``.
+
+For asynchronous scoring, prompts are left-padded and responses are right-padded to the
+maximum prompt and response lengths within the trajectory. ``input_ids`` concatenates
+these two padded tensors, and ``attention_mask`` uses the same boundary. Its response
+portion therefore excludes padding even when outputs have different prompt lengths.
+The ``prompt_len`` and ``response_len`` non-tensor fields retain each output's unpadded lengths.
 
 
 Rule-Based Reward
