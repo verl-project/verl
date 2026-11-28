@@ -88,7 +88,7 @@ def forward_with_torch_backend(
     topk_labels: Optional[torch.LongTensor] = None,
     **loss_kwargs,
 ) -> tuple | CausalLMOutputForPPO:
-    from verl.utils.experimental.torch_functional import FusedLinearForPPO
+    from verl.models.transformers.fused_lm_head import fused_lm_head_forward
 
     outputs = forward_base_model(
         self,
@@ -121,39 +121,23 @@ def forward_with_torch_backend(
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
+    kernel_labels = rolled_labels
     if topk_labels is not None:
-        from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
-
         if topk_labels.shape[:-1] != rolled_labels.shape:
             raise ValueError("topk_labels must have rolled_labels.shape as its leading dimensions")
         kernel_labels = torch.cat((rolled_labels.unsqueeze(-1), topk_labels), dim=-1)
-        all_log_probs, entropy = linear_cross_entropy(
-            hidden_states,
-            self.lm_head.weight,
-            kernel_labels,
-            temperature,
-            "none",
-            impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"),
-        )
-        return CausalLMOutputForPPO(
-            log_probs=all_log_probs[..., 0],
-            topk_log_probs=all_log_probs[..., 1:],
-            entropy=entropy,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
-
-    fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
-    log_probs, entropy = fused_linear_for_ppo.forward(
-        hidden_states=hidden_states,
-        vocab_weights=self.lm_head.weight,
-        input_ids=rolled_labels,
-        temperature=temperature,
+    all_log_probs, entropy = fused_lm_head_forward(
+        self.lm_head,
+        hidden_states,
+        kernel_labels,
+        temperature,
+        getattr(self, "_verl_fused_kernels_backend", "torch"),
+        use_linear_cross_entropy=topk_labels is not None,
     )
 
     return CausalLMOutputForPPO(
-        log_probs=log_probs,
+        log_probs=all_log_probs[..., 0] if topk_labels is not None else all_log_probs,
+        topk_log_probs=all_log_probs[..., 1:] if topk_labels is not None else None,
         entropy=entropy,
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
@@ -180,7 +164,7 @@ def forward_with_triton_backend(
     topk_labels: Optional[torch.LongTensor] = None,
     **loss_kwargs,
 ) -> tuple | CausalLMOutputForPPO:
-    from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+    from verl.models.transformers.fused_lm_head import fused_lm_head_forward
 
     outputs = forward_base_model(
         self,
@@ -217,13 +201,13 @@ def forward_with_triton_backend(
         if topk_labels.shape[:-1] != rolled_labels.shape:
             raise ValueError("topk_labels must have rolled_labels.shape as its leading dimensions")
         kernel_labels = torch.cat((rolled_labels.unsqueeze(-1), topk_labels), dim=-1)
-    all_log_probs, entropy = linear_cross_entropy(
+    all_log_probs, entropy = fused_lm_head_forward(
+        self.lm_head,
         hidden_states,
-        self.lm_head.weight,
         kernel_labels,
         temperature,
-        "none",
-        impl_backend=getattr(self, "_verl_fused_kernels_backend", "triton"),
+        getattr(self, "_verl_fused_kernels_backend", "triton"),
+        use_linear_cross_entropy=True,
     )
     log_probs = all_log_probs[..., 0] if topk_labels is not None else all_log_probs
     topk_log_probs = all_log_probs[..., 1:] if topk_labels is not None else None
