@@ -564,6 +564,8 @@ class MiniMaxToolParser(ToolParser):
 class KimiToolParser(ToolParser):
     """Tool parser for Kimi K2-family special-token function calls."""
 
+    _canonical_tool_call_id_regex = regex.compile(r"functions\.(.+):\d+")
+
     def __init__(self, tokenizer) -> None:
         super().__init__(tokenizer)
         self.tool_calls_section_start_token = "<|tool_calls_section_begin|>"
@@ -604,10 +606,19 @@ class KimiToolParser(ToolParser):
         if raw_name in tool_names:
             return raw_name
 
+        # Kimi emits tool call ids as ``functions.<name>:<index>``. Read the name from that form
+        # first, so a tool whose name contains another tool's name is not confused with it.
+        canonical_match = KimiToolParser._canonical_tool_call_id_regex.fullmatch(raw_name)
+        if canonical_match and canonical_match.group(1) in tool_names:
+            return canonical_match.group(1)
+
         compact_raw_name = raw_name.lower().replace("-", "_")
         substring_matches = [name for name in tool_names if name.lower() in compact_raw_name]
-        if len(substring_matches) == 1:
-            return substring_matches[0]
+        if substring_matches:
+            # With nested names (``search`` inside ``web_search``) the id names the longest one.
+            longest = max(substring_matches, key=len)
+            if all(name.lower() in longest.lower() for name in substring_matches):
+                return longest
 
         argument_keys = set(arguments)
         schema_matches = []
