@@ -1,6 +1,6 @@
 # 训练配置参数与指标说明
 
-Last updated: 11/02/2026.
+Last updated: 11/08/2026.
 
 如需查看 NPU 相关特性，请访问：[NPU 高级特性指南](../../feature_support/npu_advance_features.md) 。
 
@@ -597,8 +597,6 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | 参数名 | 默认值 | 说明 |
 |--------|--------|------|
 | `actor.megatron.router_replay.mode` / `actor.veomni.router_replay.mode` | `disabled` | 引擎侧路由重放模式，可选 disabled、R2、R3 |
-| `router_replay.record_file` | `null` | 路由记录文件路径 |
-| `router_replay.replay_file` | `null` | 路由重放文件路径 |
 
 #### 1.4.4 Checkpoint 配置
 
