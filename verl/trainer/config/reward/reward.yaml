@@ -40,6 +40,9 @@ reward_model:
   nnodes: 0
 
   model_path: null
+  # Per-attempt HTTP deadline in seconds, including reading the response body.
+  # Must be finite and positive. Timed-out requests use the existing retry policy.
+  request_timeout: 300.0
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
