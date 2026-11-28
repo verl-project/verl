@@ -116,6 +116,9 @@ jobs:
       - name: Running rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
           $UV_RUN pytest -s tests/models/test_transformer.py
+      - name: Running shared-prefix packing parity tests + latest flash_attn
+        run: |
+          $UV_RUN pytest -s tests/models/test_prefix_packing.py
       - name: Running FSDP rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
           STRATEGY=fsdp $UV_RUN torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
