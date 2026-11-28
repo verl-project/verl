@@ -67,3 +67,58 @@ def test_async_bridge_loop_reused_between_calls():
         assert tqu._ASYNC_BRIDGE_LOOP is first_loop
     finally:
         tqu._shutdown_async_bridge_runtime()
+
+
+class _FakeMeta:
+    """Duck-typed stand-in for transfer_queue.BatchMeta (only what _async_meta_to_realdata reads)."""
+
+    def __init__(self, size, field_names):
+        self.size = size
+        self.field_names = field_names
+        self.extra_info = {"temperature": 1.0}
+
+
+class _FakeClient:
+    def __init__(self, tensordict):
+        self._tensordict = tensordict
+
+    async def async_get_data(self, meta):
+        return self._tensordict
+
+
+class _FakeTQ:
+    def __init__(self, tensordict):
+        self._client = _FakeClient(tensordict)
+
+    def get_client(self):
+        return self._client
+
+
+def test_meta_to_realdata_raises_when_tq_returns_no_samples(monkeypatch):
+    # TransferQueue answers an empty TensorDict (with only a warning) when the controller never
+    # registered the samples' fields, e.g. after a missed data-status update ACK.
+    import torch
+    from tensordict import TensorDict
+
+    monkeypatch.setattr(tqu, "tq", _FakeTQ(TensorDict({}, batch_size=0)))
+    with pytest.raises(RuntimeError, match="TQ_DATA_UPDATE_RESPONSE_TIMEOUT"):
+        tqu._meta_to_realdata(_FakeMeta(size=4, field_names=[]))
+
+    # A short read is caught too, not just an empty one.
+    monkeypatch.setattr(tqu, "tq", _FakeTQ(TensorDict({"loss_mask": torch.ones(3, 2)}, batch_size=3)))
+    with pytest.raises(RuntimeError, match="returned 3 samples for a BatchMeta of size 4"):
+        tqu._meta_to_realdata(_FakeMeta(size=4, field_names=["loss_mask"]))
+    tqu._shutdown_async_bridge_runtime()
+
+
+def test_meta_to_realdata_passes_complete_batch(monkeypatch):
+    import torch
+    from tensordict import TensorDict
+
+    monkeypatch.setattr(tqu, "tq", _FakeTQ(TensorDict({"loss_mask": torch.ones(4, 2)}, batch_size=4)))
+    try:
+        data = tqu._meta_to_realdata(_FakeMeta(size=4, field_names=["loss_mask"]))
+    finally:
+        tqu._shutdown_async_bridge_runtime()
+    assert data.batch_size[0] == 4
+    assert "loss_mask" in data.keys()

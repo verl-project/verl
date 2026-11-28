@@ -157,6 +157,29 @@ def _find_meta(*args, **kwargs):
     return None
 
 
+def _check_realdata_matches_meta(tensordict: TensorDict, meta: BatchMeta) -> None:
+    """Fail at the TransferQueue read when it returns fewer samples than the metadata names.
+
+    TransferQueue answers an empty TensorDict, with only a warning, when the controller has
+    no fields registered for the requested samples. That happens when a producer's put landed
+    in storage but its data-status update was never acknowledged by the controller (logged as
+    "Timeout waiting for data status update ACK from controller"). Without this check the
+    caller receives a TensorDict that only holds the meta_info scalars and fails later with an
+    unrelated-looking KeyError (e.g. ``'loss_mask'`` in ``compute_log_prob``).
+    """
+    num_samples = tensordict.batch_size[0] if len(tensordict.batch_size) > 0 else 0
+    if num_samples == meta.size:
+        return
+    raise RuntimeError(
+        f"TransferQueue returned {num_samples} samples for a BatchMeta of size {meta.size} "
+        f"(fields: {meta.field_names}). The missing samples were most likely written to storage but "
+        "never marked ready by the TransferQueue controller, which happens when a put does not get "
+        "its data-status update ACK in time (look for 'Timeout waiting for data status update ACK "
+        "from controller' in the worker logs). Raising TQ_DATA_UPDATE_RESPONSE_TIMEOUT (default 30s) "
+        "in the environment of every Ray worker avoids this when the controller is just slow."
+    )
+
+
 async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
     if isinstance(meta, KVBatchMeta):
         meta = await async_kv_batch_meta2batch_meta(meta)
@@ -168,6 +191,7 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
 
     tq_client = tq.get_client()
     tensordict = await tq_client.async_get_data(meta)
+    _check_realdata_matches_meta(tensordict, meta)
 
     for key, val in meta_info.items():
         if isinstance(val, (NonTensorData | NonTensorStack)):
