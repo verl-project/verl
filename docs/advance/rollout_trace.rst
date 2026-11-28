@@ -1,7 +1,7 @@
 Trace Function Usage Instructions
 ========================================
 
-Last updated: 07/10/2025.
+Last updated: 08/25/2026.
 
 Applicable Scenarios
 --------------------
@@ -119,7 +119,9 @@ Usage of mlflow
    1. Http and https URLs corresponding to online services
    2. Local files or directories, such as ``sqlite:////tmp/mlruns.db``, indicate that data is stored in ``/tmp/mlruns.db``. When using local files, it is necessary to initialize the file first (e.g., start the UI: ``mlflow ui --backend-store-uri sqlite:////tmp/mlruns.db``) to avoid conflicts when multiple workers create files simultaneously.
 
-2. Configuration Parameters
+2. Optionally set the ``VERL_MLFLOW_EXPERIMENT_PREFIX`` environment variable to nest the experiment under a root path. Managed backends such as Databricks require the experiment to be an absolute workspace path, while ``trainer.project_name`` is usually a bare name that is also reused as a path component (e.g. ``trainer.default_local_dir``). With ``VERL_MLFLOW_EXPERIMENT_PREFIX=/Workspace/Shared/verl``, ``trainer.project_name=my_project`` becomes the experiment ``/Workspace/Shared/verl/my_project``, for both the mlflow logger and the rollout trace. A ``project_name`` that is already absolute is left untouched, and leaving the variable unset keeps the previous behavior.
+
+3. Configuration Parameters
 
    1. ``actor_rollout_ref.rollout.trace.backend=mlflow``
    2. ``trainer.logger=['console', 'mlflow']``. This item is optional. Trace and logger are independent functions. When using mlflow, it is recommended to also enable the mlflow logger to implement both functions in one system.
