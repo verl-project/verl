@@ -28,6 +28,24 @@ from transformers import GenerationConfig
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
+_QWEN_VL_PROCESSOR_TYPES = frozenset(
+    {
+        "Qwen2VLProcessor",
+        "Qwen2_5_VLProcessor",
+        "Qwen3VLProcessor",  # Also used by Qwen3.5 checkpoints.
+    }
+)
+
+
+def normalize_mm_processor_kwargs(processor, mm_processor_kwargs=None) -> dict:
+    """Return a copy of multimodal kwargs with Qwen VL preprocessing defaults."""
+    kwargs = dict(mm_processor_kwargs or {})
+    if processor is not None and type(processor).__name__ in _QWEN_VL_PROCESSOR_TYPES:
+        # qwen-vl-utils has already resized decoded images and videos.
+        kwargs.setdefault("do_resize", False)
+    return kwargs
+
+
 # Handle version compatibility for flash_attn_supports_top_left_mask
 # This function was added in newer versions of transformers
 try:
