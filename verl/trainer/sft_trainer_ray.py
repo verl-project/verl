@@ -245,6 +245,9 @@ class SFTTrainer:
         return batch_seqlens
 
     def fit(self):
+        if self.resume_global_step >= self.total_training_steps:
+            return
+
         tracking = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,

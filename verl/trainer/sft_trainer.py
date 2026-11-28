@@ -306,6 +306,9 @@ class SFTTrainer:
         return batch_seqlens
 
     def fit(self):
+        if self.resume_global_step >= self.total_training_steps:
+            return
+
         is_logging = self.engine.is_mp_src_rank_with_outputs() and self.engine.get_data_parallel_rank() == 0
 
         # TODO: add a unified tracking
