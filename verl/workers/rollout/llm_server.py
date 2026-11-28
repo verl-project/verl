@@ -47,8 +47,20 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def _as_actor(cls: type["LLMServerManager"]) -> "ray.actor.ActorClass":
-    """Wrap a manager class as a zero-CPU Ray actor (``ray.remote(cls)`` picks up subclass overrides)."""
-    return ray.remote(cls).options(num_cpus=0)
+    """Wrap a manager class as a zero-CPU Ray actor pinned to the caller's node.
+
+    ``ray.remote(cls)`` picks up subclass overrides. The pin is a hard constraint
+    (``soft=False``): a soft affinity would silently fall back to another node
+    and reintroduce the placement-dependent failures described in
+    :meth:`LLMServerManager._launch_manager_actor`.
+    """
+    return ray.remote(cls).options(
+        num_cpus=0,
+        scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(),
+            soft=False,
+        ),
+    )
 
 
 class LLMServerClient:
@@ -447,9 +459,16 @@ class LLMServerManager:
         """Resolve the router spec on the caller's node, then launch the actor.
 
         The router YAML read and plugin import must happen before launch: the
-        zero-CPU manager actor can be scheduled on any node and must not need
-        the router config file locally, and a bad config fails fast here,
-        before replicas are initialized inside the actor.
+        manager actor must not need the router config file locally, and a bad
+        config fails fast here, before replicas are initialized inside the actor.
+
+        The actor is pinned to the caller's node. Replicas are initialized from
+        inside the actor, and some launch paths perform node-local work on the
+        caller's node: prefill-decode disaggregation reserves its side-channel
+        ports by binding a socket on the driver's address (see
+        ``get_free_port(..., with_alive_sock=True)`` in the PD replica classes),
+        and platform detection runs in-process. Before the actorization both ran
+        in the driver process; pinning preserves that assumption.
 
         Subclass contract: ``config`` and ``load_balancer_cls`` are read from the
         bound factory arguments, so a manager subclass that overrides
@@ -459,6 +478,10 @@ class LLMServerManager:
         declare the base signature) are unaffected.
         """
         bound = inspect.signature(cls).bind(*args, **kwargs)
+        # ``bind`` omits arguments the caller left to a subclass's own default;
+        # without this a subclass declaring ``load_balancer_cls=Custom`` would
+        # resolve the default strategy instead.
+        bound.apply_defaults()
         router_spec = cls._router_spec_from_config(
             config=bound.arguments.get("config"),
             load_balancer_cls=bound.arguments.get("load_balancer_cls"),

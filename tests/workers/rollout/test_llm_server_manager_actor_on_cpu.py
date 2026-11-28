@@ -28,6 +28,7 @@ from unittest.mock import patch
 import pytest
 import ray
 import yaml
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.rollout import llm_server
@@ -158,7 +159,8 @@ def test_bad_router_config_fails_fast_on_driver(tmp_path):
     """A bad router config raises at the factory call, on the caller's node —
     before the actor is launched and before any replica initialization runs:
     a missing YAML, and a YAML whose plugin is a Ray actor class (an embedded
-    balancer is constructed in-process, so it cannot host one)."""
+    balancer is constructed in-process, so it cannot host one). A valid launch
+    is pinned to the caller's node."""
     ray.init(ignore_reinit_error=True)
     manager_cls = _make_manager_cls()
     config = _config()
@@ -175,12 +177,35 @@ def test_bad_router_config_fails_fast_on_driver(tmp_path):
             manager_cls.create_empty(config=config)
     launch.assert_not_called()
 
+    real_remote = llm_server.ray.remote
+    option_calls = []
+
+    def _recording_remote(cls):
+        actor_class = real_remote(cls)
+        real_options = actor_class.options
+
+        def _recording_options(**options):
+            option_calls.append(options)
+            return real_options(**options)
+
+        actor_class.options = _recording_options
+        return actor_class
+
+    with patch.object(llm_server.ray, "remote", _recording_remote):
+        manager = manager_cls.create_empty(config=_config())
+    strategy = option_calls[0]["scheduling_strategy"]
+    assert isinstance(strategy, NodeAffinitySchedulingStrategy)
+    assert strategy.node_id == ray.get_runtime_context().get_node_id()
+    assert strategy.soft is False
+    ray.kill(manager)
+
 
 def test_release_honors_the_strategy_release_fields():
     """The embedded plane must honor the strategy's ``require_release_fields``
     declaration: declared fields are forwarded, undeclared ones are omitted —
     legacy ``release_server(self, server_id)`` signatures keep working through
-    the manager's RPC surface."""
+    the manager's RPC surface. A subclass's own constructor default for
+    ``load_balancer_cls`` is honored too."""
     ray.init(ignore_reinit_error=True)
     manager_cls = _make_manager_cls()
 
@@ -218,6 +243,19 @@ def test_release_honors_the_strategy_release_fields():
     # Declared fields are forwarded: a dropped request_id would surface as a
     # RayTaskError(ValueError) inside _drain_once.
     _drain_once(_DemandingBalancer)
+
+    # A subclass's own constructor default counts as an injected strategy.
+    class _TaggedBalancer(GlobalRequestLoadBalancer):
+        def get_status(self) -> dict:
+            return {**super().get_status(), "tagged": True}
+
+    class _ManagerWithDefaultBalancer(manager_cls):
+        def __init__(self, config, load_balancer_cls=_TaggedBalancer):
+            super().__init__(config, load_balancer_cls=load_balancer_cls)
+
+    manager = _ManagerWithDefaultBalancer.create_empty(config=_config())
+    assert ray.get(manager.get_status.remote())["tagged"] is True
+    ray.kill(manager)
 
 
 def test_yaml_plugin_resolves_on_driver_and_embeds_via_factory(tmp_path):
