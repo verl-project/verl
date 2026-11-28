@@ -355,9 +355,48 @@ def preprocess_thd_engine(
         if need_roll:
             saved_roll_dict = {}
             saved_position_roll_dict = {}
+        # ------------------------------------------------------------------
+        # Fast path for multi-row batches at cp_size == 1: a jagged NestedTensor
+        # already stores its rows in THD packed order, so the `input_ids[i]` in
+        # the loop below is a round trip through NestedTensor.__torch_dispatch__
+        # -- 48 rows cost 15.5ms of wall time with only 175us of self time, the
+        # GPU idle throughout. Scatter every sequence at once instead.
+        #
+        # Gated on batch_size > 1 because the win is removing one dispatch per
+        # row, so it scales with the row count, not with the sequence length.
+        # A single row has nothing to amortise while the vectorized path still
+        # materialises O(total_tokens) index tensors, so it loses on very long
+        # sequences: a CUDA microbenchmark at batch_size=1 measured 1.19x at
+        # 256K tokens but 0.94x at 1M and 0.35x at 8M, against 31.5x for 48 rows
+        # of 1K tokens each.
+        # ------------------------------------------------------------------
+        total_valid = sum(seqlens_in_batch_cpu)
+        fast_packed = batch_size > 1 and cp_size <= 1 and (not need_roll or cp_layout == "zigzag")
+        if fast_packed:
+            # A nested tensor whose values buffer holds more than the valid
+            # tokens (e.g. one built by narrowing) is not in packed THD order.
+            nested_values = input_ids.values()
+            fast_packed = nested_values.shape[0] == total_valid
+        if fast_packed:
+            # offset_in_seq[j] is the position of row j inside its own sequence,
+            # i.e. exactly the torch.arange(seqlen) the loop builds per sample.
+            valid_starts = torch.repeat_interleave(cu_seqlens[:-1].long(), seqlens_in_batch, output_size=total_valid)
+            offset_in_seq = torch.arange(total_valid, dtype=torch.long, device=input_ids.device) - valid_starts
+            if shape[0] == total_valid:
+                # No per-sequence padding: destination layout == source layout.
+                input_ids_rmpad.copy_(nested_values)
+                position_ids_rmpad.copy_(offset_in_seq)
+            else:
+                padded_starts = torch.repeat_interleave(
+                    cu_seqlens_padded[:-1].long(), seqlens_in_batch, output_size=total_valid
+                )
+                dest_idx = padded_starts + offset_in_seq
+                input_ids_rmpad.index_copy_(0, dest_idx, nested_values)
+                position_ids_rmpad.index_copy_(0, dest_idx, offset_in_seq)
         local_global_start = shape[0] * cp_rank
         local_global_end = local_global_start + shape[0]
-        for i in range(batch_size):
+        # range(0) when the vectorized path above already filled both buffers
+        for i in range(0 if fast_packed else batch_size):
             # Use Python int, so no GPU→CPU sync in the loop
             if cp_layout == "contiguous":
                 seq_global_start = cu_seqlens_padded_cpu[i]

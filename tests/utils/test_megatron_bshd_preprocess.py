@@ -402,3 +402,116 @@ def test_preprocess_thd_engine_pads_short_topk_sequence_dimension(monkeypatch):
     torch.testing.assert_close(packed, torch.zeros_like(packed))
     torch.testing.assert_close(position_ids, torch.tensor([[1, 0]], dtype=torch.long))
     assert packed_seq_params.local_cp_size == 2
+
+
+def _count_repeat_interleave(monkeypatch, mcore_util) -> list[int]:
+    """Count ``torch.repeat_interleave`` calls; only the vectorized path makes them.
+
+    Without this counter the fast-path tests below would still pass against the
+    per-sample loop, so it is what actually pins the optimization down.
+    """
+    calls = [0]
+    original = torch.repeat_interleave
+
+    def counting(*args, **kwargs):
+        calls[0] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mcore_util.torch, "repeat_interleave", counting)
+    return calls
+
+
+def test_preprocess_thd_engine_fast_path_packs_without_per_sequence_padding(monkeypatch):
+    """align_size == 1, so the packed buffer is a straight copy of ``values()``."""
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=1)
+    input_ids = _nested_tensor([torch.arange(0, 3), torch.arange(3, 8), torch.arange(8, 10)])
+
+    packed, packed_seq_params, position_ids = mcore_util.preprocess_thd_engine(input_ids)
+
+    assert packed.tolist() == [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]]
+    assert position_ids.tolist() == [[0, 1, 2, 0, 1, 2, 3, 4, 0, 1]]
+    assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 3, 8, 10]
+    assert packed_seq_params.max_seqlen_q == 5
+
+
+def test_preprocess_thd_engine_fast_path_scatters_into_padded_slots(monkeypatch):
+    """tp_size == 4 pads every sequence, so rows are scattered, not block-copied."""
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=4, cp_size=1)
+    calls = _count_repeat_interleave(monkeypatch, mcore_util)
+    input_ids = _nested_tensor([torch.arange(0, 3), torch.arange(3, 8), torch.arange(8, 10)])
+
+    packed, packed_seq_params, position_ids = mcore_util.preprocess_thd_engine(input_ids)
+
+    # Lengths 3/5/2 round up to 4/8/4; the padding slots keep their zero initializer.
+    assert packed.tolist() == [[0, 1, 2, 0, 3, 4, 5, 6, 7, 0, 0, 0, 8, 9, 0, 0]]
+    assert position_ids.tolist() == [[0, 1, 2, 0, 0, 1, 2, 3, 4, 0, 0, 0, 0, 1, 0, 0]]
+    assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 4, 12, 16]
+    assert packed_seq_params.max_seqlen_q == 8
+    assert calls[0] == 2, "vectorized path must build valid_starts and padded_starts"
+
+
+def test_preprocess_thd_engine_fast_path_preserves_dense_tail_dims(monkeypatch):
+    """Trailing dense dims (e.g. top-k teacher logits) must survive the scatter."""
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=4, cp_size=1)
+    rows = [
+        torch.arange(3 * 2, dtype=torch.float32).reshape(3, 2),
+        torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2) + 100,
+    ]
+    teacher_logits = _nested_tensor(rows)
+
+    packed, packed_seq_params, _ = mcore_util.preprocess_thd_engine(teacher_logits)
+
+    assert packed.shape == (1, 12, 2)
+    torch.testing.assert_close(packed[0, :3], rows[0])
+    torch.testing.assert_close(packed[0, 4:9], rows[1])
+    torch.testing.assert_close(packed[0, 3], torch.zeros(2))
+    torch.testing.assert_close(packed[0, 9:], torch.zeros(3, 2))
+    assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 4, 12]
+
+
+def test_preprocess_thd_engine_contiguous_roll_bypasses_fast_path(monkeypatch):
+    """``contiguous`` + ``need_roll`` rolls each sequence, which the fast path cannot do."""
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=1)
+    calls = _count_repeat_interleave(monkeypatch, mcore_util)
+    input_ids = _nested_tensor([torch.arange(0, 3), torch.arange(3, 8), torch.arange(8, 10)])
+
+    packed, _, position_ids = mcore_util.preprocess_thd_engine(input_ids, need_roll=True, cp_layout="contiguous")
+
+    # Each sequence is rotated left by one within its own span: 0 1 2 -> 1 2 0 etc.
+    assert packed.tolist() == [[1, 2, 0, 4, 5, 6, 7, 3, 9, 8]]
+    assert position_ids.tolist() == [[1, 2, 0, 1, 2, 3, 4, 0, 1, 0]]
+    assert calls[0] == 0, "per-sequence roll must keep using the loop"
+
+
+def test_preprocess_thd_engine_zigzag_roll_keeps_global_roll_semantics(monkeypatch):
+    """``zigzag`` + cp_size == 1 rolls the packed buffer as a whole, not per sequence.
+
+    The fast path is allowed here precisely because the pre-existing loop also
+    ignored ``need_roll`` on this branch; the roll is applied afterwards.
+    """
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=1)
+    input_ids = _nested_tensor([torch.arange(0, 3), torch.arange(3, 8), torch.arange(8, 10)])
+
+    packed, _, position_ids = mcore_util.preprocess_thd_engine(input_ids, need_roll=True)
+
+    assert packed.tolist() == [[1, 2, 3, 4, 5, 6, 7, 8, 9, 0]]
+    assert position_ids.tolist() == [[1, 2, 0, 1, 2, 3, 4, 0, 1, 0]]
+
+
+def test_preprocess_thd_engine_single_row_keeps_the_loop(monkeypatch):
+    """A one-row batch has no per-row dispatch to amortise.
+
+    The vectorized path would still materialise O(total_tokens) index tensors, so
+    it loses on long single sequences (0.35x at 8M tokens in a CUDA
+    microbenchmark). Keep the loop and stay correct either way.
+    """
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=1)
+    calls = _count_repeat_interleave(monkeypatch, mcore_util)
+    input_ids = _nested_tensor([torch.arange(0, 5)])
+
+    packed, packed_seq_params, position_ids = mcore_util.preprocess_thd_engine(input_ids)
+
+    assert packed.tolist() == [[0, 1, 2, 3, 4]]
+    assert position_ids.tolist() == [[0, 1, 2, 3, 4]]
+    assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 5]
+    assert calls[0] == 0, "single-row batches must not take the vectorized path"
