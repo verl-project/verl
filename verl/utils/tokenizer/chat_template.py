@@ -173,8 +173,76 @@ def apply_chat_template(
             **kwargs,
         )
     except Exception:
-        # Qwen3.5 apply_chat_template needs messages with at least one user message
+        # Qwen3.5 apply_chat_template needs messages with at least one user message.
+        # A leading system block must stay first, so the dummy user cannot be prepended
+        # in that case. It is not appended either: templates that keep the reasoning
+        # content of the *last* assistant message only (Qwen3, DeepSeek-R1, ...) would
+        # drop it once another message follows. Instead the dummy user is inserted right
+        # after the leading system block and its span is cut back out of the middle of
+        # the output, which keeps both the system message first and the last assistant
+        # message last.
         dummy_user_message = [{"role": "user", "content": [{"type": "text", "text": ""}]}]
+        num_leading_system = 0
+        while num_leading_system < len(messages) and messages[num_leading_system].get("role") == "system":
+            num_leading_system += 1
+
+        if num_leading_system:
+            head = list(messages[:num_leading_system])
+            tail = list(messages[num_leading_system:])
+            # The difference trick gives the length of one dummy-user span; subtracting it
+            # from the head+dummy rendering gives the length of the head block itself.
+            one_user = processor.apply_chat_template(
+                head + dummy_user_message,
+                tokenize=tokenize,
+                add_generation_prompt=False,
+                tools=tools,
+                return_dict=return_dict,
+                **kwargs,
+            )
+            two_users = processor.apply_chat_template(
+                head + dummy_user_message * 2,
+                tokenize=tokenize,
+                add_generation_prompt=False,
+                tools=tools,
+                return_dict=return_dict,
+                **kwargs,
+            )
+            output = processor.apply_chat_template(
+                head + dummy_user_message + tail,
+                tokenize=tokenize,
+                add_generation_prompt=add_generation_prompt,
+                tools=tools,
+                return_dict=return_dict,
+                **kwargs,
+            )
+
+            if not tokenize:  # tokenize=False
+                user_len = len(two_users) - len(one_user)
+                head_len = len(one_user) - user_len
+                return output[:head_len] + output[head_len + user_len :]
+            elif not return_dict:  # tokenize=True and return_dict=False
+                if isinstance(output[0], list):  # transformers>=5
+                    assert len(output) == 1, "output must be a list[int] or list[list[int]]"
+                    one_user = one_user[0]
+                    two_users = two_users[0]
+                    output = output[0]
+                user_len = len(two_users) - len(one_user)
+                head_len = len(one_user) - user_len
+                return output[:head_len] + output[head_len + user_len :]
+            else:  # tokenize=True and return_dict=True and return_tensors="pt"
+                import torch
+
+                one_user = dict(one_user)
+                two_users = dict(two_users)
+                output = dict(output)
+                user_len = two_users["input_ids"].shape[1] - one_user["input_ids"].shape[1]
+                head_len = one_user["input_ids"].shape[1] - user_len
+                for key in ("input_ids", "attention_mask", "mm_token_type_ids"):
+                    if key not in output:
+                        continue
+                    output[key] = torch.cat([output[key][:, :head_len], output[key][:, head_len + user_len :]], dim=1)
+                return output
+
         dummy_user_prefix = processor.apply_chat_template(
             dummy_user_message,
             tokenize=tokenize,
