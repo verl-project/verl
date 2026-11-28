@@ -130,6 +130,7 @@ verl is fast with:
    advance/delta_weight_sync
    advance/sharded_nixl_weight_sync
    advance/v1_async_trainer
+   advance/group_delivery
    advance/fully_async
    advance/async-on-policy-distill
    advance/dynamic_schedule
