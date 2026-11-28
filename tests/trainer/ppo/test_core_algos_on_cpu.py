@@ -280,6 +280,47 @@ def test_grpo_vectorized_matches_original_for_low_variance_rewards():
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("reward", [0.1, 0.3, 0.6, 0.7, 0.9])
+@pytest.mark.parametrize("group_size", [8, 16, 64])
+def test_grpo_uniform_reward_group_has_zero_advantage(reward: float, group_size: int):
+    # Every response in the group got the same fractional reward, so there
+    # is no preference between them and every advantage must be exactly
+    # zero. The float32 group statistics used to invent a small nonzero
+    # advantage for the whole group instead (up to ~0.35 for the
+    # vectorized path at group_size=64).
+    token_level_rewards = torch.full((group_size, 1), reward, dtype=torch.float32)
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array(["prompt"] * group_size, dtype=object)
+
+    for fn in (compute_grpo_outcome_advantage, compute_grpo_vectorized_outcome_advantage):
+        for norm_adv_by_std_in_grpo in (True, False):
+            adv, ret = fn(
+                token_level_rewards=token_level_rewards,
+                response_mask=response_mask,
+                index=index,
+                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            )
+            assert torch.equal(adv, torch.zeros_like(adv)), fn.__name__
+            assert torch.equal(ret, torch.zeros_like(ret)), fn.__name__
+
+
+def test_grpo_uniform_group_next_to_mixed_group():
+    # A uniform group in the same batch as a mixed group: only the
+    # uniform group's advantages are zeroed.
+    token_level_rewards = torch.tensor([[0.3], [0.3], [0.3], [0.3], [1.0], [0.0], [0.0], [0.0]], dtype=torch.float32)
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array(["uniform"] * 4 + ["mixed"] * 4, dtype=object)
+
+    for fn in (compute_grpo_outcome_advantage, compute_grpo_vectorized_outcome_advantage):
+        adv, ret = fn(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+        )
+        assert torch.equal(adv[:4], torch.zeros_like(adv[:4])), fn.__name__
+        assert torch.allclose(adv[4:, 0], torch.tensor([1.5, -0.5, -0.5, -0.5])), fn.__name__
+
+
 @pytest.mark.parametrize(
     "batch_size,seq_len,num_groups,seed",
     [
