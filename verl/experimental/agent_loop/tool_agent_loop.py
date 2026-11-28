@@ -29,10 +29,12 @@ from verl.experimental.agent_loop.agent_loop import (
     register,
 )
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
+from verl.tools.base_tool import RECOVERABLE_TOOL_ERRORS
 from verl.tools.function_tool import FunctionTool, normalize_function_tool_return
 from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, ToolResponse
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.workers.config.rollout import ToolRetryConfig
 from verl.workers.rollout.replica import TokenOutput
 
 logger = logging.getLogger(__file__)
@@ -43,6 +45,18 @@ SPEC_DECODE_EXTRA_KEYS = (
     "spec_num_accepted_tokens",
     "spec_num_verify_steps",
 )
+
+
+def _new_tool_retry_metrics() -> dict[str, int]:
+    return {
+        "total_calls": 0,
+        "retried_calls": 0,
+        "retry_attempts": 0,
+        "recovered_calls": 0,
+        "exhausted_calls": 0,
+        "non_recoverable_failures": 0,
+        "release_failures": 0,
+    }
 
 
 class AgentState(Enum):
@@ -115,6 +129,13 @@ class ToolAgentLoop(AgentLoopBase):
         self.max_parallel_calls = self.rollout_config.multi_turn.max_parallel_calls
         self.max_tool_response_length = self.rollout_config.multi_turn.max_tool_response_length
         self.tool_response_truncate_side = self.rollout_config.multi_turn.tool_response_truncate_side
+        raw_retry = getattr(self.rollout_config.multi_turn, "tool_retry", None)
+        if isinstance(raw_retry, ToolRetryConfig):
+            self.tool_retry = raw_retry
+        elif isinstance(raw_retry, dict) or hasattr(raw_retry, "items"):
+            self.tool_retry = ToolRetryConfig(**{k: v for k, v in raw_retry.items() if k != "_target_"})
+        else:
+            self.tool_retry = ToolRetryConfig()
 
         tool_list = tools.tools if tools else []
         self.tools = {tool.name: tool for tool in tool_list}
@@ -154,6 +175,8 @@ class ToolAgentLoop(AgentLoopBase):
             request_id=request_id,
             tools_kwargs=tools_kwargs,
         )
+        if self.tool_retry.enable:
+            agent_data.extra_fields["tool_retry_metrics"] = _new_tool_retry_metrics()
 
         # Per-sample tool selection: filter global tools by extra_info.tool_selection
         extra_info = kwargs.get("extra_info", {}) or {}
@@ -260,8 +283,11 @@ class ToolAgentLoop(AgentLoopBase):
         else:
             agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
 
-        if not agent_data.extra_fields:
-            agent_data.extra_fields.update(output.extra_fields)
+        has_backend_extra_fields = any(key != "tool_retry_metrics" for key in agent_data.extra_fields)
+        if not has_backend_extra_fields:
+            for key, value in output.extra_fields.items():
+                if key != "tool_retry_metrics":
+                    agent_data.extra_fields[key] = value
         else:
             # Multi-round calls, only update the maximum max_global_steps.
             max_global_steps = output.extra_fields.get("max_global_steps", None)
@@ -471,31 +497,77 @@ class ToolAgentLoop(AgentLoopBase):
             return ToolResponse(text=msg), 0.0, {}
 
         # Execute tool
-        tool, instance_id = None, None
-        try:
-            tool = active_tools[tool_name]
-
-            if isinstance(tool, FunctionTool):
-                # Function-based tools have no lifecycle; call directly.
-                # Note: tools_kwargs (create_kwargs / release_kwargs) is intentionally
-                # ignored here. Function tools are stateless and per-trajectory state
-                # injection is not supported by design; use a BaseTool subclass instead.
+        tool = active_tools[tool_name]
+        if isinstance(tool, FunctionTool):
+            # Function-based tools have no lifecycle; call directly.
+            # Note: tools_kwargs (create_kwargs / release_kwargs) is intentionally
+            # ignored here. Function tools are stateless and per-trajectory state
+            # injection is not supported by design; use a BaseTool subclass instead.
+            try:
                 raw = await tool.call(tool_args)
                 tool_execution_response, tool_reward, res = normalize_function_tool_return(raw)
-            else:
-                # BaseTool subclass
-                kwargs = tools_kwargs.get(tool_name, {})
-                instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
-                tool_execution_response, tool_reward, res = await tool.execute(
-                    instance_id, tool_args, agent_data=agent_data
-                )
-        except Exception as e:
-            logger.warning(f"Error executing tool '{tool_name}': {e}")
-            return ToolResponse(text=f"Error executing tool '{tool_name}': {e}"), 0.0, {}
-        finally:
-            # Only BaseTool instances need release (function tools never set instance_id).
-            if tool and instance_id and not isinstance(tool, FunctionTool):
-                await tool.release(instance_id)
+            except Exception as e:
+                logger.warning(f"Error executing tool '{tool_name}': {e}")
+                return ToolResponse(text=f"Error executing tool '{tool_name}': {e}"), 0.0, {}
+        else:
+            # BaseTool subclass
+            retry_cfg = getattr(self, "tool_retry", None)
+            retry_enabled = isinstance(retry_cfg, ToolRetryConfig) and retry_cfg.enable
+            max_attempts = (retry_cfg.max_retries + 1) if retry_enabled else 1
+
+            extra_fields = getattr(agent_data, "extra_fields", None)
+            retry_metrics = (
+                extra_fields.setdefault("tool_retry_metrics", _new_tool_retry_metrics())
+                if retry_enabled and isinstance(extra_fields, dict)
+                else None
+            )
+            if retry_metrics is not None:
+                retry_metrics["total_calls"] += 1
+
+            for attempt in range(max_attempts):
+                instance_id = None
+                try:
+                    kwargs = tools_kwargs.get(tool_name, {})
+                    instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
+                    tool_execution_response, tool_reward, res = await tool.execute(
+                        instance_id, tool_args, agent_data=agent_data
+                    )
+                    if retry_metrics is not None and attempt > 0:
+                        retry_metrics["recovered_calls"] += 1
+                    break
+                except Exception as e:
+                    can_retry = retry_enabled and isinstance(e, RECOVERABLE_TOOL_ERRORS)
+                    if can_retry and attempt + 1 < max_attempts:
+                        if retry_metrics is not None:
+                            if attempt == 0:
+                                retry_metrics["retried_calls"] += 1
+                            retry_metrics["retry_attempts"] += 1
+                        logger.warning(
+                            f"Recoverable error executing tool '{tool_name}' "
+                            f"(attempt {attempt + 1}/{max_attempts}): {e}"
+                        )
+                    else:
+                        if retry_metrics is not None:
+                            if can_retry:
+                                retry_metrics["exhausted_calls"] += 1
+                            else:
+                                retry_metrics["non_recoverable_failures"] += 1
+                        logger.warning(f"Error executing tool '{tool_name}': {e}")
+                        return ToolResponse(text=f"Error executing tool '{tool_name}': {e}"), 0.0, {}
+                finally:
+                    # Release failed or completed BaseTool instance before retrying or returning.
+                    if instance_id:
+                        try:
+                            await tool.release(instance_id)
+                        except Exception as release_err:
+                            if retry_metrics is not None:
+                                retry_metrics["release_failures"] += 1
+                            logger.warning(
+                                f"Error releasing instance '{instance_id}' for tool '{tool_name}': {release_err}"
+                            )
+
+                if retry_cfg.retry_delay > 0:
+                    await asyncio.sleep(retry_cfg.retry_delay)
 
         tool_response_text = tool_execution_response.text
         if tool_response_text and len(tool_response_text) > self.max_tool_response_length:
