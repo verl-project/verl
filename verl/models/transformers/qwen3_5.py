@@ -38,9 +38,65 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _resolve_kernel_target(fn):
+    """Return the callable whose signature describes the arguments a loaded kernel accepts.
+
+    transformers' hub kernel wrappers use ``@functools.wraps(torch_function)``, which
+    exposes the fallback's ``**kwargs`` signature even when an optimized kernel is loaded.
+    When the ``kernels`` package is installed, the wrapper is additionally converted into an
+    instantiated ``nn.Module`` that only forwards ``*args``/``**kwargs``, so both module and
+    function wrappers are unwrapped until the original implementation is reached.
+    """
+    seen = set()
+    current = fn
+    target = fn
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        # kernels' use_kernel_forward_from_hub turns a decorated function into a module instance.
+        if isinstance(current, torch.nn.Module):
+            current = getattr(current, "forward", None)
+            target = current if current is not None else target
+            continue
+        func = getattr(current, "__func__", None)
+        if func is not None:
+            current = func
+            target = func
+            continue
+        closure = getattr(current, "__closure__", None)
+        code = getattr(current, "__code__", None)
+        if closure and code:
+            freevars = dict(zip(code.co_freevars, closure, strict=True))
+            implementation = freevars.get("implementation")
+            if implementation is not None:
+                try:
+                    impl = implementation.cell_contents
+                except ValueError:
+                    impl = None
+                if callable(impl):
+                    return impl
+            # kernels' _create_func_module wraps the hub kernel wrapper in a function that
+            # closes over it; follow that closure to keep resolving the implementation.
+            inner = freevars.get("func")
+            if inner is not None:
+                try:
+                    inner_callable = inner.cell_contents
+                except ValueError:
+                    inner_callable = None
+                if callable(inner_callable):
+                    current = inner_callable
+                    continue
+        current = getattr(current, "__wrapped__", None)
+    return target
+
+
 def _call_accepts_kwarg(fn, name: str) -> bool:
-    params = signature(fn).parameters
-    return name in params or any(param.kind == param.VAR_KEYWORD for param in params.values())
+    """Whether the resolved kernel implementation declares ``name`` explicitly.
+
+    ``**kwargs``-only wrappers are rejected so packed arguments are forwarded only to
+    kernels that actually accept them.
+    """
+    target = _resolve_kernel_target(fn)
+    return name in signature(target).parameters
 
 
 def _prepare_packed_seq_idx(cu_seqlens: torch.LongTensor, cu_seqlens_cpu: Optional[torch.LongTensor]):
@@ -264,7 +320,9 @@ def qwen3_5_gated_delta_net_forward(
         if cache_params is not None:
             conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
             cache_params.conv_states[self.layer_idx] = conv_state
-        if causal_conv1d_fn is not None:
+        if causal_conv1d_fn is not None and (
+            model_cu_seqlens is None or _call_accepts_kwarg(causal_conv1d_fn, "seq_idx")
+        ):
             conv_prefix_len = 0
             conv_input = mixed_qkv
             if cp_context is not None:
