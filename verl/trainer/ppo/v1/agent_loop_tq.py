@@ -46,12 +46,23 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
     params["temperature"] = 0
 
 
+def _worker_class(config):
+    """The worker the rollout runs on: sharing lives in a subclass, so turning it off never imports it."""
+    # Imported here because the subclass lives below this module in the import graph.
+    from verl.experimental.agent_loop.prompt_sharing import prompt_sharing_enabled
+
+    if prompt_sharing_enabled(config):
+        from verl.experimental.agent_loop.agent_loop_tq_share import AgentLoopWorkerTQShare
+
+        return ray.remote(AgentLoopWorkerTQShare)
+    return ray.remote(AgentLoopWorkerTQ)
+
+
 async def _settle_session_tasks(tasks: list[asyncio.Task[Any]]) -> list[BaseException]:
     results = await asyncio.gather(*tasks, return_exceptions=True)
     return [result for result in results if isinstance(result, BaseException)]
 
 
-@ray.remote
 class AgentLoopWorkerTQ(AgentLoopWorker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -152,6 +163,21 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 await _settle_session_tasks(tasks)
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
+    async def _get_multi_modal_inputs(self, uid: str, output: AgentLoopOutput, input_ids: torch.Tensor) -> dict:
+        """``multi_modal_inputs`` of one output; a subclass may compute them once for the sessions of uid."""
+        return self._compute_multi_modal_inputs(output, input_ids)
+
+    async def _put_trajectories(
+        self, keys: list[str], fields: list[dict], tags: list[dict], partition_id: str, sample_kwargs: dict[str, Any]
+    ) -> None:
+        """Store the outputs of one session; a subclass may link shared fields instead of storing them."""
+        await tq.async_kv_batch_put(
+            keys=keys,
+            fields=list_of_dict_to_tensordict(fields),
+            tags=tags,
+            partition_id=partition_id,
+        )
+
     async def _agent_loop_postprocess(
         self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
     ) -> None:
@@ -190,7 +216,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             responses = torch.tensor(output.response_ids, dtype=torch.int64)
             input_ids = torch.cat([prompts, responses], dim=0)
             attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
-            multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
+            multi_modal_inputs = await self._get_multi_modal_inputs(uid, output, input_ids)
             position_ids = self._compute_position_ids(
                 input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
             ).squeeze(0)
@@ -224,18 +250,14 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 }
             )
 
-        await tq.async_kv_batch_put(
-            keys=keys,
-            fields=list_of_dict_to_tensordict(fields),
-            tags=tags,
-            partition_id="train" if not validate else "val",
-        )
+        partition_id = "train" if not validate else "val"
+        await self._put_trajectories(keys, fields, tags, partition_id, kwargs)
 
 
 class AgentLoopManagerTQ(AgentLoopManager):
-    def __init__(self, *args, **kwargs):
-        self.agent_loop_workers_class = AgentLoopWorkerTQ
-        super().__init__(*args, **kwargs)
+    def __init__(self, config, *args, **kwargs):
+        self.agent_loop_workers_class = _worker_class(config)
+        super().__init__(config, *args, **kwargs)
 
     @classmethod
     @auto_await
