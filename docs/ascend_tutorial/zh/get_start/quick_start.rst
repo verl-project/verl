@@ -10,9 +10,9 @@
 关键更新
 --------
 
-- 2026/06/30：新增覆盖四种常用训推后端组合，便于用户在 quickstart 阶段快速选择合适的启动脚本。
-- 2026/05/13：将 quick start 和 install guidance 分开。
-- 2025/12/11：verl 存量场景目前支持自动识别 NPU 设备类型，GPU 脚本在昇腾上运行，原则上不再需要显式设置 ``trainer.device=npu`` 参数，新增特性通过设置 ``trainer.device`` 仍可优先使用，逐步适配自动识别能力。
+- 2026/06/30：新增覆盖四种常用训推后端组合，便于用户在quickstart阶段快速选择合适的启动脚本。
+- 2026/05/13：将quick start和install guidance分开。
+- 2025/12/11：verl存量场景目前支持自动识别NPU设备类型，GPU脚本在昇腾上运行，原则上不再需要显式设置 ``trainer.device=npu`` 参数，新增特性通过设置 ``trainer.device`` 仍可优先使用，逐步适配自动识别能力。
 
 
 硬件支持
@@ -26,39 +26,39 @@
 快速开始
 ---------------------------------
 
-本文面向 Ascend NPU 环境，提供基于 GSM8K 和 Qwen3-0.6B 的最小化 GRPO 训练验证流程，涵盖四种训推后端组合，帮助用户快速上手。
+本文面向Ascend NPU环境，提供基于GSM8K和Qwen3-0.6B的最小化GRPO训练验证流程，涵盖四种训推后端组合，帮助用户快速上手。
 
 验证范围：
 
-- 环境入口：verl 入口是否可用；
+- 环境入口：verl入口是否可用；
 - 数据读取：GSM8K数据集是否正确解析；
-- 组件初始化：actor、rollout、reference worker 是否能初始化；
-- 模型推理：vLLM-Ascend/sglang rollout 是否能生成；
-- 端到端链路：训练流程是否能完成首个 step。
+- 组件初始化：actor、rollout、reference worker是否能初始化；
+- 模型推理：vLLM-Ascend/SGLang rollout是否能生成；
+- 端到端链路：训练流程是否能完成首个step。
   
 配置提示：
 
-- 默认配置：示例脚本均使用 Qwen3-0.6B 模型和 GSM8K 数据集。
-- 硬件适配：由于 A3 每卡含 2 Die，运行示例需将 ``n_gpus_per_node`` 参数设置为16（A2 每卡含 1 die）
+- 默认配置：示例脚本均使用Qwen3-0.6B模型和GSM8K数据集。
+- 硬件适配：由于A3每卡含2 Die，运行示例需将 ``n_gpus_per_node`` 参数设置为16（A2每卡含1 Die）。
 
 环境准备
 ~~~~~~~~~~~~~~~
 
-运行本文脚本前，请确认已完成 verl Ascend 环境安装。环境安装详见 `昇腾安装指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/install_guidance.html>`_ 。
+运行本文脚本前，请确认已完成verl Ascend环境安装。环境安装详见 `昇腾安装指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/install_guidance.html>`_。
 
 权重准备
 ~~~~~~~~~~~~~~~
 
-1. 请自行从Hugging Face上下载 Qwen3-0.6B 模型权重。
+1. 请自行从Hugging Face上下载Qwen3-0.6B模型权重。
 
 2. 脚本中的默认读取权重路径为 ``~/models/Qwen/Qwen3-0.6B``，建议将权重放在该路径下。若路径不同请修改脚本中的MODEL_PATH指向本地路径。
 
 数据准备
 ~~~~~~~~~~~~~~~
 
-1. 请自行从Hugging Face上下载 GSM8K 原始数据集。
+1. 请自行从Hugging Face上下载GSM8K原始数据集。
 
-2. 执行以下命令（请根据实际数据集路径调整命令）
+2. 执行以下命令（请根据实际数据集路径调整命令）。
 
    .. code-block:: bash
 
@@ -74,9 +74,9 @@
 运行方式
 ~~~~~~~~~~~~~~~
 
-1. 进入项目目录： ``cd /your/path/verl``。
+1. 进入项目目录：``cd /your/path/verl``。
 
-2. 使能CANN环境：执行以下命令。（若您自定义了 CANN 的路径，请根据实际路径调整命令。）
+2. 使能CANN环境：执行以下命令。（若您自定义了CANN的路径，请根据实际路径调整命令。）
 
    .. code-block:: bash
 
@@ -91,7 +91,7 @@
 
    * - 组合
      - 训练后端
-     - rollout 后端
+     - rollout后端
      - 运行方式
    * - vLLM + FSDP2
      - FSDP2
@@ -128,18 +128,18 @@
 附录
 -------------------------------------------
 
-SGLang 后端使能说明
+SGLang后端使能说明
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-当前 verl 已解析推理常见参数，详见 `async_sglang_server.py <https://github.com/verl-project/verl/blob/main/verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_ 中 ``ServerArgs`` 初始化传参。
+当前verl已解析推理常见参数，详见 `async_sglang_server.py <https://github.com/verl-project/verl/blob/main/verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_ 中 ``ServerArgs`` 初始化传参。
 
 其他 `SGLang 参数 <https://github.com/sgl-project/sglang/blob/v0.5.10/docs/advanced_features/server_arguments.md>`_ 均可通过 ``engine_kwargs`` 进行参数传递。
 
 
-vLLM 后端脚本转换为 SGLang
+vLLM后端脚本转换为SGLang
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-如需自行将 vLLM 后端推理脚本转换为 SGLang，需要添加或修改以下参数。
+如需自行将vLLM后端推理脚本转换为SGLang，需要添加或修改以下参数。
 
 .. code-block:: bash
 
@@ -154,4 +154,4 @@ vLLM 后端脚本转换为 SGLang
    ++actor_rollout_ref.rollout.engine_kwargs.sglang.moe_a2a_backend="deepep" \
 
    # MoE 模型多 DP 时必须设置为 True（默认为False）
-   +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=False \   
+   +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=True \   

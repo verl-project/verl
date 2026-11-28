@@ -1,4 +1,4 @@
-昇腾安装指南(Ascend 950PR&950DT系列产品)
+昇腾安装指南（Ascend 950PR&950DT系列产品）
 =================
 
 Last updated: 11/13/2026.
@@ -31,7 +31,7 @@ Last updated: 11/13/2026.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 推荐优先使用 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 提供的已有镜像，以减少环境配置和依赖安装工作。
-如需自定义环境，也可以根据 Dockerfile 自行构建镜像。镜像获取、构建和使用方法请参照
+如需自定义环境，也可以根据Dockerfile自行构建镜像。镜像获取、构建和使用方法请参照
 `昇腾镜像说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/dockerfile_build_guidance.html>`_\ 。
 
 
@@ -45,34 +45,34 @@ Last updated: 11/13/2026.
 ============= ================================================= ===================
 CANN          ``9.2.1``                                         CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
 Python        ``3.12``                                          Python版本                                                 
-torch         ``2.10.0``                                        PyTorch 深度学习框架基础包                                 
-torch_npu     ``2.10.0.post7``                                  NPU PyTorch 适配插件
-torchvision   ``0.25.0``                                        PyTorch 图像处理库
-torchaudio    ``2.10.0``                                        PyTorch 音频处理库
-triton-ascend ``3.6.0.post2``                                   NPU Triton 适配
-transformers  ``5.14.1``                                        Hugging Face 大模型库，提供模型架构与预训练权重
-xgrammar      ``>=0.2.1,<1.0.0``                                 vLLM 结构化输出依赖
-vLLM          ``0.30.0``                                        高性能 LLM 推理与服务引擎
-vLLM-Ascend   ``0.30.0``                                        NPU vLLM 后端适配
+torch         ``2.10.0``                                        PyTorch深度学习框架基础包                                 
+torch_npu     ``2.10.0.post7``                                  NPU PyTorch适配插件
+torchvision   ``0.25.0``                                        PyTorch图像处理库
+torchaudio    ``2.10.0``                                        PyTorch音频处理库
+triton-ascend ``3.6.0.post2``                                   NPU Triton适配
+transformers  ``5.14.1``                                        Hugging Face大模型库，提供模型架构与预训练权重
+xgrammar      ``>=0.2.1,<1.0.0``                                 vLLM结构化输出依赖
+vLLM          ``0.30.0``                                        高性能LLM推理与服务引擎
+vLLM-Ascend   ``0.30.0``                                        NPU vLLM后端适配
 Megatron-LM   ``core_v0.18.2``                                  大规模分布式训练框架
-MindSpeed     ``26.2.0_core_r0.18.0``                           Megatron-LM 在昇腾 NPU 上的适配和优化组件
+MindSpeed     ``26.2.0_core_r0.18.0``                           Megatron-LM在昇腾NPU上的适配和优化组件
 ============= ================================================= ===================
 
 .. note::
 
-   MegatronAdaptor 使用 ``26.2.0_core_r0.18.0``。
-   MindSpeed-Bridge 使用 ``26.2.0_v0.5.0``。
-   TransformerEngineNPU 使用 ``26.2.0_release_v2.17``。
-   MindSpeed-Ops 使用 ``26.2.0``。
+   MegatronAdaptor使用 ``26.2.0_core_r0.18.0``。
+   MindSpeed-Bridge使用 ``26.2.0_v0.5.0``。
+   TransformerEngineNPU使用 ``26.2.0_release_v2.17``。
+   MindSpeed-Ops使用 ``26.2.0``。
 
    本表的运行依赖与 `vLLM-Ascend 0.30.0 安装依赖 <https://github.com/vllm-project/vllm-ascend/blob/releases/v0.30.0/requirements.txt>`_
-   对齐；xgrammar 使用 `vLLM 0.30.0 的依赖范围 <https://github.com/vllm-project/vllm/blob/v0.30.0/requirements/common.txt>`_。
-   使用 triton-ascend 提供的 Triton 实现，无需另行安装 triton 软件包。
-   当前两个上游存在 FastAPI 约束冲突：vLLM 要求 ``>=0.133.0,<0.137.0``，vLLM-Ascend 要求 ``<0.124.0``，
+   对齐；xgrammar使用 `vLLM 0.30.0 的依赖范围 <https://github.com/vllm-project/vllm/blob/v0.30.0/requirements/common.txt>`_。
+   使用triton-ascend提供的Triton实现，无需另行安装triton软件包。
+   当前两个上游存在FastAPI约束冲突：vLLM要求 ``>=0.133.0,<0.137.0``，vLLM-Ascend要求 ``<0.124.0``，
    没有同时满足两者的版本。需先解决该冲突，再使用 ``pip check`` 检查最终环境并验证运行兼容性。
 
 
-Megatron 训练后端还需安装以下 Bridge 组件：
+Megatron训练后端还需安装以下Bridge组件：
 
 .. list-table::
    :header-rows: 1
@@ -82,17 +82,17 @@ Megatron 训练后端还需安装以下 Bridge 组件：
      - 说明
    * - Megatron-Bridge
      - ``v0.5.0``
-     - 模型构造与 Hugging Face 权重转换
+     - 模型构造与Hugging Face权重转换
    * - MindSpeed-Bridge
      - ``26.2.0_v0.5.0``
-     - Megatron-Bridge 的昇腾适配
+     - Megatron-Bridge的昇腾适配
 
 
-安装前准备（ CANN）
+安装前准备（CANN）
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-CANN是NPU上的异构计算架构，以下为arm平台950PR&DT系列产品安装指令，请参照如下指令下载HDK和CANN并安装，
-或者根据系统硬件型号从 `CANN社区 <https://www.hiascend.com/cann/download>`_ 下载安装
+CANN是NPU上的异构计算架构，以下为ARM平台950PR&DT系列产品安装指令，请参照如下指令下载HDK和CANN并安装，
+或者根据系统硬件型号从 `CANN社区 <https://www.hiascend.com/cann/download>`_ 下载安装。
 
 .. code:: bash
 
@@ -135,17 +135,17 @@ vLLM推理后端支持
     cd ..
 
 
-Megatron 训练后端支持
+Megatron训练后端支持
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. note::
 
-   Megatron-Bridge ``v0.5.0`` 配合本文的 Transformers ``5.14.1`` 环境时，需要应用
+   Megatron-Bridge ``v0.5.0`` 配合本文的Transformers ``5.14.1`` 环境时，需要应用
    `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_。
-   当 Transformers 已提供原生 Qwen3-ASR 配置时，补丁会跳过内置的 AutoConfig、
-   AutoModel 和 AutoProcessor 注册，避免导入时出现 ``qwen3_asr`` 重复注册错误。
-   下方的 verl 依赖安装命令会在克隆 verl 后，仅向已存在的 Megatron-Bridge 目录应用该补丁。
-   仅使用 FSDP 时会跳过此步骤；使用 Megatron 时，请将 Megatron-Bridge 与 verl 源码目录放在同一父目录下。
+   当Transformers已提供原生Qwen3-ASR配置时，补丁会跳过内置的AutoConfig、
+   AutoModel和AutoProcessor注册，避免导入时出现 ``qwen3_asr`` 重复注册错误。
+   下方的verl依赖安装命令会在克隆verl后，仅向已存在的Megatron-Bridge目录应用该补丁。
+   仅使用FSDP时会跳过此步骤；使用Megatron时，请将Megatron-Bridge与verl源码目录放在同一父目录下。
 
 .. code:: bash
     
@@ -172,7 +172,7 @@ Megatron 训练后端支持
     # 恢复推理依赖版本，避免训练依赖安装时覆盖
     pip install torch_npu==2.10.0.post7 transformers==5.14.1 "xgrammar>=0.2.1,<1.0.0"
 
-verl 依赖安装
+verl依赖安装
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code:: bash
@@ -195,7 +195,7 @@ verl 依赖安装
 
 日志过滤
 ^^^^^^^^^^^^^^^^^^^^^^^^
-使用 transformers 时，若出现大量别名废弃告警，可添加环境变量过滤冗余日志
+使用transformers时，若出现大量别名废弃告警，可添加环境变量过滤冗余日志。
 
 .. code:: bash
 

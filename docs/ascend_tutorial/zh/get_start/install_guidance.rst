@@ -10,27 +10,27 @@ Last updated: 11/13/2026.
 关键更新
 --------
 
--  2026/11/03：本分支将 vLLM / vLLM-Ascend 目标版本调整为 ``0.30.0``，
-   torch_npu 对齐 ``2.10.0.post7``，transformers 对齐 ``5.14.1``，xgrammar 对齐 ``>=0.2.1,<1.0.0``，
-   triton-ascend 使用 ``3.6.0.post2``；Megatron-LM 使用 ``core_v0.18.0``；MindSpeed 保持 ``core_r0.18.0``。
--  2026/08/29：将 MindSpeed / Megatron-LM 从 ``core_r0.16.0`` 更新为
-   ``core_r0.18.0``\ 。弃用mbridge，改用Megatron-Bridge，Megatron-Bridge 版本为 ``0.5.0``\ 。
-   torch_npu 更新为 ``2.10.0.post4``\ 。
--  2026/08/03：将 vLLM / vLLM-Ascend 从 ``0.18.0`` 更新为 ``0.23.0``\ ，vLLM
-   对应基础环境版本同步调整为 torch ``2.10.0``\ 、torch_npu ``2.10.0.post2``\ 。
--  2026/05/13：vLLM 已按 `PR
-   #6291 <https://github.com/verl-project/verl/pull/6291>`__\ 将 vLLM /
-   vLLM-Ascend 从 ``0.13.0`` 更新为 ``0.18.0``\ ，vLLM
-   对应基础环境版本同步调整为 torch ``2.9.0``\ 、torch_npu
+-  2026/11/03：本分支将vLLM / vLLM-Ascend目标版本调整为 ``0.30.0``，
+   torch_npu对齐 ``2.10.0.post7``，transformers对齐 ``5.14.1``，xgrammar对齐 ``>=0.2.1,<1.0.0``，
+   triton-ascend使用 ``3.6.0.post2``；Megatron-LM使用 ``core_v0.18.0``；MindSpeed保持 ``core_r0.18.0``。
+-  2026/08/29：将MindSpeed / Megatron-LM从 ``core_r0.16.0`` 更新为
+   ``core_r0.18.0``\ 。弃用mbridge，改用Megatron-Bridge，Megatron-Bridge版本为 ``0.5.0``\ 。
+   torch_npu更新为 ``2.10.0.post4``\ 。
+-  2026/08/03：将vLLM / vLLM-Ascend从 ``0.18.0`` 更新为 ``0.23.0``\ ，vLLM
+   对应基础环境版本同步调整为torch ``2.10.0``\ 、torch_npu ``2.10.0.post2``\ 。
+-  2026/05/13：vLLM已按 `PR
+   #6291 <https://github.com/verl-project/verl/pull/6291>`__\ 将vLLM /
+   vLLM-Ascend从 ``0.13.0`` 更新为 ``0.18.0``\ ，vLLM
+   对应基础环境版本同步调整为torch ``2.9.0``\ 、torch_npu
    ``2.9.0.post2``\ 。
--  2025/12/11：verl 存量场景目前支持自动识别 NPU 设备类型。原则上，GPU
+-  2025/12/11：verl存量场景目前支持自动识别NPU设备类型。原则上，GPU
    脚本在昇腾上运行时不再需要显式设置
    ``trainer.device=npu``\ ；新增特性仍可通过设置 ``trainer.device``
    优先指定设备类型。
 
 ..
 
-   [说明] 自动识别 NPU 设备类型的前提，是运行程序所在环境包含
+   [说明] 自动识别NPU设备类型的前提，是运行程序所在环境包含
    ``torch_npu`` 软件包。如环境中不包含 ``torch_npu``\ ，仍需显式指定
    ``trainer.device=npu``\ 。
 
@@ -68,7 +68,7 @@ Atlas A3训练系列产品
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 推荐优先使用 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 提供的已有镜像，以减少环境配置和依赖安装工作。
-如需自定义环境，也可以根据 Dockerfile 自行构建镜像。镜像获取、构建和使用方法请参照
+如需自定义环境，也可以根据Dockerfile自行构建镜像。镜像获取、构建和使用方法请参照
 `昇腾镜像说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/dockerfile_build_guidance.html>`_\ 。
 
 
@@ -85,40 +85,40 @@ Atlas A3训练系列产品
 HDK           ``26.2.rc1``                            NPU硬件驱动与固件
 CANN          ``9.2.1``                               CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
 Python        ``>=3.10, <3.13``\ ，推荐 ``3.12``      
-torch         ``2.10.0``                              PyTorch 深度学习框架基础包
-torch_npu     ``2.10.0.post7``                        NPU PyTorch 适配插件
-torchvision   ``0.25.0``                              PyTorch 图像处理库
-torchaudio    ``2.10.0``                              PyTorch 音频处理库
-triton-ascend ``3.6.0.post2``                         NPU Triton 适配，安装命令需参考脚本 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`__
-transformers  ``5.14.1``                              Hugging Face 大模型库，提供模型架构与预训练权重
-xgrammar      ``>=0.2.1,<1.0.0``                       vLLM 结构化输出依赖
-vLLM          ``0.30.0``                              高性能 LLM 推理与服务引擎
-vLLM-Ascend   ``0.30.0``                              NPU vLLM 后端适配
+torch         ``2.10.0``                              PyTorch深度学习框架基础包
+torch_npu     ``2.10.0.post7``                        NPU PyTorch适配插件
+torchvision   ``0.25.0``                              PyTorch图像处理库
+torchaudio    ``2.10.0``                              PyTorch音频处理库
+triton-ascend ``3.6.0.post2``                         NPU Triton适配，安装命令需参考脚本 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`__
+transformers  ``5.14.1``                              Hugging Face大模型库，提供模型架构与预训练权重
+xgrammar      ``>=0.2.1,<1.0.0``                       vLLM结构化输出依赖
+vLLM          ``0.30.0``                              高性能LLM推理与服务引擎
+vLLM-Ascend   ``0.30.0``                              NPU vLLM后端适配
 Megatron-LM   ``core_v0.18.2``                        大规模分布式训练框架
-MindSpeed     ``26.2.0_core_r0.18.0``                 Megatron-LM 在昇腾 NPU 上的适配和优化组件
+MindSpeed     ``26.2.0_core_r0.18.0``                 Megatron-LM在昇腾NPU上的适配和优化组件
 ============= ======================================= ===================
 
 .. note::
 
-   MegatronAdaptor 使用 ``26.2.0_core_r0.18.0``。
-   MindSpeed-Bridge 使用 ``26.2.0_v0.5.0``。
-   TransformerEngineNPU 使用 ``26.2.0_release_v2.17``。
-   MindSpeed-Ops 使用 ``26.2.0``。
+   MegatronAdaptor使用 ``26.2.0_core_r0.18.0``。
+   MindSpeed-Bridge使用 ``26.2.0_v0.5.0``。
+   TransformerEngineNPU使用 ``26.2.0_release_v2.17``。
+   MindSpeed-Ops使用 ``26.2.0``。
 
    本表按 `vLLM-Ascend 0.30.0 安装依赖 <https://github.com/vllm-project/vllm-ascend/blob/releases/v0.30.0/requirements.txt>`_
-   对齐 torch、torch_npu、torchvision、torchaudio、triton-ascend 和 transformers；xgrammar 使用
+   对齐torch、torch_npu、torchvision、torchaudio、triton-ascend和transformers；xgrammar使用
    `vLLM 0.30.0 的依赖范围 <https://github.com/vllm-project/vllm/blob/v0.30.0/requirements/common.txt>`_。
-   使用 triton-ascend 提供的 Triton 实现，无需另行安装 triton 软件包。
-   当前两个上游存在 FastAPI 约束冲突：vLLM 要求 ``>=0.133.0,<0.137.0``，vLLM-Ascend 要求 ``<0.124.0``，
+   使用triton-ascend提供的Triton实现，无需另行安装triton软件包。
+   当前两个上游存在FastAPI约束冲突：vLLM要求 ``>=0.133.0,<0.137.0``，vLLM-Ascend要求 ``<0.124.0``，
    没有同时满足两者的版本。需先解决该冲突，再使用 ``pip check`` 检查最终环境并验证运行兼容性。
-   vLLM 与 SGLang 共用 ``requirements-npu.txt``；vLLM 在全部依赖安装完成后补装 ``triton-ascend==3.6.0.post2``，SGLang 保持原依赖版本。
+   vLLM与SGLang共用 ``requirements-npu.txt``；vLLM在全部依赖安装完成后补装 ``triton-ascend==3.6.0.post2``，SGLang保持原依赖版本。
 
 
 安装前准备（HDK & CANN）
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参照如下指令下载HDK和CANN并安装，
-或者根据系统硬件型号从 `CANN社区 <https://www.hiascend.com/cann/download>`_ 下载安装
+CANN是NPU上的异构计算架构，以下为ARM平台A3安装指令，请参照如下指令下载HDK和CANN并安装，
+或者根据系统硬件型号从 `CANN社区 <https://www.hiascend.com/cann/download>`_ 下载安装。
 
 .. code:: bash
 
@@ -145,17 +145,17 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
 
 .. note::
 
-   启用 Megatron 后端时，安装脚本会自动向 Megatron-Bridge ``v0.5.0`` 应用
+   启用Megatron后端时，安装脚本会自动向Megatron-Bridge ``v0.5.0`` 应用
    `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_。
-   在本文使用的 Transformers ``5.14.1`` 环境中，补丁会保留已有的原生 Qwen3-ASR 注册，
-   并在该配置已注册时跳过内置的 AutoConfig、AutoModel 和 AutoProcessor 注册，
-   避免导入 Megatron-Bridge 时出现 ``qwen3_asr`` 重复注册错误。
-   运行安装脚本时，请保留克隆的 verl 仓库中的该补丁文件。
+   在本文使用的Transformers ``5.14.1`` 环境中，补丁会保留已有的原生Qwen3-ASR注册，
+   并在该配置已注册时跳过内置的AutoConfig、AutoModel和AutoProcessor注册，
+   避免导入Megatron-Bridge时出现 ``qwen3_asr`` 重复注册错误。
+   运行安装脚本时，请保留克隆的verl仓库中的该补丁文件。
 
-   安装脚本还会安装 vLLM-Ascend 所需的 FLA NPU 后端（版本 ``26.9.1``）。
-   运行脚本前须设置 ``FLA_NPU_DEVICE``：A2 使用 ``a2``，A3 使用 ``a3``，
+   安装脚本还会安装vLLM-Ascend所需的FLA NPU后端（版本 ``26.9.1``）。
+   运行脚本前须设置 ``FLA_NPU_DEVICE``：A2使用 ``a2``，A3使用 ``a3``，
    分别安装 ``flash-linear-attention-npu-a2`` 或 ``flash-linear-attention-npu-a3``。
-   FSDP 和 Megatron 安装方式均会安装该依赖。
+   FSDP和Megatron安装方式均会安装该依赖。
 
 .. code:: bash
 
@@ -175,7 +175,7 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
 
 日志过滤
 ^^^^^^^^^^^^^^^^^^^^^^^^
-使用 transformers 时，若出现大量别名废弃告警，可添加环境变量过滤冗余日志
+使用transformers时，若出现大量别名废弃告警，可添加环境变量过滤冗余日志。
 
 .. code:: bash
 
@@ -193,27 +193,27 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
 HDK           ``25.5.0``                              NPU硬件驱动与固件
 CANN          ``>=8.5.0``                             CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
 Python        ``>=3.12``\ ，推荐 ``3.12``
-torch         ``2.8.0``                               PyTorch 深度学习框架基础包
-torch_npu     ``2.8.0.post2``                         NPU PyTorch 适配插件
-SGLang        ``v0.5.10``                             高性能 LLM 推理引擎
+torch         ``2.8.0``                               PyTorch深度学习框架基础包
+torch_npu     ``2.8.0.post2``                         NPU PyTorch适配插件
+SGLang        ``v0.5.10``                             高性能LLM推理引擎
 triton        ``3.5.0``                               Triton，用于编写自定义算子
-triton-ascend ``3.2.2``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_sglang_mcore_npu.sh>`__
-transformers  ``5.10.4``                               Hugging Face 大模型库，提供模型架构与预训练权重
+triton-ascend ``3.2.2``                               NPU Triton适配，安装命令需参考脚本 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_sglang_mcore_npu.sh>`__
+transformers  ``5.10.4``                               Hugging Face大模型库，提供模型架构与预训练权重
 Megatron-LM   ``core_r0.18.0``                        大规模分布式训练框架
-MindSpeed     ``core_r0.18.0``                        Megatron-LM 在昇腾 NPU 上的适配和优化组件
+MindSpeed     ``core_r0.18.0``                        Megatron-LM在昇腾NPU上的适配和优化组件
 ============= ======================================= ===================
 
-昇腾 Megatron 依赖组合以 ``install_sglang_mcore_npu.sh`` 为基准：
-Megatron-LM、MindSpeed、MegatronAdaptor 使用 ``core_r0.18.0``，
-Megatron-Bridge 使用 ``v0.5.0``；MindSpeed-Bridge 使用仓库默认分支，
-当前未固定 tag 或 commit。SGLang 安装脚本和当前 CI 镜像构建文件使用同一组合。
+昇腾Megatron依赖组合以 ``install_sglang_mcore_npu.sh`` 为基准：
+Megatron-LM、MindSpeed、MegatronAdaptor使用 ``core_r0.18.0``，
+Megatron-Bridge使用 ``v0.5.0``；MindSpeed-Bridge使用仓库默认分支，
+当前未固定tag或commit。SGLang安装脚本和当前CI镜像构建文件使用同一组合。
 
 
 安装前准备（HDK & CANN）
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参照如下指令下载HDK和CANN并安装，
-或者根据系统硬件型号从 `CANN社区 <https://www.hiascend.com/cann/download?versionId=680&ids=d803%2Ch0501%2Ch0601%2Ch0702>`_ 下载安装
+CANN是NPU上的异构计算架构，以下为ARM平台A3安装指令，请参照如下指令下载HDK和CANN并安装，
+或者根据系统硬件型号从 `CANN社区 <https://www.hiascend.com/cann/download?versionId=680&ids=d803%2Ch0501%2Ch0601%2Ch0702>`_ 下载安装。
 
 .. code:: bash
 
@@ -236,7 +236,7 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
 源码安装
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-我们提供了基于conda一键部署 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_sglang_mcore_npu.sh>`__ ，脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决。
+我们提供了基于conda一键部署 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_sglang_mcore_npu.sh>`__，脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决。
 
 .. code:: bash
 
@@ -252,10 +252,10 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    # 如果您仅需要使用FSDP后端
    # USE_MEGATRON=0 bash verl/scripts/install_sglang_mcore_npu.sh
 
-SGLang 使用注意事项
+SGLang使用注意事项
 ^^^^^^^^^^^^^^^^^^^
 
-当前 NPU 上支持 SGLang 后端必须添加以下环境变量：
+当前NPU上使用SGLang后端时，必须添加以下环境变量：
 
 .. code:: bash
 
@@ -280,11 +280,11 @@ SGLang 使用注意事项
 昇腾暂不支持生态库说明
 ~~~~~~~~~~~~~~~~~~~~~~
 
-verl 中昇腾暂不支持生态库如下：
+verl中昇腾暂不支持的生态库如下：
 
 +------------------+--------------------------------------------------+
 | 软件             | 说明                                             |
 +==================+==================================================+
-| ``flash_attn``   | 不支持通过独立 ``flash_attn`` 包使能 flash       |
-|                  | attention 加速，支持通过 transformers 使用       |
+| ``flash_attn``   | 不支持通过独立 ``flash_attn`` 包使能flash        |
+|                  | attention加速，支持通过transformers使用          |
 +------------------+--------------------------------------------------+
