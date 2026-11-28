@@ -1,0 +1,8 @@
+vllm>=0.8.5
+torch
+transformers
+datasets
+wandb
+tenacity
+atroposlib
+pydantic

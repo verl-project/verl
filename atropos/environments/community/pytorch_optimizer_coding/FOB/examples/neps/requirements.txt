@@ -1,0 +1,5 @@
+neural-pipeline-search
+torch==2.0.0
+torchvision
+torchaudio
+torchtext

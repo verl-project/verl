@@ -1,0 +1,6 @@
+requests>=2.28.0
+python-dotenv>=0.19.0
+gymnasium>=0.28.1
+numpy>=1.24.0
+# Atropos would be included here in a full implementation
+# atropos>=0.1.0
