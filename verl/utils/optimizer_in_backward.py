@@ -51,11 +51,6 @@ The wrapper keeps the wrapped optimizer's ``state`` / ``param_groups`` / ``state
 authoritative, so checkpoints, LR schedulers and optimizer offload keep working unchanged.
 Only :meth:`_step_param` temporarily narrows ``param_groups`` to a single parameter, which
 is what lets one parameter be stepped without touching the others.
-
-Not covered here (already available in verl): activation offloading
-(``model.enable_activation_offload`` / :mod:`verl.utils.activation_offload`) and
-``fsdp_config.reshard_after_forward`` / ``enable_full_shard`` (FSDP1/FSDP2/veomni/torchtitan
-configs and :mod:`verl.utils.fsdp_utils`).
 """
 
 from __future__ import annotations
@@ -145,7 +140,6 @@ class OptimizerInBackwardWrapper:
 
     def zero_grad(self, set_to_none: bool = True):
         self.optimizer.zero_grad(set_to_none=set_to_none)
-        self._stepping = False
         self._sq_norm = None
         self._nonfinite = False
         self._stepped_params = 0
@@ -181,8 +175,6 @@ class OptimizerInBackwardWrapper:
                 had already been updated, so the mini-batch cannot be skipped atomically.
         """
         self._stepping = False
-        if self.step_in_hooks:
-            self._check_leftover_grads()
         if grad_norm is None:
             grad_norm = self._reduce_partial_norm()
         if self._nonfinite and self._stepped_params:
@@ -232,24 +224,11 @@ class OptimizerInBackwardWrapper:
             # No partial norms were recorded, so this is the non-hook mode and the caller did
             # not measure the norm either (``clip_grad`` disabled): measure the gradients now.
             total = self._sq_norm_of_current_grads()
-        elif self.step_in_hooks:
-            # Gradients that accumulated in earlier micro-batches without firing a hook in the
-            # last one (e.g. an expert unused by the final batch) are still pending here.
-            leftover = self._sq_norm_of_current_grads()
-            if leftover is not None:
-                total = total + leftover
         if total is None:
             return 0.0
         if self._grad_norm_group is not None and torch.distributed.is_initialized():
             torch.distributed.all_reduce(total, group=self._grad_norm_group)
         return total.sqrt().item()
-
-    def _check_leftover_grads(self):
-        """Flag a non-finite gradient that never reached a hook during the last backward."""
-        for param in self._params:
-            if param.grad is not None and not torch.isfinite(self._local_view(param.grad)).all():
-                self._nonfinite = True
-                return
 
     def _sq_norm_of_current_grads(self):
         total = None
