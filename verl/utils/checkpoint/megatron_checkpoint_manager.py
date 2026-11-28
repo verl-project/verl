@@ -27,7 +27,7 @@ from megatron.core import dist_checkpointing, mpu, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
 from packaging import version
 
-from verl.utils.device import get_device_name, get_torch_device, is_device_available
+from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_device_available
 from verl.utils.fs import is_non_local, local_mkdir_safe
 from verl.utils.logger import log_with_rank
 from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing, save_dist_checkpointing
@@ -44,6 +44,7 @@ from verl.utils.megatron_utils import (
 from verl.utils.transformers_compat import copy_generation_config
 
 from .checkpoint_manager import BaseCheckpointManager
+from .megatron_thread_checkpoint import ThreadedCheckpointWriter, _raise_if_writer_failed
 
 # Setup logging
 logger = logging.getLogger(__file__)
@@ -199,6 +200,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         self.peft_cls = peft_cls
         self.use_megatron_fsdp = use_megatron_fsdp
         self.rank = torch.distributed.get_rank()
+        self._threaded_checkpoint_writer: ThreadedCheckpointWriter | None = None
+        self.threaded_checkpoint_metrics: dict[str, float] = {}
 
         # ``use_dist_checkpointing`` selects Megatron shards for the ``model``
         # slot; HF weights always go through ``bridge`` when requested by
@@ -1033,6 +1036,45 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 default=lambda o: o.to_dict() if hasattr(o, "to_dict") else o,
             )
 
+    def enable_trainer_owned_threaded_checkpointing(self, *, cache_plans: bool = False) -> None:
+        """Select the caller-owned thread writer on all ranks before the first save.
+
+        The caller finalizes writes, publishes the tracker, and manages storage
+        and retention. Cache plans only for a stable sharded state structure.
+        """
+        if self._threaded_checkpoint_writer is not None or self.previous_global_step is not None:
+            raise RuntimeError("Select threaded checkpointing once, before the first save")
+        if self.checkpoint_config is None or not self.checkpoint_config.async_save:
+            raise ValueError("Threaded checkpointing requires async_save")
+        if not is_cuda_available or not self.use_dist_checkpointing or self.use_megatron_fsdp:
+            raise ValueError(
+                "Threaded checkpointing requires native Megatron checkpoints on CUDA without Megatron-FSDP"
+            )
+        if self.should_save_hf_model:
+            raise ValueError("Threaded checkpointing does not support Hugging Face weight export")
+        if not (self.should_save_dist_ckpt_model or self.should_save_optimizer or self.should_save_extra):
+            raise ValueError("Threaded checkpointing requires at least one native checkpoint content")
+        self._threaded_checkpoint_writer = ThreadedCheckpointWriter(cache_plans=cache_plans)
+
+    def finalize_async_checkpoint(self, *, blocking: bool = True) -> bool:
+        """Complete caller-owned threaded writes and publish the role manifest on aligned ranks."""
+        writer = self._threaded_checkpoint_writer
+        if writer is None:
+            raise RuntimeError("Threaded checkpointing is not enabled")
+        return writer.finalize(blocking=blocking)
+
+    def discard_failed_async_checkpoint(self) -> None:
+        """Clear a failed threaded checkpoint on all ranks before saving to a new directory."""
+        writer = self._threaded_checkpoint_writer
+        if writer is None:
+            raise RuntimeError("Threaded checkpointing is not enabled")
+        writer.discard_failed()
+
+    def close_threaded_checkpoint(self) -> None:
+        """Drain and release the thread writer on all ranks before shutting down."""
+        if self._threaded_checkpoint_writer is not None:
+            self._threaded_checkpoint_writer.close()
+
     def _save_dist_checkpoint(self, dist_checkpoint_path: str, state_dict: dict):
         """Persist ``state_dict`` via Megatron dist_checkpointing.
 
@@ -1046,6 +1088,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         ``None`` for synchronous saves.
         """
         sharded_sd_metadata = self._build_sharded_state_dict_metadata()
+        if self._threaded_checkpoint_writer is not None:
+            return self._threaded_checkpoint_writer.save_dist_checkpoint(
+                dist_checkpoint_path, state_dict, sharded_sd_metadata
+            )
 
         async_save_request = save_dist_checkpointing(
             sharded_state_dict=state_dict,
@@ -1100,6 +1146,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # Write the contents manifest last so its presence indicates a
         # fully-complete save (including async dist_checkpointing writes).
         self._write_checkpoint_manifest(local_path, global_step, saved_any_dist_ckpt)
+        if self._threaded_checkpoint_writer is not None:
+            return
 
         if self.rank == 0 and hdfs_path is not None:
             log_with_rank(f"Uploading checkpoint to {hdfs_path}", rank=self.rank, logger=logger)
@@ -1139,7 +1187,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         In all other cases (sync save, or async save with nothing to write)
         the callback fires immediately on the calling thread.
         """
-        if self.checkpoint_config.async_save and async_requests:
+        writer = self._threaded_checkpoint_writer
+        if writer is not None:
+            if not async_requests:
+                raise RuntimeError("Threaded checkpoint did not schedule any native writes")
+            self.threaded_checkpoint_metrics = writer.schedule(async_requests, finalize_save_fn)
+            self.threaded_checkpoint_metrics["checkpoint/worker_async_request_count"] = float(len(async_requests))
+        elif self.checkpoint_config.async_save and async_requests:
             async_requests[-1].add_finalize_fn(finalize_save_fn)
             from megatron.core.dist_checkpointing.strategies.base import async_calls
 
@@ -1172,6 +1226,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         See ``docs/advance/checkpoint.rst`` ("Locating saved contents") for
         the manifest schema.
         """
+        writer = self._threaded_checkpoint_writer
+        if writer is not None:
+            writer.raise_if_failed()
+            if writer.pending:
+                raise RuntimeError("Finalize the pending threaded checkpoint before starting another save")
+            if hdfs_path is not None or max_ckpt_to_keep is not None:
+                raise ValueError("The threaded checkpoint caller owns storage and retention")
         self.previous_global_step = global_step
 
         if not self.checkpoint_config.async_save:
@@ -1262,7 +1323,15 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
         # ── 4. Transformer config (rank 0, at checkpoint root) ──────────────
         if self.should_save_extra:
-            self._save_transformer_config(local_path)
+            if writer is not None:
+                config_error = None
+                try:
+                    self._save_transformer_config(local_path)
+                except BaseException as error:
+                    config_error = error
+                _raise_if_writer_failed(config_error)
+            else:
+                self._save_transformer_config(local_path)
 
         # ── 5. Finalization (manifest, HDFS upload, tracker, retention) ─────
         # FSDP saves synchronously and produces no async request, so the
