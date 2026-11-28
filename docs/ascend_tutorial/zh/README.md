@@ -3,7 +3,7 @@
 
 昇腾全面支持 verl 使用与开发，本文档全面介绍了如何在华为昇腾芯片 NPU 上使用 verl。
 
-Last updated: 05/14/2026.
+Last updated: 11/03/2026.
 
 ## 目录结构
 
@@ -24,6 +24,7 @@ zh/
 - [昇腾镜像说明](./get_start/dockerfile_build_guidance.rst) - 构建并使用昇腾环境的 Docker 镜像  
 - [昇腾安装指南](./get_start/install_guidance.rst) - 在昇腾 NPU 上自定义安装 verl                                                    
 - [昇腾快速上手说明](./get_start/quick_start.rst) - 快速上手在昇腾 NPU 上运行 verl
+- [基于 CANN 基础镜像的源码安装](./get_start/container_source_install.rst) - 在 A3 Ubuntu 容器中准备环境并执行源码安装
 
 ## 特性支持说明
 

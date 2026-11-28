@@ -1,7 +1,7 @@
 昇腾镜像说明
 ===================================
 
-Last updated: 11/11/2026.
+Last updated: 11/26/2026.
 
 
 镜像获取与公开镜像地址
@@ -10,6 +10,14 @@ Last updated: 11/11/2026.
 昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3/950 镜像，基于 `Dockerfile <https://github.com/verl-project/verl/tree/main/docker/ascend>`_ 构建。
 
 最新构建镜像名格式：latest-{推理后端}-{适用产品信息}-{操作系统}-{其他字段}
+
+A3 vLLM 的最新镜像也可从国内 SWR 仓库拉取。
+
+.. code-block:: bash
+   :name: docker-image-vllm-a3
+
+   export IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+   docker pull "$IMAGE"
 
 verl release版本镜像名格式：{verl release版本号}-{CANN版本}-{TorchNPU版本}[-{适用产品信息}-{操作系统}]-{Python版本}[-{推理后端}-{其他字段}]
 
@@ -148,6 +156,17 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 
 镜像构建命令示例
 --------------------
+
+A3 vLLM 镜像使用当前工作目录中的源码。在 verl 仓库根目录执行
+``git submodule update --init --recursive`` 后构建镜像。
+
+.. code-block:: bash
+   :name: docker-build-vllm-a3
+
+   docker build \
+       -f docker/ascend/Dockerfile.ascend_9.2.1_a3 \
+       --build-arg PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}" \
+       -t "${IMAGE:-verl-ascend:9.2.1-a3}" .
 
 .. code:: bash
 

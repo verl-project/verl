@@ -5,7 +5,7 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "docker/ascend/Dockerfile.ascend_9.2.1_a3"
+      - "docker/ascend/Dockerfile.ascend_9.2.1_a3*"
       - "docker/ascend/Dockerfile.ascend_9.1.0_a3_v0.9.1"
       - ".github/workflows/docker-build-ascend-a3.yml"
 
@@ -50,6 +50,9 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
