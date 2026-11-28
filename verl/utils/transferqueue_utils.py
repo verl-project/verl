@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -69,6 +70,66 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 TQ_INITIALIZED = False
+_GET_PARSER_SUPPORTED: bool | None = None
+
+
+@dataclass
+class TQGetSpec:
+    """How a rank reads its share of a batch from TransferQueue.
+
+    Attributes:
+        data_parser: ``data_parser(data, args)`` the storage units apply before replying.
+        non_tensor: Non-tensor data assigned to the fetched batch, describing what the parser kept.
+    """
+
+    data_parser: Callable
+    non_tensor: dict[str, Any] = field(default_factory=dict)
+
+
+def tq_get_parser_supported() -> bool:
+    """Whether the connected TransferQueue runs ``data_parser`` on get, which only SimpleStorage does."""
+    global _GET_PARSER_SUPPORTED
+    if _GET_PARSER_SUPPORTED is not None:
+        return _GET_PARSER_SUPPORTED
+    try:
+        from transfer_queue.storage.managers.simple_storage_manager import AsyncSimpleStorageManager
+
+        tq_client = tq.get_client()
+    except Exception as e:
+        # Answer for this call only: a client that is not up yet says nothing about the backend.
+        logger.warning(f"TransferQueue get parser is unavailable, every rank fetches whole samples: {e}")
+        return False
+    _GET_PARSER_SUPPORTED = isinstance(tq_client.storage_manager, AsyncSimpleStorageManager)
+    return _GET_PARSER_SUPPORTED
+
+
+async def _get_data_with_parser(tq_client, meta: BatchMeta, data_parser: Callable) -> tuple[TensorDict, bool]:
+    """``async_get_data`` with a parser, retrying a timed-out storage unit itself, and whether it ran.
+
+    TransferQueue never replays a parser-backed request, because it cannot know the parser has no
+    side effects; the ones here only select stored rows, so a read is safe to repeat. A retry repeats
+    the whole batch, so it survives fewer timeouts than a plain get, where every storage-unit request
+    has its own budget. A read that keeps timing out therefore ends in a plain get, whose whole
+    samples every caller can still use, rather than failing where a plain read would recover.
+    """
+    from transfer_queue.storage.managers.simple_storage_manager import StorageUnitTimeout
+
+    attempts = max(1, int(os.environ.get("TQ_SIMPLE_STORAGE_MAX_ATTEMPTS", 3)))
+    for attempt in range(1, attempts + 1):
+        try:
+            return await tq_client.async_get_data(meta, data_parser=data_parser), True
+        except StorageUnitTimeout as e:
+            logger.warning(f"parsed get attempt {attempt}/{attempts} timed out for {meta.size} samples: {e}")
+    return await tq_client.async_get_data(meta), False
+
+
+def _get_tq_get_spec(args, func_name: str) -> TQGetSpec | None:
+    get_spec = getattr(args[0], "get_tq_get_spec", None) if args else None
+    if get_spec is None or not tq_get_parser_supported():
+        return None
+    return get_spec(func_name)
+
+
 _ASYNC_BRIDGE_LOOP: asyncio.AbstractEventLoop | None = None
 _ASYNC_BRIDGE_THREAD: threading.Thread | None = None
 _ASYNC_BRIDGE_LOCK = threading.Lock()
@@ -157,7 +218,7 @@ def _find_meta(*args, **kwargs):
     return None
 
 
-async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
+async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta, spec: TQGetSpec | None = None) -> TensorDict:
     if isinstance(meta, KVBatchMeta):
         meta = await async_kv_batch_meta2batch_meta(meta)
     meta_info = copy.deepcopy(meta.extra_info)
@@ -167,7 +228,14 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
         return empty_td
 
     tq_client = tq.get_client()
-    tensordict = await tq_client.async_get_data(meta)
+    parsed = False
+    if spec is not None:
+        tensordict, parsed = await _get_data_with_parser(tq_client, meta, spec.data_parser)
+    else:
+        tensordict = await tq_client.async_get_data(meta)
+    # This data describes what the parser kept, so a get that fell back to whole samples must not carry it.
+    for key, val in spec.non_tensor.items() if parsed else ():
+        tu.assign_non_tensor_data(tensor_dict=tensordict, key=key, val=val)
 
     for key, val in meta_info.items():
         if isinstance(val, (NonTensorData | NonTensorStack)):
@@ -177,8 +245,8 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
     return tensordict
 
 
-def _meta_to_realdata(meta: BatchMeta) -> TensorDict:
-    return _run_async_in_temp_loop(_async_meta_to_realdata, meta)
+def _meta_to_realdata(meta: BatchMeta, spec: TQGetSpec | None = None) -> TensorDict:
+    return _run_async_in_temp_loop(_async_meta_to_realdata, meta, spec)
 
 
 async def _async_update_meta_with_output(output: TensorDict, meta: BatchMeta, func_name=None) -> BatchMeta:
@@ -386,10 +454,14 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
                 if is_kv_batch_meta:
                     tags = batch_meta.tags
                     batch_meta = kv_batch_meta2batch_meta(batch_meta)
+                spec = _get_tq_get_spec(args, func.__name__)
                 t1 = time.time()
-                args = [_meta_to_realdata(arg) if isinstance(arg, BatchMeta | KVBatchMeta) else arg for arg in args]
+                args = [
+                    _meta_to_realdata(arg, spec) if isinstance(arg, BatchMeta | KVBatchMeta) else arg for arg in args
+                ]
                 kwargs = {
-                    k: _meta_to_realdata(v) if isinstance(v, BatchMeta | KVBatchMeta) else v for k, v in kwargs.items()
+                    k: _meta_to_realdata(v, spec) if isinstance(v, BatchMeta | KVBatchMeta) else v
+                    for k, v in kwargs.items()
                 }
                 t2 = time.time()
                 logger.info(
@@ -434,13 +506,14 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
                     tags = batch_meta.tags
                     batch_meta = await async_kv_batch_meta2batch_meta(batch_meta)
 
+                spec = _get_tq_get_spec(args, func.__name__)
                 t1 = time.time()
                 args = [
-                    await _async_meta_to_realdata(arg) if isinstance(arg, BatchMeta | KVBatchMeta) else arg
+                    await _async_meta_to_realdata(arg, spec) if isinstance(arg, BatchMeta | KVBatchMeta) else arg
                     for arg in args
                 ]
                 kwargs = {
-                    k: await _async_meta_to_realdata(v) if isinstance(v, BatchMeta | KVBatchMeta) else v
+                    k: await _async_meta_to_realdata(v, spec) if isinstance(v, BatchMeta | KVBatchMeta) else v
                     for k, v in kwargs.items()
                 }
                 t2 = time.time()

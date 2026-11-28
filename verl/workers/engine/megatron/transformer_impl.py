@@ -48,6 +48,8 @@ from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     align_r3_router_replay_data,
     build_r3_replay_mask,
+    cp_preshard_params,
+    iter_model_routers,
     merge_nested_router_maps,
     merge_router_topk_indices,
     pp_gather,
@@ -76,6 +78,8 @@ from verl.utils.megatron_utils import (
 )
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
 from verl.utils.seqlen_balancing import restore_dynamic_batch
+from verl.utils.tq_get_parsers import slice_for_rank
+from verl.utils.transferqueue_utils import TQGetSpec
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
@@ -137,6 +141,11 @@ def _check_dcp_unsupported_features(engine_config, model_config, tf_config=None,
             raise NotImplementedError("Dynamic CP does not support score centering")
 
 
+# What a get parser kept of ``routed_experts``: which layers, and whether the rows are one CP rank's.
+ROUTE_LAYERS_KEY = "routed_experts_layers"
+CP_PRESHARDED_KEY = "routed_experts_cp_presharded"
+
+
 def _attach_dcp_recorded_routes(losses_reduced: list[dict], layers_topk_idx: torch.Tensor) -> None:
     """Attach recorded routes to DCP micro-batches without dropping or inventing samples."""
     recorded_routes = list(layers_topk_idx.unbind())
@@ -175,6 +184,12 @@ class MegatronEngine(BaseEngine):
         if getattr(unwrapped_model.config, "experimental_attention_variant", None) == "dsv4_hybrid":
             return "contiguous"
         return "zigzag"
+
+    def _static_pad_to_length_bucket(self) -> int | None:
+        """The THD bucket the forward aligns to, which also decides whether routes can be presharded."""
+        if self.engine_config.pad_to_length and self.engine_config.use_remove_padding:
+            return self.engine_config.pad_to_length_bucket
+        return None
 
     def __init__(
         self,
@@ -770,6 +785,37 @@ class MegatronEngine(BaseEngine):
     def get_context_parallel_group(self):
         return mpu.get_context_parallel_group()
 
+    def get_tq_get_spec(self) -> TQGetSpec | None:
+        """The part of each sample this rank reads from TransferQueue.
+
+        Under R3 that is the routes of its own MoE layers, and of its own rows under context parallelism.
+        """
+        route_layers, cp_rows = None, None
+        if self.engine_config.router_replay.mode == "R3":
+            layers = sorted({n - 1 for n, _ in iter_model_routers([unwrap_model(m) for m in self.module])})
+            if len(layers) < self.tf_config.num_layers:
+                route_layers = layers
+            if not self.engine_config.dynamic_context_parallel:
+                cp_rows = cp_preshard_params(
+                    self.tf_config,
+                    mpu.get_tensor_model_parallel_world_size(),
+                    mpu.get_context_parallel_world_size(),
+                    mpu.get_context_parallel_rank(),
+                    pad_to_length_bucket=self._static_pad_to_length_bucket(),
+                )
+
+        if route_layers is None and cp_rows is None:
+            return None
+        non_tensor = {}
+        if route_layers is not None:
+            non_tensor[ROUTE_LAYERS_KEY] = route_layers
+        if cp_rows is not None:
+            non_tensor[CP_PRESHARDED_KEY] = True
+        return TQGetSpec(
+            data_parser=partial(slice_for_rank, route_layers=route_layers, cp_rows=cp_rows),
+            non_tensor=non_tensor,
+        )
+
     def save_checkpoint(
         self,
         local_path: str,
@@ -1316,11 +1362,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
         score_centering = tu.get_non_tensor_data(batch, key="score_centering", default=False)
-        pad_to_length_bucket = (
-            self.engine_config.pad_to_length_bucket
-            if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
-            else None
-        )
+        pad_to_length_bucket = self._static_pad_to_length_bucket()
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1371,8 +1413,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     "R2 compute_log_prob must record and preserve routes before actor update."
                 )
             replay_mask = None
+            cp_presharded = bool(tu.get_non_tensor_data(batch, key=CP_PRESHARDED_KEY, default=False))
             if self.engine_config.router_replay.mode == "R3":
-                layers_topk_idx = align_r3_router_replay_data(layers_topk_idx, input_ids)
+                if not cp_presharded:  # Pre-sharded routes were aligned on the storage unit.
+                    layers_topk_idx = align_r3_router_replay_data(layers_topk_idx, input_ids)
                 replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
             set_router_replay_data(
                 layers_topk_idx,
@@ -1383,6 +1427,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 local_cp_size=local_cp_size,
                 pad_to_length_bucket=pad_to_length_bucket,
                 model=unwrapped_model,
+                route_layer_ids=tu.get_non_tensor_data(batch, key=ROUTE_LAYERS_KEY, default=None),
+                cp_presharded=cp_presharded,
             )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
@@ -1610,11 +1656,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
-            pad_to_length_bucket=(
-                self.engine_config.pad_to_length_bucket
-                if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
-                else None
-            ),
+            pad_to_length_bucket=self._static_pad_to_length_bucket(),
             cp_layout=cp_layout,
             position_ids=batch.get("position_ids", None),
         )

@@ -234,6 +234,25 @@ def _context_parallel_layout(tf_config) -> str:
     return "zigzag"
 
 
+def cp_preshard_params(
+    tf_config, tp_size: int, cp_size: int, cp_rank: int, pad_to_length_bucket: int | None = None
+) -> tuple[int, int, int] | None:
+    """``(cp_rank, cp_size, align_size)`` for slicing routes per CP rank, None where that is unsafe.
+
+    Unsafe means the rows a rank owns do not follow from the sequence alone: a non-zigzag layout, or
+    padding that grows the *last* sequence of a micro-batch by an amount one sample cannot reveal.
+    """
+    if cp_size <= 1 or _context_parallel_layout(tf_config) != "zigzag":
+        return None
+    if get_thd_quant_align_size(tf_config) is not None:
+        return None
+    if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid":
+        return None
+    if pad_to_length_bucket is not None:
+        return None
+    return cp_rank, cp_size, tp_size * cp_size * 2
+
+
 def merge_router_topk_indices(
     attention_mask,
     input_ids,
@@ -445,6 +464,8 @@ def set_router_replay_data(
     local_cp_size=None,
     model=None,
     pad_to_length_bucket=None,
+    route_layer_ids=None,
+    cp_presharded=False,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -466,6 +487,10 @@ def set_router_replay_data(
         model: The forwarded model (or list of VPP chunks). When given, targets are written to its own
             routers instead of a positional slice of the global RouterReplay.router_instances list.
         pad_to_length_bucket: Static THD bucket alignment used by the model forward.
+        route_layer_ids (Optional[list[int]]): Absolute layer index of each ``layer_num`` entry, when
+            the routes hold only some layers such as the ones on this pipeline rank.
+        cp_presharded (bool): The routes already hold this CP rank's rows alone, in packing order, so
+            they are concatenated rather than split again.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -486,15 +511,19 @@ def set_router_replay_data(
 
         replay_mask_rmpad = None
         if layers_topk_idx.is_nested:
-            layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
-                layers_topk_idx,
-                pre_process=True,
-                quant_align_size=quant_align_size,
-                min_local_rows=min_local_rows,
-                local_cp_size=local_cp_size,
-                pad_to_length_bucket=pad_to_length_bucket,
-                cp_layout=cp_layout,
-            )
+            if cp_presharded:
+                # Each sequence already contributes its rank-local chunk, in packing order.
+                layers_topk_idx_rmpad = torch.cat(list(layers_topk_idx.unbind())).unsqueeze(0)
+            else:
+                layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
+                    layers_topk_idx,
+                    pre_process=True,
+                    quant_align_size=quant_align_size,
+                    min_local_rows=min_local_rows,
+                    local_cp_size=local_cp_size,
+                    pad_to_length_bucket=pad_to_length_bucket,
+                    cp_layout=cp_layout,
+                )
             if replay_mask is not None:
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
                     replay_mask,
@@ -531,6 +560,20 @@ def set_router_replay_data(
         # index by absolute layer_idx; otherwise (R2 with mixed dense/MoE),
         # dim-0 only contains MoE layers, index by MoE-layer ordinal.
         index_by_layer = len(layers_topk_idx_reshape) == tf_config.num_layers
+        if route_layer_ids is not None and len(route_layer_ids) != len(layers_topk_idx_reshape):
+            raise RuntimeError(
+                f"router_replay REPLAY got {len(layers_topk_idx_reshape)} route layers for "
+                f"route_layer_ids={route_layer_ids}"
+            )
+        route_positions = {layer_idx: pos for pos, layer_idx in enumerate(route_layer_ids or [])}
+
+        def route_index(layer_idx: int) -> int:
+            """Row of ``layers_topk_idx_reshape`` holding a layer's routes, -1 where they are absent."""
+            if route_layer_ids is not None:
+                return route_positions.get(layer_idx, -1)
+            if index_by_layer:
+                return layer_idx
+            return sum(1 for i in range(layer_idx) if is_moe_layer(tf_config, i))
 
         if model is not None:
             model_routers = list(iter_model_routers(model))
@@ -540,7 +583,7 @@ def set_router_replay_data(
             missing_layer_numbers = []
             for layer_number, router in model_routers:
                 layer_idx = layer_number - 1
-                idx = layer_idx if index_by_layer else sum(1 for i in range(layer_idx) if is_moe_layer(tf_config, i))
+                idx = route_index(layer_idx)
                 if not 0 <= idx < layers_topk_idx_reshape.shape[0]:
                     missing_layer_numbers.append(layer_number)
                     continue
@@ -560,21 +603,19 @@ def set_router_replay_data(
         offset, end = local_rank_info["start"], local_rank_info["end"]
         router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
 
-        # For R2: count MoE layers before `offset` as the starting position.
-        moe_idx = sum(1 for i in range(offset) if is_moe_layer(tf_config, i))
-
         router_offset = 0
         for layer_idx in range(offset, end):
             if not is_moe_layer(tf_config, layer_idx):
                 continue
             router = router_instances_list[router_offset]
-            idx = layer_idx if index_by_layer else moe_idx
+            idx = route_index(layer_idx)
+            if not 0 <= idx < layers_topk_idx_reshape.shape[0]:
+                raise RuntimeError(f"router_replay REPLAY data does not cover layer {layer_idx}")
             router.set_target_indices(
                 layers_topk_idx_reshape[idx].to(torch.int64),
                 replay_mask=replay_mask_rmpad_split,
             )
             router_offset += 1
-            moe_idx += 1
 
 
 def iter_model_routers(model):
