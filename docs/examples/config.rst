@@ -171,6 +171,7 @@ Actor/Rollout/Reference Policy
       use_torch_compile: True # False to disable torch compile
       kl_loss_coef: 0.001 # for grpo
       kl_loss_type: low_var_kl # for grpo
+      kl_topk: 16 # reference top-k for kl_loss_type=topk_rb
       ppo_epochs: 1
       data_loader_seed: null
       shuffle: False
@@ -370,7 +371,9 @@ Actor/Rollout/Reference Policy
 
 - ``actor_rollout_ref.actor.kl_loss_coef``: The coefficient of kl loss. Default is 0.001. 
 
-- ``actor_rollout_ref.actor.kl_loss_type``: Support ``kl`` (``k1``), ``abs``, ``mse`` (``k2``), ``low_var_kl`` (``k3``) and ``full``. Appending ``+`` in the end (e.g., ``k1+`` and ``k3+``) would use straight-through to employ ``k2`` for unbiased gradient estimation, regardless of the kl value estimation (see https://github.com/verl-project/verl/pull/2953#issuecomment-3162113848 for more details). How to calculate the kl divergence between actor and reference policy. For specific options, refer to `kl_penalty()` in `core_algos.py <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py>`_ . See this blog post for detailed analysis: http://joschu.net/blog/kl-approx.html
+- ``actor_rollout_ref.actor.kl_loss_type``: Support ``kl`` (``k1``), ``abs``, ``mse`` (``k2``), ``low_var_kl`` (``k3``) and ``full``. Appending ``+`` in the end (e.g., ``k1+`` and ``k3+``) would use straight-through to employ ``k2`` for unbiased gradient estimation, regardless of the kl value estimation (see https://github.com/verl-project/verl/pull/2953#issuecomment-3162113848 for more details). How to calculate the kl divergence between actor and reference policy. For specific options, refer to `kl_penalty()` in `core_algos.py <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py>`_ . See this blog post for detailed analysis: http://joschu.net/blog/kl-approx.html ``topk_rb`` computes the KL exactly over the reference top-``kl_topk`` tokens (``actor_rollout_ref.actor.kl_topk``) with a sampled tail correction; it is unbiased for the full-vocabulary KL gradient (see ``docs/algo/topk_rb_kl.md``).
+
+- ``actor_rollout_ref.actor.kl_topk``: Size of the reference top-k for ``kl_loss_type=topk_rb``. Larger values lower the variance and raise the reference-to-actor payload; the estimator is unbiased for every value. Default is 16.
 
 - ``actor_rollout_ref.actor.checkpoint``: The configurations of checkpoint function in actor
 

@@ -112,8 +112,12 @@ use_torch_compile: true
 # KL loss coefficient when use_kl_loss is enabled. For GRPO
 kl_loss_coef: 0.001
 
-# Type of KL divergence loss. Options: "kl"(k1), "abs", "mse"(k2), "low_var_kl"(k3), "full"
+# Type of KL divergence loss. Options: "kl"(k1), "abs", "mse"(k2), "low_var_kl"(k3), "full",
+# "topk_rb" (exact over the reference top-k + sampled tail correction; unbiased, see docs/algo/topk_rb_kl.md)
 kl_loss_type: low_var_kl
+
+# Reference top-k size for kl_loss_type=topk_rb (ignored otherwise)
+kl_topk: 16
 
 # Number of PPO epochs per batch
 ppo_epochs: 1

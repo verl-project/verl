@@ -117,6 +117,22 @@ def _validate_score_centering_config(config: DictConfig) -> None:
         raise ValueError("score centering cannot be combined with distillation.")
 
 
+def validate_topk_rb_kl_config(config: DictConfig) -> None:
+    """Fail at startup, not after the first rollout, on setups ``kl_loss_type=topk_rb`` does not support."""
+    if config.algorithm.get("use_kl_in_reward", False) and config.algorithm.get("kl_penalty") == "topk_rb":
+        raise ValueError("algorithm.kl_penalty=topk_rb is not supported; use actor.kl_loss_type=topk_rb instead.")
+    actor = config.actor_rollout_ref.actor
+    if not (actor.get("use_kl_loss", False) and actor.get("kl_loss_type") == "topk_rb"):
+        return
+    if actor.strategy not in ("fsdp", "fsdp2", "veomni", "megatron"):
+        raise NotImplementedError(f"actor.kl_loss_type=topk_rb is not supported for strategy={actor.strategy}.")
+    if config.actor_rollout_ref.model.get("use_fused_kernels", False):
+        raise ValueError("actor.kl_loss_type=topk_rb needs the full logits; set model.use_fused_kernels=False.")
+    pad_to_length = actor.get("pad_to_length", False) or config.actor_rollout_ref.get("ref", {}).get("pad_to_length")
+    if actor.strategy != "megatron" and pad_to_length:
+        raise NotImplementedError("actor.kl_loss_type=topk_rb does not support pad_to_length with FSDP/VeOmni.")
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -216,6 +232,7 @@ def validate_config(
 
     if config.algorithm.get("use_kl_in_reward", False) and config.actor_rollout_ref.actor.use_kl_loss:
         print("NOTICE: You have both enabled in-reward kl and kl loss.")
+    validate_topk_rb_kl_config(config)
 
     # critic
     if use_critic:

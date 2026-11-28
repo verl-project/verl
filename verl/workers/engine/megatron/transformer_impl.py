@@ -1242,6 +1242,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
         pad_to_length_bucket: int | None = None,
         cp_layout: str = "zigzag",
         local_cp_size: int | None = None,
+        ref_topk: int = 0,
+        kl_topk_rb: bool = False,
+        ref_topk_ids: torch.Tensor | None = None,
+        ref_topk_log_probs: torch.Tensor | None = None,
     ):
         assert logits.shape[:2] == label.shape[:2]
         # avoid non-positive temperature such as padding
@@ -1273,6 +1277,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
         else:
             logits_bak = logits
 
+        if ref_topk or kl_topk_rb:
+            # before the cross entropy below, which shifts logits_bak in place unless it is given a clone
+            ret.update(self._topk_kl_side_outputs(logits_bak, ref_topk, kl_topk_rb, ref_topk_ids, ref_topk_log_probs))
+
         # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
         if distillation_use_topk or score_centering:
             from verl.models.mcore.util import get_thd_quant_align_size
@@ -1290,12 +1298,39 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 )
             )
         if not distillation_only:
-            # the cross entropy shifts fp32 logits in place; the score centering hook re-reads them in backward
+            # the cross entropy shifts fp32 logits in place; score centering and topk_rb re-read them in backward
             ret["log_probs"] = vocab_parallel_log_probs_from_logits(
-                logits_bak.clone() if score_centering else logits_bak, label
+                logits_bak.clone() if score_centering or kl_topk_rb else logits_bak, label
             )
 
         return ret
+
+    @staticmethod
+    def _topk_kl_side_outputs(logits, ref_topk, kl_topk_rb, ref_topk_ids, ref_topk_log_probs):
+        """``kl_loss_type: topk_rb`` outputs from vocab-parallel logits ``(1, N, V / tp)``.
+
+        ``ref_topk=k`` (reference pass): the global top-k as ``ref_topk_*``. ``kl_topk_rb`` (actor update): the
+        coarse KL against the packed ``ref_topk_*`` and the policy's log tail mass.
+        """
+        from megatron.core import parallel_state as mpu
+
+        from verl.trainer.ppo.topk_rb_kl import compute_coarse_reverse_kl, compute_topk_log_probs
+
+        group = mpu.get_tensor_model_parallel_group()
+        shape = logits.shape[:2]
+        flat = logits.reshape(-1, logits.shape[-1])
+        out = {}
+        if ref_topk:
+            log_probs, ids = compute_topk_log_probs(flat, int(ref_topk), process_group=group)
+            out["ref_topk_log_probs"] = log_probs.reshape(*shape, -1)
+            out["ref_topk_ids"] = ids.to(torch.int32).reshape(*shape, -1)
+        if kl_topk_rb:
+            ids = ref_topk_ids.reshape(-1, ref_topk_ids.shape[-1]).long()
+            log_probs = ref_topk_log_probs.reshape(ids.shape[0], -1)
+            coarse, log_q_tail = compute_coarse_reverse_kl(flat, ids, log_probs, process_group=group)
+            out["kl_topk_coarse"] = coarse.reshape(shape)
+            out["kl_topk_log_q_tail"] = log_q_tail.reshape(shape)
+        return out
 
     def forward_step(
         self, batch_iter: Iterator[TensorDict], model, logits_processor_func, postprocess_micro_batch_func
@@ -1316,6 +1351,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
         score_centering = tu.get_non_tensor_data(batch, key="score_centering", default=False)
+        ref_topk = tu.get_non_tensor_data(batch, key="ref_topk", default=0)
+        kl_topk_rb = tu.get_non_tensor_data(batch, key="kl_topk_rb", default=False)
+        if (ref_topk or kl_topk_rb) and use_fused_kernels:
+            raise NotImplementedError(
+                "kl_loss_type=topk_rb needs the full (vocab-parallel) logits; use_fused_kernels is not supported."
+            )
         pad_to_length_bucket = (
             self.engine_config.pad_to_length_bucket
             if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
@@ -1455,6 +1496,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
                 local_cp_size=local_cp_size,
+                ref_topk=ref_topk,
+                kl_topk_rb=kl_topk_rb,
             )
 
             response_attention_mask = None
@@ -1466,6 +1509,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 "loss_mask": loss_mask,
                 "response_attention_mask": response_attention_mask,
             }
+            if kl_topk_rb:
+                # packed exactly like the labels (CP split, quant alignment, bucket pad), without the roll
+                logits_processor_args["ref_topk_ids"] = batch["ref_topk_ids"]
+                logits_processor_args["ref_topk_log_probs"] = batch["ref_topk_log_probs"]
 
             mtp_loss_normalization_factor = None
             if (
