@@ -26,6 +26,7 @@ from functools import partial, wraps
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
+from urllib.parse import quote
 
 import orjson
 from packaging.version import Version
@@ -228,7 +229,8 @@ class RLInsightLogger:
     """Logger backend that exports scalar metrics and rl-insight runtime signals."""
 
     ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
-    MINIMUM_RL_INSIGHT_VERSION = Version("0.3.0")
+    RL_INSIGHT_SERVICE_NAME = "rl_insight_monitor"
+    MINIMUM_RL_INSIGHT_VERSION = Version("0.4.0")
     _init_done = False
     _rl_insight_module = None
     _registered_metrics: set[tuple[str | None, tuple[str, ...], str | None]] = set()
@@ -251,6 +253,20 @@ class RLInsightLogger:
         return os.getenv(cls.ENABLE_ENV) == "1"
 
     @classmethod
+    def discover_otlp_traces_endpoint(cls) -> str | None:
+        """Return the Run's OTLP/HTTP traces endpoint from the public Run context.
+
+        Returns ``None`` when RL-Insight is disabled or no Run context is
+        available (server unreachable or Tempo disabled).
+        """
+        if not cls.enabled():
+            return None
+        context = cls._get_rl_insight().get_context()
+        if context is None:
+            return None
+        return context.otlp_endpoint or None
+
+    @classmethod
     def _warn_unsupported_rl_insight(cls, feature: str) -> None:
         """Warn once when an optional RL-Insight feature is unavailable."""
         if feature in cls._warned_unsupported_features:
@@ -266,6 +282,63 @@ class RLInsightLogger:
     def _rl_insight_version(cls) -> Version:
         module = cls._get_rl_insight()
         return Version(getattr(module, "__version__", "0"))
+
+    @classmethod
+    def configure_vllm_tracing(cls, args: dict[str, Any], replica_rank: int, trace_config: Any) -> None:
+        """Configure vLLM request tracing from ``rollout.trace``.
+
+        Mutates ``args`` and the process OTel env; no-op unless ``trace_config.enable_otel``.
+        Request spans always use the RL-Insight OTLP endpoint so the managed
+        dashboard can read them; an explicit engine endpoint is ignored with a warning.
+        """
+        if not trace_config.enable_otel:
+            return
+
+        explicit = args.get("otlp_traces_endpoint") or args.get("otlp-traces-endpoint")
+        if explicit:
+            logger.warning(
+                "rollout.trace.enable_otel=True ignores the explicit engine tracing endpoint %s; "
+                "request spans must use the RL-Insight OTLP endpoint to appear in the managed dashboard.",
+                explicit,
+            )
+        endpoint = cls.discover_otlp_traces_endpoint()
+        if not endpoint:
+            logger.warning(
+                "rollout.trace.enable_otel=True but the RL-Insight OTLP endpoint is unavailable; "
+                "engine request traces are disabled. Check that `rl_insight` is in trainer.logger, "
+                "that RL_INSIGHT_SERVER_URL points to the RL-Insight server, and that Tempo is enabled."
+            )
+            return
+        # vLLM defaults to gRPC. RL-Insight's Tempo receiver speaks HTTP.
+        os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "http/protobuf"
+        args.pop("otlp-traces-endpoint", None)
+        args["otlp_traces_endpoint"] = endpoint
+
+        # Keep engine spans under the RL-Insight service so the dashboard's
+        # resource.service.name filter can find them. An explicit user setting wins.
+        if not os.environ.get("OTEL_SERVICE_NAME"):
+            os.environ["OTEL_SERVICE_NAME"] = cls.RL_INSIGHT_SERVICE_NAME
+        cls._set_otel_resource_attributes(replica_rank)
+
+    @classmethod
+    def _set_otel_resource_attributes(cls, replica_rank: int) -> None:
+        """Add service and replica metadata to ``OTEL_RESOURCE_ATTRIBUTES``.
+
+        Run identity is intentionally omitted: the engine cannot see the Hub's
+        execution-suffixed experiment name, so request spans are scoped by the
+        dashboard time range instead. Appended attributes take precedence over
+        launcher-provided values with the same key.
+        """
+        service_name = os.environ.get("OTEL_SERVICE_NAME") or cls.RL_INSIGHT_SERVICE_NAME
+        attributes = ",".join(
+            f"{key}={quote(str(value), safe='')}"
+            for key, value in {"service.name": service_name, "replica": str(replica_rank)}.items()
+            if value
+        )
+        existing_attributes = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "").strip()
+        os.environ["OTEL_RESOURCE_ATTRIBUTES"] = (
+            f"{existing_attributes},{attributes}" if existing_attributes else attributes
+        )
 
     @classmethod
     def init(cls, project_name=None, experiment_name=None, config=None):
@@ -287,7 +360,6 @@ class RLInsightLogger:
     def log(cls, data, step):
         if not cls.enabled():
             return
-        cls._ensure_rl_insight_init()
         module = cls._get_rl_insight()
         # Present on current main, but not in the released 0.3.0 package.
         metric_log = getattr(module, "metric_log", None)
@@ -306,7 +378,7 @@ class RLInsightLogger:
 
     @classmethod
     def finish(cls):
-        if not cls._init_done:
+        if cls._rl_insight_module is None:
             return
 
         cls._get_rl_insight().finish()
@@ -326,7 +398,7 @@ class RLInsightLogger:
             yield
             return
 
-        cls._ensure_rl_insight_init()
+        # RL-Insight >= 0.4.0 buffers early Ray states until formal initialization.
         with cls._get_rl_insight().trace_state(state_name, state_lane_id=state_lane_id, **labels):
             yield
 
@@ -375,19 +447,12 @@ class RLInsightLogger:
         ):
             cls._warn_unsupported_rl_insight("trace_span")
             return
-        cls._ensure_rl_insight_init()
-        cls._get_rl_insight().trace_span(
+        module.trace_span(
             name=name,
             start_time_ns=start_time_ns,
             end_time_ns=end_time_ns,
             attributes=dict(attributes or {}),
         )
-
-    @classmethod
-    def _ensure_rl_insight_init(cls) -> None:
-        if not cls._init_done:
-            cls._get_rl_insight().init()
-            cls._init_done = True
 
     @classmethod
     def agent_loop_session(

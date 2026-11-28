@@ -413,6 +413,13 @@ class LLMServerManager:
                 disaggregation_enabled=self.rollout_config.disaggregation.enabled,
             )
 
+        if self.rollout_config.trace.enable_otel and self.rollout_config.name != "vllm":
+            logger.warning(
+                "rollout.trace.enable_otel is only supported by the vLLM rollout engine; "
+                "engine request traces stay disabled for rollout.name=%s",
+                self.rollout_config.name,
+            )
+
     @classmethod
     @auto_await
     async def create(cls, *args, **kwargs):

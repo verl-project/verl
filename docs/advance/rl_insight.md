@@ -1,6 +1,6 @@
 # Use RL-Insight to Monitor Training
 
-Last updated: 07/15/2026.
+Last updated: 11/16/2026.
 
 [RL-Insight](https://github.com/verl-project/rl-insight) provides online observability for RL training. In verl, it can receive trainer scalar metrics, async rollout engine metrics, TransferQueue metrics, and rollout state traces, then show them in Grafana dashboards managed by the RL-Insight server.
 
@@ -16,7 +16,7 @@ Use RL-Insight when you want one monitor view for:
 
 ## Step 1: Install and Start RL-Insight
 
-Install RL-Insight in the environment where the monitor server runs. Prefer the latest source version:
+Install RL-Insight >= 0.4.0 in the server and training environments. Prefer the latest source version:
 
 ```bash
 pip install "git+https://github.com/verl-project/rl-insight.git"
@@ -25,7 +25,7 @@ pip install "git+https://github.com/verl-project/rl-insight.git"
 Or install a released package:
 
 ```bash
-pip install "rl-insight>=0.2.0"
+pip install "rl-insight>=0.4.0"
 ```
 
 ### Install monitor services
@@ -82,7 +82,7 @@ env_vars:
 
 If your launch script passes another file through `ray job submit --runtime-env`, add the variable to that file instead.
 
-Add `rl_insight` to `trainer.logger`. When `rl_insight` is enabled, verl sets `VERL_RL_INSIGHT_ENABLE=1` and initializes the RL-Insight client in each process that uses it.
+Add `rl_insight` to `trainer.logger`. verl sets `VERL_RL_INSIGHT_ENABLE=1` and passes the project and experiment names to RL-Insight when creating the training logger. Workers send state traces directly through the SDK.
 
 ```bash
 python3 -m verl.trainer.main_ppo \
@@ -108,7 +108,20 @@ python3 -m verl.trainer.main_ppo \
 
 When rollout replicas or TransferQueue metrics endpoints start, verl registers them with RL-Insight. The generation path is also wrapped with RL-Insight state traces for vLLM and SGLang rollout workers.
 
-## Step 4: Add Hardware Metrics (Optional)
+## Step 4: Export vLLM Request Traces (Optional)
+
+Set `actor_rollout_ref.rollout.trace.enable_otel=True` to export each vLLM inference request as a span:
+
+```bash
+python3 -m verl.trainer.main_ppo \
+    trainer.logger='["console","rl_insight"]' \
+    actor_rollout_ref.rollout.trace.enable_otel=True \
+    ...
+```
+
+Spans are reported under the `rl_insight_monitor` service (override with `OTEL_SERVICE_NAME`) with the rollout replica as resource attribute, and appear in the **vLLM request traces** row of the `verl_trainer_v1_with_vllm_engine` dashboard, scoped by the dashboard time range and replica (the engine cannot know the Run's execution-suffixed experiment name). They contain request metadata only, with no prompt or response text. An explicit `actor_rollout_ref.rollout.engine_kwargs.vllm.otlp_traces_endpoint` is ignored with a warning: request spans always use the RL-Insight OTLP endpoint so they appear in the managed dashboard. Trace export never blocks rollout.
+
+## Step 5: Add Hardware Metrics (Optional)
 
 To monitor CPU, memory, network, or Ascend NPU metrics, follow the [RL-Insight Hardware Monitoring guide](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/hardware/index.md). The guide explains how to install or reuse the exporters and register their monitoring endpoints with RL-Insight.
 
@@ -151,6 +164,7 @@ The dashboards should include training metrics, rollout metrics, TransferQueue m
 - If trainer metrics do not appear, check that `trainer.logger` contains `rl_insight` and `RL_INSIGHT_SERVER_URL` points to the machine that runs `rl-insight server start`.
 - If rollout metrics do not appear, check that `actor_rollout_ref.rollout.disable_log_stats=False` is set.
 - If TransferQueue metrics do not appear, check that `transfer_queue.metrics.enabled=True` is set.
+- If engine request traces do not appear, check that `actor_rollout_ref.rollout.trace.enable_otel=True` is set.
 - If `server install` fails to download packages, use the offline `--local-archive` path above.
 
 For more RL-Insight server installation details, see the [RL-Insight server installation guide](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/server_installation.md) and [quick start](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/quick_start.md).
