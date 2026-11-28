@@ -86,6 +86,7 @@ from verl.utils.dataset.dataloader import (
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
+from verl.utils.global_pack import global_pack_enabled, global_pack_partitions_from_env
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
@@ -1774,7 +1775,26 @@ class PPOTrainer(ABC):
         workload_lst = calculate_workload(global_seqlen_lst)
 
         # reorder based on index. The data will be automatically equally partitioned by dispatch function
-        global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
+        global_partition_lst = None
+        if global_pack_enabled():
+            # Static-shape TPU engine: choose each rank's sequences so its bin-packed micro-batch count is minimal.
+            mini_batch = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+            mini_batch *= self.config.actor_rollout_ref.rollout.n
+            num_mini_batches = max(1, len(batch) // mini_batch) if len(batch) % mini_batch == 0 else 1
+            if num_mini_batches > 1 and self.config.actor_rollout_ref.actor.get("shuffle", False):
+                logger.warning(
+                    "global pack plans each mini-batch, but actor.shuffle=True remixes a rank's mini-batches; "
+                    "set actor.shuffle=False to keep the planned micro-batch counts"
+                )
+            planned = global_pack_partitions_from_env(
+                global_seqlen_lst.tolist(), k_partitions=dp_size, num_mini_batches=num_mini_batches
+            )
+            if planned is not None:
+                global_partition_lst, pack_stats = planned
+                metrics.update(pack_stats.as_metrics())
+                print(f"[{logging_prefix}] {pack_stats.summary()}", flush=True)
+        if global_partition_lst is None:
+            global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
         batch.reorder([j for partition in global_partition_lst for j in partition])
         global_balance_stats = log_seqlen_unbalance(
             seqlen_list=global_seqlen_lst.tolist(), partitions=global_partition_lst, prefix=logging_prefix
