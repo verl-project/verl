@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state as mpu
@@ -25,6 +27,7 @@ from megatron.core.optimizer.optimizer import ChainedOptimizer
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.megatron_utils import load_megatron_optimizer, offload_megatron_optimizer
 
 # ==== Helper functions ==== #
@@ -53,7 +56,7 @@ def init_model(bf16_all: bool = False):
         transformer_layer_spec=get_gpt_layer_local_spec(),
         vocab_size=128,
         max_sequence_length=SEQUENCE_LENGTH,
-    ).cuda()
+    ).to(get_device_name())
     if bf16_all:
         gpt_model.bfloat16()
 
@@ -114,9 +117,9 @@ def test_precision_aware_optimizer_offload_and_load(tmp_path):
     # Initialize torch distributed and Megatron parallel state.
     rendezvous_file = tmp_path / "rdzv_optimizer"
 
-    torch.cuda.set_device(0)
+    get_torch_device().set_device(0)
     dist.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
+        backend=f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}",
         init_method=f"file://{rendezvous_file}",
         rank=0,
         world_size=1,
@@ -126,7 +129,7 @@ def test_precision_aware_optimizer_offload_and_load(tmp_path):
 
     try:
         # Initialize model and optimizer.
-        model_chunks = init_model()
+        model_chunks = init_model(bf16_all=os.getenv("VERL_TEST_OPTIMIZER_OFFLOAD_BF16_ALL") == "1")
         optimizer = init_precision_aware_optimizer(model_chunks)
 
         # Fully initialize the optimizer state by calling optimizer.step() on
@@ -152,7 +155,7 @@ def test_precision_aware_optimizer_offload_and_load(tmp_path):
         # Make sure everything has been loaded.
         assert precision_aware_optimizer_is_on_device(
             optimizer,
-            torch.device("cuda:0"),
+            torch.device(get_device_name(), 0),
         )
     finally:
         # Tear down MPU state and torch.distributed.
@@ -187,13 +190,14 @@ def gpu_sub_optimizer_state_ids(optimizer):
     legitimately offloads."""
 
     opts = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
+    device_type = get_device_name()
     gpu_state = []
     for opt in opts:
         hdo = opt.optimizer
         for sub in hdo.sub_optimizers:
             for state in sub.state.values():
                 for k, v in state.items():
-                    if isinstance(v, torch.Tensor) and v.is_cuda and k in ("exp_avg", "exp_avg_sq"):
+                    if isinstance(v, torch.Tensor) and v.device.type == device_type and k in ("exp_avg", "exp_avg_sq"):
                         gpu_state.append((id(v), str(v.device)))
     return gpu_state
 
@@ -211,9 +215,9 @@ def test_hdo_optimizer_offload_leaves_gpu_state_untouched(tmp_path):
 
     rendezvous_file = tmp_path / "rdzv_hdo"
 
-    torch.cuda.set_device(0)
+    get_torch_device().set_device(0)
     dist.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
+        backend=f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}",
         init_method=f"file://{rendezvous_file}",
         rank=0,
         world_size=1,
@@ -244,7 +248,8 @@ def test_hdo_optimizer_offload_leaves_gpu_state_untouched(tmp_path):
             # The round trip must still restore the state to GPU after load.
             load_megatron_optimizer(optimizer)
             assert len(gpu_sub_optimizer_state_ids(optimizer)) == len(gpu_state_before)
-            assert all(device == "cuda:0" for _, device in gpu_sub_optimizer_state_ids(optimizer))
+            expected_device = f"{get_device_name()}:0"
+            assert all(device == expected_device for _, device in gpu_sub_optimizer_state_ids(optimizer))
     finally:
         # Tear down MPU state and torch.distributed.
         mpu.destroy_model_parallel()
