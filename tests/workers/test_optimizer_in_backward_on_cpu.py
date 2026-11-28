@@ -211,6 +211,23 @@ def test_hook_mode_releases_gradients_immediately():
     wrapper.finalize()
 
 
+def test_zero_grad_disarms_pending_hook_stepping():
+    """A failed backward must not leave the hooks armed for the next micro-batch."""
+    model = _build_model()
+    initial = [parameter.detach().clone() for parameter in model.parameters()]
+    optimizer, _ = _build_optimizer(model, clip_grad=None)
+    wrapper = create_optim_in_bwd_wrapper(optimizer, step_in_hooks=True)
+
+    wrapper.begin_backward(stepping=True)
+    wrapper.zero_grad()
+    for parameter in model.parameters():
+        parameter.grad = torch.ones_like(parameter)
+        wrapper._on_grad_ready(parameter)
+
+    for before, after in zip(initial, model.parameters(), strict=True):
+        assert torch.equal(before, after)
+
+
 def test_accumulates_every_micro_batch_before_stepping():
     """Gradient accumulation must sum every micro-batch before the single update."""
     reference_model = _build_model()

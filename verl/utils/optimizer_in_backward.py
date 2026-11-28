@@ -51,6 +51,11 @@ The wrapper keeps the wrapped optimizer's ``state`` / ``param_groups`` / ``state
 authoritative, so checkpoints, LR schedulers and optimizer offload keep working unchanged.
 Only :meth:`_step_param` temporarily narrows ``param_groups`` to a single parameter, which
 is what lets one parameter be stepped without touching the others.
+
+Not covered here (already available in verl): activation offloading
+(``model.enable_activation_offload`` / :mod:`verl.utils.activation_offload`) and
+``fsdp_config.reshard_after_forward`` / ``enable_full_shard`` (FSDP1/FSDP2/veomni/torchtitan
+configs and :mod:`verl.utils.fsdp_utils`).
 """
 
 from __future__ import annotations
@@ -140,6 +145,7 @@ class OptimizerInBackwardWrapper:
 
     def zero_grad(self, set_to_none: bool = True):
         self.optimizer.zero_grad(set_to_none=set_to_none)
+        self._stepping = False
         self._sq_norm = None
         self._nonfinite = False
         self._stepped_params = 0
