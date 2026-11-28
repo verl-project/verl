@@ -123,6 +123,15 @@ DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((TOTAL_TRAINER_CHIPS / T
 ROLLOUT_TENSOR_PARALLEL_SIZE="${ROLLOUT_TENSOR_PARALLEL_SIZE:-${TOTAL_ROLLOUT_CHIPS}}"
 FUSE_QKV="${FUSE_QKV:-True}"
 
+# Qwen3.5-35B-A3B: EP=8 ragged dispatcher (needs torchtitan#142), bf16 + fp32 master / AdamW on host,
+# dynamic bsz with 16K static micro-batches. Env overrides any value; QWEN3_5_35B_TUNED_DEFAULTS=False turns it off.
+if [[ "${MODEL_NAME}" == "Qwen3.5-35B-A3B" && "${QWEN3_5_35B_TUNED_DEFAULTS:-True}" == "True" ]]; then
+    : "${EXPERT_PARALLEL_SIZE:=8}" "${EP_DISPATCHER:=ragged}" "${EP_PAIRED_GROUPED_MM:=True}"
+    : "${PARAM_DTYPE:=bfloat16}" "${FP32_MASTER:=True}" "${OPTIMIZER_HOST_OFFLOAD:=True}"
+    : "${USE_DYNAMIC_BSZ:=True}" "${MAX_TOKEN_LEN_PER_GPU:=16384}"
+    : "${STATIC_MICRO_BATCH_LEN:=${MAX_TOKEN_LEN_PER_GPU}}" "${STATIC_MAX_RESPONSE_LEN:=${MAX_RESPONSE_LEN:-2048}}"
+fi
+
 # Memory settings for very large MoE models (e.g. Qwen3.5-397B-A17B on 24 chips): USE_KL_LOSS=False drops the
 # reference model; EXPERT_PARALLEL_SIZE shards the trainer's routed experts; PARAM_DTYPE=bfloat16 keeps bf16
 # parameters and gradients, and FP32_MASTER=True adds fp32 master weights and fp32 AdamW states to it;
@@ -194,9 +203,11 @@ fi
 # least this many tokens, e.g. MAX_TOKEN_LEN_PER_GPU / MAX_RESPONSE_LEN, so the trainer compiles one shape.
 if [[ -n "${STATIC_MICRO_BATCH_LEN:-}" ]]; then
     EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_micro_batch_len=${STATIC_MICRO_BATCH_LEN}")
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.static_micro_batch_len=${STATIC_MICRO_BATCH_LEN}")
 fi
 if [[ -n "${STATIC_MAX_RESPONSE_LEN:-}" ]]; then
     EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_max_response_len=${STATIC_MAX_RESPONSE_LEN}")
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.static_max_response_len=${STATIC_MAX_RESPONSE_LEN}")
 fi
 
 python3 -m verl.trainer.main_ppo \
