@@ -257,6 +257,9 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         elif "max_new_tokens" in sampling_params:
             limit_key = "max_new_tokens"
         original_max_tokens = sampling_params.get(limit_key) if limit_key else None
+        # a caller-set lower bound shrinks with the budget on every resume
+        min_key = next((key for key in ("min_tokens", "min_new_tokens") if key in sampling_params), None)
+        original_min_tokens = sampling_params.get(min_key) if min_key else None
 
         # The budget below is rewritten on every attempt, and the caller reuses its dict across
         # turns, so never mutate the caller's copy.
@@ -347,6 +350,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             # 3. update max_new_tokens
             if original_max_tokens is not None:
                 sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
+                if original_min_tokens is not None:
+                    sampling_params[min_key] = max(
+                        0, min(original_min_tokens - len(final_output.token_ids), sampling_params[limit_key])
+                    )
                 if len(final_output.token_ids) >= original_max_tokens:
                     final_output.stop_reason = "length"
                     break
