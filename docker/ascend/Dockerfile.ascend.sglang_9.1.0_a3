@@ -1,0 +1,132 @@
+# Pull base image
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.1.0-a3-ubuntu22.04-py3.12
+
+ARG SOC_VERSION="ascend910_9382"
+ARG MAX_JOBS="8"
+ARG SGLANG_KERNEL_NPU_TAG="2026.9.0"
+ARG VERL_REPOSITORY="https://github.com/verl-project/verl.git"
+
+SHELL ["/bin/bash", "-c"]
+
+
+# Prepare required system dependencies
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends gcc g++ cmake libnuma-dev wget git curl jq vim build-essential \
+        unzip libsndfile1 libgl1 ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    pip install --upgrade pip packaging setuptools==80.10.2 && \
+    pip cache purge
+
+# Prepare repositories with low update frequency
+RUN ARCH=$(uname -m) && \
+    # Set extra pip index for x86_64 platform
+    echo "[LOG INFO] Detected architecture: $ARCH" && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
+    fi && \
+    # Clone libs
+    git clone --depth 1 --branch v0.5.20 https://github.com/sgl-project/sglang.git && \
+    git clone --branch core_r0.18.0 https://gitcode.com/Ascend/MindSpeed.git && \
+    git clone --depth 1 --branch core_v0.18.0 https://github.com/NVIDIA/Megatron-LM.git && \
+    git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git && \
+    git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git && \
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git && \
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git && \
+    git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+
+# Install repositories with low update frequency
+RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
+    export PIP_TRUSTED_HOST=triton-ascend.osinfra.cn && \
+    ARCH=$(uname -m) && \
+    # Source the CANN and ATB environment provided by the base image
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1 && \
+    # Select CPU PyTorch wheels on x86_64, matching the reference Dockerfile
+    if [ "$ARCH" = "x86_64" ]; then \
+        pip install torch==2.10.0+cpu torchvision==0.25.0+cpu --index-url https://download.pytorch.org/whl/cpu/; \
+    fi && \
+    cd sglang && \
+    cp python/pyproject_npu.toml python/pyproject.toml && \
+    # Upstream ZBAL 1.1.2 only ships CPython 3.11 wheels; 1.1.3 provides the 3.12 build.
+    sed -i 's/memfabric-zbal==1.1.2/memfabric-zbal==1.1.3/' python/pyproject.toml && \
+    # SGLang provides Transformers; torch-npu selects its matching PyTorch version
+    pip install -e python torch-npu==2.10.0.post6 && \
+    cd .. && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
+
+# Install sgl-kernel-npu and CANN custom ops
+RUN ARCH=$(uname -m) && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1 && \
+    mkdir sgl-kernel-npu && cd sgl-kernel-npu && \
+    wget -nv https://github.com/sgl-project/sgl-kernel-npu/releases/download/${SGLANG_KERNEL_NPU_TAG}/sgl-kernel-npu-${SGLANG_KERNEL_NPU_TAG}-torch2.10.0-py312-cann9.1.0-a3-${ARCH}.zip && \
+    wget -nv https://github.com/sgl-project/sgl-kernel-npu/releases/download/${SGLANG_KERNEL_NPU_TAG}/custom-ops-${SGLANG_KERNEL_NPU_TAG}-torch2.10.0-cann9.1.0-a3-${ARCH}.zip && \
+    wget -nv https://github.com/sgl-project/sgl-kernel-npu/releases/download/${SGLANG_KERNEL_NPU_TAG}/ops-transformer-${SGLANG_KERNEL_NPU_TAG}-torch2.10.0-cann9.1.0-a3-${ARCH}.zip && \
+    unzip 'sgl-kernel-npu-*.zip' && \
+    unzip 'custom-ops-*.zip' && \
+    unzip 'ops-transformer-*.zip' && \
+    chmod +x *.run && \
+    ./CANN-custom_ops-none-linux.${ARCH}.run --install-path=${ASCEND_HOME_PATH}/opp && \
+    ./cann-ops-transformer-custom_linux-${ARCH}.run --install-path=${ASCEND_HOME_PATH}/opp && \
+    source ${ASCEND_HOME_PATH}/opp/vendors/customize/bin/set_env.bash && \
+    source ${ASCEND_HOME_PATH}/opp/vendors/custom_transformer/bin/set_env.bash && \
+    pip install --no-deps torch_memory_saver*.whl sgl_kernel_npu*.whl deep_ep*.whl attentions*.whl custom_ops*.whl && \
+    cd .. && rm -rf sgl-kernel-npu && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
+
+# Install Megatron & MindSpeed
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1 && \
+    source ${ASCEND_HOME_PATH}/opp/vendors/customize/bin/set_env.bash && \
+    source ${ASCEND_HOME_PATH}/opp/vendors/custom_transformer/bin/set_env.bash && \
+    # Build dependency required by Megatron-LM before verl requirements are installed
+    pip install pybind11 && \
+    pip install -e Megatron-LM --no-build-isolation --no-deps && \
+    pip install -e MindSpeed --no-build-isolation --no-deps && \
+    # Install MegatronAdaptor
+    pip install -e MegatronAdaptor --no-build-isolation --no-deps && \
+    # Install TransformerEngineNPU
+    pip install -e TransformerEngineNPU --no-build-isolation --no-deps && \
+    # Install MindSpeed-Ops
+    MINDSPEED_BUILD_CATLASS=0 pip install -e MindSpeed-Ops --no-build-isolation --no-deps && \
+    # Install MindSpeed-Bridge without resolving its conflicting Transformers requirement
+    pip install -e MindSpeed-Bridge --no-build-isolation --no-deps && \
+    # Install Megatron-Bridge
+    pip install -e Megatron-Bridge --no-build-isolation --no-deps && \
+    # Bridge requirements skipped by --no-deps; Energon also requires multi-storage-client
+    pip install nvidia-modelopt==0.44.0 diffusers==0.42.1 \
+        megatron-energon==6.0.1 multi-storage-client==0.27.0 tensorboard && \
+    # Install the FLA packages used in the validated Qwen3.5 environment
+    pip install --no-deps fla-core==0.5.2 flash-linear-attention==0.5.2 && \
+    pip install --no-deps flash-linear-attention-npu-a3==26.9.1 \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
+
+# Prepare and install verl (update frequently)
+RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
+    export PIP_TRUSTED_HOST=triton-ascend.osinfra.cn && \
+    git clone --recursive ${VERL_REPOSITORY} verl && \
+    cd verl && \
+    pip install -r requirements-npu.txt cachetools && \
+    pip install -v -e . --no-deps && cd .. && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
+
+ENV SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND=python \
+    SGLANG_ZBAL_LOCAL_MEM_SIZE=0 \
+    RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+
+# Show install results
+RUN pip list
+
+# Setting Default Commands
+ENTRYPOINT ["/bin/bash", "-c", "source /usr/local/Ascend/ascend-toolkit/set_env.sh && source /usr/local/Ascend/cann-9.1.0/share/info/ascendnpu-ir/bin/set_env.sh && source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1 && source ${ASCEND_HOME_PATH}/opp/vendors/customize/bin/set_env.bash && source ${ASCEND_HOME_PATH}/opp/vendors/custom_transformer/bin/set_env.bash && exec \"$@\"", "--"]
+CMD ["/bin/bash"]

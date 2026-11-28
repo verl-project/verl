@@ -6,10 +6,15 @@ on:
     branches: ["main"]
     paths:
       - "docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3"
+      - "docker/ascend/Dockerfile.ascend.sglang_9.1.0_a3"
       - ".github/workflows/docker-build-ascend-sglang-a3.yml"
 
   schedule:
     - cron: "0 16 * * *"
+
+env:
+  QUAY_REPO: quay.io/ascend/verl
+  QUAY_TEMP_REPO: quay.io/yezib/verltest
 
 jobs:
   build-ascend-sglang-image-a3:
@@ -76,3 +81,148 @@ jobs:
           cache-to: type=gha,mode=max,scope=ascend-sglang-a3
           build-args: |
             BUILDKIT_INLINE_CACHE=1
+
+  # ============================================================
+  # 第一阶段（CANN 9.1.0）：分架构构建并推送 digest 到临时仓库
+  # ============================================================
+  build-push-digest-cann910:
+    name: build-cann9.1.0-${{ matrix.tag }}
+    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-cann9.1.0-${{ matrix.tag }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      packages: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: linux/amd64
+            runner: ubuntu-latest
+            tag: amd64
+          - arch: linux/arm64
+            runner: ubuntu-22.04-arm
+            tag: arm64
+    steps:
+      - name: Remove unnecessary parts in github actions runners to free up disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          use: true
+
+      # Build 阶段只推送到临时仓库，只需登录临时仓库
+      - name: Login to Quay Temp
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME_TMP }}
+          password: ${{ secrets.QUAY_PASSWORD_TMP }}
+
+      - name: Clean Docker cache before build
+        run: |
+          docker system prune -a -f --volumes || true
+
+      - name: Build and push by digest to temp repo (CANN 9.1.0 image)
+        uses: docker/build-push-action@v6
+        id: build_cann910
+        with:
+          context: .
+          platforms: ${{ matrix.arch }}
+          file: ./docker/ascend/Dockerfile.ascend.sglang_9.1.0_a3
+          push: true
+          outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+          cache-from: type=gha,scope=ascend-sglang-a3-cann910-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=ascend-sglang-a3-cann910-${{ matrix.tag }}
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      # Quay.io 约 1 小时自动清理未打 tag 的 digest，构建后立即打临时 tag 防止 GC
+      - name: Tag digest to prevent GC
+        run: |
+          docker buildx imagetools create \
+            -t "${{ env.QUAY_TEMP_REPO }}:tmp-sglang-cann910-a3-${{ matrix.tag }}" \
+            "${{ env.QUAY_TEMP_REPO }}@${{ steps.build_cann910.outputs.digest }}"
+
+      - name: Export digest (CANN 9.1.0 image)
+        run: |
+          mkdir -p ${{ runner.temp }}/digests-sglang-cann910
+          digest="${{ steps.build_cann910.outputs.digest }}"
+          touch "${{ runner.temp }}/digests-sglang-cann910/cann910-${digest#sha256:}"
+
+      - name: Upload digest (CANN 9.1.0 image)
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-sglang-cann910-${{ matrix.tag }}
+          path: ${{ runner.temp }}/digests-sglang-cann910/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ============================================================
+  # 第二阶段（CANN 9.1.0）：合并多架构 manifest
+  # ============================================================
+  merge-image-cann910:
+    name: merge-cann9.1.0
+    runs-on: ubuntu-latest
+    needs: build-push-digest-cann910
+    steps:
+      - name: Download digests (CANN 9.1.0 image)
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests-sglang-cann910
+          pattern: digests-sglang-cann910-*
+          merge-multiple: true
+
+      # Merge 阶段只推送到正式仓库，只需登录正式仓库
+      # 临时仓库需为 Public，否则匿名读取 digest 会 401
+      - name: Login to Quay.io (Official)
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Merge and push multi-arch image (CANN 9.1.0)
+        env:
+          SOURCE_IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          TARGET_IMAGE: ${{ env.QUAY_REPO }}
+        run: |
+          DIGESTS=$(printf "$SOURCE_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests-sglang-cann910 | sed 's/^cann910-//'))
+          echo "CANN 9.1.0 image digests: $DIGESTS"
+          docker buildx imagetools create \
+            -t "$TARGET_IMAGE:latest-sglang-cann9.1.0-a3-ubuntu" \
+            $DIGESTS
+
+      # Cleanup 阶段单独登录临时仓库，不影响前面的 imagetools create
+      - name: Login to Quay Temp for cleanup
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME_TMP }}
+          password: ${{ secrets.QUAY_PASSWORD_TMP }}
+
+      - name: Delete temporary tags from temp repo (CANN 9.1.0)
+        run: |
+          curl -sL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz | tar -xz crane
+          chmod +x crane
+          echo "Deleting temporary CANN 9.1.0 tags from temp repo..."
+          ./crane delete ${{ env.QUAY_TEMP_REPO }}:tmp-sglang-cann910-a3-amd64 || true
+          ./crane delete ${{ env.QUAY_TEMP_REPO }}:tmp-sglang-cann910-a3-arm64 || true
