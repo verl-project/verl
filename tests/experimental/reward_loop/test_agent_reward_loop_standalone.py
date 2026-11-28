@@ -14,9 +14,11 @@
 import os
 
 import ray
+import transfer_queue as tq
 from hydra import compose, initialize_config_dir
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from tests.experimental.agent_loop.agent_utils import generate_and_collect
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
@@ -85,6 +87,8 @@ def test_agent_reward_loop_standalone():
     # 1. init reward model manager
     reward_loop_manager = RewardLoopManager(config)
     llm_server_manager = LLMServerManager.create(config=config)
+    config.transfer_queue.enable = True
+    tq.init(config.transfer_queue)
     agent_loop_manager = AgentLoopManager.create(
         config=config,
         llm_client=llm_server_manager.get_client(),
@@ -119,10 +123,10 @@ def test_agent_reward_loop_standalone():
     batch = DataProto.from_single_dict(batch_dict)
 
     # standalone reward model should wake up for agent_reward_loop
-    gen_batch = agent_loop_manager.generate_sequences(prompts=batch)
+    gen_batch = generate_and_collect(agent_loop_manager, batch.to_tensordict(), config.actor_rollout_ref.rollout.n)
 
-    rm_scores = gen_batch.batch["rm_scores"]
-    sample_scores = rm_scores.sum(dim=1)
+    sample_scores = [row["rm_scores"].sum().item() for row in gen_batch]
     print(sample_scores)
 
+    tq.close()
     ray.shutdown()

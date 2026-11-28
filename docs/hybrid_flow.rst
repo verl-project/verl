@@ -95,7 +95,7 @@ Code: https://github.com/verl-project/verl/blob/main/verl/trainer/main_ppo.py
 
 ``TaskRunnerV1`` is the remote controller process. It initializes TransferQueue,
 selects a trainer using ``trainer.v1.trainer_mode``, initializes the workers,
-and creates ``AgentLoopManagerTQ`` before calling ``trainer.fit()``.
+and creates ``AgentLoopManager`` before calling ``trainer.fit()``.
 
 Ray trainer
 ~~~~~~~~~~~~~~~~~~~~

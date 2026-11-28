@@ -9,6 +9,21 @@ The V1 trainer provides two asynchronous PPO training modes under the standard `
 
 Both modes use the V1 `TransferQueue`, asynchronous replay buffer, and partial rollout client. This guide explains their execution model, configuration, and tuning.
 
+## Agent Loop API
+
+All trainer modes use `AgentLoopManager` and `AgentLoopWorker` from
+`verl.experimental.agent_loop`. These replace `AgentLoopManagerTQ` and
+`AgentLoopWorkerTQ` from `verl.trainer.ppo.v1`; update custom manager/worker imports
+and subclasses accordingly. Workers remain plain Python classes, wrapped with
+`ray.remote` by the manager.
+
+`generate_sequences` accepts a TensorDict of prompts and schedules background
+sessions. Each prompt is expanded according to `rollout.n` (or its `__rollout_n__`
+override); callers should not repeat the input batch. Completed, unpadded
+trajectories are published to TransferQueue rather than returned as a padded
+DataProto. Initialize TransferQueue before creating the manager; the standard
+training entry point already does this.
+
 ## Choose a Trainer Mode
 
 Set the mode with `trainer.v1.trainer_mode`.

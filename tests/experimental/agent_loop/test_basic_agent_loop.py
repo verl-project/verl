@@ -18,15 +18,16 @@ from typing import Any
 import numpy as np
 import pytest
 import ray
+import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf
 from transformers.utils import get_json_schema
 
-from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
+from tests.experimental.agent_loop.agent_utils import generate_and_collect, init_agent_loop_manager
 from verl.experimental.agent_loop import get_trajectory_info
-from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
 from verl.utils import hf_tokenizer
+from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.router import GlobalRequestLoadBalancer
 
 
@@ -88,8 +89,8 @@ def test_single_turn(init_config):
         ],
         [{"role": "user", "content": "Let's play a role playing game. Your name is Bob, your favorite color is red."}],
     ]
-    batch = DataProto(
-        non_tensor_batch={
+    batch = tu.get_tensordict(
+        {
             "raw_prompt": np.array(raw_prompts),
             "agent_name": np.array(["single_turn_agent"] * len(raw_prompts)),
             "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
@@ -97,33 +98,24 @@ def test_single_turn(init_config):
         },
     )
     n = init_config.actor_rollout_ref.rollout.n
-    batch = batch.repeat(n)
-    result = agent_loop_manager.generate_sequences(prompts=batch)
+    result = generate_and_collect(agent_loop_manager, batch, n)
     assert len(result) == len(raw_prompts) * n
 
-    # check result
-    seq_len = result.batch["prompts"].size(1) + result.batch["responses"].size(1)
-    assert result.batch["input_ids"].size(1) == seq_len
-    assert result.batch["attention_mask"].size(1) == seq_len
-    assert result.batch["position_ids"].size(1) == seq_len
-
-    if init_config.actor_rollout_ref.rollout.calculate_log_probs:
-        assert result.batch["rollout_log_probs"].size(1) == result.batch["responses"].size(1)
-
-    # check compute score
-    assert result.batch["rm_scores"].shape == result.batch["responses"].shape
-    reward_tensor = result.batch["rm_scores"]
-    reward_extra_keys = result.meta_info.get("reward_extra_keys", [])
-    reward_extra_info = {key: result.non_tensor_batch[key] for key in reward_extra_keys}
-    assert reward_tensor.shape == result.batch["responses"].shape
-    assert "acc" in reward_extra_info, f"reward_extra_info {reward_extra_info} should contain 'acc'"
-    assert reward_extra_info["acc"].shape == (len(result),), f"invalid acc: {reward_extra_info['acc']}"
+    for row in result:
+        seq_len = len(row["prompts"]) + len(row["responses"])
+        assert row["input_ids"].shape == (seq_len,)
+        assert row["position_ids"].shape == (seq_len,)
+        if init_config.actor_rollout_ref.rollout.calculate_log_probs:
+            assert row["rollout_log_probs"].shape == row["responses"].shape
+        assert row["rm_scores"].shape == row["responses"].shape
+        assert "acc" in row["extra_fields"]["reward_extra_info"]
 
     # check turns
-    num_turns = result.non_tensor_batch["__num_turns__"]
-    assert np.all(num_turns == 2)
+    num_turns = [row["num_turns"] for row in result]
+    assert all(turns == 2 for turns in num_turns)
 
     print("Test passed!")
+    tq.close()
     ray.shutdown()
 
 
@@ -190,6 +182,7 @@ class WeatherToolWithData(BaseTool):
 
 
 def test_tool_agent(init_config):
+    tq.close()
     ray.shutdown()
     ray.init(
         runtime_env={
@@ -249,20 +242,19 @@ def test_tool_agent(init_config):
             {"role": "user", "content": "What's the temperature in San Francisco now? How about tomorrow?"},
         ],
     ]
-    batch = DataProto(
-        non_tensor_batch={
+    batch = tu.get_tensordict(
+        {
             "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
             "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
             "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
             "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
         },
     )
-    batch = batch.repeat(n)
-    result = agent_loop_manager.generate_sequences(prompts=batch)
+    result = generate_and_collect(agent_loop_manager, batch, n)
     assert len(result) == len(raw_prompts) * n
 
     # Check turns
-    num_turns = result.non_tensor_batch["__num_turns__"]
+    num_turns = [row["num_turns"] for row in result]
     print(f"num_turns: {num_turns}")
     for i in range(len(num_turns)):
         if i // n == 0:
@@ -274,17 +266,15 @@ def test_tool_agent(init_config):
 
     # Check response_mask
     tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-    responses = result.batch["responses"]
-    response_mask = result.batch["response_mask"]
-    attention_mask = result.batch["attention_mask"]
-    assert result.batch["rm_scores"].size(1) == responses.size(1)
-    assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
-    assert result.batch["rollout_log_probs"].size(1) == result.batch["responses"].size(1)
+    responses = [row["responses"] for row in result]
+    response_mask = [row["response_mask"] for row in result]
+    assert all(row["rm_scores"].shape == row["responses"].shape for row in result)
+    assert all(response.shape == mask.shape for response, mask in zip(responses, response_mask, strict=True))
+    assert all(row["rollout_log_probs"].shape == row["responses"].shape for row in result)
 
-    response_length = response_mask.size(1)
     for i in range(len(responses)):
         # response with tool response
-        valid_tokens = responses[i][attention_mask[i][-response_length:].bool()]
+        valid_tokens = responses[i]
         response_with_obs = tokenizer.decode(valid_tokens)
 
         # response without tool response
@@ -303,12 +293,14 @@ def test_tool_agent(init_config):
         print(response_without_obs)
 
     print("Test passed!")
+    tq.close()
     ray.shutdown()
 
 
 def test_function_tool_agent(init_config):
     """End-to-end coverage for ``rollout.multi_turn.function_tool_path``."""
     # See ``test_tool_agent`` for why we shut Ray down first.
+    tq.close()
     ray.shutdown()
     ray.init(
         runtime_env={
@@ -334,39 +326,37 @@ def test_function_tool_agent(init_config):
         [{"role": "user", "content": "Hi! Please reply with a one-word greeting."}],
         [{"role": "user", "content": "What is the current temperature in Tokyo, in celsius?"}],
     ]
-    batch = DataProto(
-        non_tensor_batch={
+    batch = tu.get_tensordict(
+        {
             "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
             "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
             "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
             "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
         },
     )
-    batch = batch.repeat(n)
-    result = agent_loop_manager.generate_sequences(prompts=batch)
+    result = generate_and_collect(agent_loop_manager, batch, n)
     assert len(result) == len(raw_prompts) * n
 
-    num_turns = result.non_tensor_batch["__num_turns__"]
+    num_turns = [row["num_turns"] for row in result]
     print(f"num_turns: {num_turns}")
     greeting_idx = list(range(0, n))
     weather_idx = list(range(n, 2 * n))
     assert all(num_turns[i] == 2 for i in greeting_idx), (
-        f"greeting prompt should not trigger a tool: {num_turns[greeting_idx]}"
+        f"greeting prompt should not trigger a tool: {[num_turns[i] for i in greeting_idx]}"
     )
     assert any(num_turns[i] == 4 for i in weather_idx), (
-        f"expected at least one weather prompt to trigger a tool call (==4 turns); got {num_turns[weather_idx]}"
+        "expected at least one weather prompt to trigger a tool call (==4 turns); "
+        f"got {[num_turns[i] for i in weather_idx]}"
     )
 
     tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-    responses = result.batch["responses"]
-    response_mask = result.batch["response_mask"]
-    attention_mask = result.batch["attention_mask"]
-    response_length = response_mask.size(1)
+    responses = [row["responses"] for row in result]
+    response_mask = [row["response_mask"] for row in result]
     saw_stub_value = False
     for i in weather_idx:
         if num_turns[i] != 4:
             continue
-        valid_with_obs = responses[i][attention_mask[i][-response_length:].bool()]
+        valid_with_obs = responses[i]
         full_response = tokenizer.decode(valid_with_obs)
         if "17.3" in full_response:
             saw_stub_value = True
@@ -391,6 +381,7 @@ def test_function_tool_agent(init_config):
         )
 
     print("Test passed!")
+    tq.close()
     ray.shutdown()
 
 
@@ -421,6 +412,7 @@ async def test_get_trajectory_info():
 def ray_for_lb():
     ray.init(ignore_reinit_error=True)
     yield
+    tq.close()
     ray.shutdown()
 
 

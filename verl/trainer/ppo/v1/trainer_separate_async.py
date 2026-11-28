@@ -24,7 +24,7 @@ from omegaconf import DictConfig
 from transfer_queue import KVBatchMeta
 
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.separation.engine_workers import DetachActorWorker
+from verl.experimental.separation.engine_workers_detach import DetachActorWorker
 from verl.trainer.config import HybridRolloutSwitchConfig
 from verl.trainer.ppo.utils import Role, need_reward_model
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer

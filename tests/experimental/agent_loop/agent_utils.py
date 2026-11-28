@@ -12,8 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
+from uuid import uuid4
+
 import ray
+import transfer_queue as tq
 from omegaconf import DictConfig
+from tensordict import TensorDict
 
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
@@ -22,6 +27,7 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, Res
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.utils import Role
 from verl.utils import omega_conf_to_dataclass
+from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
 from verl.workers.engine_workers import ActorRolloutRefWorker
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -35,6 +41,9 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
 def init_agent_loop_manager_and_workers(
     config: DictConfig,
 ) -> tuple[AgentLoopManager, RayWorkerGroup, CheckpointEngineManager]:
+    config.transfer_queue.enable = True
+    tq.init(config.transfer_queue)
+
     # =========================== 1. Create hybrid ActorRollout workers ===========================
     # The unified model-engine ActorRolloutRefWorker supports both sync and async rollout modes.
     actor_rollout_cls = ActorRolloutRefWorker
@@ -111,3 +120,25 @@ def init_agent_loop_manager_and_workers(
     checkpoint_manager.update_weights()
 
     return agent_loop_manager, actor_rollout_wg, checkpoint_manager
+
+
+def generate_and_collect(manager: AgentLoopManager, batch: TensorDict, n: int) -> list[dict]:
+    """Wait for terminal prompt groups and read unpadded trajectories in session order."""
+    uids = [uuid4().hex for _ in range(len(batch))]
+    tu.assign_non_tensor_stack(batch, "uid", uids)
+    tu.assign_non_tensor_stack(batch, "index", list(range(len(batch))))
+    tu.assign_non_tensor_data(batch, "global_steps", 0)
+    manager.generate_sequences(batch)
+    deadline = time.monotonic() + 600
+    while time.monotonic() < deadline:
+        metadata = (tq.kv_list() or {}).get("train", {})
+        statuses = [metadata.get(uid, {}).get("status") for uid in uids]
+        assert "failure" not in statuses, f"Agent loop failed: {statuses}"
+        if all(status == "finished" for status in statuses):
+            keys = [f"{uid}_{session}_0" for uid in uids for session in range(n)]
+            data = tq.kv_batch_get(keys=keys, partition_id="train")
+            rows = [{key: tu.unwrap_non_tensor_data(value) for key, value in row.items()} for row in data]
+            tq.kv_clear(keys=uids + keys, partition_id="train")
+            return rows
+        time.sleep(0.1)
+    raise TimeoutError("Agent loop prompts did not finish within 600 seconds")
