@@ -337,3 +337,51 @@ def test_group_balanced_partitions_equal_size():
         for uid in uids_in_partition:
             uid_indices = [i for i, u in enumerate(uid_list) if u == uid]
             assert all(i in partition for i in uid_indices)
+
+
+def test_group_balanced_partitions_non_contiguous_uids():
+    """Samples sharing a uid must stay in one partition even when interleaved."""
+    from verl.utils.seqlen_balancing import get_group_balanced_partitions
+
+    seqlen_list = [100, 120, 110, 130, 140, 150, 160, 170]
+    uid_list = ["u0", "u1", "u0", "u1", "u2", "u3", "u2", "u3"]
+
+    partitions = get_group_balanced_partitions(seqlen_list, uid_list, k_partitions=2)
+    assert len(partitions) == 2
+    assert sorted(i for p in partitions for i in p) == list(range(len(seqlen_list)))
+
+    for partition in partitions:
+        for uid in {uid_list[i] for i in partition}:
+            uid_indices = [i for i, u in enumerate(uid_list) if u == uid]
+            assert all(i in partition for i in uid_indices), f"non-contiguous uid {uid} split"
+
+    # Odd contiguous run count that previously crashed with AssertionError: 5 % 2 != 0
+    odd_runs_parts = get_group_balanced_partitions(
+        [10, 20, 30, 40, 50, 60], ["u0", "u1", "u0", "u1", "u1", "u0"], k_partitions=2
+    )
+    assert sorted(i for p in odd_runs_parts for i in p) == [0, 1, 2, 3, 4, 5]
+
+
+def test_rearrange_micro_batches_all_zero_attention_mask():
+    """All-zero attention masks should return a single valid micro-batch without IndexError."""
+    input_ids = torch.zeros((4, 8), dtype=torch.long)
+    attention_mask = torch.zeros((4, 8), dtype=torch.long)
+    dataproto = DataProto.from_single_dict({"input_ids": input_ids, "attention_mask": attention_mask})
+
+    micro_batches, idxs = rearrange_micro_batches(dataproto.batch, max_token_len=16)
+    assert len(micro_batches) == 1
+    assert sorted(i for part in idxs for i in part) == [0, 1, 2, 3]
+
+
+def test_log_seqlen_unbalance_non_divisible_and_small():
+    """log_seqlen_unbalance handles non-divisible counts and len < k_partition safely."""
+    from verl.utils.seqlen_balancing import log_seqlen_unbalance
+
+    stats = log_seqlen_unbalance([1000, 1000, 1000, 1000, 1000], [[0, 1, 2], [3, 4]], "seqlen")
+    assert stats["seqlen/min"] == 2000
+    assert stats["seqlen/max"] == 3000
+    assert stats["seqlen/minmax_diff"] == 1000
+
+    small_stats = log_seqlen_unbalance([100], [[0], []], "seqlen")
+    assert small_stats["seqlen/min"] == 0
+    assert small_stats["seqlen/max"] == 100

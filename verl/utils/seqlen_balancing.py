@@ -269,15 +269,27 @@ def log_seqlen_unbalance(seqlen_list: list[int], partitions: list[list[int]], pr
     """
     # Get the number of partitions
     k_partition = len(partitions)
-    # assert len(seqlen_list) % k_partition == 0
-    batch_size = len(seqlen_list) // k_partition
+    if k_partition == 0:
+        return {
+            f"{prefix}/min": 0,
+            f"{prefix}/max": 0,
+            f"{prefix}/minmax_diff": 0,
+            f"{prefix}/balanced_min": 0,
+            f"{prefix}/balanced_max": 0,
+            f"{prefix}/mean": 0.0,
+        }
+
+    base_size, remainder = divmod(len(seqlen_list), k_partition)
     min_sum_seqlen = None
     max_sum_seqlen = None
     total_sum_seqlen = 0
 
-    # Iterate over each batch of sequence lengths
-    for offset in range(0, len(seqlen_list), batch_size):
-        cur_sum_seqlen = sum(seqlen_list[offset : offset + batch_size])
+    # Iterate over k_partition chunks matching dp split sizes (handles non-divisible lengths safely)
+    offset = 0
+    for p_idx in range(k_partition):
+        chunk_size = base_size + (1 if p_idx < remainder else 0)
+        cur_sum_seqlen = sum(seqlen_list[offset : offset + chunk_size])
+        offset += chunk_size
         if min_sum_seqlen is None or cur_sum_seqlen < min_sum_seqlen:
             min_sum_seqlen = cur_sum_seqlen
         if max_sum_seqlen is None or cur_sum_seqlen > max_sum_seqlen:
@@ -298,7 +310,7 @@ def log_seqlen_unbalance(seqlen_list: list[int], partitions: list[list[int]], pr
         f"{prefix}/minmax_diff": max_sum_seqlen - min_sum_seqlen,
         f"{prefix}/balanced_min": min_sum_seqlen_balanced,
         f"{prefix}/balanced_max": max_sum_seqlen_balanced,
-        f"{prefix}/mean": total_sum_seqlen / len(partitions),
+        f"{prefix}/mean": total_sum_seqlen / k_partition,
     }
 
 
@@ -392,10 +404,10 @@ def rearrange_micro_batches(
     )
 
     total_seqlen = seq_len_effective.sum().item()
-    # NOTE: num_microbatches <= batch_size, so take the min of this two.
+    # NOTE: 1 <= num_microbatches <= num_groups, avoiding 0 partitions when total_seqlen == 0.
     # When force_group_size > 1, we work with groups instead of individual samples
     num_groups = batch_size // force_group_size
-    num_micro_batches = min(num_groups, ceildiv(total_seqlen, max_token_len))
+    num_micro_batches = max(1, min(num_groups, ceildiv(total_seqlen, max_token_len)))
     if min_num_micro_batch is not None:
         # used to support pp
         num_micro_batches = max(min_num_micro_batch, num_micro_batches)
@@ -607,27 +619,12 @@ def get_group_balanced_partitions(
     """
     assert len(seqlen_list) == len(uid_list), "seqlen_list and uid_list must have same length"
 
-    # Build groups: each group contains indices of samples with the same uid
-    # Assumes samples with same uid are contiguous
-    groups = []  # List of (group_indices, group_total_seqlen)
-    current_uid = None
-    current_indices = []
-    current_seqlen = 0
-
-    for i, (seqlen, uid) in enumerate(zip(seqlen_list, uid_list, strict=False)):
-        if uid != current_uid:
-            if current_indices:
-                groups.append((current_indices, current_seqlen))
-            current_uid = uid
-            current_indices = [i]
-            current_seqlen = seqlen
-        else:
-            current_indices.append(i)
-            current_seqlen += seqlen
-
-    # Don't forget the last group
-    if current_indices:
-        groups.append((current_indices, current_seqlen))
+    # Group sample indices by unique uid while preserving first-seen order
+    # (works even when samples sharing a uid are non-contiguous/interleaved).
+    uid_to_indices: dict = {}
+    for i, uid in enumerate(uid_list):
+        uid_to_indices.setdefault(uid, []).append(i)
+    groups = list(uid_to_indices.values())
 
     num_groups = len(groups)
     assert num_groups >= k_partitions, (
@@ -635,12 +632,9 @@ def get_group_balanced_partitions(
         f"Consider reducing world_size or increasing batch_size."
     )
 
-    # Calculate workload for each group (as integers for partitioning)
-    group_workloads = []
-    for indices, total_seqlen in groups:
-        # Use sum of individual workloads for more accurate estimation
-        workload = sum(int(calculate_workload(torch.tensor([seqlen_list[i]])).item()) for i in indices)
-        group_workloads.append(workload)
+    # Calculate workload for each group once (avoid per-sample tensor allocation)
+    sample_workloads = calculate_workload(torch.tensor(seqlen_list, dtype=torch.long)).tolist()
+    group_workloads = [int(sum(sample_workloads[i] for i in indices)) for indices in groups]
 
     # Use Karmarkar-Karp to partition groups
     # equal_size=True ensures each partition gets the same number of groups,
@@ -656,7 +650,7 @@ def get_group_balanced_partitions(
     for group_partition in group_partitions:
         sample_indices = []
         for group_idx in group_partition:
-            sample_indices.extend(groups[group_idx][0])
+            sample_indices.extend(groups[group_idx])
         sample_partitions.append(sorted(sample_indices))
 
     return sample_partitions
