@@ -1,15 +1,16 @@
-昇腾 vLLM 最佳实践
+昇腾vLLM最佳实践
 ===================================
 
 Last updated: 06/06/2026.
 
 .. _Qwen3-30B: https://github.com/verl-project/verl/blob/release/v0.7.1/examples/grpo_trainer/run_qwen3moe-30b_grpo_megatron_vllm_npu.sh
 .. _doclink: https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/model_support/examples/ascend_vllm_best_practices.rst
+
 引言
 ----------------------------------
 
-vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支持该推理引擎在verl中使用,
-仅需简单的构建流程，开发者即可完成环境构建，本文将提供两个经典用例来帮助开发者了解以下内容：
+vLLM是当前主流的高性能开源推理引擎，昇腾已经全面原生支持该推理引擎在verl中使用，
+仅需简单的构建流程，开发者即可完成环境构建，本文将提供一个经典用例来帮助开发者了解以下内容：
 
 1. 环境构建
 2. 模型训练与评估 
@@ -17,7 +18,7 @@ vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支�
 
 用例模型脚本以及其需要的硬件条件如下：
 
-- 注:verl近期进行了脚本清理与命名变更, 推荐根据 commit id c98cb8cc 对应文档 `doclink`_  及对应脚本进行构建避免链接失效
+- 注：verl近期进行了脚本清理与命名变更，推荐根据commit id c98cb8cc对应文档 `doclink`_  及对应脚本进行构建避免链接失效
 
 +----------------------+----------------------+----------+----------------------------+
 | 模型                 | NPU型号              | 节点数量 | 训推后端                   |
@@ -28,9 +29,9 @@ vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支�
 
 环境构建
 -----------------------------------
-我们在 `昇腾安装指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/install_guidance.html>`_ 中提供了两种构建环境的方法, 1.从镜像文件DockerFile进行构建 2.从自定义Conda环境进行构建
+我们在 `昇腾安装指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/install_guidance.html>`_ 中提供了两种构建环境的方法，1.从镜像文件DockerFile进行构建2.从自定义Conda环境进行构建。
 
-在本实践中, 我们额外指定verl 的commit id 以避免引入其他问题
+在本实践中，我们额外指定verl的commit id以避免引入其他问题。
 
 .. code-block:: bash
 
@@ -57,7 +58,7 @@ vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支�
 
   git clone https://www.modelscope.cn/datasets/modelscope/gsm8k.git
 
-**HuggingFace To Megatron权重转换(可选)**
+**HuggingFace To Megatron权重转换（可选）**
 
 .. code-block:: bash
 
@@ -65,7 +66,7 @@ vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支�
       --hf_model_path Qwen/Qwen3-30B-A3B-Base \
       --output_path Qwen/Qwen3-30B-A3B-Base-mcore \
       --use_cpu_initialization    # Only work for MoE models
-*注:verl当前已支持mbridge进行灵活的hf和mcore之间的权重转换,可以修改以下相关参数直接加载hf权重*
+*注：verl当前已支持mbridge进行灵活的hf和mcore之间的权重转换，可以修改以下相关参数直接加载hf权重*
 
 .. code-block:: bash
 
@@ -74,7 +75,7 @@ vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支�
 
 2.训练
 ^^^^^^^^^^^
-根据开发者实际路径配置情况修改模型训练脚本中的以下参数
+根据开发者实际路径配置情况修改模型训练脚本中的以下参数：
 
 .. code-block:: bash 
 
@@ -85,18 +86,18 @@ vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支�
     CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 
     # File System Paths
-    TRAIN_FILE=$RAY_DATA_HOME/dataset/gsm8k/test.parquet
+    TRAIN_FILE=$RAY_DATA_HOME/dataset/gsm8k/train.parquet
     TEST_FILE=$RAY_DATA_HOME/dataset/gsm8k/test.parquet
 
     #保存频率，-1默认不保存，如需评测请修改此参数
     trainer.save_freq=-1
 
-对于单机任务 `Qwen3-30B`_ , 可以直接bash执行verl仓上示例脚本，如:
+对于单机任务 `Qwen3-30B`_，可以直接bash执行verl仓库中的示例脚本，如：
 
 .. code-block:: bash 
 
   bash examples/grpo_trainer/run_qwen3moe-30b_grpo_megatron_vllm_npu.sh
-如果您想扩展至多节点 ，我们推荐使用以下脚本进行大规模多节点训练拉起
+如果您想扩展至多节点，我们推荐使用以下脚本进行大规模多节点训练拉起：
 
 .. code-block:: bash
 
@@ -173,11 +174,11 @@ vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支�
   
   sleep 600
 
-DEFAULT_SH:修改为训练所用配置 sh 文件路径。
+DEFAULT_SH：修改为训练所用配置sh文件路径。
           
-NNODES 和 NPUS_PER_NODE:修改为使用节点数量和每个节点 NPU 数量。在此案例中分别为2和8。
+NNODES和NPUS_PER_NODE：修改为使用节点数量和每个节点NPU数量。在此案例中分别为2和8。
           
-MASTER_ADDR:修改为对应主节点 IP。即所有节点的 MASTER_ADDR 应该相同。
+MASTER_ADDR：修改为对应主节点IP，即所有节点的MASTER_ADDR应该相同。
           
 SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网卡，通信网卡可以通过以下命令获取：
           
@@ -188,9 +189,9 @@ SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网�
 3.模型评估
 ^^^^^^^^^^^
 
-不同模型步骤一致,仅以Qwen3-30b为例列举
+不同模型步骤一致，仅以Qwen3-30B为例列举。
 
-我们通过 AISBenchmark 评估模型,该工具支持vllm/sglang多种推理后端的评估
+我们通过AISBenchmark评估模型，该工具支持vLLM/SGLang多种推理后端的评估。
 
 **安装方法**
 
@@ -212,15 +213,15 @@ SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网�
   unzip aime.zip
   rm aime.zip
 
-**修改AISBench配置代码使能vllm推理评测**
+**修改AISBench配置代码使能vLLM推理评测**
 
 .. code-block:: bash
 
    vim /examples/benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general.py
 
-python文件内容如下，host_port需与服务端的port一致，根据模型配置修改max_seq_len和max_out_len，推理示例设置为2k推20k：
+Python文件内容如下，host_port需与服务端的port一致，根据模型配置修改max_seq_len和max_out_len，推理示例设置为2k tokens输入、20k tokens输出：
 
-.. code-block:: bash
+.. code-block:: python
 
   from ais_bench.benchmark.models import VLLMCustomAPI
 
@@ -254,10 +255,10 @@ python文件内容如下，host_port需与服务端的port一致，根据模型�
 
 通过以下命令拉起NPU服务端，需要修改的参数：model和tensor-parallel-size。
 
-/path/to/Qwen3-30B/：保存训练后权重的huggingface模型地址；
-tensor-parallel-size：张量并行副本数，TP建议和训练时infer的配置保持一致；
-data-parallel-size：数据并行副本数，DP建议和训练时infer的配置保持一致，默认为1；
-port：可任意设置空闲端口；
+/path/to/Qwen3-30B/：保存训练后权重的huggingface模型地址。
+tensor-parallel-size：张量并行副本数，TP建议和训练时infer的配置保持一致。
+data-parallel-size：数据并行副本数，DP建议和训练时infer的配置保持一致，默认为1。
+port：可任意设置空闲端口。
 
 .. code-block:: bash
 
@@ -287,7 +288,7 @@ port：可任意设置空闲端口；
 
 **评测结果**
 
-经过训练,模型在aime2024上的评分显著上升
+经过训练，模型在aime2024上的评分显著上升。
 
 +------+----------+---------+----------+------+-----------------------+
 | iter | dataset  | version | metric   | mode | vllm-api-stream-chat  |
@@ -301,6 +302,6 @@ port：可任意设置空闲端口；
 -----------------------------------
 关于NPU profiling的详细文档请参考 `Profiling采集指导 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/dev_guide/performance/ascend_profiling.html>`_
 
-采集完成后，开发者可以使用 `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ 进行数据解析
+采集完成后，开发者可以使用 `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ 进行数据解析。
 
-注: verl框架侧进行采集全量 Profiling 产生海量且重复的算子记录，可以根据文档修改代码仅采集关键阶段
+注：verl框架侧进行全量采集Profiling产生海量且重复的算子记录，可以根据文档修改代码仅采集关键阶段。
