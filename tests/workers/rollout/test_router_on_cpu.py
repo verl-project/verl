@@ -125,6 +125,57 @@ def ray_session():
     ray.shutdown()
 
 
+@ray.remote
+class _BlockingGenerationServer:
+    """Keep real Ray generation calls alive until their callers cancel them."""
+
+    def __init__(self):
+        self.active = set()
+        self.cancelled = set()
+
+    async def generate(self, request_id, **kwargs):
+        self.active.add(request_id)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.active.discard(request_id)
+            self.cancelled.add(request_id)
+
+    async def state(self):
+        return sorted(self.active), sorted(self.cancelled)
+
+
+@pytest.mark.asyncio
+async def test_generation_cancel_stops_only_its_remote_request(ray_session):
+    """A cancelled local await must settle its dispatched Ray request before returning."""
+    server = _BlockingGenerationServer.remote()
+    router = ray.remote(GlobalRequestLoadBalancer).remote(servers={"s0": server})
+    config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"name": "vllm", "full_determinism": True}}})
+    client = LLMServerClient(config, load_balancer_handle=router)
+    tasks = [
+        asyncio.create_task(client.generate(name, prompt_ids=[1], sampling_params={}))
+        for name in ("cancelled", "retained")
+    ]
+
+    async def wait_for_both():
+        while (await server.state.remote())[0] != ["cancelled", "retained"]:
+            await asyncio.sleep(0.01)
+
+    try:
+        await asyncio.wait_for(wait_for_both(), timeout=30)
+        tasks[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(tasks[0], timeout=10)
+        assert await server.state.remote() == (["retained"], ["cancelled"])
+        assert not tasks[1].done()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        ray.kill(server)
+        ray.kill(router)
+
+
 def _write_router_yaml(tmp_path, router_class, **kwargs):
     """Write a plugin router YAML and return its path."""
     content = {"router_class": router_class, **kwargs}
