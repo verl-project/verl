@@ -260,6 +260,33 @@ def test_rloo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_rloo_vectorized_preserves_reward_dtype(dtype: torch.dtype):
+    """The vectorized path must return the caller's dtype.
+
+    `torch.bincount(weights=...)` accumulates in float64 regardless of the weights'
+    dtype, so a bf16/fp16 reward tensor used to come back as float64 advantages while
+    `compute_rloo_outcome_advantage` preserved the input dtype. Groups here all have
+    two samples, so this pins the dtype contract independently of singleton handling.
+    """
+    token_level_rewards = torch.zeros(4, 3, dtype=dtype)
+    token_level_rewards[:, -1] = torch.tensor([1.0, 2.0, 5.0, 9.0], dtype=dtype)
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array(["p0", "p0", "p1", "p1"], dtype=object)
+
+    adv_scalar, ret_scalar = compute_rloo_outcome_advantage(
+        token_level_rewards=token_level_rewards, response_mask=response_mask, index=index
+    )
+    adv_vec, ret_vec = compute_rloo_vectorized_outcome_advantage(
+        token_level_rewards=token_level_rewards, response_mask=response_mask, index=index
+    )
+
+    assert adv_vec.dtype == dtype
+    assert ret_vec.dtype == dtype
+    assert adv_scalar.dtype == adv_vec.dtype
+    assert ret_scalar.dtype == ret_vec.dtype
+
+
 def test_grpo_vectorized_matches_original_for_low_variance_rewards():
     token_level_rewards = torch.tensor([[1.0], [1.00001], [2.0], [2.00001]], dtype=torch.float32)
     response_mask = torch.ones_like(token_level_rewards)
