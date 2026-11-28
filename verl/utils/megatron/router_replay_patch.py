@@ -93,6 +93,8 @@ class RouterReplay:
 
     def set_target_indices(self, topk_indices: torch.Tensor, replay_mask: torch.Tensor | None = None):
         """Sets the target topk indices for replay."""
+        if replay_mask is not None and replay_mask.dtype != torch.bool:
+            replay_mask = replay_mask.to(torch.bool)
         self.target_topk_idx = topk_indices
         self.target_replay_mask = replay_mask
         self.replay_backward_list.append(topk_indices)
@@ -132,7 +134,11 @@ class RouterReplay:
                     f"scores={tuple(scores.shape)}, targets={tuple(indices.shape)}, "
                     f"native={tuple(native_indices.shape)}, mask={tuple(replay_mask.shape)}"
                 )
-            indices = torch.where(replay_mask.to(scores.device).bool().unsqueeze(-1), indices, native_indices)
+            if replay_mask.dtype != torch.bool:
+                replay_mask = replay_mask.bool()
+            if replay_mask.device != scores.device:
+                replay_mask = replay_mask.to(scores.device)
+            indices = torch.where(replay_mask.unsqueeze(-1), indices, native_indices)
         return scores.gather(1, indices), indices
 
     def clear_indices(self):

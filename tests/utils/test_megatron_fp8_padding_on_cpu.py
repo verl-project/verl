@@ -387,3 +387,47 @@ def test_distillation_topk_thd_teacher_rows_follow_the_dynamic_cp_group(monkeypa
         monkeypatch, mcore_util, seqlens, quant_align_size=32, cp_layout=cp_layout
     )
     assert not torch.equal(seen_static["ids"][..., 0], student_tokens)
+
+
+def test_preprocess_thd_engine_can_skip_position_ids(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
+
+    rows = [
+        torch.arange(4, dtype=torch.long),
+        torch.arange(7, dtype=torch.long),
+    ]
+    input_ids = torch.nested.as_nested_tensor(rows, layout=torch.jagged)
+
+    packed, _, position_ids = mcore_util.preprocess_thd_engine(input_ids, pre_process=True)
+    packed_skip, _, position_ids_skip = mcore_util.preprocess_thd_engine(
+        input_ids, pre_process=True, need_position_ids=False
+    )
+
+    assert position_ids is not None
+    assert position_ids_skip is None
+    torch.testing.assert_close(packed, packed_skip)
+
+    with pytest.raises(ValueError, match="need_roll requires need_position_ids"):
+        mcore_util.preprocess_thd_engine(input_ids, pre_process=True, need_roll=True, need_position_ids=False)
+
+
+@pytest.mark.parametrize("cp_layout", ["zigzag", "contiguous"])
+@pytest.mark.parametrize("cp_rank", [0, 1])
+@pytest.mark.parametrize("quant_align_size", [None, 32])
+def test_preprocess_thd_engine_can_skip_position_ids_with_cp(monkeypatch, cp_layout, cp_rank, quant_align_size):
+    """Skipping position ids must not change the CP-packed rows in either layout."""
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=2, cp_rank=cp_rank)
+
+    rows = [
+        torch.arange(4, dtype=torch.long),
+        torch.arange(7, dtype=torch.long),
+    ]
+    input_ids = torch.nested.as_nested_tensor(rows, layout=torch.jagged)
+
+    kwargs = {"pre_process": True, "cp_layout": cp_layout, "quant_align_size": quant_align_size}
+    packed, _, position_ids = mcore_util.preprocess_thd_engine(input_ids, **kwargs)
+    packed_skip, _, position_ids_skip = mcore_util.preprocess_thd_engine(input_ids, need_position_ids=False, **kwargs)
+
+    assert position_ids is not None
+    assert position_ids_skip is None
+    torch.testing.assert_close(packed, packed_skip)
